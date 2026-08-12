@@ -130,7 +130,7 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
         health_key = governor_connection_key(
             config.openlist_server_url, config.openlist_username
         )
-        allowed, record = source_health.can_request(health_key)
+        allowed, record = source_health.peek_request_allowed(health_key)
         if not allowed:
             # 冷却中：延后而非成功。job 回到 queued + not_before=cooldown_until，
             # 不消耗 attempt、不显示 succeeded/failed。

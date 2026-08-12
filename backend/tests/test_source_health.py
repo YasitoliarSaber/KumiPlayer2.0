@@ -85,17 +85,20 @@ class TestRecordSuccess:
         assert rec.cooldown_until == 0
         assert not rec.in_cooldown
 
-    def test_success_recovers_from_cooldown(self, health_db):
-        """冷却中的来源成功一次立即回 healthy 并清零计数。"""
+    def test_success_during_cooldown_keeps_cooldown(self, health_db):
+        """冷却中到达的成功（旧 in-flight）不得解除冷却：只更新 last_success_at。"""
         sh.record_failure("src-recover", "risk_control", now=T0 - 100)
-        assert sh.get_health("src-recover").state == sh.STATE_COOLING_DOWN
+        before = sh.get_health("src-recover")
+        assert before.state == sh.STATE_COOLING_DOWN
 
         sh.record_success("src-recover", now=T0)
         rec = sh.get_health("src-recover")
-        assert rec.state == sh.STATE_HEALTHY
-        assert rec.consecutive_failures == 0
-        assert rec.cooldown_until == 0
-        assert not rec.in_cooldown
+        assert rec.state == sh.STATE_COOLING_DOWN  # 冷却不被滞后成功覆盖
+        assert rec.cooldown_until == before.cooldown_until
+        assert rec.reason_kind == "risk_control"
+        assert rec.consecutive_failures == before.consecutive_failures
+        assert rec.last_success_at == T0  # 只更新时间戳
+        assert rec.in_cooldown
 
     def test_success_recovers_from_probe(self, health_db):
         """probe 状态下 record_success → healthy。"""
@@ -266,8 +269,12 @@ class TestCooldownExpiryAndProbe:
         rec = sh.get_health("src-clock")
         assert rec.in_cooldown  # 真实时钟仍处于 6 小时冷却期内
 
-        sh.record_success("src-clock", now=T0)
-        assert not sh.get_health("src-clock").in_cooldown
+        # 冷却中 record_success 不解除冷却（旧 in-flight success 语义）
+        sh.record_success("src-clock", now=T0 + 1)
+        assert sh.get_health("src-clock").in_cooldown
+
+        sh.record_success("src-clock-ok", now=T0)
+        assert not sh.get_health("src-clock-ok").in_cooldown
 
         self._enter_cooldown("src-clock2")
         sh.can_request("src-clock2", now=T0 + RISK_CONTROL_COOLDOWN_SECONDS + 1)  # 转 probe
@@ -506,17 +513,21 @@ class TestSingleProbe:
         assert rec.cooldown_until == expiry + 1 + RISK_CONTROL_COOLDOWN_SECONDS
         assert rec.in_cooldown
 
-    def test_probe_403_does_not_cooldown(self, health_db):
-        """探针遇 403(permission)：不累计不冷却，state 保持 probe。"""
+    def test_probe_irrelevant_recovers_healthy(self, health_db):
+        """探针遇 403/404 等 known non-transient：breaker 恢复 healthy（远端可达）。
+
+        probe + irrelevant 错误 = 探针请求已真实到达远端并被正常处理
+        （只是业务上 403/404），证明连接未被风控：state 回 healthy、
+        计数清零；业务错误仍由调用方抛出。
+        """
         self._enter_cooldown("src-sp-403")
         expiry = T0 + RISK_CONTROL_COOLDOWN_SECONDS + 1
         allowed, _ = sh.can_request("src-sp-403", now=expiry)
         assert allowed is True
 
-        before = sh.get_health("src-sp-403")
         rec = sh.record_failure("src-sp-403", "permission", now=expiry + 1)
-        assert rec.state == sh.STATE_PROBE  # 任务1：state 不变
-        assert rec.consecutive_failures == before.consecutive_failures
+        assert rec.state == sh.STATE_HEALTHY  # probe + irrelevant → healthy
+        assert rec.consecutive_failures == 0
         assert rec.cooldown_until == 0
         assert not rec.in_cooldown
         assert rec.reason_kind == "permission"
@@ -558,3 +569,164 @@ class TestConcurrentSingleProbe:
 
         assert sorted(results) == [False, True]
         assert sh.get_health("src-race").state == sh.STATE_PROBE
+
+
+# ============================================================
+# peek_request_allowed：只读预检，绝不消费探针
+# ============================================================
+
+class TestPeekRequestAllowed:
+    """peek 与 can_request 的职责分离（模块 1 最终补丁）：
+
+    - peek 只读：冷却中拒绝；冷却已到期放行但**不修改 state**（探针
+      保留给物理请求前的 can_request 原子抢占）；
+    - can_request 是唯一消费探针的入口。
+    """
+
+    def test_peek_without_record_allows(self, health_db):
+        """无记录时 peek 放行。"""
+        allowed, rec = sh.peek_request_allowed("peek-none", now=T0)
+        assert allowed is True
+        assert rec.state == sh.STATE_HEALTHY
+
+    def test_peek_healthy_allows(self, health_db):
+        """healthy 时 peek 放行。"""
+        sh.record_success("peek-ok", now=T0 - 10)
+        allowed, rec = sh.peek_request_allowed("peek-ok", now=T0)
+        assert allowed is True
+        assert rec.state == sh.STATE_HEALTHY
+
+    def test_peek_during_cooldown_denies(self, health_db):
+        """冷却未到期：peek 返回 (False, record)，不改状态。"""
+        sh.record_failure("peek-cool", "risk_control", now=T0)
+        allowed, rec = sh.peek_request_allowed("peek-cool", now=T0 + 100)
+        assert allowed is False
+        assert rec.state == sh.STATE_COOLING_DOWN
+        assert rec.in_cooldown
+        assert sh.get_health("peek-cool").state == sh.STATE_COOLING_DOWN
+
+    def test_peek_expired_cooldown_allows_without_consuming_probe(self, health_db):
+        """冷却已到期：peek 放行且**不改 state（不消费探针）**。"""
+        sh.record_failure("peek-exp", "risk_control", now=T0)
+        expiry = T0 + RISK_CONTROL_COOLDOWN_SECONDS + 1
+        allowed, rec = sh.peek_request_allowed("peek-exp", now=expiry)
+        assert allowed is True
+        assert rec.state == sh.STATE_COOLING_DOWN  # 关键：peek 不改 state
+        assert sh.get_health("peek-exp").state == sh.STATE_COOLING_DOWN
+
+        # peek 之后 can_request 仍能抢占探针（探针未被 peek 消耗）
+        allowed2, rec2 = sh.can_request("peek-exp", now=expiry)
+        assert allowed2 is True
+        assert rec2.state == sh.STATE_PROBE
+
+    def test_peek_probe_denies(self, health_db):
+        """probe 中 peek 返回 (False, record)。"""
+        sh.record_failure("peek-probe", "rate_limit", now=T0)
+        expiry = T0 + RATE_LIMIT_COOLDOWN_SECONDS + 1
+        sh.can_request("peek-probe", now=expiry)  # 抢占探针
+        allowed, rec = sh.peek_request_allowed("peek-probe", now=expiry + 1)
+        assert allowed is False
+        assert rec.state == sh.STATE_PROBE
+
+
+# ============================================================
+# 最终补丁：source_cooling_down NO-OP / 冷却中 success 保护 /
+# probe + transient 保守累计
+# ============================================================
+
+class TestFinalPatchSemantics:
+    """规划员最终固定状态机回归：
+
+    - cooling_down + 本地 source_cooling_down → 完全 NO-OP；
+    - cooling_down + 旧 in-flight success → 保持 cooling_down；
+    - probe + irrelevant → healthy（breaker 恢复）；
+    - probe + transient → 保持 probe 累计，达阈值才冷却。
+    """
+
+    def test_record_failure_source_cooling_down_noop_during_cooldown(self, health_db):
+        """冷却中 record_failure('source_cooling_down')：完全 NO-OP。"""
+        sh.record_failure("noop-cool", "risk_control", now=T0)
+        before = sh.get_health("noop-cool")
+
+        for i in range(10):
+            rec = sh.record_failure("noop-cool", "source_cooling_down", now=T0 + i + 1)
+            assert rec.state == sh.STATE_COOLING_DOWN
+            assert rec.cooldown_until == before.cooldown_until
+            assert rec.reason_kind == "risk_control"
+            assert rec.consecutive_failures == before.consecutive_failures
+            assert rec.last_failure_at == before.last_failure_at  # 连失败时间都不动
+
+    def test_record_failure_source_cooling_down_noop_on_healthy(self, health_db):
+        """healthy 上 record_failure('source_cooling_down') 也完全 NO-OP。"""
+        sh.record_success("noop-ok", now=T0 - 10)
+        before = sh.get_health("noop-ok")
+        rec = sh.record_failure("noop-ok", "source_cooling_down", now=T0)
+        assert rec.state == sh.STATE_HEALTHY
+        assert rec.consecutive_failures == 0
+        assert rec.last_failure_at == before.last_failure_at
+        assert rec.last_success_at == before.last_success_at
+
+    def test_record_failure_source_cooling_down_noop_without_record(self, health_db):
+        """无记录来源：record_failure('source_cooling_down') 不落库（NO-OP）。"""
+        rec = sh.record_failure("noop-none", "source_cooling_down", now=T0)
+        assert rec.state == sh.STATE_HEALTHY
+        assert rec.consecutive_failures == 0
+        # 确认没有写入任何记录（保持无记录默认）
+        from app.catalog.source_health import get_connection
+
+        row = get_connection().execute(
+            "SELECT COUNT(*) AS n FROM source_health WHERE source_id = ?",
+            ("noop-none",),
+        ).fetchone()
+        assert row["n"] == 0
+
+    def test_success_during_probe_still_recovers(self, health_db):
+        """probe 中 success → healthy（清 breaker）。"""
+        sh.record_failure("succ-probe", "rate_limit", now=T0 - 100)
+        expiry = T0 + RATE_LIMIT_COOLDOWN_SECONDS + 1
+        sh.can_request("succ-probe", now=expiry)
+        assert sh.get_health("succ-probe").state == sh.STATE_PROBE
+
+        sh.record_success("succ-probe", now=expiry + 1)
+        rec = sh.get_health("succ-probe")
+        assert rec.state == sh.STATE_HEALTHY
+        assert rec.consecutive_failures == 0
+        assert rec.cooldown_until == 0
+
+    def test_probe_transient_keeps_probe_and_accumulates(self, health_db):
+        """probe 下遇 transient：保持 probe、累计计数、不立即冷却（保守做法）。"""
+        sh.record_failure("probe-tran", "risk_control", now=T0)
+        expiry = T0 + RISK_CONTROL_COOLDOWN_SECONDS + 1
+        allowed, _ = sh.can_request("probe-tran", now=expiry)
+        assert allowed is True
+        assert sh.get_health("probe-tran").state == sh.STATE_PROBE
+
+        # risk_control 冷却时已累计 1 次（consecutive=1）；probe 下遇 transient
+        # 保持 probe 继续累计（2 → 3 达阈值才冷却）
+        rec = sh.record_failure("probe-tran", "network", now=expiry + 1)
+        assert rec.state == sh.STATE_PROBE  # 不转 healthy（探针失败不证明远端可达）
+        assert rec.consecutive_failures == 2
+        assert not rec.in_cooldown
+
+        # 第 3 次累计达阈值 → 正常冷却
+        rec3 = sh.record_failure("probe-tran", "network", now=expiry + 2)
+        assert rec3.state == sh.STATE_COOLING_DOWN
+        assert rec3.consecutive_failures == TRANSIENT_FAILURE_THRESHOLD
+        assert rec3.cooldown_until == expiry + 2 + TRANSIENT_COOLDOWN_SECONDS
+
+    def test_irrelevant_three_failures_then_probe_recovers(self, health_db):
+        """irrelevant 错误不累计；probe + irrelevant → healthy（回归组合）。"""
+        # 连续 3 次 404：不冷却、不累计（现有语义保持）
+        for i in range(3):
+            rec = sh.record_failure("irrel-probe", "not_found", now=T0 + i)
+            assert rec.state == sh.STATE_HEALTHY
+            assert rec.consecutive_failures == 0
+        # 触发冷却 → 到期 → 探针 → 404 → healthy
+        sh.record_failure("irrel-probe", "risk_control", now=T0 + 10)
+        expiry = T0 + 10 + RISK_CONTROL_COOLDOWN_SECONDS + 1
+        allowed, _ = sh.can_request("irrel-probe", now=expiry)
+        assert allowed is True
+        rec = sh.record_failure("irrel-probe", "not_found", now=expiry + 1)
+        assert rec.state == sh.STATE_HEALTHY
+        assert rec.consecutive_failures == 0
+        assert rec.cooldown_until == 0

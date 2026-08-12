@@ -313,7 +313,7 @@ def _schedule_background_refresh(
         global _refresh_active
         try:
             # 模块 1 冷却拦截：冷却中保留旧缓存，不发任何请求
-            allowed, _health = source_health.can_request(
+            allowed, _health = source_health.peek_request_allowed(
                 governor_connection_key(server_url, username)
             )
             if not allowed:
@@ -368,7 +368,7 @@ def test_connection(req: TestConnectionRequest):
         }
 
     # 模块 1：该连接正在冷却时，主动测试也不向远端发请求（用户可见的安全提示）
-    allowed, _health = source_health.can_request(
+    allowed, _health = source_health.peek_request_allowed(
         governor_connection_key(normalize_openlist_server_url(server_url), username)
     )
     if not allowed:
@@ -495,7 +495,7 @@ def browse(path: str = "", page: int = 1, refresh: bool = False):
     # 模块 1 冷却拦截：发请求前检查连接健康（与 OpenListClient 上报同一连接键）。
     # 冷却中：fresh 缓存直接返回（标注 health）；无 fresh 缓存则拒绝请求，
     # 不发起任何网络请求。
-    allowed, _health = source_health.can_request(
+    allowed, _health = source_health.peek_request_allowed(
         governor_connection_key(config.openlist_server_url, config.openlist_username)
     )
     if not allowed:
@@ -626,7 +626,7 @@ def prefetch(req: PrefetchRequest):
         return {"prefetched": 0, "skipped": len(paths), "busy": True}
 
     # 模块 1 冷却拦截：冷却中不发任何请求，直接返回空结果 + health 标注
-    allowed, _health = source_health.can_request(
+    allowed, _health = source_health.peek_request_allowed(
         governor_connection_key(config.openlist_server_url, config.openlist_username)
     )
     if not allowed:

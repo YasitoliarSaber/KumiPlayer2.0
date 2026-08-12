@@ -420,6 +420,11 @@ class OpenListClient:
         self._governor.acquire(self._conn_key)
         try:
             token = self._login_request()
+        except OpenListSourceCoolingDownError:
+            # 第一保险：本地准入拒绝（冷却拦截）不是上游失败，直接 re-raise，
+            # 不调用 _report_failure（record_failure 对 source_cooling_down
+            # 已 NO-OP 兜底，双保险防止冷却期被反复刷新）。
+            raise
         except OpenListError as exc:
             self._report_failure(exc.kind)
             raise
@@ -477,6 +482,11 @@ class OpenListClient:
         """
         try:
             page = self._list_dir_request(remote_path, page, per_page, refresh=refresh)
+        except OpenListSourceCoolingDownError:
+            # 第一保险：本地准入拒绝（冷却拦截）不是上游失败，直接 re-raise，
+            # 不调用 _report_failure（record_failure 对 source_cooling_down
+            # 已 NO-OP 兜底，双保险防止冷却期被反复刷新）。
+            raise
         except OpenListError as exc:
             self._report_failure(exc.kind)
             raise

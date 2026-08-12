@@ -154,8 +154,15 @@ class TestDiscoveryCooldown:
         assert result["summary"].get("health") != "cooling_down"
         assert result["units"] == []
 
-    def test_cooldown_expired_becomes_probe_and_scans(self, monkeypatch):
-        """冷却期结束后 can_request 放行（probe），扫描正常执行。"""
+    def test_cooldown_expired_peek_allows_scan_without_consuming_probe(self, monkeypatch):
+        """冷却到期后 handler 预检 peek 放行且**不消费探针**，扫描正常执行。
+
+        R3 最终语义：handler 预检只读（peek_request_allowed），probe 由
+        真实 OpenListClient 在物理请求前 can_request 原子抢占；本用例用
+        _FakeEngine（无物理请求），因此 state 保持 cooling_down 恰恰证明
+        peek 没有抢占探针——探针仍留给后续物理请求（见
+        TestCooldownExpiredRealClientProbe）。
+        """
         from app.pipeline.discovery_handler import handle_discovery_scan
 
         root, generation = _make_root()
@@ -171,8 +178,6 @@ class TestDiscoveryCooldown:
         )
         key = governor_connection_key(_FakeConfig.openlist_server_url, _FakeConfig.openlist_username)
         # 冷却窗口 [1000, 1100)：真实时钟已过期。
-        # 单探针语义：探针许可由 handler 内部的 can_request 原子抢占，
-        # 测试不得预先调用 can_request（否则会消耗唯一探针许可，handler 被拒）。
         source_health.enter_cooldown(
             key, reason_kind="risk_control",
             cooldown_seconds=100, now=1000.0,
@@ -183,8 +188,12 @@ class TestDiscoveryCooldown:
             should_cancel=lambda: False,
         )
         assert built == [1]
-        # 冷却到期后的第一个调用（handler 内部）抢占为 probe，扫描正常执行
-        assert source_health.get_health(key).state == source_health.STATE_PROBE
+        # 关键：peek 预检不消费探针，state 保持 cooling_down（未变 probe）
+        assert source_health.get_health(key).state == source_health.STATE_COOLING_DOWN
+        # 探针仍在：物理请求前的 can_request 仍能抢占（证明未被 handler 消耗）
+        allowed, rec = source_health.can_request(key)
+        assert allowed is True
+        assert rec.state == source_health.STATE_PROBE
 
 
 class TestMidScanRiskControlPropagation:
@@ -417,3 +426,74 @@ class TestDurableJobDefer:
             assert claimed2[0].attempt == 0  # defer 不消耗 attempt
         finally:
             unregister("discovery_scan")
+
+
+class TestCooldownExpiredRealClientProbe:
+    """最终补丁（R3）：冷却到期后 handler 预检 peek 不消费探针。
+
+    关键回归（规划员点名）：handler 预检不得抢占唯一探针许可——否则
+    真实 OpenListClient 在物理请求前的 can_request 准入会被自己拦截，
+    transport 收到 0 次调用、扫描永远无法恢复。正确路径：
+
+    handler.peek_request_allowed（只读，冷却到期放行、不改 state）
+    → 真实 OpenListClient 物理请求前 can_request 原子抢占 probe
+    → transport 恰好 1 次 HTTP → probe success → healthy。
+    """
+
+    def test_expired_cooldown_real_client_probe_success_healthy(self, monkeypatch):
+        import httpx
+
+        from app.catalog.scanner import SourceCatalogScanner
+        from app.integrations.openlist.client import OpenListClient
+        from app.integrations.openlist.governor import OpenListRequestGovernor
+        from app.pipeline.discovery_handler import handle_discovery_scan
+
+        root, generation = _make_root()
+        _patch_config(monkeypatch)
+
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.url.path)
+            return httpx.Response(
+                200,
+                json={"code": 200, "message": "success",
+                      "data": {"content": [], "total": 0}},
+                request=request,
+            )
+
+        client = OpenListClient(
+            _FakeConfig.openlist_server_url,
+            _FakeConfig.openlist_username,
+            _FakeConfig.openlist_password,
+            transport=httpx.MockTransport(handler),
+            governor=OpenListRequestGovernor(rate_per_second=1000),
+        )
+        monkeypatch.setattr(
+            "app.pipeline.discovery_handler._build_scanner",
+            lambda root: SourceCatalogScanner(source="openlist", client=client),
+        )
+
+        key = governor_connection_key(
+            _FakeConfig.openlist_server_url, _FakeConfig.openlist_username
+        )
+        # 冷却窗口 [1000, 1100)：真实时钟已过期
+        source_health.enter_cooldown(
+            key, reason_kind="risk_control", cooldown_seconds=100, now=1000.0,
+        )
+        assert source_health.get_health(key).state == source_health.STATE_COOLING_DOWN
+
+        result = handle_discovery_scan(
+            {"root_id": root.root_id, "generation": generation},
+            progress_callback=lambda *a, **k: None,
+            should_cancel=lambda: False,
+        )
+
+        # 关键断言：恰好 1 次物理请求（peek 预检零请求；空目录单次枚举）
+        assert calls == ["/api/fs/list"]
+        # probe success → healthy（清 breaker）
+        record = source_health.get_health(key)
+        assert record.state == source_health.STATE_HEALTHY
+        assert record.consecutive_failures == 0
+        assert record.cooldown_until == 0
+        assert result["units"] == []

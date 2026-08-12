@@ -755,3 +755,84 @@ class TestIrrelevantKindsNoCooldown:
             with pytest.raises(OpenListAuthError):
                 client.list_dir("/")
         self._assert_no_cooldown(client)
+
+
+# ============================================================
+# 模块 1 最终补丁（R3）：冷却期准入拒绝零副作用 + 探针 404 解锁
+# ============================================================
+
+class TestFinalPatchCooldownAdmission:
+    """最终补丁回归（规划员点名）：
+
+    1. risk_control 冷却中连续 10 次本地准入拒绝（OpenListSourceCoolingDown
+       Error）：cooldown_until / reason_kind / consecutive_failures 完全
+       不变，transport 调用数 == 0（双保险：client 外层 re-raise +
+       record_failure('source_cooling_down') NO-OP）；
+    2. 冷却到期 → probe → 真实请求返回 404（irrelevant）→ breaker 恢复
+       healthy → 下一个请求有资格执行（连接未锁死）。
+    """
+
+    def test_ten_admission_denials_do_not_mutate_health(self):
+        """冷却中连续 10 次 list_dir：健康状态完全不变，零物理请求。"""
+        from app.catalog import source_health
+
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            return _json_response(200, _fs_list_payload("/", [_entry("ok.mkv")]))
+
+        client = make_client(handler)
+        client._token = "t"
+        source_health.enter_cooldown(
+            client._conn_key, reason_kind="risk_control", cooldown_seconds=6 * 3600,
+        )
+        before = source_health.get_health(client._conn_key)
+        assert before.state == "cooling_down"
+        assert before.reason_kind == "risk_control"
+
+        for _ in range(10):
+            with pytest.raises(OpenListSourceCoolingDownError):
+                client.list_dir("/")
+
+        after = source_health.get_health(client._conn_key)
+        assert calls == []  # 零物理请求
+        assert after.state == "cooling_down"
+        assert after.reason_kind == before.reason_kind  # 仍 risk_control
+        assert after.cooldown_until == before.cooldown_until  # 未被刷新
+        assert after.consecutive_failures == before.consecutive_failures  # 不累计
+        assert after.last_failure_at == before.last_failure_at  # 连失败时间都不动
+
+    def test_probe_404_recovers_healthy_then_next_request_allowed(self):
+        """冷却到期探针返回 404：breaker 回 healthy，后续请求有资格执行。"""
+        from app.catalog import source_health
+
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.url.path)
+            if len(calls) == 1:
+                # 探针请求：远端可达但目录不存在（business error，非风控）
+                return httpx.Response(404, request=request)
+            return _json_response(200, _fs_list_payload("/", [_entry("ok.mkv")]))
+
+        client = make_client(handler)
+        client._token = "t"
+        source_health.enter_cooldown(
+            client._conn_key, reason_kind="risk_control",
+            cooldown_seconds=100, now=1000.0,
+        )
+
+        # 第一次请求（冷却已到期）：can_request 抢占 probe → 真实请求 → 404
+        with pytest.raises(OpenListNotFoundError):
+            client.list_dir("/")
+        record = source_health.get_health(client._conn_key)
+        assert record.state == "healthy"  # probe + not_found(irrelevant) → healthy
+        assert record.consecutive_failures == 0
+        assert record.cooldown_until == 0
+        assert not record.in_cooldown
+
+        # 下一个请求有资格执行（breaker 已恢复，连接未锁死）
+        page = client.list_dir("/")
+        assert page.total == 1
+        assert len(calls) == 2

@@ -176,8 +176,26 @@ def _upsert(
 
 
 def record_success(source_id: str, *, now: float | None = None) -> None:
-    """记录一次最终成功：回到 healthy 并清零连续失败计数。"""
+    """记录一次最终成功。
+
+    - 无记录 / healthy / probe：清除 breaker（state=healthy、
+      consecutive=0、cooldown_until=0），更新 last_success_at；
+    - **cooling_down：只更新 last_success_at / updated_at**，保持
+      state / reason_kind / consecutive_failures / cooldown_until 不变。
+      冷却中到达的成功是旧 in-flight 请求的滞后结果，不得覆盖新触发的
+      冷却（否则 risk_control 冷却会被并发旧请求的成功瞬间解除）。
+    """
     now = now if now is not None else time.time()
+    current = get_health(source_id)
+    if current.state == STATE_COOLING_DOWN:
+        conn = get_connection()
+        conn.execute(
+            "UPDATE source_health SET last_success_at = ?, updated_at = ? "
+            "WHERE source_id = ?",
+            (now, now, source_id),
+        )
+        conn.commit()
+        return
     _upsert(
         source_id,
         state=STATE_HEALTHY,
@@ -218,17 +236,42 @@ def record_failure(source_id: str, kind: str, *, now: float | None = None) -> So
     返回更新后的记录；调用方可通过 ``in_cooldown`` 判断是否需要停止后续请求。
 
     分类语义：
+    - ``source_cooling_down``（本地准入拒绝）：**defensive NO-OP**，
+      什么都不改直接返回当前记录——准入拒绝不是上游失败，绝不刷新/推进冷却；
     - breaker relevant：risk_control/rate_limit 立即冷却；其余累计连续失败，
-      达阈值才冷却（未知 kind 归为 ``unknown``）；
+      达阈值才冷却（未知 kind 归为 ``unknown``）；probe 下遇 transient 只
+      累计不转 healthy（探针失败不能证明远端可达，也不解锁单探针保护）；
     - breaker irrelevant（auth/permission/not_found/validation/redirect/
-      scan_limit）：目录级/根级 known non-transient 问题，不累计不冷却，
-      仅更新 last_failure_at / reason_kind / updated_at，state /
-      consecutive_failures / cooldown_until 保持原状。
+      scan_limit）：不累计不冷却；**若当前处于 probe，视为探针成功证明远端
+      可达 → breaker 恢复 healthy**（state=healthy、consecutive=0、
+      cooldown_until=0），业务错误仍由调用方抛出；其他状态仅更新
+      last_failure_at / reason_kind / updated_at。
     """
     now = now if now is not None else time.time()
     current = get_health(source_id)
 
+    if kind == "source_cooling_down":
+        # 本地准入拒绝（冷却拦截）不是上游失败：完全 NO-OP，
+        # state/reason_kind/consecutive_failures/cooldown_until/
+        # last_failure_at 一律不动（client 外层已第一保险直接 re-raise，
+        # 这里是第二保险）。
+        return current
+
     if kind in BREAKER_IRRELEVANT_KINDS:
+        if current.state == STATE_PROBE:
+            # 探针返回 known non-transient：证明远端可达（非风控/非网络故障），
+            # breaker 恢复 healthy；业务错误（403/404/auth 等）仍由调用方抛出。
+            _upsert(
+                source_id,
+                state=STATE_HEALTHY,
+                reason_kind=kind,
+                consecutive_failures=0,
+                cooldown_until=0.0,
+                last_failure_at=now,
+                last_success_at=current.last_success_at,
+                now=now,
+            )
+            return get_health(source_id)
         # known non-transient：不累计 circuit-breaker 计数、不触发冷却，
         # 仅记录最近一次失败原因与时间；state / cooldown_until 保持原状。
         _upsert(
@@ -272,9 +315,12 @@ def record_failure(source_id: str, kind: str, *, now: float | None = None) -> So
             now=now,
         )
     else:
+        # 未达阈值：保持当前 state 继续累计（probe 下保持 probe、不转
+        # healthy——探针失败不能证明远端可达，也不解锁单探针保护；
+        # 达阈值时统一进入冷却）。
         _upsert(
             source_id,
-            state=STATE_HEALTHY if current.state != STATE_COOLING_DOWN else current.state,
+            state=current.state,
             reason_kind=normalized,
             consecutive_failures=consecutive,
             cooldown_until=current.cooldown_until,
@@ -285,8 +331,37 @@ def record_failure(source_id: str, kind: str, *, now: float | None = None) -> So
     return get_health(source_id)
 
 
+def peek_request_allowed(source_id: str, *, now: float | None = None) -> tuple[bool, SourceHealthRecord]:
+    """只读准入预检：**绝不修改任何状态、绝不消费探针**。
+
+    返回 (allowed, record)：
+    - 无记录 / healthy → (True, record)；
+    - cooling_down 且未到期 → (False, record)；
+    - cooling_down 且已到期 → (True, record)，**不改 state**——探针留给
+      物理 HTTP 请求前的 :func:`can_request` 原子抢占（上层预检不得抢
+      占探针，否则真实客户端物理请求前会被自己拦截）；
+    - probe → (False, record)。
+
+    用于任务开始前的低成本拦截（discovery handler / API 入口）：冷却中
+    直接拒绝、零网络请求；冷却已到期时放行，由唯一的消费入口
+    :func:`can_request` 在真正发请求前抢占探针。
+    """
+    now = now if now is not None else time.time()
+    record = get_health(source_id)
+    if record.state == STATE_COOLING_DOWN:
+        if now < record.cooldown_until:
+            return False, record
+        return True, record
+    if record.state == STATE_PROBE:
+        return False, record
+    return True, record
+
+
 def can_request(source_id: str, *, now: float | None = None) -> tuple[bool, SourceHealthRecord]:
-    """判断当前是否允许向该来源发请求。
+    """判断当前是否允许向该来源发请求（**唯一消费探针的入口**）。
+
+    **只应在物理 HTTP 请求前调用**；任务开始前的预检一律使用
+    :func:`peek_request_allowed`，避免上层预检抢占唯一探针许可。
 
     返回 (allowed, record)：
     - 冷却中 → (False, record)；
