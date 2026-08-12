@@ -474,3 +474,29 @@ def create_schema_v3(conn) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('backend_data_epoch', '2')"
     )
+    # 轻量扩展表（source_health 等）统一由 ensure_* 幂等补齐
+    ensure_source_health_table(conn)
+
+
+# 轻量幂等扩展表（v3 之后的补充表，不 bump user_version）
+_EXTRA_TABLES: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS source_health (
+        source_id TEXT PRIMARY KEY,
+        state TEXT NOT NULL DEFAULT 'healthy',
+        reason_kind TEXT NOT NULL DEFAULT '',
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        cooldown_until REAL NOT NULL DEFAULT 0,
+        last_failure_at REAL NOT NULL DEFAULT 0,
+        last_success_at REAL NOT NULL DEFAULT 0,
+        updated_at REAL NOT NULL DEFAULT 0
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_source_health_state ON source_health(state)",
+)
+
+
+def ensure_source_health_table(conn) -> None:
+    """幂等补齐 source_health 表（已有 v3 库的轻量迁移，不重置数据库）。"""
+    for ddl in _EXTRA_TABLES:
+        conn.execute(ddl)

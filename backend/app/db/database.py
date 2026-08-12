@@ -107,6 +107,13 @@ def init_db() -> None:
         conn.execute("ALTER TABLE import_revision_items ADD COLUMN card_type TEXT NOT NULL DEFAULT ''")
         conn.commit()
 
+    # 幂等轻量扩展（不 bump user_version）：来源级风控健康表。
+    # 已有 v3 数据库不会重新执行整份 create_schema_v3()，因此这里单独
+    # 用 CREATE TABLE IF NOT EXISTS 补齐，不强制用户重置数据库。
+    from app.db.schema_v3 import ensure_source_health_table
+
+    ensure_source_health_table(conn)
+
     conn.commit()
     close_connection()
 

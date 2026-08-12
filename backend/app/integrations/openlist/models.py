@@ -66,6 +66,20 @@ class OpenListRateLimitedError(OpenListError):
         self.retry_after = retry_after
 
 
+class OpenListRiskControlError(OpenListError):
+    """远端网盘疑似触发访问保护（风控拦截页，如 115 阿里云盾 405）。
+
+    语义与 rate_limit / network / timeout / permission / not_found 严格区分：
+    检测到后**不允许本请求再自动重试**，并应立即进入来源级冷却。
+
+    安全边界：message 只携带面向用户的固定安全文本；服务端 HTML、
+    trace 页面、Token、URL、Authorization 一律不进入 message、日志或前端。
+    """
+
+    def __init__(self, message: str = "远端网盘疑似触发访问保护，KumiPlayer 已暂停该来源的自动请求"):
+        super().__init__(message, status_code=405, kind="risk_control")
+
+
 class OpenListTimeoutError(OpenListError):
     """连接或读取超时。"""
 

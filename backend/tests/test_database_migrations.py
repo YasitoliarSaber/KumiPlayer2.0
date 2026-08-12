@@ -85,3 +85,57 @@ def test_database_newer_than_application_is_rejected(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="数据库版本"):
         database.init_db()
+
+
+def test_v3_init_creates_source_health_table(tmp_path, monkeypatch):
+    """v3 初始化应创建 source_health 表（含 state 索引）。"""
+    from app.db import database
+
+    path = tmp_path / "v3_source_health.db"
+    _reset_database_module(database, path, monkeypatch)
+    database.init_db()
+
+    connection = sqlite3.connect(path)
+    try:
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "source_health" in tables
+        indexes = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
+        }
+        assert "idx_source_health_state" in indexes
+    finally:
+        connection.close()
+
+
+def test_source_health_survives_repeated_init(tmp_path, monkeypatch):
+    """source_health 幂等：重复 init_db 不抛异常、不重置已写入的数据。"""
+    from app.db import database
+
+    path = tmp_path / "v3_source_health_idem.db"
+    _reset_database_module(database, path, monkeypatch)
+    database.init_db()
+    database.init_db()  # 第二次：不抛异常（幂等）
+
+    # 向 source_health 写入一行，再 init_db：数据必须仍在
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "INSERT INTO source_health (source_id, state, reason_kind, consecutive_failures, updated_at) "
+            "VALUES ('src-idem', 'cooling_down', 'risk_control', 1, 100.0)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database.init_db()  # 第三次：幂等补齐不应重置数据
+
+    connection = sqlite3.connect(path)
+    try:
+        row = connection.execute(
+            "SELECT source_id, state, reason_kind, consecutive_failures FROM source_health WHERE source_id = 'src-idem'"
+        ).fetchone()
+        assert row == ("src-idem", "cooling_down", "risk_control", 1)
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
+    finally:
+        connection.close()
