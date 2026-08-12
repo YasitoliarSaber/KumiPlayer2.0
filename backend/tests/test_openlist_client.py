@@ -402,6 +402,145 @@ class TestListDir:
 # 风控拦截页（模块 1：OpenList / 网盘访问安全与风控保护）
 # ============================================================
 
+    def test_probe_401_relogin_recovers_and_retries_request(self):
+        """cooldown 到期后的唯一 probe 收到 401 时，应先解除 probe 再登录并重试。"""
+        from app.catalog import source_health
+
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.url.path)
+
+            if request.url.path == "/api/auth/login":
+                return _json_response(
+                    200,
+                    {
+                        "code": 200,
+                        "message": "success",
+                        "data": {"token": "fresh-token"},
+                    },
+                )
+
+            if request.url.path == "/api/fs/list":
+                auth = request.headers.get("authorization")
+                if auth != "fresh-token":
+                    return _json_response(
+                        200,
+                        {
+                            "code": 401,
+                            "message": "token invalid",
+                            "data": None,
+                        },
+                    )
+                return _json_response(
+                    200,
+                    _fs_list_payload("/", [_entry("ok.mkv")]),
+                )
+
+            raise AssertionError(f"unexpected request: {request.url.path}")
+
+        client = make_client(handler)
+        client._token = "stale-token"
+
+        # 建立一个已经到期的 cooldown。
+        # 第一次 list_dir() 的最终 can_request() 会把它原子转换成 probe。
+        source_health.enter_cooldown(
+            client._conn_key,
+            reason_kind="risk_control",
+            cooldown_seconds=1,
+            now=1000.0,
+        )
+
+        page = client.list_dir("/")
+
+        assert [entry.name for entry in page.entries] == ["ok.mkv"]
+
+        # 必须严格是：
+        # probe fs/list -> 401
+        # login -> fresh token
+        # retry fs/list -> 200
+        assert calls == [
+            "/api/fs/list",
+            "/api/auth/login",
+            "/api/fs/list",
+        ]
+
+        health = source_health.get_health(client._conn_key)
+        assert health.state == "healthy"
+        assert not health.in_cooldown
+
+
+    def test_probe_401_does_not_relogin_after_new_risk_cooldown(self, monkeypatch):
+        """probe 收到 401 后若同时出现新的 risk_control，login 不得穿透 cooldown。"""
+        from app.catalog import source_health
+
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.url.path)
+
+            if request.url.path == "/api/auth/login":
+                raise AssertionError(
+                    "risk_control cooldown 已建立，login 不应该发出物理请求"
+                )
+
+            if request.url.path == "/api/fs/list":
+                return _json_response(
+                    200,
+                    {
+                        "code": 401,
+                        "message": "token invalid",
+                        "data": None,
+                    },
+                )
+
+            raise AssertionError(f"unexpected request: {request.url.path}")
+
+        client = make_client(handler)
+        client._token = "stale-token"
+
+        # 先放入一个已经到期的 cooldown，让第一次 fs/list 成为唯一 probe。
+        source_health.enter_cooldown(
+            client._conn_key,
+            reason_kind="risk_control",
+            cooldown_seconds=1,
+            now=1000.0,
+        )
+
+        original_report_failure = client._report_failure
+
+        def report_failure_with_new_risk(kind: str) -> None:
+            # 先执行生产逻辑：
+            # probe + auth → healthy
+            original_report_failure(kind)
+
+            if kind == "auth":
+                # 模拟 401 返回以后、真正 login 之前，
+                # 另一个并发请求刚刚触发新的 405 风控。
+                source_health.record_failure(
+                    client._conn_key,
+                    "risk_control",
+                )
+
+        monkeypatch.setattr(
+            client,
+            "_report_failure",
+            report_failure_with_new_risk,
+        )
+
+        with pytest.raises(OpenListSourceCoolingDownError):
+            client.list_dir("/")
+
+        # 只能发生第一次 probe fs/list。
+        # 新 cooldown 建立以后，login 的 peek 必须直接拦截，
+        # /api/auth/login 绝不能真正进入 transport。
+        assert calls == ["/api/fs/list"]
+
+        health = source_health.get_health(client._conn_key)
+        assert health.state == "cooling_down"
+        assert health.reason_kind == "risk_control"
+        assert health.in_cooldown
+
 class TestRiskControl:
     """405 风控 HTML 页 → risk_control，且不继续自动重试。"""
 

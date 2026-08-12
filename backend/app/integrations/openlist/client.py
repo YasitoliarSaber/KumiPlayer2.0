@@ -381,9 +381,24 @@ class OpenListClient:
                     continue
                 raise OpenListNetworkError("OpenList 服务暂时不可用，请稍后重试")
 
-            # 认证失败：进程内单次重登后重试一次
+            # 认证失败：进程内单次重登后重试一次。
+            #
+            # 重要：如果当前请求是 cooldown 到期后的唯一 probe，
+            # can_request() 已经把 source_health 状态置为 probe。
+            # 该物理请求已经真实到达 OpenList 并收到 401，说明：
+            # 1. 远端可达；
+            # 2. 当前失败属于 auth，而不是 risk_control / rate_limit。
+            #
+            # 因此必须先把 auth 结果上报给 SourceHealth：
+            # probe + auth(irrelevant) → healthy，
+            # 然后 login() 才能正常通过 health admission。
+            #
+            # 若在这期间另一个请求已经触发 risk_control 并进入 cooling_down，
+            # record_failure("auth") 的 cooling 保护会保留 cooldown，
+            # 后续 login() 仍会被 peek_request_allowed 拒绝，不会穿透风控。
             if (status == 401 or code == 401) and retry_on_auth:
                 self._token = None
+                self._report_failure("auth")
                 self.login()
                 return self._post(path, payload, retry_on_auth=False)
 
