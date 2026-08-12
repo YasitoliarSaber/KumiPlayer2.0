@@ -18,13 +18,16 @@ from app.integrations.openlist.client import (
     validate_entry_name,
     validate_server_url,
 )
+from app.integrations.openlist.governor import OpenListRequestGovernor
 from app.integrations.openlist.models import (
     OpenListAuthError,
     OpenListEntry,
+    OpenListError,
     OpenListNetworkError,
     OpenListPermissionError,
     OpenListRateLimitedError,
     OpenListRedirectError,
+    OpenListRiskControlError,
     OpenListTimeoutError,
     OpenListValidationError,
 )
@@ -51,6 +54,9 @@ def make_client(handler, **kwargs) -> OpenListClient:
         "user",
         "secret-pass",
         transport=transport,
+        # 限速语义由 test_openlist_governor.py 单独覆盖：这里注入快速 governor，
+        # 避免共享全局单例 1 req/s 拖慢既有用例（限速器本身不参与断言）。
+        governor=OpenListRequestGovernor(rate_per_second=1000),
         **kwargs,
     )
 
@@ -326,3 +332,215 @@ class TestListDir:
         with pytest.raises(Exception) as exc:
             client.list_dir("/")
         assert "secret-pass" not in str(exc.value)
+
+
+# ============================================================
+# 风控拦截页（模块 1：OpenList / 网盘访问安全与风控保护）
+# ============================================================
+
+class TestRiskControl:
+    """405 风控 HTML 页 → risk_control，且不继续自动重试。"""
+
+    _ALIYUN_HTML = (
+        "<!DOCTYPE html><html><head><title>访问被阻断</title></head><body>"
+        "<script src='https://errors.aliyun.com/robots/blocked'></script>"
+        "<p>访问被阻断</p></body></html>"
+    )
+
+    def _make_405_html_handler(self, calls: list):
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            return httpx.Response(
+                405,
+                content=self._ALIYUN_HTML.encode("utf-8"),
+                headers={"content-type": "text/html; charset=utf-8"},
+                request=httpx.Request("POST", "http://test"),
+            )
+        return handler
+
+    def test_405_aliyun_html_raises_risk_control(self):
+        calls: list = []
+        client = make_client(self._make_405_html_handler(calls))
+        client._token = "t"
+        with pytest.raises(OpenListRiskControlError):
+            client.list_dir("/")
+        assert calls == [1]  # 立即失败，无第二、第三次自动重试
+
+    def test_405_risk_control_message_is_safe_text(self):
+        """对外只返回安全文本：不包含 HTML、URL、Token、Authorization。"""
+        calls: list = []
+        client = make_client(self._make_405_html_handler(calls))
+        client._token = "t"
+        with pytest.raises(OpenListRiskControlError) as exc:
+            client.list_dir("/")
+        message = str(exc.value)
+        assert "疑似触发访问保护" in message
+        assert "errors.aliyun.com" not in message
+        assert "<html" not in message
+        assert "jwt" not in message.lower()
+        assert "authorization" not in message.lower()
+
+    def test_405_html_with_blocked_marker_raises_risk_control(self):
+        calls: list = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            return httpx.Response(
+                405,
+                content="<html><body>访问被阻断，请稍后再试</body></html>".encode("utf-8"),
+                headers={"content-type": "text/html"},
+                request=httpx.Request("POST", "http://test"),
+            )
+
+        client = make_client(handler)
+        client._token = "t"
+        with pytest.raises(OpenListRiskControlError):
+            client.list_dir("/")
+        assert calls == [1]
+
+    def test_405_json_body_not_risk_control(self):
+        """405 但 content-type 不是 HTML：保持普通错误语义（不误判风控）。"""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return _json_response(405, {"code": 405, "message": "method not allowed", "data": None})
+
+        client = make_client(handler)
+        client._token = "t"
+        with pytest.raises(OpenListError) as exc:
+            client.list_dir("/")
+        assert not isinstance(exc.value, OpenListRiskControlError)
+        assert exc.value.kind != "risk_control"
+
+    def test_405_html_without_markers_not_risk_control(self):
+        """405 HTML 但没有任何风控特征：不归为 risk_control。"""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                405,
+                content="<html><body>not allowed</body></html>".encode("utf-8"),
+                headers={"content-type": "text/html"},
+                request=httpx.Request("POST", "http://test"),
+            )
+
+        client = make_client(handler)
+        client._token = "t"
+        with pytest.raises(OpenListError) as exc:
+            client.list_dir("/")
+        assert not isinstance(exc.value, OpenListRiskControlError)
+
+    def test_risk_control_does_not_retry_even_with_max_attempts(self):
+        """风控优先级高于重试：即便允许 3 次尝试也只发 1 个请求。"""
+        calls: list = []
+        client = make_client(self._make_405_html_handler(calls), max_attempts=3)
+        client._token = "t"
+        with pytest.raises(OpenListRiskControlError):
+            client.list_dir("/")
+        assert calls == [1]
+
+    def test_login_405_aliyun_raises_risk_control(self):
+        calls: list = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            return httpx.Response(
+                405,
+                content=self._ALIYUN_HTML.encode("utf-8"),
+                headers={"content-type": "text/html"},
+                request=httpx.Request("POST", "http://test"),
+            )
+
+        client = make_client(handler)
+        with pytest.raises(OpenListRiskControlError):
+            client.login()
+        assert calls == [1]
+
+
+# ============================================================
+# 模块 1 阶段 B：请求最终结果写入 source_health
+# ============================================================
+
+class TestSourceHealthReporting:
+    """客户端最终结果按连接键上报 source_health（临时 SQLite 隔离）。"""
+
+    @pytest.fixture(autouse=True)
+    def db(self, tmp_path, monkeypatch):
+        from app.db.database import close_connection, init_db
+
+        db_path = tmp_path / "health.db"
+        monkeypatch.setattr("app.db.database._db_path", db_path)
+        import app.db.database as db_mod
+
+        if hasattr(db_mod._local, "connection"):
+            db_mod._local.connection = None
+        init_db()
+        yield
+        close_connection()
+
+    def test_success_list_dir_records_healthy(self):
+        from app.catalog import source_health
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return _json_response(200, _fs_list_payload("/", [_entry("ok.mkv")]))
+
+        client = make_client(handler)
+        client._token = "t"
+        page = client.list_dir("/")
+        assert page.total == 1
+        record = source_health.get_health(client._conn_key)
+        assert record.state == "healthy"
+        assert record.last_success_at > 0
+        assert not record.in_cooldown
+
+    def test_429_exhausted_records_cooling_down(self):
+        """429 最终失败（max_attempts=1 不再重试）→ rate_limit 冷却。"""
+        from app.catalog import source_health
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(429, headers={"retry-after": "1"}, request=request)
+
+        client = make_client(handler, max_attempts=1, sleep=lambda _: None)
+        with pytest.raises(OpenListRateLimitedError):
+            client.list_dir("/")
+        record = source_health.get_health(client._conn_key)
+        assert record.state == "cooling_down"
+        assert record.reason_kind == "rate_limit"
+        assert record.in_cooldown
+
+    def test_risk_control_records_cooling_down(self):
+        from app.catalog import source_health
+
+        aliyun_html = (
+            "<!DOCTYPE html><html><head><title>访问被阻断</title></head><body>"
+            "<script src='https://errors.aliyun.com/robots/blocked'></script>"
+            "<p>访问被阻断</p></body></html>"
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                405,
+                content=aliyun_html.encode("utf-8"),
+                headers={"content-type": "text/html; charset=utf-8"},
+                request=httpx.Request("POST", "http://test"),
+            )
+
+        client = make_client(handler)
+        client._token = "t"
+        with pytest.raises(OpenListRiskControlError):
+            client.list_dir("/")
+        record = source_health.get_health(client._conn_key)
+        assert record.state == "cooling_down"
+        assert record.reason_kind == "risk_control"
+        assert record.in_cooldown
+
+    def test_timeout_failure_accumulates_transient(self):
+        """transient（timeout）不立即冷却：记录连续失败但保持可请求。"""
+        from app.catalog import source_health
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("read timeout")
+
+        client = make_client(handler, max_attempts=1, sleep=lambda _: None)
+        with pytest.raises(OpenListTimeoutError):
+            client.list_dir("/")
+        record = source_health.get_health(client._conn_key)
+        assert record.reason_kind == "timeout"
+        assert record.consecutive_failures == 1
+        assert not record.in_cooldown  # 未达阈值，不冷却

@@ -89,6 +89,36 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
     if root is None:
         raise ValueError(f"source root 不存在: {root_id}")
 
+    # 模块 1 冷却拦截：OpenList 来源在构造扫描器之前检查连接健康。
+    # 冷却中不构造扫描器、不跑 engine、不请求远程；保留 Source Catalog 已有数据。
+    source = str(root.source_id or "")
+    if source.startswith("openlist") or source == "openlist":
+        from app.catalog import source_health
+        from app.core.config import load_config
+        from app.integrations.openlist.governor import governor_connection_key
+
+        config = load_config()
+        # 与 OpenListClient 上报一致：连接键 = sha256(server_url|username)
+        health_key = governor_connection_key(
+            config.openlist_server_url, config.openlist_username
+        )
+        allowed, _record = source_health.can_request(health_key)
+        if not allowed:
+            return {
+                "root_id": root_id,
+                "generation": generation,
+                "units": [],
+                "summary": {
+                    "plan_ready": 0,
+                    "needs_review": 0,
+                    "mirror_enqueued": 0,
+                    "failed_count": 0,
+                    "failed_paths": [],
+                    "health": "cooling_down",
+                    "message": "远端网盘疑似触发访问保护，KumiPlayer 已暂停该来源的自动请求",
+                },
+            }
+
     scanner = _build_scanner(
         {
             "source_id": root.source_id,

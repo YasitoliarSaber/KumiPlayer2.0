@@ -77,6 +77,26 @@ class FakeOpenListClient:
 
 
 @pytest.fixture(autouse=True)
+def db_ready(tmp_path, monkeypatch):
+    """模块 1 起 browse/test-connection 会查 source_health 表：临时 SQLite 初始化。
+
+    TestClient(app) 不触发 lifespan（init_db 在 app 启动时才执行），
+    这里显式为整个文件的 API 测试准备隔离数据库。
+    """
+    from app.db.database import close_connection, init_db
+
+    db_path = tmp_path / "api.db"
+    monkeypatch.setattr("app.db.database._db_path", db_path)
+    import app.db.database as db_mod
+
+    if hasattr(db_mod._local, "connection"):
+        db_mod._local.connection = None
+    init_db()
+    yield
+    close_connection()
+
+
+@pytest.fixture(autouse=True)
 def fake_client(monkeypatch):
     FakeOpenListClient.instances = []
     FakeOpenListClient.login_user = ""
@@ -556,3 +576,104 @@ class TestImport:
         preset = list_presets()[0]
         assert preset.version_count == 2
         assert preset.current_plan_id == record["result"]["plan_id"]
+
+
+class TestCooldownInterception:
+    """模块 1 阶段 B：连接冷却中，browse/prefetch/test-connection 不发请求。"""
+
+    @staticmethod
+    def _health_key() -> str:
+        from app.integrations.openlist.governor import governor_connection_key
+
+        return governor_connection_key("https://ol.example.com:5244", "quark-user")
+
+    @staticmethod
+    def _enter_cooldown():
+        from app.catalog import source_health
+
+        source_health.enter_cooldown(
+            TestCooldownInterception._health_key(),
+            reason_kind="risk_control",
+            cooldown_seconds=3600,
+        )
+
+    def test_browse_cooling_down_without_cache_423(self, client, tmp_path):
+        """冷却中且无 fresh 缓存：拒绝请求（423），不构造客户端。"""
+        _save_config(client, tmp_path)
+        self._enter_cooldown()
+        FakeOpenListClient.instances = []
+        resp = client.get("/api/openlist/browse", params={"path": REMOTE_ROOT})
+        assert resp.status_code == 423
+        assert "访问保护" in resp.json()["detail"]
+        assert FakeOpenListClient.instances == []  # 未发起任何网络请求
+
+    def test_browse_cooling_down_with_fresh_cache_served(self, client, tmp_path):
+        """冷却中但缓存 fresh：直接返回缓存并标注 health=cooling_down，不发请求。"""
+        _save_config(client, tmp_path)
+        # 先正常浏览一次写入本地缓存
+        first = client.get("/api/openlist/browse", params={"path": REMOTE_ROOT})
+        assert first.status_code == 200
+        # 随后连接进入冷却
+        self._enter_cooldown()
+        FakeOpenListClient.instances = []
+        resp = client.get("/api/openlist/browse", params={"path": REMOTE_ROOT})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["cache"]["status"] == "fresh"
+        assert body["cache"]["health"] == "cooling_down"
+        assert [e["name"] for e in body["entries"]] == ["动画", "说明.txt"]
+        assert FakeOpenListClient.instances == []
+
+    def test_browse_refresh_cooling_down_423(self, client, tmp_path):
+        """显式强制刷新在冷却中同样被拒绝（安全优先，不做探针请求）。"""
+        _save_config(client, tmp_path)
+        first = client.get("/api/openlist/browse", params={"path": REMOTE_ROOT})
+        assert first.status_code == 200
+        self._enter_cooldown()
+        resp = client.get(
+            "/api/openlist/browse",
+            params={"path": REMOTE_ROOT, "refresh": "true"},
+        )
+        assert resp.status_code == 423
+
+    def test_prefetch_cooling_down_returns_empty(self, client, tmp_path):
+        """冷却中 prefetch 直接返回空结果 + health 标注，不发请求。"""
+        _save_config(client, tmp_path)
+        self._enter_cooldown()
+        FakeOpenListClient.instances = []
+        resp = client.post(
+            "/api/openlist/prefetch",
+            json={"paths": [REMOTE_ROOT + "/动画"]},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["prefetched"] == 0
+        assert body["skipped"] == 0
+        assert body["health"] == "cooling_down"
+        assert FakeOpenListClient.instances == []
+
+    def test_test_connection_cooling_down_blocked(self, client, tmp_path):
+        """冷却中主动测试连接：ok=False + 安全消息（不发登录请求）。"""
+        _save_config(client, tmp_path)
+        self._enter_cooldown()
+        FakeOpenListClient.instances = []
+        resp = client.post(
+            "/api/openlist/test-connection",
+            json={
+                "server_url": "https://ol.example.com:5244",
+                "username": "quark-user",
+                "password": "p@ssw0rd",
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is False
+        assert "访问保护" in body["message"]
+        assert FakeOpenListClient.instances == []
+
+    def test_no_cooldown_browse_still_works(self, client, tmp_path):
+        """无冷却记录：browse 保持原行为。"""
+        _save_config(client, tmp_path)
+        resp = client.get("/api/openlist/browse", params={"path": REMOTE_ROOT})
+        assert resp.status_code == 200
+        assert [e["name"] for e in resp.json()["entries"]] == ["动画", "说明.txt"]

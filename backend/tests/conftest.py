@@ -114,3 +114,19 @@ def isolate_path_config_alias(monkeypatch):
         pass
 
     yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def init_collection_db():
+    """保证集合级 SQLite 表存在（对齐生产 app lifespan 的 init_db）。
+
+    模块 1 起 api/discovery 的冷却检查（source_health.can_request）与
+    TestClient(app)（不触发 lifespan）都会访问数据库；没有独立 db fixture
+    的测试文件依赖本会话级初始化。各文件自己的 db fixture
+    （monkeypatch _db_path + init_db）仍优先生效，不受影响。
+    """
+    from app.db.database import close_connection, init_db
+
+    init_db()
+    yield
+    close_connection()

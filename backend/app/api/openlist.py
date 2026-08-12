@@ -30,6 +30,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 from app.api.imports import _diff_to_dict
+from app.catalog import source_health
 from app.core.config import load_config, save_config
 from app.integrations.openlist.cache import (
     connection_key,
@@ -42,6 +43,7 @@ from app.integrations.openlist.client import (
     normalize_remote_path,
     validate_server_url,
 )
+from app.integrations.openlist.governor import governor_connection_key
 from app.integrations.openlist.models import OpenListError
 from app.integrations.openlist.providers import (
     PROVIDER_OTHER,
@@ -310,6 +312,12 @@ def _schedule_background_refresh(
     def worker() -> None:
         global _refresh_active
         try:
+            # 模块 1 冷却拦截：冷却中保留旧缓存，不发任何请求
+            allowed, _health = source_health.can_request(
+                governor_connection_key(server_url, username)
+            )
+            if not allowed:
+                return
             client = OpenListClient(server_url, username, password)
             entries, _truncated = _fetch_dir_entries(client, remote_path, refresh=False)
             write_cache(conn_key, remote_path, entries, ttl_minutes)
@@ -357,6 +365,16 @@ def test_connection(req: TestConnectionRequest):
             "ok": False,
             "message": "本地/局域网 HTTP 将以明文传输密码，请在设置中确认风险后重试",
             "insecure_http_required": True,
+        }
+
+    # 模块 1：该连接正在冷却时，主动测试也不向远端发请求（用户可见的安全提示）
+    allowed, _health = source_health.can_request(
+        governor_connection_key(normalize_openlist_server_url(server_url), username)
+    )
+    if not allowed:
+        return {
+            "ok": False,
+            "message": "远端网盘疑似触发访问保护，KumiPlayer 已暂停该来源的自动请求，请稍后再试",
         }
 
     client = OpenListClient(server_url, username, password)
@@ -474,6 +492,28 @@ def browse(path: str = "", page: int = 1, refresh: bool = False):
         remote_root,
     )
 
+    # 模块 1 冷却拦截：发请求前检查连接健康（与 OpenListClient 上报同一连接键）。
+    # 冷却中：fresh 缓存直接返回（标注 health）；无 fresh 缓存则拒绝请求，
+    # 不发起任何网络请求。
+    allowed, _health = source_health.can_request(
+        governor_connection_key(config.openlist_server_url, config.openlist_username)
+    )
+    if not allowed:
+        if not refresh:
+            cached = read_cache(conn_key, path)
+            if cached is not None and cached["fresh"]:
+                return _browse_payload(
+                    path, parent_path, remote_root, cached["entries"],
+                    cache={"cached": True, "status": "fresh", "refreshing": False,
+                           "refresh_failed": False, "health": "cooling_down",
+                           "fetched_at": cached["fetched_at"],
+                           "expires_at": cached["expires_at"]},
+                )
+        raise HTTPException(
+            status_code=423,
+            detail="远端网盘疑似触发访问保护，KumiPlayer 已暂停该来源的自动请求",
+        )
+
     if not refresh:
         cached = read_cache(conn_key, path)
         if cached is not None:
@@ -584,6 +624,18 @@ def prefetch(req: PrefetchRequest):
 
     if not _prefetch_guard.acquire(blocking=False):
         return {"prefetched": 0, "skipped": len(paths), "busy": True}
+
+    # 模块 1 冷却拦截：冷却中不发任何请求，直接返回空结果 + health 标注
+    allowed, _health = source_health.can_request(
+        governor_connection_key(config.openlist_server_url, config.openlist_username)
+    )
+    if not allowed:
+        _prefetch_guard.release()
+        return {
+            "prefetched": 0, "skipped": 0, "busy": False, "cancelled": False,
+            "health": "cooling_down",
+        }
+
     ttl_minutes = max(1, int(config.openlist_cache_ttl_minutes or 1440))
     conn_key = connection_key(
         config.openlist_server_url,

@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 import time
 from collections.abc import Callable
@@ -30,6 +31,12 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
+from app.catalog import source_health
+from app.integrations.openlist.governor import (
+    OpenListRequestGovernor,
+    get_governor,
+    governor_connection_key,
+)
 from app.integrations.openlist.models import (
     OpenListAuthError,
     OpenListDirPage,
@@ -40,6 +47,7 @@ from app.integrations.openlist.models import (
     OpenListPermissionError,
     OpenListRateLimitedError,
     OpenListRedirectError,
+    OpenListRiskControlError,
     OpenListTimeoutError,
     OpenListValidationError,
 )
@@ -59,6 +67,17 @@ _MAX_ATTEMPTS = 3
 _MAX_RETRY_AFTER = 10.0
 # Windows 与远端路径都禁止的字符
 _UNSAFE_NAME_RE = re.compile(r'[<>:"|?*\x00-\x1f/\\]')
+
+
+# 风控拦截页识别：仅当响应确认为风控 HTML 页面时才归类为 risk_control。
+# 至少覆盖 2026-08-12 真实事件（115 阿里云盾）：HTTP 405 + text/html +
+# errors.aliyun.com / 访问被阻断。不保存原始 HTML，不把 trace / Token /
+# URL / Authorization 写入日志或前端。
+_RISK_CONTROL_HTML_MARKERS = ("errors.aliyun.com", "访问被阻断")
+# 风控页正文只做有限截断检查，防止把超大 HTML 读入内存
+_RISK_CONTROL_BODY_LIMIT = 8192
+
+_logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -205,6 +224,7 @@ class OpenListClient:
         max_retry_after: float = _MAX_RETRY_AFTER,
         sleep: Callable[[float], None] = time.sleep,
         transport: httpx.BaseTransport | None = None,
+        governor: OpenListRequestGovernor | None = None,
     ):
         ok, reason = validate_server_url(server_url)
         if not ok:
@@ -219,6 +239,24 @@ class OpenListClient:
         self._sleep = sleep
         self._transport = transport  # 测试注入 MockTransport 用
         self._token: str | None = None
+        # 连接级限速与健康上报：默认接入进程内共享单例
+        self._governor = governor if governor is not None else get_governor()
+        #: 连接匿名键（sha256(server_url|username)），用于限速与 source_health 记录
+        self._conn_key = governor_connection_key(self.server_url, self.username)
+
+    # -- 健康上报（最终结果；失败记录不改变请求错误语义） ------------------
+
+    def _report_success(self) -> None:
+        try:
+            source_health.record_success(self._conn_key)
+        except Exception:
+            _logger.warning("source_health 记录成功状态失败（不影响请求语义）")
+
+    def _report_failure(self, kind: str) -> None:
+        try:
+            source_health.record_failure(self._conn_key, kind)
+        except Exception:
+            _logger.warning("source_health 记录失败状态失败（不影响请求语义）")
 
     # -- 内部请求 ----------------------------------------------------
 
@@ -244,6 +282,20 @@ class OpenListClient:
             return min(retry_after, self.max_retry_after)
         return min(0.5 * (2 ** attempt), self.max_retry_after)
 
+    @staticmethod
+    def _looks_like_risk_control(response: httpx.Response) -> bool:
+        """判断响应是否为风控拦截 HTML 页（仅检测特征，不保存正文）。"""
+        if response.status_code != 405:
+            return False
+        content_type = (response.headers.get("content-type") or "").lower()
+        if "text/html" not in content_type:
+            return False
+        try:
+            body = response.content[:_RISK_CONTROL_BODY_LIMIT].decode("utf-8", errors="ignore")
+        except Exception:
+            return False
+        return any(marker in body for marker in _RISK_CONTROL_HTML_MARKERS)
+
     def _post(
         self,
         path: str,
@@ -254,7 +306,13 @@ class OpenListClient:
         """POST JSON，统一做有限重试与错误归一化。
 
         返回 (http_status, body)。401 认证失败仅允许一次重登重试。
+
+        风控识别优先级最高：明确 405 拦截页时**立即失败为 risk_control**，
+        不做第二、第三次自动重试，避免继续向同一账号发请求。
         """
+        # 连接级限速：同一连接键的请求间隔 >= 1/rate_per_second（锁外 sleep，
+        # 不同连接互不阻塞）。在真正发请求前准入。
+        self._governor.acquire(self._conn_key)
         last_error: Exception | None = None
         for attempt in range(self.max_attempts):
             try:
@@ -274,6 +332,10 @@ class OpenListClient:
             status = response.status_code
             if status in (301, 302, 303, 307, 308):
                 raise OpenListRedirectError()
+
+            # 明确风控拦截页：立即失败，绝不重试
+            if self._looks_like_risk_control(response):
+                raise OpenListRiskControlError()
 
             body = self._decode_body(response)
             code = int(body.get("code", status)) if isinstance(body, dict) else status
@@ -332,7 +394,24 @@ class OpenListClient:
     # -- 对外接口 ----------------------------------------------------
 
     def login(self) -> str:
-        """登录并返回 Token（进程内缓存，不落盘）。"""
+        """登录并返回 Token（进程内缓存，不落盘）。
+
+        公共请求入口：连接级限速 + 按最终结果上报 source_health。
+        """
+        self._governor.acquire(self._conn_key)
+        try:
+            token = self._login_request()
+        except OpenListError as exc:
+            self._report_failure(exc.kind)
+            raise
+        except Exception:
+            self._report_failure("unknown")
+            raise
+        self._report_success()
+        return token
+
+    def _login_request(self) -> str:
+        """登录实际请求（不限速、不上报，供 login 包装）。"""
         with self._client() as client:
             try:
                 response = client.post(
@@ -346,6 +425,8 @@ class OpenListClient:
                 raise OpenListNetworkError() from None
         if response.status_code in (301, 302, 303, 307, 308):
             raise OpenListRedirectError()
+        if self._looks_like_risk_control(response):
+            raise OpenListRiskControlError()
         body = self._decode_body(response)
         if response.status_code == 429 or int(body.get("code", 200)) == 429:
             raise OpenListRateLimitedError()
@@ -368,9 +449,33 @@ class OpenListClient:
     ) -> OpenListDirPage:
         """读取单个目录的一页条目（不递归）。
 
+        公共请求入口：最终结果上报 source_health（成功回 healthy，
+        失败按 exc.kind 记录；错误仍原样抛出，不影响调用方语义）。
+        实际限速由内部 ``_post`` 在发请求前通过 governor 完成。
+
         ``refresh=False`` 使用 OpenList 上游缓存（普通浏览/后台更新）；
         ``refresh=True`` 仅显式强制刷新当前层时使用，不递归刷新后代。
         """
+        try:
+            page = self._list_dir_request(remote_path, page, per_page, refresh=refresh)
+        except OpenListError as exc:
+            self._report_failure(exc.kind)
+            raise
+        except Exception:
+            self._report_failure("unknown")
+            raise
+        self._report_success()
+        return page
+
+    def _list_dir_request(
+        self,
+        remote_path: str,
+        page: int = 1,
+        per_page: int = _DEFAULT_PER_PAGE,
+        *,
+        refresh: bool = False,
+    ) -> OpenListDirPage:
+        """单目录分页读取实际请求（不限速、不上报，供 list_dir 包装）。"""
         path = normalize_remote_path(remote_path)
         per_page = max(1, min(int(per_page), MAX_PER_PAGE))
         status, body = self._post(
