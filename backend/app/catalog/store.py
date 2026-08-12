@@ -67,6 +67,22 @@ def get_source(source_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def set_source_capabilities(source_id: str, capabilities: dict) -> None:
+    """更新来源能力声明（capabilities_json），只负责 JSON 序列化写入。
+
+    模块4：OpenList 等来源在创建/复用时显式声明能力（native_delta /
+    directory_verification / rolling_reconciliation），滚动策略据此决策；
+    不加表、不 bump schema，来源不存在时静默（create_source 保证存在）。
+    """
+    import json
+
+    get_connection().execute(
+        "UPDATE sources SET capabilities_json = ?, updated_at = ? WHERE source_id = ?",
+        (json.dumps(capabilities or {}, ensure_ascii=False), now_iso(), source_id),
+    )
+    get_connection().commit()
+
+
 def _roots_with_prefix(source_id: str, normalized: str) -> list[SourceRootRecord]:
     rows = get_connection().execute(
         "SELECT * FROM source_roots WHERE source_id = ? ORDER BY normalized_locator",

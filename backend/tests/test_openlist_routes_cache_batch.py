@@ -787,11 +787,16 @@ class TestLegacyPresetCompatibility:
         assert preset.provider_id == "quark"
         assert preset.ingest_method == "openlist_api"
 
-        # 旧预设 rescan 仍成功
+        # 旧预设 rescan 仍成功（模块4 cutover：入队 durable incremental discovery scan）
         resp = client.post(f"/api/openlist/presets/{preset.preset_id}/rescan")
         assert resp.status_code == 200, resp.text
-        record = _wait_task(client, resp.json()["task_id"])
-        assert record["status"] == "succeeded", record
+        body = resp.json()
+        assert body["execution_mode"] == "durable"
+        assert body["task_id"] and body["root_id"]
+        from app.jobs import store as job_store
+
+        jobs = job_store.list_discovery_jobs_for_root(body["root_id"])
+        assert jobs and jobs[0].payload["scan_mode"] == "incremental"
         assert list_presets()[0].provider_id == "quark"
 
 

@@ -1123,7 +1123,18 @@ def batch_import(req: BatchImportRequest):
 
 @router.post("/presets/{preset_id}/rescan")
 def rescan_openlist_preset(preset_id: str):
-    """按预设保存的远端定位重新扫描并生成增量计划（旧 OpenList 预设兼容）。"""
+    """按预设保存的远端定位增量更新（模块4：preset rescan → Source Catalog 增量链路）。
+
+    预设远端定位 → exact SourceRoot（缺失则一次性注册；与既有 root 祖先/后代
+    重叠且无 exact match 时 409 安全失败，不放宽 overlap 规则）→
+    bump generation → enqueue durable incremental discovery scan。
+    返回 durable job_id，前端既有 /api/tasks polling 继续可用。
+    """
+    from app.catalog import store as catalog_store
+    from app.db.database import init_db
+    from app.pipeline import orchestrator
+
+    init_db()
     config = load_config()
     preset = get_preset(preset_id)
     if preset is None:
@@ -1133,20 +1144,49 @@ def rescan_openlist_preset(preset_id: str):
     if not preset.remote_locator:
         raise HTTPException(status_code=400, detail="该媒体库缺少 OpenList 远端定位，请重新导入")
     _client_from_config(config)  # 未配置时快速失败
-    return _submit_openlist_task(
-        "openlist_update",
+
+    source_id = _openlist_source_id(config)
+    remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
+    normalized = normalize_remote_path(preset.remote_locator)
+    _ensure_within_remote_root(remote_root, normalized)
+    _ensure_openlist_source(catalog_store, source_id)
+
+    exact = next(
         (
-            config.openlist_server_url,
-            config.openlist_username,
-            config.openlist_password,
-            preset.remote_locator,
-            preset.source_root,
-            preset.import_family,
-            preset.import_scope,
+            root for root in catalog_store.list_source_roots(source_id=source_id)
+            if root.normalized_locator == catalog_store.normalize_locator(normalized)
         ),
-        f"更新 OpenList 媒体库「{preset.name}」",
-        preset_id=preset_id,
+        None,
     )
+    if exact is None:
+        # 一次性注册（参考 import-batch：路由归属校验 + overlap 安全失败）
+        _require_route_for_import(config, normalized)
+        try:
+            root = catalog_store.create_source_root(
+                source_id=source_id,
+                remote_locator=normalized,
+                local_locator=derive_local_path(config.openlist_mount_root, remote_root, normalized),
+                import_family=(preset.import_family or "anime").strip(),
+                import_scope=(preset.import_scope or "").strip(),
+                scan_policy="standard",
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"预设远端定位与既有来源根重叠，拒绝扩大扫描范围：{exc}",
+            ) from None
+    else:
+        root = exact
+
+    root_id = root.root_id
+    generation = catalog_store.bump_generation(root_id)
+    job_id = orchestrator.enqueue_scan(root_id, generation, source_id, scan_mode="incremental")
+    return {
+        "task_id": job_id,
+        "root_id": root_id,
+        "generation": generation,
+        "execution_mode": "durable",
+    }
 
 
 # ============================================================
@@ -1161,6 +1201,28 @@ def _openlist_source_id(config) -> str:
         remote_root,
     )
     return f"openlist-{identity}"
+
+
+#: OpenList 来源能力声明（模块4：Source Catalog 主链路）。
+#: native_delta=False：OpenList 无原生增量接口；依赖目录验证 + 滚动对账收敛。
+_OPENLIST_CAPABILITIES = {
+    "native_delta": False,
+    "directory_verification": True,
+    "rolling_reconciliation": True,
+}
+
+
+def _ensure_openlist_source(catalog_store, source_id: str) -> None:
+    """创建（或复用）OpenList 来源记录并写入能力声明（幂等）。"""
+    catalog_store.create_source(
+        source_id=source_id,
+        source_type="openlist",
+        provider_id="openlist",
+        ingest_method="openlist_api",
+        connection_key=source_id,
+        display_name="OpenList",
+    )
+    catalog_store.set_source_capabilities(source_id, _OPENLIST_CAPABILITIES)
 
 
 def _batch_jobs(batch: dict) -> dict[str, object]:
@@ -1287,14 +1349,7 @@ def create_openlist_import_batch(req: BatchImportRequest):
     normalized = _validate_batch_paths(config, req.remote_paths)
     remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
     source_id = _openlist_source_id(config)
-    catalog_store.create_source(
-        source_id=source_id,
-        source_type="openlist",
-        provider_id="openlist",
-        ingest_method="openlist_api",
-        connection_key=source_id,
-        display_name="OpenList",
-    )
+    _ensure_openlist_source(catalog_store, source_id)
     family = (req.import_family or "anime").strip()
     scope = (req.import_scope or "").strip()
     roots = []

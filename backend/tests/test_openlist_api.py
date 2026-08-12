@@ -570,12 +570,24 @@ class TestImport:
 
         resp = client.post(f"/api/openlist/presets/{preset_id}/rescan")
         assert resp.status_code == 200
-        record = _wait_task(client, resp.json()["task_id"])
-        assert record["status"] == "succeeded", record
-        assert record["result"]["unchanged"] is False
-        preset = list_presets()[0]
-        assert preset.version_count == 2
-        assert preset.current_plan_id == record["result"]["plan_id"]
+        body = resp.json()
+        # 模块4 cutover：preset rescan 入队 durable incremental discovery scan，
+        # 不再走旧链后台任务（测试环境无 worker，job 保持 queued 等待消费）
+        assert body["execution_mode"] == "durable"
+        assert body["task_id"]
+        assert body["root_id"]
+        assert body["generation"] >= 1
+
+        from app.jobs import store as job_store
+
+        jobs = job_store.list_discovery_jobs_for_root(body["root_id"])
+        assert jobs
+        assert jobs[0].payload["scan_mode"] == "incremental"
+        assert int(jobs[0].payload["generation"] or 0) == body["generation"]
+        # 前端原有 task_id polling 继续工作（/api/tasks 门面读 durable job）
+        record = client.get(f"/api/tasks/{body['task_id']}").json()
+        assert record["task_id"] == body["task_id"]
+        # 旧链产物（版本/计划）由 worker 消费 discovery job 后收敛，端点不再直接写
 
 
 class TestCooldownInterception:
