@@ -405,7 +405,11 @@ class TestBreakerIrrelevantKinds:
         assert rec.last_failure_at == T0 + 2
 
     def test_irrelevant_during_cooldown_keeps_state(self, health_db):
-        """冷却中的来源收到 irrelevant 错误：state/cooldown_until 保持原状。"""
+        """冷却中的来源收到 irrelevant 错误：state/cooldown_until/原因保持原状。
+
+        Review Fix 3：冷却原因保护——普通 404 结果不得覆盖冷却原因，
+        否则冷却语义被普通旧请求结果污染（reason_kind 变 not_found）。
+        """
         src = "src-cooldown-403"
         sh.record_failure(src, "risk_control", now=T0)  # 进入 6h 冷却
         before = sh.get_health(src)
@@ -415,8 +419,8 @@ class TestBreakerIrrelevantKinds:
         assert rec.state == sh.STATE_COOLING_DOWN
         assert rec.cooldown_until == before.cooldown_until
         assert rec.consecutive_failures == 1  # risk_control 时累计的 1 次保持
-        assert rec.reason_kind == "not_found"
-        assert rec.last_failure_at == T0 + 60
+        assert rec.reason_kind == "risk_control"  # 冷却原因保护：普通结果不覆盖
+        assert rec.last_failure_at == T0 + 60  # 失败时间照常更新
         assert rec.in_cooldown
 
     def test_irrelevant_does_not_reset_transient_accumulation(self, health_db):
@@ -530,7 +534,7 @@ class TestSingleProbe:
         assert rec.consecutive_failures == 0
         assert rec.cooldown_until == 0
         assert not rec.in_cooldown
-        assert rec.reason_kind == "permission"
+        assert rec.reason_kind == ""  # breaker 恢复后原因清空（Review Fix 3）
         assert rec.last_failure_at == expiry + 1
 
 
@@ -730,3 +734,241 @@ class TestFinalPatchSemantics:
         assert rec.state == sh.STATE_HEALTHY
         assert rec.consecutive_failures == 0
         assert rec.cooldown_until == 0
+
+
+# ============================================================
+# Review Fix 3：原子化「读→判→写」+ 单调冷却（真并发交错回归）
+# ============================================================
+
+class TestAtomicTransitions:
+    """规划员第三次审核：SourceHealth 的「读 → 判断 → 写」必须原子。
+
+    旧实现存在 TOCTOU 竞态：record_success / record_failure 先用
+    get_health() 读当前值、再 _upsert() 写入，两个操作之间并发线程可能
+    写入冷却状态，旧线程继续用读到的陈旧值覆盖——冷却被滞后结果解除、
+    冷却原因被普通 404 覆盖。
+
+    修复：所有读-判-写收敛到 _transition()，单 BEGIN IMMEDIATE 事务内
+    完成（线程本地连接 + busy_timeout=5000 串行化写）。以下测试通过
+    _test_after_read_hook（事务内 SELECT 之后、写入之前触发）强制制造
+    「先读到旧值 → 并发写入冷却 → 继续用旧值写」的交错，验证串行化后
+    冷却事实不被陈旧普通结果覆盖。不用 sleep 猜时序，全部 Event/Barrier
+    精确同步。
+    """
+
+    def test_a_stale_success_cannot_clear_risk_cooldown(self, health_db, monkeypatch):
+        """Test A（真并发）：滞后 success 旧读(healthy) 与 risk_control 冷却交错 → 冷却保持。
+
+        交错制造：success 线程事务内读到 healthy 后经 hook 暂停（写锁持有）；
+        risk 线程开始写冷却事务（被写锁阻塞）；放行 success 提交 healthy 后
+        risk 获得锁，基于最新状态写入 cooling_down 6h。串行化保证冷却写入
+        永远基于最新状态，最终冷却保持。
+        """
+        import threading
+
+        from app.db import database as db_mod
+
+        src = "atomic-a"
+        sh.record_success(src, now=T0 - 100)  # 预置 healthy 记录
+        read_done = threading.Event()
+        proceed = threading.Event()
+        risk_entered = threading.Event()
+        errors: list[BaseException] = []
+
+        def hook(conn, source_id, current):
+            # 事务内（写锁持有）SELECT 之后暂停，模拟旧实现 TOCTOU 窗口
+            read_done.set()
+            if not proceed.wait(timeout=10):
+                raise TimeoutError("hook wait timed out")
+
+        def run_success():
+            try:
+                sh.record_success(src, now=T0)  # 基于读到的旧值(healthy) 写
+            except BaseException as exc:  # pragma: no cover
+                errors.append(exc)
+            finally:
+                db_mod.close_connection()
+
+        def run_risk():
+            try:
+                risk_entered.set()
+                sh.record_failure(src, "risk_control", now=T0)
+            except BaseException as exc:  # pragma: no cover
+                errors.append(exc)
+            finally:
+                db_mod.close_connection()
+
+        monkeypatch.setattr(sh, "_test_after_read_hook", hook)
+        t_success = threading.Thread(target=run_success)
+        t_risk = threading.Thread(target=run_risk)
+        t_success.start()
+        assert read_done.wait(timeout=10)  # success 已读到 healthy 并暂停
+        t_risk.start()
+        assert risk_entered.wait(timeout=10)  # risk 已发起（在 BEGIN 处等写锁）
+        proceed.set()  # 放行 success：提交其陈旧 healthy 写入
+        t_success.join(timeout=10)
+        t_risk.join(timeout=10)
+        monkeypatch.setattr(sh, "_test_after_read_hook", None)
+
+        assert not errors
+        rec = sh.get_health(src)
+        assert rec.state == sh.STATE_COOLING_DOWN
+        assert rec.reason_kind == "risk_control"
+        assert rec.cooldown_until == T0 + RISK_CONTROL_COOLDOWN_SECONDS
+        assert rec.in_cooldown
+
+    def test_b_stale_irrelevant_cannot_overwrite_risk_cooldown(self, health_db, monkeypatch):
+        """Test B：404/irrelevant 旧读 与 risk_control 冷却交错 → 冷却与原因保持。
+
+        旧实现：irrelevant 读 healthy 后暂停，risk 写入冷却，irrelevant 继续
+        用旧值写 state=healthy + reason=not_found → 冷却丢失且冷却原因被
+        普通 404 覆盖。新实现：事务串行化 + 冷却原因保护，最终冷却保持
+        risk_control 6h。
+        """
+        import threading
+
+        from app.db import database as db_mod
+
+        src = "atomic-b"
+        sh.record_success(src, now=T0 - 100)  # 预置 healthy 记录
+        read_done = threading.Event()
+        proceed = threading.Event()
+        risk_entered = threading.Event()
+        errors: list[BaseException] = []
+
+        def hook(conn, source_id, current):
+            read_done.set()
+            if not proceed.wait(timeout=10):
+                raise TimeoutError("hook wait timed out")
+
+        def run_irrelevant():
+            try:
+                sh.record_failure(src, "not_found", now=T0)  # 基于旧值(healthy) 写
+            except BaseException as exc:  # pragma: no cover
+                errors.append(exc)
+            finally:
+                db_mod.close_connection()
+
+        def run_risk():
+            try:
+                risk_entered.set()
+                sh.record_failure(src, "risk_control", now=T0)
+            except BaseException as exc:  # pragma: no cover
+                errors.append(exc)
+            finally:
+                db_mod.close_connection()
+
+        monkeypatch.setattr(sh, "_test_after_read_hook", hook)
+        t_irrel = threading.Thread(target=run_irrelevant)
+        t_risk = threading.Thread(target=run_risk)
+        t_irrel.start()
+        assert read_done.wait(timeout=10)  # irrelevant 已读到 healthy 并暂停
+        t_risk.start()
+        assert risk_entered.wait(timeout=10)  # risk 已发起（在 BEGIN 处等写锁）
+        proceed.set()  # 放行 irrelevant：提交其陈旧 healthy 写入
+        t_irrel.join(timeout=10)
+        t_risk.join(timeout=10)
+        monkeypatch.setattr(sh, "_test_after_read_hook", None)
+
+        assert not errors
+        rec = sh.get_health(src)
+        assert rec.state == sh.STATE_COOLING_DOWN
+        assert rec.reason_kind == "risk_control"  # 冷却原因不被 404 覆盖
+        assert rec.cooldown_until == T0 + RISK_CONTROL_COOLDOWN_SECONDS
+        assert rec.in_cooldown
+
+    def test_c_cooldown_monotonic_never_shrinks(self, health_db):
+        """Test C（顺序版）：冷却单调不缩短，双向验证。
+
+        - 先 risk_control(6h) 再 rate_limit(1h)：冷却结束点保持 6h 值、
+          reason 不降级（仍 risk_control）；
+        - 先 rate_limit(1h) 再 risk_control(6h)：冷却延长到 6h。
+        """
+        # 正向：risk 6h 在先，rate 1h 在后 → 不缩短、原因不降级
+        sh.enter_cooldown(
+            "atomic-c1",
+            reason_kind="risk_control",
+            cooldown_seconds=RISK_CONTROL_COOLDOWN_SECONDS,
+            now=T0,
+        )
+        rec1 = sh.get_health("atomic-c1")
+        assert rec1.cooldown_until == T0 + RISK_CONTROL_COOLDOWN_SECONDS
+
+        sh.enter_cooldown(
+            "atomic-c1",
+            reason_kind="rate_limit",
+            cooldown_seconds=RATE_LIMIT_COOLDOWN_SECONDS,
+            now=T0 + 60,
+        )
+        rec2 = sh.get_health("atomic-c1")
+        assert rec2.cooldown_until == rec1.cooldown_until  # 6h 结束点不变
+        assert rec2.reason_kind == "risk_control"  # rate_limit 不降级 risk 原因
+
+        # 反向：rate 1h 在先，risk 6h 在后 → 延长到 6h
+        sh.enter_cooldown(
+            "atomic-c2",
+            reason_kind="rate_limit",
+            cooldown_seconds=RATE_LIMIT_COOLDOWN_SECONDS,
+            now=T0,
+        )
+        sh.enter_cooldown(
+            "atomic-c2",
+            reason_kind="risk_control",
+            cooldown_seconds=RISK_CONTROL_COOLDOWN_SECONDS,
+            now=T0 + 60,
+        )
+        rec = sh.get_health("atomic-c2")
+        assert rec.cooldown_until == T0 + 60 + RISK_CONTROL_COOLDOWN_SECONDS
+        assert rec.reason_kind == "risk_control"
+
+    def test_c2_concurrent_cooldown_never_shrinks(self, health_db):
+        """Test C（真并发版，尽力而为）：两线程同时 enter_cooldown（6h vs 1h）。
+
+        Barrier 精确同发；BEGIN IMMEDIATE 串行化后最终冷却期不短于较长者
+        （= 6h 结束点），且无论提交顺序如何 reason 最终都是 risk_control
+        （rate_limit 不降级 risk 原因）。
+        """
+        import threading
+
+        from app.db import database as db_mod
+
+        src = "atomic-c3"
+        barrier = threading.Barrier(2)
+        errors: list[BaseException] = []
+
+        def worker(reason_kind: str, seconds: float):
+            try:
+                barrier.wait(timeout=5)
+                sh.enter_cooldown(
+                    src,
+                    reason_kind=reason_kind,
+                    cooldown_seconds=seconds,
+                    now=T0,
+                )
+            except BaseException as exc:  # pragma: no cover
+                errors.append(exc)
+            finally:
+                db_mod.close_connection()
+
+        threads = [
+            threading.Thread(
+                target=worker,
+                args=("risk_control", RISK_CONTROL_COOLDOWN_SECONDS),
+            ),
+            threading.Thread(
+                target=worker,
+                args=("rate_limit", RATE_LIMIT_COOLDOWN_SECONDS),
+            ),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors
+        rec = sh.get_health(src)
+        expected = T0 + max(
+            RISK_CONTROL_COOLDOWN_SECONDS, RATE_LIMIT_COOLDOWN_SECONDS
+        )
+        assert rec.cooldown_until >= expected  # 单调：不短于较长冷却
+        assert rec.reason_kind == "risk_control"  # 更强原因最终保持
