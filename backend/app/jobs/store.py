@@ -73,6 +73,21 @@ def _job_params(job: Job) -> tuple[Any, ...]:
     )
 
 
+def _insert_job(conn, job: Job) -> None:
+    """插入 job 行（调用方负责事务边界与提交）。"""
+    conn.execute(
+        """
+        INSERT INTO jobs (
+            job_id, job_type, resource_key, payload, status, priority,
+            parent_job_id, attempt, max_attempts, not_before, lease_owner,
+            lease_until, cancel_requested, progress, message, error, version,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        _job_params(job),
+    )
+
+
 def create_job(
     *,
     job_type: str,
@@ -98,19 +113,55 @@ def create_job(
         created_at=timestamp,
         updated_at=timestamp,
     )
-    conn.execute(
-        """
-        INSERT INTO jobs (
-            job_id, job_type, resource_key, payload, status, priority,
-            parent_job_id, attempt, max_attempts, not_before, lease_owner,
-            lease_until, cancel_requested, progress, message, error, version,
-            created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        _job_params(job),
-    )
+    _insert_job(conn, job)
     conn.commit()
     return job
+
+
+def get_or_create_job(
+    *,
+    job_type: str,
+    resource_key: str,
+    payload: dict | None = None,
+    parent_job_id: str = "",
+    priority: int = 0,
+    max_attempts: int = 3,
+    not_before: str = "",
+) -> tuple[Job, bool]:
+    """按 job_type + resource_key 幂等取回/创建任务（get-or-create）。
+
+    BEGIN IMMEDIATE 事务内先查 exact job_type + resource_key（任意状态，含
+    succeeded/failed/cancelled/queued/running），存在则复用原 job（created=False）；
+    不存在则 INSERT 新 job（created=True）。并发调用（如重复 confirm）只会得到
+    同一 job 身份，不会双写。
+    """
+    conn = get_connection()
+    timestamp = now_iso()
+    with transaction(conn) as tx:
+        row = tx.execute(
+            "SELECT * FROM jobs WHERE job_type = ? AND resource_key = ? LIMIT 1",
+            (job_type, resource_key),
+        ).fetchone()
+        if row is not None:
+            job = _row_to_job(row)
+            if job is None:  # pragma: no cover - 理论不可达（行存在即可解析）
+                raise ValueError(f"无法解析已存在 job: {job_type}/{resource_key}")
+            return job, False
+        job = Job(
+            job_id=uuid.uuid4().hex,
+            job_type=job_type,
+            resource_key=resource_key,
+            payload=payload or {},
+            status=QUEUED,
+            priority=priority,
+            parent_job_id=parent_job_id,
+            max_attempts=max_attempts,
+            not_before=not_before,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        _insert_job(tx, job)
+    return job, True
 
 
 def get_job(job_id: str) -> Job | None:

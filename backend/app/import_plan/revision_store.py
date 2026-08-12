@@ -337,6 +337,8 @@ def patch_draft_revision_item(revision_id: str, item_id: str, patch: dict) -> di
         raise RevisionStatusError(
             f"revision 状态为 {revision['status']}，仅 draft 可人工修正"
         )
+    # optimistic fence 基准：事务外读取时的 updated_at（load plan 前捕获）
+    expected_updated_at = revision["updated_at"]
 
     plan = load_plan(revision_id)
     if plan is None:
@@ -358,6 +360,20 @@ def patch_draft_revision_item(revision_id: str, item_id: str, patch: dict) -> di
     conn = get_connection()
     set_sql = ", ".join(f"{col} = ?" for col in _ITEM_UPDATE_COLUMNS)
     with transaction(conn) as tx:
+        # optimistic fence：BEGIN IMMEDIATE 已独占写锁，事务内重查确认仍为
+        # draft 且未被并发请求修改（防 PATCH/confirm TOCTOU 与双 PATCH lost-update）
+        fresh = tx.execute(
+            "SELECT status, updated_at FROM import_revisions WHERE revision_id = ?",
+            (revision_id,),
+        ).fetchone()
+        if fresh is None:
+            raise ValueError(f"revision 不存在: {revision_id}")
+        if fresh["status"] != "draft":
+            raise RevisionStatusError(
+                f"revision 状态为 {fresh['status']}，仅 draft 可人工修正"
+            )
+        if fresh["updated_at"] != expected_updated_at:
+            raise RevisionStatusError("revision 已被其他请求修改，请刷新后重试")
         for entry in items:
             row = _item_row_values(revision_id, entry)
             # row = (revision_id, item_id, *values)
@@ -373,11 +389,16 @@ def patch_draft_revision_item(revision_id: str, item_id: str, patch: dict) -> di
     return load_revision(revision_id)  # type: ignore[return-value]
 
 
-def confirm_revision_state(revision_id: str, *, method: str) -> dict:
+def confirm_revision_state(
+    revision_id: str, *, method: str, expected_updated_at: str | None = None
+) -> dict:
     """唯一 SQLite 确认状态转换（同一事务内原子执行，V3 唯一 confirm 入口）。
 
     - 仅 draft 可确认；已 confirmed/executed → transitioned=False（幂等，
       不重复转换，也不误 supersede 其他 revision）；
+    - expected_updated_at（optimistic fence，由调用方传入其验证所用版本）：
+      draft 但 updated_at 已变化 → RevisionStatusError（不能用旧 preview/
+      旧验证结果确认新语义，调用方须重新加载重新验证）；
     - 同一 unit 内旧 confirmed/executed revision（parent_revision_id 链与
       media_units.current_revision_id 指向的旧值）→ status='superseded'；
       绝不 supersede 其他 unit / 无关 revision（查询都带 unit_id 约束）；
@@ -413,7 +434,7 @@ def confirm_revision_state(revision_id: str, *, method: str) -> dict:
             raise ValueError(f"media_unit 不存在: {revision['unit_id']}")
 
         if revision["status"] != "draft":
-            # 幂等：不重复转换
+            # 幂等：不重复转换（已 confirmed/executed 重复 confirm）
             return {
                 "transitioned": False,
                 "revision_id": revision_id,
@@ -423,6 +444,14 @@ def confirm_revision_state(revision_id: str, *, method: str) -> dict:
                 "confirmed_at": revision.get("confirmed_at") or "",
                 "superseded": [],
             }
+
+        # optimistic fence：确认前 updated_at 不得变化（防止用旧 preview/
+        # 旧验证结果确认已被并发 PATCH 修改的新语义）
+        if (
+            expected_updated_at is not None
+            and revision["updated_at"] != expected_updated_at
+        ):
+            raise RevisionStatusError("revision 已被其他请求修改，请重新加载后确认")
 
         superseded: list[str] = []
 
@@ -515,7 +544,10 @@ def confirm_revision_manually(revision_id: str, force: bool = False) -> dict:
     ok, _preview, error = validate_confirmation(plan, force=force)
     if not ok:
         raise RevisionStatusError(error or "确认校验未通过")
-    return confirm_revision_state(revision_id, method="manual")
+    # optimistic fence：验证基于的 updated_at 在确认事务内不得变化
+    return confirm_revision_state(
+        revision_id, method="manual", expected_updated_at=revision["updated_at"]
+    )
 
 
 def try_auto_confirm_revision(revision_id: str) -> tuple[bool, str]:
@@ -554,7 +586,9 @@ def try_auto_confirm_revision(revision_id: str) -> tuple[bool, str]:
         conn.commit()
         return False, details
 
-    result = confirm_revision_state(revision_id, method="auto")
+    result = confirm_revision_state(
+        revision_id, method="auto", expected_updated_at=revision["updated_at"]
+    )
     return result["transitioned"], ""
 
 

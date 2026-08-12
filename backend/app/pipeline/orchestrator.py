@@ -105,9 +105,14 @@ def enqueue_scan(
 
 
 def enqueue_mirror(revision_id: str, unit_id: str) -> str:
-    """revision confirmed 后创建 mirror job（每 revision 互斥）。"""
+    """revision confirmed 后创建 mirror job（每 revision 幂等 get-or-create）。
+
+    已有任意状态（queued/running/succeeded/failed/cancelled）的 mirror job 都
+    复用同一 job 身份（durable jobs 自带 attempt/retry），不创建第二个业务任务；
+    并发 confirm / crash 后重确认只会得到同一个 job_id。
+    """
     _ensure_handlers()
-    job = job_store.create_job(
+    job, _created = job_store.get_or_create_job(
         job_type="mirror_revision",
         resource_key=f"mirror:{revision_id}",
         payload={"revision_id": revision_id, "unit_id": unit_id},

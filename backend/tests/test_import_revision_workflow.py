@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from app.db.database import close_connection, get_connection, init_db
@@ -688,3 +690,215 @@ class TestV3SplitBrainApi:
         reloaded = load_import_plan(plan_id="plan-legacy-c2")
         assert reloaded is not None
         assert reloaded.status == "confirmed"
+
+
+# ============================================================
+# 模块3 Review Fix A：PATCH/confirm optimistic fence 与 mirror get-or-create
+# ============================================================
+
+
+def _mirror_job_count(revision_id: str) -> int:
+    """统计 revision 的 durable mirror job 数量（按 resource_key 精确匹配）。"""
+    conn = get_connection()
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) FROM jobs "
+            "WHERE job_type = 'mirror_revision' AND resource_key = ?",
+            (f"mirror:{revision_id}",),
+        ).fetchone()[0]
+    )
+
+
+class TestPatchConfirmFence:
+    """PATCH/confirm TOCTOU 修复：乐观并发 fence（确定性 Barrier，无 sleep）。"""
+
+    def test_patch_read_then_confirm_rejected(self, monkeypatch):
+        """PATCH 已读取 draft（事务外读取后暂停）→ confirm 先提交 → PATCH 被拒。"""
+        from app.import_plan import revision_store, service
+
+        unit_id = "unit-fence-pc"
+        _ensure_unit(unit_id)
+        revision = revision_store.create_revision(
+            unit_id=unit_id, source_generation=1,
+            items=_make_items(["作品 - S01E01.mkv"]), status="draft",
+        )
+        revision_id = revision["revision_id"]
+
+        read_done = threading.Event()
+        allow_continue = threading.Event()
+        orig_apply = service.apply_patch_rules
+
+        def sync_apply(plan, item_id, patch):
+            read_done.set()  # PATCH 线程事务外读取完成后暂停
+            assert allow_continue.wait(timeout=10), "等待 confirm 提交超时"
+            return orig_apply(plan, item_id, patch)
+
+        monkeypatch.setattr(service, "apply_patch_rules", sync_apply)
+        errors: list[Exception] = []
+
+        def do_patch() -> None:
+            try:
+                revision_store.patch_draft_revision_item(
+                    revision_id, "i-0", {"original_title": "并发修改"},
+                )
+            except Exception as exc:  # noqa: BLE001 - 收集异常供断言
+                errors.append(exc)
+
+        thread = threading.Thread(target=do_patch)
+        thread.start()
+        assert read_done.wait(timeout=10), "PATCH 线程未完成事务外读取"
+        # confirm 先提交（确定性：PATCH 已暂停，confirm 必赢）
+        result = revision_store.confirm_revision_manually(revision_id)
+        assert result["transitioned"] is True
+        allow_continue.set()
+        thread.join(timeout=10)
+        assert not thread.is_alive(), "PATCH 线程超时未退出"
+
+        assert len(errors) == 1
+        assert isinstance(errors[0], revision_store.RevisionStatusError)
+        loaded = revision_store.load_revision(revision_id)
+        assert loaded["status"] == "confirmed"
+        assert loaded["items"][0]["original_title"] == "", "confirmed revision 不得被 PATCH 修改"
+
+    def test_two_concurrent_patches_only_one_wins(self, monkeypatch):
+        """两个 PATCH 基于同一 updated_at 并发 → 恰好一个成功，失败者不覆盖。"""
+        from app.import_plan import revision_store, service
+
+        unit_id = "unit-fence-pp"
+        _ensure_unit(unit_id)
+        revision = revision_store.create_revision(
+            unit_id=unit_id, source_generation=1,
+            items=_make_items(["a.mkv"]), status="draft",
+        )
+        revision_id = revision["revision_id"]
+
+        barrier = threading.Barrier(2)
+        orig_apply = service.apply_patch_rules
+
+        def sync_apply(plan, item_id, patch):
+            barrier.wait(timeout=10)  # 两个线程都完成事务外读取后一起放行
+            return orig_apply(plan, item_id, patch)
+
+        monkeypatch.setattr(service, "apply_patch_rules", sync_apply)
+        outcomes: list = []
+
+        def do_patch(title: str) -> None:
+            try:
+                revision_store.patch_draft_revision_item(
+                    revision_id, "i-0", {"original_title": title},
+                )
+                outcomes.append(("ok", title))
+            except Exception as exc:  # noqa: BLE001 - 收集异常供断言
+                outcomes.append(("err", exc))
+
+        threads = [
+            threading.Thread(target=do_patch, args=("甲",)),
+            threading.Thread(target=do_patch, args=("乙",)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+        assert not any(thread.is_alive() for thread in threads), "PATCH 线程超时未退出"
+
+        oks = [item for item in outcomes if item[0] == "ok"]
+        errs = [
+            item for item in outcomes
+            if isinstance(item[1], revision_store.RevisionStatusError)
+        ]
+        assert len(oks) == 1, f"应恰好一个成功，实际 {outcomes}"
+        assert len(errs) == 1, f"应恰好一个 conflict，实际 {outcomes}"
+        loaded = revision_store.load_revision(revision_id)
+        assert loaded["items"][0]["original_title"] == oks[0][1], "失败者不得覆盖成功者"
+
+
+class TestMirrorEnsureSemantics:
+    """mirror get-or-create：confirmed→durable 可靠恰好一个 + crash self-healing。"""
+
+    def test_confirm_self_heals_missing_mirror_job(self):
+        """confirmed revision 无 mirror job（人为构造 crash 窗口）→ confirm 自动补出。"""
+        from app.api.imports import ConfirmRequest, confirm
+        from app.import_plan import revision_store
+
+        unit_id = "unit-mirror-heal"
+        _ensure_unit(unit_id)
+        revision = revision_store.create_revision(
+            unit_id=unit_id, source_generation=1,
+            items=_make_items(["作品 - S01E01.mkv"]), status="draft",
+        )
+        revision_id = revision["revision_id"]
+        # 人为构造 crash 窗口：只确认、不经 enqueue_mirror
+        result = revision_store.confirm_revision_state(revision_id, method="auto")
+        assert result["transitioned"] is True
+        assert _mirror_job_count(revision_id) == 0, "前置：确认后无 mirror job（模拟崩溃）"
+
+        response = confirm("openlist", ConfirmRequest(plan_id=revision_id))
+        assert response["status"] == "confirmed"
+        assert response["execution_mode"] == "durable"
+        assert response["job_id"], "self-healing：重复 confirm 必须补出非空 job_id"
+        assert _mirror_job_count(revision_id) == 1
+
+    def test_concurrent_confirm_returns_same_job_id(self):
+        """两个并发 confirm → job_id 均非空且完全相同 → DB 仅 1 个 mirror job。"""
+        from app.api.imports import ConfirmRequest, confirm
+        from app.import_plan import revision_store
+
+        unit_id = "unit-mirror-conc"
+        _ensure_unit(unit_id)
+        revision = revision_store.create_revision(
+            unit_id=unit_id, source_generation=1,
+            items=_make_items(["作品 - S01E01.mkv"]), status="draft",
+        )
+        revision_id = revision["revision_id"]
+
+        barrier = threading.Barrier(2)
+        responses: list = []
+
+        def do_confirm() -> None:
+            barrier.wait(timeout=10)
+            try:
+                responses.append(confirm("openlist", ConfirmRequest(plan_id=revision_id)))
+            except Exception as exc:  # noqa: BLE001 - 收集异常供断言
+                responses.append(exc)
+
+        threads = [threading.Thread(target=do_confirm) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+        assert not any(thread.is_alive() for thread in threads), "confirm 线程超时未退出"
+
+        assert len(responses) == 2
+        assert all(isinstance(r, dict) for r in responses), f"并发 confirm 出现异常: {responses}"
+        job_ids = {r["job_id"] for r in responses}
+        assert all(job_ids), f"job_id 不得为空: {responses}"
+        assert len(job_ids) == 1, f"并发 confirm 必须返回同一 job_id: {job_ids}"
+        assert _mirror_job_count(revision_id) == 1, "并发 confirm 只能创建一个 mirror job"
+
+    @pytest.mark.parametrize("final_status", ["failed", "succeeded"])
+    def test_confirm_reuses_existing_terminal_job(self, final_status):
+        """已有 failed/succeeded mirror job → 再 confirm → 复用原 job_id，count==1。"""
+        from app.api.imports import ConfirmRequest, confirm
+        from app.import_plan import revision_store
+
+        unit_id = f"unit-mirror-{final_status}"
+        _ensure_unit(unit_id)
+        revision = revision_store.create_revision(
+            unit_id=unit_id, source_generation=1,
+            items=_make_items(["作品 - S01E01.mkv"]), status="draft",
+        )
+        revision_id = revision["revision_id"]
+
+        # 先确认并产生 mirror job，再模拟历史终态
+        first = confirm("openlist", ConfirmRequest(plan_id=revision_id))
+        existing_job_id = first["job_id"]
+        conn = get_connection()
+        conn.execute(
+            "UPDATE jobs SET status = ? WHERE job_id = ?",
+            (final_status, existing_job_id),
+        )
+        conn.commit()
+
+        response = confirm("openlist", ConfirmRequest(plan_id=revision_id))
+        assert response["job_id"] == existing_job_id, "已存在终态 job 必须复用原身份"
+        assert _mirror_job_count(revision_id) == 1

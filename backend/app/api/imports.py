@@ -141,24 +141,25 @@ def confirm(source: str, req: ConfirmRequest):
                 detail=f"revision.source={revision_source} 与 URL source={source} 不匹配",
             )
         if revision["status"] in ("confirmed", "executed"):
-            # 重复 confirm：幂等，不创建第二个 mirror job；复用已有 job 或返回空
-            job_id = _find_existing_mirror_job_id(req.plan_id)
+            # 重复 confirm：ensure 语义——缺失 mirror job 时自动补出
+            # （crash self-healing），已有则复用同一 job 身份
+            job_id = orchestrator.enqueue_mirror(req.plan_id, revision["unit_id"])
             return {
                 "plan_id": req.plan_id,
                 "source": source,
                 "status": "confirmed",
                 "execution_mode": "durable",
                 "job_id": job_id,
-                "message": "import revision already confirmed; mirror job reused",
+                "message": "import revision already confirmed; mirror job ensured",
             }
         try:
-            result = revision_store.confirm_revision_manually(req.plan_id, force=req.force)
+            revision_store.confirm_revision_manually(req.plan_id, force=req.force)
         except revision_store.RevisionStatusError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        job_id = ""
-        if result["transitioned"]:
-            job_id = orchestrator.enqueue_mirror(req.plan_id, revision["unit_id"])
+        # ensure 语义：无论 transitioned True/False 都调用 enqueue_mirror
+        # （get-or-create 幂等），始终返回稳定非空 job_id；并发 confirm 同 job_id
+        job_id = orchestrator.enqueue_mirror(req.plan_id, revision["unit_id"])
         return {
             "plan_id": req.plan_id,
             "source": source,
@@ -186,27 +187,6 @@ def confirm(source: str, req: ConfirmRequest):
         "status": confirmed_plan.status,
         "message": "import_plan confirmed; review warnings deferred",
     }
-
-
-def _find_existing_mirror_job_id(revision_id: str) -> str:
-    """查找 revision 已有的 durable mirror job（任意状态），找不到返回空串。"""
-    import json
-
-    from app.db.database import get_connection
-
-    conn = get_connection()
-    rows = conn.execute(
-        "SELECT job_id, payload FROM jobs "
-        "WHERE job_type = 'mirror_revision' ORDER BY created_at DESC LIMIT 500"
-    ).fetchall()
-    for row in rows:
-        try:
-            payload = json.loads(row["payload"] or "{}")
-        except (TypeError, ValueError):
-            continue
-        if payload.get("revision_id") == revision_id:
-            return row["job_id"]
-    return ""
 
 
 # ============================================================
