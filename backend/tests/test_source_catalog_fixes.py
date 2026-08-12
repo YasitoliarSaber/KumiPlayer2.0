@@ -148,6 +148,141 @@ class TestUnitReuse:
         assert int(rows["c"]) == 1
 
 
+class TestSubtreeCascadeTombstone:
+    """模块2 checkpoint1：目录消失级联整棵物理子树。
+
+    - 消失的 child directory → 后代 source_nodes 全部 tombstone；
+    - child 与所有后代的 source_directories checkpoint 直接 DELETE（frontier 不再含）；
+    - 目录重新出现时父目录 commit 自然重建 queued checkpoint，可重新扫描。
+    """
+
+    def test_disappeared_directory_cascades_to_whole_subtree(self):
+        root = _make_root()
+        generation = 1
+        # 第一轮完整列 /动画：直属 S2（子目录）+ root.txt
+        run = catalog_store.new_stage_run()
+        _seed_stage(run, "/动画", [
+            {"remote_path": "/动画/S2", "name": "S2", "kind": "dir"},
+            {"remote_path": "/动画/root.txt", "name": "root.txt", "kind": "file",
+             "size": 10, "mtime": 1.0},
+        ])
+        catalog_store.commit_directory(root.root_id, "/动画", run, generation)
+        # 第二轮扫描 /动画/S2：E01/E02（文件）+ OVA（子目录）
+        run = catalog_store.new_stage_run()
+        _seed_stage(run, "/动画/S2", [
+            {"remote_path": "/动画/S2/E01.mkv", "name": "E01.mkv", "kind": "file",
+             "size": 100, "mtime": 1.0},
+            {"remote_path": "/动画/S2/E02.mkv", "name": "E02.mkv", "kind": "file",
+             "size": 200, "mtime": 2.0},
+            {"remote_path": "/动画/S2/OVA", "name": "OVA", "kind": "dir"},
+        ])
+        catalog_store.commit_directory(root.root_id, "/动画/S2", run, generation)
+        # 第三轮扫描 /动画/S2/OVA：ova.mkv
+        run = catalog_store.new_stage_run()
+        _seed_stage(run, "/动画/S2/OVA", [
+            {"remote_path": "/动画/S2/OVA/ova.mkv", "name": "ova.mkv", "kind": "file",
+             "size": 50, "mtime": 3.0},
+        ])
+        catalog_store.commit_directory(root.root_id, "/动画/S2/OVA", run, generation)
+        # checkpoint 就绪：S2 与后代 OVA 都在
+        assert catalog_store.get_directory(root.root_id, "/动画/S2") is not None
+        assert catalog_store.get_directory(root.root_id, "/动画/S2/OVA") is not None
+
+        # 第二轮完整列 /动画：S2 消失（只剩 root.txt）
+        generation = 2
+        run = catalog_store.new_stage_run()
+        _seed_stage(run, "/动画", [
+            {"remote_path": "/动画/root.txt", "name": "root.txt", "kind": "file",
+             "size": 10, "mtime": 1.0},
+        ])
+        stats = catalog_store.commit_directory(root.root_id, "/动画", run, generation)
+        # missing 统计含整棵子树：S2 + E01 + E02 + OVA + ova.mkv = 5
+        assert stats["missing"] == 5, stats
+
+        all_nodes = {
+            row["remote_path"]: row
+            for row in catalog_store.list_nodes(root.root_id, include_tombstone=True)
+        }
+        for path in ("/动画/S2", "/动画/S2/E01.mkv", "/动画/S2/E02.mkv",
+                     "/动画/S2/OVA", "/动画/S2/OVA/ova.mkv"):
+            assert all_nodes[path]["tombstone"] != "", path
+        # 活动节点只剩 root.txt
+        active = catalog_store.list_nodes(root.root_id)
+        assert [n["remote_path"] for n in active] == ["/动画/root.txt"]
+        # S2 与后代的 checkpoint 被直接删除，frontier 不再含 S2
+        assert catalog_store.get_directory(root.root_id, "/动画/S2") is None
+        assert catalog_store.get_directory(root.root_id, "/动画/S2/OVA") is None
+        frontier = [
+            d["remote_path"]
+            for d in catalog_store.list_pending_directories(root.root_id)
+        ]
+        assert "/动画/S2" not in frontier
+
+        # S2 重新出现：第三次完整列 /动画 含 S2 → 父目录 commit 重建 queued
+        generation = 3
+        run = catalog_store.new_stage_run()
+        _seed_stage(run, "/动画", [
+            {"remote_path": "/动画/S2", "name": "S2", "kind": "dir"},
+            {"remote_path": "/动画/root.txt", "name": "root.txt", "kind": "file",
+             "size": 10, "mtime": 1.0},
+        ])
+        catalog_store.commit_directory(root.root_id, "/动画", run, generation)
+        recreated = catalog_store.get_directory(root.root_id, "/动画/S2")
+        assert recreated is not None
+        assert recreated["state"] == "queued"
+        # S2 node 复活（tombstone 清空）
+        s2_map = {
+            row["remote_path"]: row
+            for row in catalog_store.list_nodes(root.root_id, include_tombstone=True)
+        }
+        assert s2_map["/动画/S2"]["tombstone"] == ""
+        # 可重新扫描 /动画/S2 → E01 重新入库（unchanged，tombstone 清除）
+        run = catalog_store.new_stage_run()
+        _seed_stage(run, "/动画/S2", [
+            {"remote_path": "/动画/S2/E01.mkv", "name": "E01.mkv", "kind": "file",
+             "size": 100, "mtime": 1.0},
+        ])
+        stats2 = catalog_store.commit_directory(root.root_id, "/动画/S2", run, generation)
+        assert stats2["added"] + stats2["unchanged"] == 1, stats2
+        assert "/动画/S2/E01.mkv" in {
+            n["remote_path"] for n in catalog_store.list_nodes(root.root_id)
+        }
+
+    def test_disappeared_file_stays_single_tombstone(self):
+        """普通文件消失：保持单点 tombstone，不影响同层/深层其他节点。"""
+        root = _make_root()
+        generation = 1
+        run = catalog_store.new_stage_run()
+        _seed_stage(run, "/动画", [
+            {"remote_path": "/动画/A", "name": "A", "kind": "dir"},
+            {"remote_path": "/动画/v1.mkv", "name": "v1.mkv", "kind": "file",
+             "size": 100, "mtime": 1.0},
+        ])
+        catalog_store.commit_directory(root.root_id, "/动画", run, generation)
+        run = catalog_store.new_stage_run()
+        _seed_stage(run, "/动画/A", [
+            {"remote_path": "/动画/A/deep.mkv", "name": "deep.mkv", "kind": "file",
+             "size": 200, "mtime": 2.0},
+        ])
+        catalog_store.commit_directory(root.root_id, "/动画/A", run, generation)
+
+        # 第二轮：v1.mkv 消失（A 仍在）→ 仅单点 tombstone，A/deep 保留
+        generation = 2
+        run = catalog_store.new_stage_run()
+        _seed_stage(run, "/动画", [
+            {"remote_path": "/动画/A", "name": "A", "kind": "dir"},
+        ])
+        stats = catalog_store.commit_directory(root.root_id, "/动画", run, generation)
+        assert stats["missing"] == 1, stats
+        nodes = catalog_store.list_nodes(root.root_id)
+        active_paths = {n["remote_path"] for n in nodes}
+        assert "/动画/A" in active_paths
+        assert "/动画/A/deep.mkv" in active_paths
+        assert "/动画/v1.mkv" not in active_paths
+        # A 的 checkpoint 保留（目录仍存在）
+        assert catalog_store.get_directory(root.root_id, "/动画/A") is not None
+
+
 class TestProviderIntoRevision:
     def test_provider_route_flow_into_nodes_and_items(self, monkeypatch):
         """provider_id/route_id 进入节点与 revision items。"""

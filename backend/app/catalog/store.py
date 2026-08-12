@@ -718,6 +718,37 @@ def commit_directory(
                     "UPDATE source_nodes SET tombstone = ? WHERE root_id = ? AND remote_path = ?",
                     (timestamp, root_id, remote),
                 )
+                # 目录消失 → 级联整棵物理子树（同一事务）：
+                # - 所有 child/ 后代的 source_nodes → tombstone（保留历史，供回溯）
+                # - child 与所有后代的 source_directories checkpoint → 直接 DELETE
+                #   （node tombstone 已保留历史、frontier 不再需要该子树；目录重新
+                #   出现时父目录提交会自然重建 queued checkpoint，避免 full scan
+                #   把 removed checkpoint 又 queue）；
+                # - 用 substr 前缀匹配（非 LIKE），避免 remote_path 中的 % _ \
+                #   被当作通配符误伤其他目录。
+                if row["kind"] == "dir":
+                    prefix = remote + "/"
+                    cursor = tx.execute(
+                        """
+                        UPDATE source_nodes SET tombstone = ?
+                        WHERE root_id = ? AND tombstone = ''
+                          AND substr(remote_path, 1, length(?)) = ?
+                          AND length(remote_path) > length(?)
+                        """,
+                        (timestamp, root_id, prefix, prefix, prefix),
+                    )
+                    stats["missing"] += cursor.rowcount
+                    tx.execute(
+                        """
+                        DELETE FROM source_directories
+                        WHERE root_id = ?
+                          AND (remote_path = ? OR (
+                              substr(remote_path, 1, length(?)) = ?
+                              AND length(remote_path) > length(?)
+                          ))
+                        """,
+                        (root_id, remote, prefix, prefix, prefix),
+                    )
 
         tx.execute("DELETE FROM source_stage_entries WHERE run_id = ?", (run_id,))
         next_verify_at = (datetime.now(timezone(timedelta(hours=8))) + VERIFY_INTERVAL).isoformat()

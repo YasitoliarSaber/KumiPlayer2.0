@@ -166,6 +166,8 @@ def scan_directory_paginated(
         page = 1
         collected = 0
         total: int | None = None
+        first_total: int | None = None
+        seen_paths: set[str] = set()
         try:
             while True:
                 _check_cancel(should_cancel)
@@ -175,7 +177,21 @@ def scan_directory_paginated(
                     remote_path, page=page, per_page=per_page,
                 )
                 total = dir_page.total
+                # 跨页 total 漂移：服务端总数在分页过程中变化 → 页集合不可信
+                if first_total is None:
+                    first_total = total
+                elif total != first_total:
+                    raise PageConsistencyError(
+                        f"分页 total 漂移: 首页 total={first_total}, 第 {page} 页 total={total}"
+                    )
                 _validate_page_consistency(dir_page.entries, page, total)
+                # 跨页重复检测：写 stage 前拦截，避免 INSERT OR REPLACE 静默覆盖
+                for item in dir_page.entries:
+                    if item.remote_path in seen_paths:
+                        raise PageConsistencyError(
+                            f"跨页重复路径: {item.remote_path}"
+                        )
+                    seen_paths.add(item.remote_path)
                 store.add_stage_page(run_id, remote_path, page, dir_page.entries)
                 collected += len(dir_page.entries)
                 if not dir_page.entries:
@@ -185,6 +201,13 @@ def scan_directory_paginated(
                 if len(dir_page.entries) < per_page:
                     break
                 page += 1
+            # 服务端提供可信 total 时，完整页集合必须精确等于 total：
+            # 提前短页（最后一页 < per_page）不代表分页完成，可能是
+            # snapshot drift / 页集合不完整，整轮按不一致处理。
+            if first_total is not None and collected != first_total:
+                raise PageConsistencyError(
+                    f"提前短页: 收集 {collected} 条 != 服务端总数 {first_total}"
+                )
             # 完整分页：原子提交（missing 只发生在完整读取后）
             stats = store.commit_directory(root_id, remote_path, run_id, generation)
             if progress_callback is not None:
