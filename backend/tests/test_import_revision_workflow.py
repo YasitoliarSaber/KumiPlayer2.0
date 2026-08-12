@@ -691,6 +691,39 @@ class TestV3SplitBrainApi:
         assert reloaded is not None
         assert reloaded.status == "confirmed"
 
+    def test_legacy_json_confirmed_confirm_idempotent(self):
+        """Legacy JSON confirmed → 重复 confirm → 200 status=confirmed，无 durable 字段。
+
+        前端确认门面对 draft/confirmed 一视同仁（FixB），legacy confirmed 计划
+        无条件 POST confirm 必须幂等返回，不能打 400。
+        """
+        from app.import_plan.store import save_import_plan
+
+        plan = _make_json_plan("plan-legacy-c2-idem", status="confirmed")
+        save_import_plan(plan)
+
+        response = self._client().post(
+            "/api/imports/openlist/confirm",
+            json={"plan_id": "plan-legacy-c2-idem"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["plan_id"] == "plan-legacy-c2-idem"
+        assert data["source"] == "openlist"
+        assert data["status"] == "confirmed"
+        assert data["message"] == "import_plan already confirmed"
+        # 不返回 durable 字段：前端自然落 legacy mirror 分支（旧 JSON 计划行为）
+        assert "execution_mode" not in data
+        assert "job_id" not in data
+        assert "task_id" not in data
+
+        # JSON 保持 confirmed 不被改写
+        from app.import_plan.store import load_import_plan
+
+        reloaded = load_import_plan(plan_id="plan-legacy-c2-idem")
+        assert reloaded is not None
+        assert reloaded.status == "confirmed"
+
 
 # ============================================================
 # 模块3 Review Fix A：PATCH/confirm optimistic fence 与 mirror get-or-create
@@ -874,6 +907,74 @@ class TestMirrorEnsureSemantics:
         assert all(job_ids), f"job_id 不得为空: {responses}"
         assert len(job_ids) == 1, f"并发 confirm 必须返回同一 job_id: {job_ids}"
         assert _mirror_job_count(revision_id) == 1, "并发 confirm 只能创建一个 mirror job"
+
+    def test_concurrent_confirm_mid_sequence_event_deterministic(self, monkeypatch):
+        """B 外层读到 draft → 卡住 B（Event）→ A 完整 confirm 成功 → 放行 B。
+
+        B 不得因 confirm_revision_manually 内部重读已 confirmed 而打 400：
+        必须按并发完成处理，返回 durable + 与 A 相同的 job_id，DB 仅 1 个
+        mirror job（确定性时序，不用两个线程同时起跑）。
+        """
+        from app.api.imports import ConfirmRequest, confirm
+        from app.import_plan import revision_store
+
+        unit_id = "unit-mirror-midseq"
+        _ensure_unit(unit_id)
+        revision = revision_store.create_revision(
+            unit_id=unit_id, source_generation=1,
+            items=_make_items(["作品 - S01E01.mkv"]), status="draft",
+        )
+        revision_id = revision["revision_id"]
+
+        b_entered_confirm = threading.Event()
+        allow_b_continue = threading.Event()
+        orig_confirm_manually = revision_store.confirm_revision_manually
+        first_call = {"count": 0}
+
+        def blocking_confirm_manually(rev_id: str, force: bool = False):
+            # 只卡第一个调用（B，已通过 confirm() 外层 load_revision 读到 draft）；
+            # 后续调用（A）直通，避免 A 也被卡住形成死锁。
+            first_call["count"] += 1
+            if first_call["count"] == 1:
+                b_entered_confirm.set()
+                assert allow_b_continue.wait(timeout=10), "等待 A 完成确认超时"
+            return orig_confirm_manually(rev_id, force=force)
+
+        monkeypatch.setattr(
+            revision_store, "confirm_revision_manually", blocking_confirm_manually
+        )
+        results: list = []
+
+        def do_b() -> None:
+            try:
+                results.append(confirm("openlist", ConfirmRequest(plan_id=revision_id)))
+            except Exception as exc:  # noqa: BLE001 - 收集异常供断言
+                results.append(exc)
+
+        thread = threading.Thread(target=do_b)
+        thread.start()
+        assert b_entered_confirm.wait(timeout=10), "B 未进入 confirm 中间时序"
+
+        # A 完整确认成功：draft → confirmed + mirror job 入队
+        response_a = confirm("openlist", ConfirmRequest(plan_id=revision_id))
+        assert response_a["status"] == "confirmed"
+        assert response_a["execution_mode"] == "durable"
+        assert response_a["job_id"]
+        job_id_a = response_a["job_id"]
+
+        # 放行 B：其内部重读已 confirmed → validate_confirmation 失败 →
+        # 必须走 except 分支的并发完成处理，而不是 400
+        allow_b_continue.set()
+        thread.join(timeout=10)
+        assert not thread.is_alive(), "B 线程超时未退出"
+
+        assert len(results) == 1
+        response_b = results[0]
+        assert isinstance(response_b, dict), f"B 必须 200 返回 dict，实际: {response_b}"
+        assert response_b["status"] == "confirmed"
+        assert response_b["execution_mode"] == "durable"
+        assert response_b["job_id"] == job_id_a, "B 必须复用 A 的 job_id"
+        assert _mirror_job_count(revision_id) == 1, "并发确认只能创建一个 mirror job"
 
     @pytest.mark.parametrize("final_status", ["failed", "succeeded"])
     def test_confirm_reuses_existing_terminal_job(self, final_status):

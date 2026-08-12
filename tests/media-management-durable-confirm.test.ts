@@ -87,3 +87,57 @@ test('confirmed preview + 无 durable 标识 → legacy mirrorApi.generate 保�
   const afterGenerate = page.slice(legacyGenerate, legacyGenerate + 200);
   assert.match(afterGenerate, /setTask\(await tasksApi\.get\(created\.task_id\)\)/);
 });
+
+// ============================================================
+// 模块3 最终补完：V3 幂等恢复与旧链隔离（durable pipeline 不得掉回 legacy）
+// ============================================================
+
+test('isDurablePipelineTask 助手覆盖 mirror_revision 与 scrape_revision', () => {
+  const helperAt = page.indexOf('function isDurablePipelineTask(');
+  assert.ok(helperAt >= 0, 'isDurablePipelineTask 助手不存在');
+  const helperEnd = page.indexOf('\n}', helperAt);
+  assert.ok(helperEnd > helperAt);
+  const helper = page.slice(helperAt, helperEnd);
+  assert.match(helper, /mirror_revision/);
+  assert.match(helper, /scrape_revision/);
+});
+
+test('handleWorkbenchStart：durable pipeline task 直接禁止 legacy fallback', () => {
+  const start = page.indexOf('const handleWorkbenchStart = () => {');
+  assert.ok(start >= 0, 'handleWorkbenchStart 不存在');
+  const end = page.indexOf('const beginNewImport = () => {', start);
+  assert.ok(end > start);
+  const block = page.slice(start, end);
+  // durable 守卫必须在任何 startTask 调用之前 return
+  const guardAt = block.indexOf('isDurablePipelineTask(task)');
+  assert.ok(guardAt >= 0, 'handleWorkbenchStart 缺少 durable 守卫');
+  const firstStartTask = block.indexOf('void startTask(');
+  assert.ok(firstStartTask > guardAt, 'durable 守卫必须位于 startTask 调用之前');
+  const guardLine = block.slice(guardAt, block.indexOf('\n', guardAt));
+  assert.match(guardLine, /return;/);
+  // legacy 分流逻辑仍然保留（非 durable 路径行为不变）
+  assert.match(block, /startTask\('scrape'\)/);
+  assert.match(block, /startTask\('mirror'\)/);
+});
+
+test('mirror→scrape 自动推进 effect 明确排除 durable mirror_revision', () => {
+  // 后端 durable mirror 完成后自己 enqueue durable scrape，前端不替它启动旧任务
+  const at = page.indexOf("if (autoAdvanceScrapeRef.current === task.task_id) return;");
+  assert.ok(at >= 0, 'auto-advance effect 不存在');
+  const before = page.slice(Math.max(0, at - 250), at);
+  assert.match(before, /isDurablePipelineTask\(task\)/);
+  const durableGuardLine = before.split('\n').filter((line) => line.includes('isDurablePipelineTask'))[0];
+  assert.match(durableGuardLine, /return;/);
+});
+
+test('durable pipeline task：工作台主按钮 disabled，不允许启动 legacy 任务', () => {
+  const workbenchAt = page.indexOf("{step === 'workbench'");
+  assert.ok(workbenchAt >= 0, 'workbench 区块不存在');
+  const workbenchBlock = page.slice(workbenchAt);
+  const disabledAt = workbenchBlock.indexOf('disabled={isScrapeTask(task) && taskKind');
+  assert.ok(disabledAt >= 0, '工作台 disabled 表达式不存在');
+  const disabledExpr = workbenchBlock.slice(disabledAt, workbenchBlock.indexOf('}', disabledAt));
+  // 两种 mode 分支都必须包含 durable pipeline 守卫
+  const durableGuardCount = (disabledExpr.match(/isDurablePipelineTask\(task\)/g) || []).length;
+  assert.ok(durableGuardCount >= 2, `disabled 表达式两个 mode 分支都必须禁用 durable pipeline，实际 ${durableGuardCount} 处守卫`);
+});

@@ -155,6 +155,21 @@ def confirm(source: str, req: ConfirmRequest):
         try:
             revision_store.confirm_revision_manually(req.plan_id, force=req.force)
         except revision_store.RevisionStatusError as exc:
+            # 并发中间时序：本请求外层读到 draft 后另一请求已完整确认
+            # （confirmed + mirror job）→ 重读当前状态：已 confirmed/executed
+            # 按“并发完成”处理（enqueue_mirror ensure 幂等，返回同一 job_id）；
+            # 仍 draft 才是真正的 optimistic conflict / validation failure。
+            current = revision_store.load_revision(req.plan_id)
+            if current is not None and current["status"] in ("confirmed", "executed"):
+                job_id = orchestrator.enqueue_mirror(req.plan_id, current["unit_id"])
+                return {
+                    "plan_id": req.plan_id,
+                    "source": source,
+                    "status": "confirmed",
+                    "execution_mode": "durable",
+                    "job_id": job_id,
+                    "message": "import revision already confirmed by concurrent request; mirror job ensured",
+                }
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         # ensure 语义：无论 transitioned True/False 都调用 enqueue_mirror
@@ -173,6 +188,17 @@ def confirm(source: str, req: ConfirmRequest):
     plan = _load_plan_or_404(plan_id=req.plan_id)
     if plan.source != source:
         raise HTTPException(status_code=400, detail=f"plan.source={plan.source} 与 URL source={source} 不匹配")
+
+    # 幂等：前端确认门面对 draft/confirmed 一视同仁，legacy confirmed 计划
+    # 重复 confirm 直接 200 返回（validate_confirmation 只接受 draft）。
+    # 不返回 execution_mode / job_id / task_id，前端自然落 legacy mirror 分支。
+    if plan.status == "confirmed":
+        return {
+            "plan_id": plan.plan_id,
+            "source": plan.source,
+            "status": "confirmed",
+            "message": "import_plan already confirmed",
+        }
 
     confirmed_plan, error = confirm_plan(plan, force=req.force)
     if error:

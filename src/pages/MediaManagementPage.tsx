@@ -344,6 +344,7 @@ export default function MediaManagementPage() {
 
   useEffect(() => {
     if (taskKind !== 'mirror' || !isMirrorTaskReady(task) || !task || !activeEntry?.planId) return;
+    if (isDurablePipelineTask(task)) return; // durable mirror 完成后后端自己 enqueue durable scrape，前端不替它启动旧任务
     if (autoAdvanceScrapeRef.current === task.task_id) return;
     autoAdvanceScrapeRef.current = task.task_id;
     void startTask('scrape');
@@ -1469,6 +1470,9 @@ export default function MediaManagementPage() {
   };
 
   const handleWorkbenchStart = () => {
+    // V3 durable pipeline：mirror/scrape 由后端 durable job 串联执行，
+    // 工作台不得再掉回 legacy startTask('mirror' | 'scrape')（防双轨）。
+    if (isDurablePipelineTask(task)) return;
     if (taskKind === 'scrape' && isScrapeTask(task)) {
       void startTask('scrape');
       return;
@@ -1868,8 +1872,8 @@ export default function MediaManagementPage() {
         onCancel={activeTask ? () => void cancelTask() : undefined}
         startLabel={isScrapeTask(task) && taskKind === 'scrape' ? '开始补充资料' : '创建媒体库'}
         disabled={isScrapeTask(task) && taskKind === 'scrape'
-          ? !preview
-          : !preview || preview.status !== 'confirmed' || activeEntry?.pathValidation?.ok === false}
+          ? !preview || isDurablePipelineTask(task)
+          : isDurablePipelineTask(task) || !preview || preview.status !== 'confirmed' || activeEntry?.pathValidation?.ok === false}
       />}
       {step === 'maintenance' && <LibraryMaintenancePanel onCleared={() => loadPresets(true)} />}
 
@@ -1989,6 +1993,12 @@ function PathValidationNotice({ resolvedRoot, validation, onRepair, repairing = 
 
 function isScrapeTask(task: TaskRecord | null): boolean {
   return Boolean(task?.task_type.startsWith('scrape_'));
+}
+
+// V3 durable pipeline job（mirror_revision / scrape_revision）：镜像/刮削由
+// 后端 durable job 串联执行，前端不得为它启动 legacy mirror/scrape 任务（防双轨）。
+function isDurablePipelineTask(task: TaskRecord | null): boolean {
+  return Boolean(task && (task.task_type === 'mirror_revision' || task.task_type === 'scrape_revision'));
 }
 
 function openlistPhaseLabel(phase: string | undefined, fallbackMessage?: string): string {
