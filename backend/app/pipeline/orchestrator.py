@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from app.catalog.closure import is_boundary_complete
 from app.db.database import get_connection
 from app.jobs import store as job_store
 from app.pipeline.handlers import register_pipeline_handlers
@@ -115,23 +116,15 @@ def enqueue_mirror(revision_id: str, unit_id: str) -> str:
 
 
 def unit_is_closed(unit_id: str) -> bool:
-    """closure：unit 的 boundary 下所有已发现目录不再排队/扫描（failed 不阻塞，
-    其缺失内容由后续扫描增量补齐）。"""
+    """closure：unit 的 boundary 下所有当前有效目录必须全部 complete 才收口
+    （唯一实现 catalog.closure.is_boundary_complete；failed 同样阻塞）。"""
     conn = get_connection()
     unit = conn.execute(
         "SELECT * FROM media_units WHERE unit_id = ?", (unit_id,)
     ).fetchone()
     if unit is None or not unit["boundary"]:
         return False
-    prefix = unit["boundary"].rstrip("/") + "/"
-    row = conn.execute(
-        """
-        SELECT COUNT(*) FROM source_directories
-        WHERE root_id = ? AND remote_path LIKE ? AND state IN ('queued', 'scanning')
-        """,
-        (unit["root_id"], prefix + "%"),
-    ).fetchone()
-    return int(row[0]) == 0 if row else True
+    return is_boundary_complete(unit["root_id"], unit["boundary"])
 
 
 def enqueue_scrape(revision_id: str, source: str, *, unit_id: str = "") -> str:

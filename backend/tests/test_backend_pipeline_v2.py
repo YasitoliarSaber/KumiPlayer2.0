@@ -151,6 +151,109 @@ class TestPipelineJobs:
         conn.commit()
         assert orchestrator.unit_is_closed("unit-open") is True
 
+    def test_failed_dir_blocks_scrape_after_mirror(self):
+        """同一作品下有 failed 目录（OVA 失败）→ mirror 成功后也不 enqueue scrape。"""
+        _ensure_unit("unit-bad", boundary="/动画/作品", root_id="root-x")
+        conn = get_connection()
+        for path, state in (
+            ("/动画/作品", "complete"),
+            ("/动画/作品/Season 1", "complete"),
+            ("/动画/作品/Season 2", "complete"),
+            ("/动画/作品/OVA", "failed"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO source_directories (
+                    root_id, remote_path, parent_path, depth, state
+                ) VALUES ('root-x', ?, '', 0, ?)
+                """,
+                (path, state),
+            )
+        conn.commit()
+        assert orchestrator.unit_is_closed("unit-bad") is False
+
+        revision = revision_store.create_revision(
+            unit_id="unit-bad", source_generation=1, items=_make_items(["a.mkv"]),
+            status="confirmed",
+        )
+        from app.mirror.result import MirrorGenerateResult
+
+        fake_result = MirrorGenerateResult(
+            plan_id=revision["revision_id"], source="openlist",
+            mirror_root="K:/mirror", status="success",
+            generated_count=1, items=[],
+        )
+        with patch("app.mirror.generator.generate_mirror", return_value=fake_result) as mock_mirror, \
+                patch("app.pipeline.orchestrator.enqueue_scrape") as mock_scrape:
+            job = job_store.create_job(
+                job_type="mirror_revision", resource_key=f"mirror:{revision['revision_id']}",
+                payload={"revision_id": revision["revision_id"], "unit_id": "unit-bad"},
+            )
+            runner = JobRunner(worker_id="w-bad", poll_interval=0.02)
+            runner.start()
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if job_store.get_job(job.job_id).status in ("succeeded", "failed"):
+                    break
+                time.sleep(0.05)
+            runner.stop()
+            assert mock_mirror.called
+            assert job_store.get_job(job.job_id).status == "succeeded"
+        # mirror 成功但不完整 → 不 enqueue scrape（同一作品存在 failed 目录）
+        mock_scrape.assert_not_called()
+
+    def test_complete_boundary_enqueues_scrape_after_mirror(self):
+        """boundary 下所有目录 complete → mirror 成功后 enqueue scrape。"""
+        _ensure_unit("unit-ok", boundary="/动画/作品", root_id="root-x")
+        conn = get_connection()
+        for path, state in (
+            ("/动画/作品", "complete"),
+            ("/动画/作品/Season 1", "complete"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO source_directories (
+                    root_id, remote_path, parent_path, depth, state
+                ) VALUES ('root-x', ?, '', 0, ?)
+                """,
+                (path, state),
+            )
+        conn.commit()
+        assert orchestrator.unit_is_closed("unit-ok") is True
+
+        revision = revision_store.create_revision(
+            unit_id="unit-ok", source_generation=1, items=_make_items(["a.mkv"]),
+            status="confirmed",
+        )
+        from app.mirror.result import MirrorGenerateResult
+
+        fake_result = MirrorGenerateResult(
+            plan_id=revision["revision_id"], source="openlist",
+            mirror_root="K:/mirror", status="success",
+            generated_count=1, items=[],
+        )
+        with patch("app.mirror.generator.generate_mirror", return_value=fake_result) as mock_mirror, \
+                patch("app.pipeline.orchestrator.enqueue_scrape") as mock_scrape:
+            job = job_store.create_job(
+                job_type="mirror_revision", resource_key=f"mirror:{revision['revision_id']}",
+                payload={"revision_id": revision["revision_id"], "unit_id": "unit-ok"},
+            )
+            runner = JobRunner(worker_id="w-ok", poll_interval=0.02)
+            runner.start()
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if job_store.get_job(job.job_id).status in ("succeeded", "failed"):
+                    break
+                time.sleep(0.05)
+            runner.stop()
+            assert mock_mirror.called
+            assert job_store.get_job(job.job_id).status == "succeeded"
+        # 完整 → mirror 成功后 enqueue scrape（携带同一 revision_id / unit_id）
+        mock_scrape.assert_called_once()
+        call = mock_scrape.call_args
+        assert call.args[0] == revision["revision_id"]
+        assert call.kwargs.get("unit_id") == "unit-ok"
+
     def test_queue_backpressure(self):
         """待处理 mirror/scrape 达到 50 时 scanner 暂停。"""
         for index in range(49):

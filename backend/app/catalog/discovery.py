@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 
 from app.catalog import service as catalog_service
 from app.catalog import store as catalog_store
+from app.catalog.closure import is_boundary_complete
 from app.catalog.service import PageConsistencyError, ScanCancelled
 from app.db.database import get_connection
 from app.integrations.openlist.models import OpenListError
@@ -150,18 +151,9 @@ class DiscoveryEngine:
             return values
 
         def boundary_is_closed(boundary: str) -> bool:
-            prefix = boundary.rstrip("/") + "/"
-            descendants = [
-                directory for directory in catalog_store.list_all_directories(self.root_id)
-                if directory["remote_path"] == boundary
-                or directory["remote_path"].startswith(prefix)
-            ]
-            # 只要没有仍在排队/扫描的目录即可收口；failed 目录不阻塞（其内容
-            # 缺失部分由下次扫描增量补齐，避免单个坏目录拖住整部作品不刮削）。
-            return bool(descendants) and all(
-                directory["state"] not in ("queued", "scanning")
-                for directory in descendants
-            )
+            # closure 唯一实现（catalog.closure）：boundary 下所有当前有效目录
+            # 必须全部 complete 才收口；任一 queued/scanning/failed 都阻塞。
+            return is_boundary_complete(self.root_id, boundary)
 
         def settle_candidates() -> None:
             for candidate in sorted(candidates):

@@ -260,8 +260,9 @@ class TestDiscoveryUnits:
         # 失败目录不产生 needs_review 单元（无已入库内容）
         assert all(item["boundary"] != "/动画/坏目录" for item in results)
 
-    def test_failed_structural_dir_does_not_block_closure(self):
-        """作品下某个 Season 目录失败不阻塞该作品收口：其余季照常出 revision。"""
+    def test_failed_structural_dir_blocks_closure(self):
+        """作品下某个 Season 目录失败阻塞该作品收口：不生成 revision；
+        同 root 下另一完整作品（Bar）不受影响，正常出 revision。"""
         from app.integrations.openlist.models import OpenListNetworkError
 
         class FlakyClient(FakeClient):
@@ -271,10 +272,11 @@ class TestDiscoveryUnits:
                 return super().list_dir(path, page=page, per_page=per_page, refresh=refresh)
 
         tree = {
-            "/动画": [("作品", True, None, None)],
+            "/动画": [("作品", True, None, None), ("好作品", True, None, None)],
             "/动画/作品": [("Season 1", True, None, None), ("Season 2", True, None, None)],
             "/动画/作品/Season 1": [("作品 - S01E01.mkv", False, 100, 1.0)],
             "/动画/作品/Season 2": [("作品 - S02E01.mkv", False, 100, 1.0)],
+            "/动画/好作品": [("好作品 - 01.mkv", False, 100, 1.0)],
         }
         store.create_source(source_id="ol", source_type="openlist")
         root = store.create_source_root(source_id="ol", remote_locator="/动画")
@@ -285,15 +287,14 @@ class TestDiscoveryUnits:
         )
         results = engine.run()
         assert "/动画/作品/Season 2" in engine.failed_paths
+        # 不完整作品（Foo：S1 complete + S2 failed）不生成 revision
+        assert all(item["boundary"] != "/动画/作品" for item in results)
+        assert all(item.get("status") != "plan_ready" or item["boundary"] != "/动画/作品"
+                   for item in results)
+        # 无关完整作品（Bar）仍可立即收口并生成 revision
         ready = [item for item in results if item["status"] == "plan_ready"]
         assert len(ready) == 1
-        assert ready[0]["boundary"] == "/动画/作品"
-
-        from app.import_plan import revision_store
-        revision = revision_store.load_revision(ready[0]["revision_id"])
-        relative = {item["relative_path"] for item in revision["items"]}
-        # 只包含 Season 1 内容；Season 2 失败部分由后续扫描增量补齐
-        assert relative == {"作品/Season 1/作品 - S01E01.mkv"}
+        assert ready[0]["boundary"] == "/动画/好作品"
 
 
 class TestImportRevisions:
