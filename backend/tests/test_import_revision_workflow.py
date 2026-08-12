@@ -340,3 +340,351 @@ class TestRevisionContext:
 
         with pytest.raises(ValueError, match="不存在"):
             load_revision_context("no-such")
+
+
+# ============================================================
+# 模块3 Checkpoint 2：唯一 SQLite 确认事务（confirm_revision_state）
+# ============================================================
+
+
+def _make_json_plan(plan_id: str, status: str = "confirmed", source: str = "openlist"):
+    """构造一个 legacy JSON 形状的 ImportPlan（与 SQLite revision 同 ID 时用于分流测试）。"""
+    from app.import_plan.models import ImportPlan, ImportPlanItem
+
+    item = ImportPlanItem(
+        id="j-1", plan_id=plan_id, raw_file_id="raw-j", source=source,
+        relative_path="动画/作品X/作品X - S01E01.mkv",
+        real_path="H:\\动画\\作品X\\作品X - S01E01.mkv",
+        resource_type="video", action="generate_strm",
+        work_title="作品X", work_id="wx", group_type="season",
+        card_type="main_series", media_type="tv",
+        season_number=1, episode_number=1,
+    )
+    return ImportPlan(
+        plan_id=plan_id, source=source, status=status, items=[item],
+        created_at="2026-08-12T00:00:00+08:00",
+        updated_at="2026-08-12T00:00:00+08:00",
+    )
+
+
+class TestConfirmStateTransition:
+    """confirm_revision_state / confirm_revision_manually / try_auto_confirm_revision 唯一事务。"""
+
+    def test_manual_confirm_full_transition(self):
+        """V3 manual confirm → confirmed + confirm_method=manual + confirmed_at 非空 + unit 指针更新。"""
+        from app.import_plan import revision_store
+
+        unit_id = "unit-c2-manual"
+        _ensure_unit(unit_id)
+        revision = revision_store.create_revision(
+            unit_id=unit_id, source_generation=1,
+            items=_make_items(["作品 - S01E01.mkv"]), status="draft",
+        )
+        revision_id = revision["revision_id"]
+
+        result = revision_store.confirm_revision_manually(revision_id)
+        assert result["transitioned"] is True
+        assert result["confirm_method"] == "manual"
+        assert result["confirmed_at"]
+
+        loaded = revision_store.load_revision(revision_id)
+        assert loaded["status"] == "confirmed"
+        assert loaded["confirm_method"] == "manual"
+        assert loaded["confirmed_at"]  # 修复：原实现缺 confirmed_at
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT status, current_revision_id FROM media_units WHERE unit_id = ?", (unit_id,)
+        ).fetchone()
+        assert row["status"] == "confirmed"
+        assert row["current_revision_id"] == revision_id
+
+    def test_manual_confirm_rejects_blockers(self):
+        """error 级别 issue 阻塞 manual confirm（与 legacy confirm_plan 同一套验证）。"""
+        from app.import_plan import revision_store
+
+        unit_id = "unit-c2-blocked"
+        _ensure_unit(unit_id)
+        revision = revision_store.create_revision(
+            unit_id=unit_id, source_generation=1,
+            items=_make_items(["a.mkv"], work_title="", group_type=""),
+            status="draft",
+        )
+        with pytest.raises(revision_store.RevisionStatusError, match="error"):
+            revision_store.confirm_revision_manually(revision["revision_id"])
+        # 未确认，仍为 draft
+        assert revision_store.load_revision(revision["revision_id"])["status"] == "draft"
+
+    def test_manual_confirm_force_skips_blockers(self):
+        """force=True 跳过 error 阻塞（与 legacy confirm_plan force 语义一致）。"""
+        from app.import_plan import revision_store
+
+        unit_id = "unit-c2-force"
+        _ensure_unit(unit_id)
+        revision = revision_store.create_revision(
+            unit_id=unit_id, source_generation=1,
+            items=_make_items(["a.mkv"], work_title="", group_type=""),
+            status="draft",
+        )
+        result = revision_store.confirm_revision_manually(revision["revision_id"], force=True)
+        assert result["transitioned"] is True
+        assert revision_store.load_revision(revision["revision_id"])["status"] == "confirmed"
+
+    def test_new_confirm_supersedes_old_confirmed_and_switches_pointer(self):
+        """旧 confirmed → 新 revision confirmed → old=superseded + unit 指针切到新 revision。"""
+        from app.import_plan import revision_store
+
+        unit_id = "unit-c2-chain"
+        _ensure_unit(unit_id)
+        first = revision_store.create_revision(
+            unit_id=unit_id, source_generation=1,
+            items=_make_items(["作品 - S01E01.mkv"]), status="draft",
+        )
+        ok, reason = revision_store.try_auto_confirm_revision(first["revision_id"])
+        assert ok, reason
+
+        # 第二轮：模拟 DiscoveryEngine 新 generation draft（parent 为旧 confirmed）
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET status = 'plan_ready', updated_at = ? WHERE unit_id = ?",
+            ("2026-08-12T00:00:00+08:00", unit_id),
+        )
+        conn.commit()
+        new_items = _make_items(
+            ["作品 - S01E01.mkv", "作品 - S01E02.mkv"],
+        )
+        second = revision_store.create_revision(
+            unit_id=unit_id, source_generation=2, items=new_items,
+            parent_revision_id=first["revision_id"], status="draft",
+        )
+
+        result = revision_store.confirm_revision_manually(second["revision_id"])
+        assert result["transitioned"] is True
+        assert first["revision_id"] in result["superseded"]
+        assert revision_store.load_revision(first["revision_id"])["status"] == "superseded"
+        assert revision_store.load_revision(second["revision_id"])["status"] == "confirmed"
+        row = conn.execute(
+            "SELECT status, current_revision_id FROM media_units WHERE unit_id = ?", (unit_id,)
+        ).fetchone()
+        assert row["status"] == "confirmed"
+        assert row["current_revision_id"] == second["revision_id"]
+
+    def test_auto_confirm_sets_confirmed_at_and_supersedes_old_current(self):
+        """auto confirm → confirmed_at 非空 + 旧 current 被 superseded（修复缺项）。"""
+        from app.import_plan import revision_store
+
+        unit_id = "unit-c2-auto-chain"
+        _ensure_unit(unit_id)
+        first = revision_store.create_revision(
+            unit_id=unit_id, source_generation=1,
+            items=_make_items(["作品 - S01E01.mkv"]), status="draft",
+        )
+        ok, reason = revision_store.try_auto_confirm_revision(first["revision_id"])
+        assert ok, reason
+
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET status = 'plan_ready', updated_at = ? WHERE unit_id = ?",
+            ("2026-08-12T00:00:00+08:00", unit_id),
+        )
+        conn.commit()
+        second = revision_store.create_revision(
+            unit_id=unit_id, source_generation=2,
+            items=_make_items(["作品 - S01E02.mkv"]),
+            parent_revision_id=first["revision_id"], status="draft",
+        )
+        ok, reason = revision_store.try_auto_confirm_revision(second["revision_id"])
+        assert ok, reason
+
+        loaded = revision_store.load_revision(second["revision_id"])
+        assert loaded["status"] == "confirmed"
+        assert loaded["confirmed_at"]  # 修复：auto 确认必须写 confirmed_at
+        assert revision_store.load_revision(first["revision_id"])["status"] == "superseded"
+
+    def test_confirm_idempotent(self):
+        """已 confirmed/executed 再次确认 → transitioned=False，不重复转换。"""
+        from app.import_plan import revision_store
+
+        unit_id = "unit-c2-idem"
+        _ensure_unit(unit_id)
+        revision = revision_store.create_revision(
+            unit_id=unit_id, source_generation=1,
+            items=_make_items(["a.mkv"]), status="draft",
+        )
+        first = revision_store.confirm_revision_state(revision["revision_id"], method="manual")
+        assert first["transitioned"] is True
+
+        second = revision_store.confirm_revision_state(revision["revision_id"], method="manual")
+        assert second["transitioned"] is False
+        assert second["superseded"] == []
+        assert revision_store.load_revision(revision["revision_id"])["status"] == "confirmed"
+
+    def test_confirm_does_not_supersede_other_unit(self):
+        """确认一个 unit 的新 revision 不得误 supersede 其他 unit 的 confirmed revision。"""
+        from app.import_plan import revision_store
+
+        unit_a = "unit-c2-a"
+        unit_b = "unit-c2-b"
+        _ensure_unit(unit_a)
+        _ensure_unit(unit_b)
+        rev_a = revision_store.create_revision(
+            unit_id=unit_a, source_generation=1,
+            items=_make_items(["a1.mkv"]), status="draft",
+        )
+        ok, reason = revision_store.try_auto_confirm_revision(rev_a["revision_id"])
+        assert ok, reason
+        rev_b = revision_store.create_revision(
+            unit_id=unit_b, source_generation=1,
+            items=_make_items(["b1.mkv"]), status="draft",
+        )
+        ok, reason = revision_store.try_auto_confirm_revision(rev_b["revision_id"])
+        assert ok, reason
+
+        # unit_b 新 draft（parent=rev_b）确认 → unit_a 的 confirmed 不得被触碰
+        rev_b2 = revision_store.create_revision(
+            unit_id=unit_b, source_generation=2,
+            items=_make_items(["b1.mkv", "b2.mkv"]),
+            parent_revision_id=rev_b["revision_id"], status="draft",
+        )
+        result = revision_store.confirm_revision_manually(rev_b2["revision_id"])
+        assert result["transitioned"] is True
+        assert rev_a["revision_id"] not in result["superseded"]
+        assert revision_store.load_revision(rev_a["revision_id"])["status"] == "confirmed"
+        assert revision_store.load_revision(rev_b["revision_id"])["status"] == "superseded"
+
+
+class TestV3SplitBrainApi:
+    """V3 人工确认 split-brain 修复的 API 级验证。"""
+
+    def _client(self):
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        return TestClient(app)
+
+    def test_preview_same_id_prefers_sqlite_draft(self):
+        """同 ID 同时存在 SQLite draft + JSON confirmed → preview 必须读 SQLite draft。"""
+        from app.import_plan import revision_store
+        from app.import_plan.store import save_import_plan
+
+        unit_id = "unit-c2-api-1"
+        _ensure_unit(unit_id)
+        revision = revision_store.create_revision(
+            unit_id=unit_id, source_generation=1,
+            items=_make_items(["作品 - S01E01.mkv"]), status="draft",
+        )
+        revision_id = revision["revision_id"]
+        # 同 ID 的 legacy JSON confirmed（split-brain 残留）
+        save_import_plan(_make_json_plan(revision_id, status="confirmed"))
+
+        response = self._client().get(
+            f"/api/imports/openlist/preview?plan_id={revision_id}"
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["plan_id"] == revision_id
+        assert data["status"] == "draft", "SQLite draft 必须优先于同 ID JSON confirmed"
+
+    def test_v3_patch_updates_sqlite_without_legacy_json(self):
+        """V3 PATCH → SQLite item 更新 → data/import_plans/<same-id>.json 不出现。"""
+        from pathlib import Path
+
+        from app.import_plan import revision_store
+        from app.core.paths import get_data_dir
+
+        unit_id = "unit-c2-api-2"
+        _ensure_unit(unit_id)
+        revision = revision_store.create_revision(
+            unit_id=unit_id, source_generation=1,
+            items=_make_items(["作品 - S01E01.mkv"]), status="draft",
+        )
+        revision_id = revision["revision_id"]
+
+        response = self._client().patch(
+            f"/api/imports/openlist/items/i-0",
+            json={"plan_id": revision_id, "patch": {"work_title": "修正作品名"}},
+        )
+        assert response.status_code == 200
+        assert response.json()["item"]["work_title"] == "修正作品名"
+
+        item = revision_store.load_revision(revision_id)["items"][0]
+        assert item["work_title"] == "修正作品名"
+        json_path = Path(get_data_dir()) / "import_plans" / f"{revision_id}.json"
+        assert not json_path.exists(), "V3 PATCH 不得回写 legacy JSON（split-brain 源头）"
+
+    def test_v3_confirm_enqueues_mirror_exactly_once_and_idempotent(self):
+        """V3 confirm → durable mirror job 恰好一次 + 重复 confirm 不重复入队。"""
+        from app.import_plan import revision_store
+
+        unit_id = "unit-c2-api-3"
+        _ensure_unit(unit_id)
+        revision = revision_store.create_revision(
+            unit_id=unit_id, source_generation=1,
+            items=_make_items(["作品 - S01E01.mkv"]), status="draft",
+        )
+        revision_id = revision["revision_id"]
+
+        client = self._client()
+        first = client.post(
+            "/api/imports/openlist/confirm",
+            json={"plan_id": revision_id},
+        )
+        assert first.status_code == 200
+        data = first.json()
+        assert data["status"] == "confirmed"
+        assert data["execution_mode"] == "durable"
+        assert data["job_id"], "transitioned=True 必须返回可用 job_id"
+        job_id = data["job_id"]
+
+        conn = get_connection()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE job_type = 'mirror_revision' AND payload LIKE ?",
+            (f'%"revision_id": "{revision_id}"%',),
+        ).fetchone()[0]
+        assert count == 1, f"mirror job 应恰好一个，实际 {count}"
+        assert conn.execute(
+            "SELECT job_id FROM jobs WHERE job_type = 'mirror_revision' LIMIT 1"
+        ).fetchone()["job_id"] == job_id
+
+        # 重复 confirm：幂等，不创建第二个 mirror job
+        second = client.post(
+            "/api/imports/openlist/confirm",
+            json={"plan_id": revision_id},
+        )
+        assert second.status_code == 200
+        assert second.json()["execution_mode"] == "durable"
+        assert second.json()["job_id"] == job_id, "重复 confirm 复用已有 job_id"
+        count = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE job_type = 'mirror_revision' AND payload LIKE ?",
+            (f'%"revision_id": "{revision_id}"%',),
+        ).fetchone()[0]
+        assert count == 1, "重复 confirm 不得创建第二个 mirror job"
+
+        loaded = revision_store.load_revision(revision_id)
+        assert loaded["status"] == "confirmed"
+        assert loaded["confirm_method"] == "manual"
+        assert loaded["confirmed_at"]
+
+    def test_legacy_json_confirm_keeps_old_behavior(self):
+        """Legacy JSON plan confirm → 仍写 JSON + 旧行为（不生成镜像、无 durable 字段）。"""
+        from app.import_plan.store import save_import_plan
+
+        plan = _make_json_plan("plan-legacy-c2", status="draft")
+        save_import_plan(plan)
+
+        response = self._client().post(
+            "/api/imports/openlist/confirm",
+            json={"plan_id": "plan-legacy-c2"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "confirmed"
+        assert "execution_mode" not in data
+        assert "job_id" not in data
+        assert "task_id" not in data
+
+        # JSON 仍被写入并更新
+        from app.import_plan.store import load_import_plan
+
+        reloaded = load_import_plan(plan_id="plan-legacy-c2")
+        assert reloaded is not None
+        assert reloaded.status == "confirmed"

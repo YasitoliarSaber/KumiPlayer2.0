@@ -499,26 +499,25 @@ def _normalize_item_shape(item: ImportPlanItem) -> None:
 
 
 # ============================================================
-# confirm_plan
+# validate_confirmation（legacy confirm_plan 与 V3 confirm_revision_manually 共用）
 # ============================================================
 
-def confirm_plan(
-    plan: ImportPlan, force: bool = False, update_latest: bool = True,
-) -> tuple[ImportPlan | None, str | None]:
-    """确认导入计划
+def validate_confirmation(
+    plan: ImportPlan, force: bool = False,
+) -> tuple[bool, ImportPreview | None, str | None]:
+    """共享确认验证（唯一一套 validation，禁止第三套）。
 
-    校验通过后将 status 从 draft 改为 confirmed。
-
-    参数:
-        force: 为 True 时遇到 error 级别问题也继续确认，仅用于兼容旧调用方。
-               needs_review 本身属于可延后的 warning，不再阻塞确认。
+    - status 必须 draft；
+    - 至少一个 action=generate_strm 视频条目；
+    - error 级别 issue 阻塞（force 可跳过）；
+    - needs_review / low-confidence 只做延后审计，不阻塞。
 
     返回:
-        (确认后的 plan, 错误信息)
+        (ok, preview, error_message)
     """
     # 校验 status
     if plan.status != "draft":
-        return None, f"plan.status 必须是 draft，当前为 {plan.status}"
+        return False, None, f"plan.status 必须是 draft，当前为 {plan.status}"
 
     # 校验至少有一个 generate_strm 视频
     has_video = any(
@@ -526,7 +525,7 @@ def confirm_plan(
         for item in plan.items
     )
     if not has_video:
-        return None, "至少需要一个 action=generate_strm 的视频条目"
+        return False, None, "至少需要一个 action=generate_strm 的视频条目"
 
     # 构建预览检查 issues
     preview = build_preview(plan)
@@ -534,7 +533,7 @@ def confirm_plan(
     error_issues = [issue for issue in preview.issues if issue.level == "error"]
 
     if error_issues and not force:
-        return None, f"存在 {len(error_issues)} 个 error 级别问题，请先处理"
+        return False, preview, f"存在 {len(error_issues)} 个 error 级别问题，请先处理"
 
     # 低置信度项目不再阻塞导入。它们会随计划继续进入镜像/刮削流程，
     # 后续由自动刮削写入 review queue，用户可在媒体管理中随时处理。
@@ -567,6 +566,32 @@ def confirm_plan(
                     "item_ids": issue.item_ids,
                 },
             )
+
+    return True, preview, None
+
+
+# ============================================================
+# confirm_plan
+# ============================================================
+
+def confirm_plan(
+    plan: ImportPlan, force: bool = False, update_latest: bool = True,
+) -> tuple[ImportPlan | None, str | None]:
+    """确认导入计划（legacy JSON 路径）
+
+    共享 validate_confirmation 验证，通过后将 status 从 draft 改为 confirmed
+    并写回 JSON（legacy 语义不变）。
+
+    参数:
+        force: 为 True 时遇到 error 级别问题也继续确认，仅用于兼容旧调用方。
+               needs_review 本身属于可延后的 warning，不再阻塞确认。
+
+    返回:
+        (确认后的 plan, 错误信息)
+    """
+    ok, _preview, error = validate_confirmation(plan, force=force)
+    if not ok:
+        return None, error
 
     # 确认
     plan.status = "confirmed"

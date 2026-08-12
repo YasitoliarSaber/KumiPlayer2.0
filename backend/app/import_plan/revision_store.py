@@ -373,12 +373,160 @@ def patch_draft_revision_item(revision_id: str, item_id: str, patch: dict) -> di
     return load_revision(revision_id)  # type: ignore[return-value]
 
 
+def confirm_revision_state(revision_id: str, *, method: str) -> dict:
+    """唯一 SQLite 确认状态转换（同一事务内原子执行，V3 唯一 confirm 入口）。
+
+    - 仅 draft 可确认；已 confirmed/executed → transitioned=False（幂等，
+      不重复转换，也不误 supersede 其他 revision）；
+    - 同一 unit 内旧 confirmed/executed revision（parent_revision_id 链与
+      media_units.current_revision_id 指向的旧值）→ status='superseded'；
+      绝不 supersede 其他 unit / 无关 revision（查询都带 unit_id 约束）；
+    - 当前 revision → status='confirmed', confirm_method=method,
+      confirmed_at=now, updated_at=now；
+    - media_unit → status='confirmed', current_revision_id=revision_id,
+      updated_at=now。
+
+    返回:
+        {
+            "transitioned": bool,
+            "revision_id": str,
+            "unit_id": str,
+            "status": str,
+            "confirm_method": str,
+            "confirmed_at": str,
+            "superseded": list[str],
+        }
+    """
+    conn = get_connection()
+    timestamp = now_iso()
+    with transaction(conn) as tx:
+        row = tx.execute(
+            "SELECT * FROM import_revisions WHERE revision_id = ?", (revision_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"revision 不存在: {revision_id}")
+        revision = dict(row)
+        unit = tx.execute(
+            "SELECT * FROM media_units WHERE unit_id = ?", (revision["unit_id"],)
+        ).fetchone()
+        if unit is None:
+            raise ValueError(f"media_unit 不存在: {revision['unit_id']}")
+
+        if revision["status"] != "draft":
+            # 幂等：不重复转换
+            return {
+                "transitioned": False,
+                "revision_id": revision_id,
+                "unit_id": revision["unit_id"],
+                "status": revision["status"],
+                "confirm_method": revision.get("confirm_method") or "",
+                "confirmed_at": revision.get("confirmed_at") or "",
+                "superseded": [],
+            }
+
+        superseded: list[str] = []
+
+        # 1) media_units.current_revision_id 指向的旧值（同一 unit 内）
+        old_current = unit["current_revision_id"] or ""
+        if old_current and old_current != revision_id:
+            old_row = tx.execute(
+                "SELECT status FROM import_revisions "
+                "WHERE revision_id = ? AND unit_id = ?",
+                (old_current, revision["unit_id"]),
+            ).fetchone()
+            if old_row and old_row["status"] in ("confirmed", "executed"):
+                tx.execute(
+                    "UPDATE import_revisions SET status = 'superseded', updated_at = ? "
+                    "WHERE revision_id = ? AND unit_id = ? "
+                    "AND status IN ('confirmed', 'executed')",
+                    (timestamp, old_current, revision["unit_id"]),
+                )
+                superseded.append(old_current)
+
+        # 2) parent_revision_id 链上仍未 superseded 的 confirmed/executed
+        #    （沿链回溯，每一步都限定同一 unit_id，不误伤其他 unit）
+        cursor = revision.get("parent_revision_id") or ""
+        visited: set[str] = set()
+        while cursor and cursor not in visited and cursor != revision_id:
+            visited.add(cursor)
+            parent_row = tx.execute(
+                "SELECT status, parent_revision_id FROM import_revisions "
+                "WHERE revision_id = ? AND unit_id = ?",
+                (cursor, revision["unit_id"]),
+            ).fetchone()
+            if parent_row is None:
+                break
+            if parent_row["status"] in ("confirmed", "executed"):
+                tx.execute(
+                    "UPDATE import_revisions SET status = 'superseded', updated_at = ? "
+                    "WHERE revision_id = ? AND status IN ('confirmed', 'executed')",
+                    (timestamp, cursor),
+                )
+                superseded.append(cursor)
+            cursor = parent_row["parent_revision_id"] or ""
+
+        # 3) 当前 revision → confirmed
+        tx.execute(
+            """
+            UPDATE import_revisions
+            SET status = 'confirmed', confirm_method = ?, confirmed_at = ?, updated_at = ?
+            WHERE revision_id = ? AND status = 'draft'
+            """,
+            (method, timestamp, timestamp, revision_id),
+        )
+        # 4) media_unit 切换指针
+        tx.execute(
+            """
+            UPDATE media_units
+            SET status = 'confirmed', current_revision_id = ?, updated_at = ?
+            WHERE unit_id = ?
+            """,
+            (revision_id, timestamp, revision["unit_id"]),
+        )
+
+    return {
+        "transitioned": True,
+        "revision_id": revision_id,
+        "unit_id": revision["unit_id"],
+        "status": "confirmed",
+        "confirm_method": method,
+        "confirmed_at": timestamp,
+        "superseded": superseded,
+    }
+
+
+def confirm_revision_manually(revision_id: str, force: bool = False) -> dict:
+    """V3 人工确认：共享验证 → SQLite 唯一确认事务。
+
+    - 复用 service.validate_confirmation（与 legacy confirm_plan 同一套规则，
+      不写第三套 validation）；
+    - 验证失败 → RevisionStatusError（400/409 语义）；
+    - 成功 → confirm_revision_state(method='manual')，返回含 transitioned。
+    """
+    revision = load_revision(revision_id)
+    if revision is None:
+        raise RevisionStatusError(f"revision 不存在: {revision_id}")
+    plan = load_plan(revision_id)
+    if plan is None:
+        raise RevisionStatusError(f"无法装载 revision: {revision_id}")
+
+    from app.import_plan.service import validate_confirmation
+
+    ok, _preview, error = validate_confirmation(plan, force=force)
+    if not ok:
+        raise RevisionStatusError(error or "确认校验未通过")
+    return confirm_revision_state(revision_id, method="manual")
+
+
 def try_auto_confirm_revision(revision_id: str) -> tuple[bool, str]:
     """以与人工确认相同的安全规则确认 SQLite revision。
 
     这是渐进发现器唯一允许自动进入镜像的门槛：只读 SQLite revision，
     不写回旧 JSON ImportPlan；发现需要复核或错误时保留 draft，并把单元标为
-    ``needs_review``。返回 ``(是否确认, 原因)``，供调用方决定是否入队。
+    ``needs_review``。通过 auto gate 后调用唯一确认事务
+    ``confirm_revision_state(method='auto')``（修复缺 confirmed_at /
+    旧 current 未 supersede 的问题）。返回 ``(是否确认, 原因)``，供调用方
+    决定是否入队。
     """
     revision = load_revision(revision_id)
     if revision is None:
@@ -406,26 +554,8 @@ def try_auto_confirm_revision(revision_id: str) -> tuple[bool, str]:
         conn.commit()
         return False, details
 
-    timestamp = now_iso()
-    conn = get_connection()
-    with transaction(conn) as tx:
-        tx.execute(
-            """
-            UPDATE import_revisions
-            SET status = 'confirmed', confirm_method = 'automatic', updated_at = ?
-            WHERE revision_id = ? AND status = 'draft'
-            """,
-            (timestamp, revision_id),
-        )
-        tx.execute(
-            """
-            UPDATE media_units
-            SET status = 'confirmed', current_revision_id = ?, updated_at = ?
-            WHERE unit_id = ?
-            """,
-            (revision_id, timestamp, revision["unit_id"]),
-        )
-    return True, ""
+    result = confirm_revision_state(revision_id, method="auto")
+    return result["transitioned"], ""
 
 
 def persist_execution_fields(plan: Any) -> None:

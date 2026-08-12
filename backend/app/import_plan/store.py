@@ -60,8 +60,13 @@ def load_import_plan(plan_id: str | None = None, source: str | None = None) -> I
     """加载 ImportPlan
 
     参数:
-        plan_id: 指定 plan_id 加载
-        source: 无 plan_id 时，加载 {source}_latest.json
+        plan_id: 指定 plan_id 加载（V3 SQLite revision 优先，legacy JSON 兜底）
+        source: 无 plan_id 时，加载 {source}_latest.json（保持 legacy 行为）
+
+    V3（OpenList 新链路）以 SQLite Import Revision 为唯一事实源：明确传
+    plan_id 时先查 revision_store，存在即返回 SQLite；同 ID 同时存在 SQLite
+    draft 与 JSON confirmed 时，必须读到 SQLite draft（可编辑的当前草稿），
+    避免人工修正与确认读到旧 JSON 的 split-brain。
 
     返回:
         ImportPlan 或 None
@@ -69,23 +74,27 @@ def load_import_plan(plan_id: str | None = None, source: str | None = None) -> I
     plans_dir = _get_import_plans_dir()
 
     if plan_id:
+        # V3 优先：SQLite Import Revision（OpenList 新链路唯一事实源）
+        from app.import_plan.revision_store import load_plan
+
+        sqlite_plan = load_plan(plan_id)
+        if sqlite_plan is not None:
+            return sqlite_plan
+        # 回退 legacy JSON（115/百度/本地旧来源）
         plan_path = plans_dir / f"{plan_id}.json"
-    elif source:
+        if not plan_path.exists():
+            return None
+        data = json.loads(plan_path.read_text(encoding="utf-8"))
+        return _dict_to_import_plan(data)
+
+    if source:
         plan_path = plans_dir / f"{source}_latest.json"
-    else:
-        return None
+        if not plan_path.exists():
+            return None
+        data = json.loads(plan_path.read_text(encoding="utf-8"))
+        return _dict_to_import_plan(data)
 
-    if not plan_path.exists():
-        # V2 回退：SQLite Import Revision（OpenList 新链路）；
-        # JSON 仍是旧来源（115/百度/本地）的事实源，直到迁移完成。
-        if plan_id:
-            from app.import_plan.revision_store import load_plan
-
-            return load_plan(plan_id)
-        return None
-
-    data = json.loads(plan_path.read_text(encoding="utf-8"))
-    return _dict_to_import_plan(data)
+    return None
 
 
 def load_latest_confirmed_import_plan(source: str) -> ImportPlan | None:

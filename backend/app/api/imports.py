@@ -70,7 +70,38 @@ def patch_item(source: str, item_id: str, req: PatchRequest):
     """修正单个 ImportPlanItem
 
     只允许 patch 白名单字段，patch 后返回更新后的 item 和 preview summary。
+    V3（SQLite revision）走 patch_draft_revision_item，事务内更新 SQLite、
+    不回写 legacy JSON（data/import_plans/<revision_id>.json 不出现）；
+    legacy JSON plan 保持原路径。
     """
+    from app.import_plan import revision_store
+
+    revision = revision_store.load_revision(req.plan_id)
+    if revision is not None:
+        revision_source = str(revision.get("source") or "")
+        if revision_source and revision_source != source:
+            raise HTTPException(
+                status_code=400,
+                detail=f"revision.source={revision_source} 与 URL source={source} 不匹配",
+            )
+        try:
+            revision_store.patch_draft_revision_item(req.plan_id, item_id, req.patch)
+        except revision_store.RevisionStatusError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        plan = revision_store.load_plan(req.plan_id)
+        if plan is None:
+            raise HTTPException(status_code=400, detail="无法装载 revision")
+        item = next((it for it in plan.items if it.id == item_id), None)
+        if item is None:
+            raise HTTPException(status_code=400, detail=f"未找到 item_id={item_id}")
+        preview = build_preview(plan)
+        return {
+            "item": _item_to_dict(item),
+            "summary": preview.summary,
+        }
+
     plan = _load_plan_or_404(plan_id=req.plan_id)
     if plan.source != source:
         raise HTTPException(status_code=400, detail=f"plan.source={plan.source} 与 URL source={source} 不匹配")
@@ -92,8 +123,52 @@ def patch_item(source: str, item_id: str, req: PatchRequest):
 def confirm(source: str, req: ConfirmRequest):
     """确认导入计划
 
-    只把 draft 改成 confirmed，不生成镜像，不返回 task_id。
+    - plan_id 是 SQLite revision（V3/OpenList 链路）→ 人工确认事务 + 入队
+      durable mirror job，返回 execution_mode='durable' + job_id；
+    - plan_id 是 legacy JSON plan → 保持 confirm_plan + mark_preset_lifecycle
+      旧行为，不生成镜像、不返回 task_id。
     """
+    from app.import_plan import revision_store
+    from app.pipeline import orchestrator
+
+    revision = revision_store.load_revision(req.plan_id)
+    if revision is not None:
+        # ---- V3 SQLite revision 路径 ----
+        revision_source = str(revision.get("source") or "")
+        if revision_source and revision_source != source:
+            raise HTTPException(
+                status_code=400,
+                detail=f"revision.source={revision_source} 与 URL source={source} 不匹配",
+            )
+        if revision["status"] in ("confirmed", "executed"):
+            # 重复 confirm：幂等，不创建第二个 mirror job；复用已有 job 或返回空
+            job_id = _find_existing_mirror_job_id(req.plan_id)
+            return {
+                "plan_id": req.plan_id,
+                "source": source,
+                "status": "confirmed",
+                "execution_mode": "durable",
+                "job_id": job_id,
+                "message": "import revision already confirmed; mirror job reused",
+            }
+        try:
+            result = revision_store.confirm_revision_manually(req.plan_id, force=req.force)
+        except revision_store.RevisionStatusError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        job_id = ""
+        if result["transitioned"]:
+            job_id = orchestrator.enqueue_mirror(req.plan_id, revision["unit_id"])
+        return {
+            "plan_id": req.plan_id,
+            "source": source,
+            "status": "confirmed",
+            "execution_mode": "durable",
+            "job_id": job_id,
+            "message": "import revision confirmed; mirror job enqueued",
+        }
+
+    # ---- legacy JSON 路径（旧行为不变）----
     plan = _load_plan_or_404(plan_id=req.plan_id)
     if plan.source != source:
         raise HTTPException(status_code=400, detail=f"plan.source={plan.source} 与 URL source={source} 不匹配")
@@ -111,6 +186,27 @@ def confirm(source: str, req: ConfirmRequest):
         "status": confirmed_plan.status,
         "message": "import_plan confirmed; review warnings deferred",
     }
+
+
+def _find_existing_mirror_job_id(revision_id: str) -> str:
+    """查找 revision 已有的 durable mirror job（任意状态），找不到返回空串。"""
+    import json
+
+    from app.db.database import get_connection
+
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT job_id, payload FROM jobs "
+        "WHERE job_type = 'mirror_revision' ORDER BY created_at DESC LIMIT 500"
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if payload.get("revision_id") == revision_id:
+            return row["job_id"]
+    return ""
 
 
 # ============================================================

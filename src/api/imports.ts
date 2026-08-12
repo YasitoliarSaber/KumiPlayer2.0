@@ -18,8 +18,17 @@ export const importsApi = {
     ),
 
   // 确认计划
+  // V3（SQLite revision）返回 execution_mode='durable' + job_id：镜像任务已由
+  // 后端入队，前端不再调用 mirrorApi.generate；legacy JSON 计划无这两个字段。
   confirm: (source: string, planId: string) =>
-    api.post<{ plan_id: string; source: string; status: string; message: string }>(
+    api.post<{
+      plan_id: string
+      source: string
+      status: string
+      message: string
+      execution_mode?: 'durable'
+      job_id?: string
+    }>(
       `/api/imports/${source}/confirm`,
       { plan_id: planId }
     ),

@@ -319,16 +319,25 @@ export default function MediaManagementPage() {
     void (async () => {
       try {
         setActionError('');
+        let durableTaskId = '';
         if (previewStatus === 'draft') {
-          await importsApi.confirm(source, planId);
+          const confirmed = await importsApi.confirm(source, planId);
+          if (confirmed.execution_mode === 'durable' && confirmed.job_id) {
+            // V3：镜像 job 已由后端确认事务入队，前端无需再生成
+            durableTaskId = confirmed.job_id;
+          }
         }
         const confirmedPreview = await importsApi.getPreview(source, planId);
         updateEntry(entryId, { preview: confirmedPreview, status: 'parsed' });
         setTask(null);
         setTaskKind('mirror');
         setStep('workbench');
-        const created = await mirrorApi.generate(source, planId);
-        setTask(await tasksApi.get(created.task_id));
+        if (durableTaskId) {
+          setTask(await tasksApi.get(durableTaskId));
+        } else {
+          const created = await mirrorApi.generate(source, planId);
+          setTask(await tasksApi.get(created.task_id));
+        }
       } catch (error) {
         autoPipelineEntryRef.current = '';
         setActionError(`自动处理未能继续：${(error as Error).message}。你仍可在此页处理识别结果后重试。`);
@@ -1398,7 +1407,12 @@ export default function MediaManagementPage() {
     try {
       // 已确认计划不重复提交确认：仅 draft 调用确认 API，confirmed 直接刷新预览并进入工作台。
       if (preview.status === 'draft') {
-        await importsApi.confirm(source, activeEntry.planId);
+        const confirmed = await importsApi.confirm(source, activeEntry.planId);
+        if (confirmed.execution_mode === 'durable' && confirmed.job_id) {
+          // V3：后端已入队 durable mirror job，工作台直接挂接该任务，不再重复生成
+          setTaskKind('mirror');
+          setTask(await tasksApi.get(confirmed.job_id));
+        }
       }
       const confirmedPreview = await importsApi.getPreview(source, activeEntry.planId);
       updateEntry(activeEntry.id, { preview: confirmedPreview });
