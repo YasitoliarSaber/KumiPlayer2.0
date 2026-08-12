@@ -1,0 +1,152 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-10",
+  "components": [
+    {
+      "component": "uosc",
+      "version": "5.13.0",
+      "upstream_repository": "https://github.com/tomasklaen/uosc",
+      "license": "LGPL-2.1",
+      "source_artifact": {
+        "url": "https://github.com/tomasklaen/uosc/releases/download/5.13.0/uosc.zip",
+        "sha256": "4be9da3289285300fa374496c3f1bfd7bb20ac08e890d25bd5a06b28eebe4882"
+      },
+      "commit": "d124c2c930d69446448022851373e00ae592390d",
+      "bundled_files": [
+        "resources/mpv-runtime/portable_config/scripts/uosc.lua",
+        "resources/mpv-runtime/portable_config/fonts/uosc_icons.otf",
+        "resources/mpv-runtime/portable_config/fonts/uosc_textures.ttf",
+        "resources/mpv-runtime/portable_config/script-opts/uosc.conf"
+      ],
+      "notices": [
+        "third_party/mpv/licenses/uosc-5.13.0/LICENSE.LGPL"
+      ],
+      "distribution_notes": "禁止 uosc 自更新；菜单/文件/URL/队列入口由 KumiPlayer 受控层屏蔽",
+      "configuration_sha256": {
+        "script-opts/uosc.conf": "94232842a395dc851545852cd6604b90131e177b95e2d480975511d95291e918"
+      }
+    },
+    {
+      "component": "thumbfast",
+      "version": "commit 0f711de3138c9bd6718209d819ac54022c23ded2",
+      "upstream_repository": "https://github.com/po5/thumbfast",
+      "license": "MPL-2.0",
+      "source_artifact": {
+        "url": "https://github.com/po5/thumbfast/blob/0f711de3138c9bd6718209d819ac54022c23ded2/thumbfast.lua",
+        "sha256": "a3d08e71eae8b892f6cd39f9593ea219768e709312d176bca883841b156448bf"
+      },
+      "commit": "0f711de3138c9bd6718209d819ac54022c23ded2",
+      "bundled_files": [
+        "resources/mpv-runtime/portable_config/scripts/thumbfast.lua",
+        "resources/mpv-runtime/portable_config/script-opts/thumbfast.conf"
+      ],
+      "notices": [
+        "third_party/mpv/licenses/thumbfast/MPL-2.0.txt"
+      ],
+      "distribution_notes": "源码内嵌 MPL-2.0 声明；网络/音频缩略图默认关闭；缓存仅写 data/mpv-state/thumbfast/"
+    },
+    {
+      "component": "Anime4K",
+      "version": "v4.0.1",
+      "upstream_repository": "https://github.com/bloc97/Anime4K",
+      "license": "MIT",
+      "source_artifact": {
+        "url": "https://codeload.github.com/bloc97/Anime4K/tar.gz/refs/tags/v4.0.1",
+        "sha256": "9e7781eb3a8fe9c5c2b4832e47ec09b9e82f4bda3c51a1ddb2a2a9d01c4eb222"
+      },
+      "bundled_files": [
+        "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1/Anime4K_AutoDownscalePre_x2.glsl",
+        "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1/Anime4K_AutoDownscalePre_x4.glsl",
+        "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1/Anime4K_Clamp_Highlights.glsl",
+        "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1/Anime4K_Restore_CNN_L.glsl",
+        "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1/Anime4K_Restore_CNN_M.glsl",
+        "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1/Anime4K_Restore_CNN_S.glsl",
+        "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1/Anime4K_Restore_CNN_Soft_L.glsl",
+        "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1/Anime4K_Restore_CNN_Soft_M.glsl",
+        "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1/Anime4K_Restore_CNN_Soft_S.glsl",
+        "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1/Anime4K_Restore_CNN_Soft_VL.glsl",
+        "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1/Anime4K_Restore_CNN_VL.glsl",
+        "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1/Anime4K_Upscale_CNN_x2_L.glsl",
+        "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1/Anime4K_Upscale_CNN_x2_M.glsl",
+        "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1/Anime4K_Upscale_CNN_x2_S.glsl",
+        "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1/Anime4K_Upscale_CNN_x2_VL.glsl",
+        "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1/Anime4K_Upscale_Denoise_CNN_x2_L.glsl",
+        "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1/Anime4K_Upscale_Denoise_CNN_x2_M.glsl",
+        "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1/Anime4K_Upscale_Denoise_CNN_x2_VL.glsl",
+        "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1/LICENSE"
+      ],
+      "notices": [
+        "third_party/mpv/licenses/anime4k-v4.0.1/LICENSE"
+      ],
+      "file_sha256": {
+        "Anime4K_AutoDownscalePre_x2.glsl": "8c58291740146bd766a4d73f132775a797fe80f7d07919b5d767e27a5dc85656",
+        "Anime4K_AutoDownscalePre_x4.glsl": "5af62d8cd844916dc1126613e13bad3beab195787f93a71200b47c6ec78f2e41",
+        "Anime4K_Clamp_Highlights.glsl": "a2a9bf7fbc1d75d09660ca2e701e4d7fb0cf5457b94da47e1825032fa2b3671a",
+        "Anime4K_Restore_CNN_L.glsl": "d6efe215e6ee8af1ec560478a91afc1df83fac4ba43b2c806ee61ca2267ed674",
+        "Anime4K_Restore_CNN_M.glsl": "67ea3ed26539e8de3b7d307688535d2ff17e8d147e11dda0247da7770dbecf41",
+        "Anime4K_Restore_CNN_S.glsl": "97c24dc370ab300c108bfaa09db7f175aeff343674842c299cf3940a3d330427",
+        "Anime4K_Restore_CNN_Soft_L.glsl": "8f2a5c73b526c6e4c67bce0366f7dcd7410bfa4a31e718240d86f53660788e63",
+        "Anime4K_Restore_CNN_Soft_M.glsl": "a78a2c76898e08e09e442a9628c64208c26e8e15789649b8755223f009794c02",
+        "Anime4K_Restore_CNN_Soft_S.glsl": "9f6867f2ef42786729522d86fe24147cb4ea145418e3974df70496acf52dc392",
+        "Anime4K_Restore_CNN_Soft_VL.glsl": "094334b0e20c1a201fe4941c7c68de72451e5aee9efb5524d7fb82b12dca64b9",
+        "Anime4K_Restore_CNN_VL.glsl": "35036722733305cd4d4e57660b883bbe2569ba2914033c254327107d7b77e35e",
+        "Anime4K_Upscale_CNN_x2_L.glsl": "db1fedf7be82f6fd9034e6bf39b64daf2b7576988bb584ec38f24f5236b1cd97",
+        "Anime4K_Upscale_CNN_x2_M.glsl": "716e02098a68f0d648761f2b96b4dd139e1cb09b174bb369fca3aa34328fff7e",
+        "Anime4K_Upscale_CNN_x2_S.glsl": "4c53ec2e287908f7ee7bcb266b0170421626d663576468b7d7dafc62962649a4",
+        "Anime4K_Upscale_CNN_x2_VL.glsl": "5638fe31c37c151a3443fea3451a3ef91af073f4dbb9615f6c0d1e29db11493d",
+        "Anime4K_Upscale_Denoise_CNN_x2_L.glsl": "6cc4604c9544fd4fd9e3a75fd797511bf5fe1e626e9e1dbcee03302823a63207",
+        "Anime4K_Upscale_Denoise_CNN_x2_M.glsl": "8c72b042e2301fe66a45c3089720459148e2504cd72af16f9c0d5017ff14181e",
+        "Anime4K_Upscale_Denoise_CNN_x2_VL.glsl": "359c48fe5a317fbc6b706ce368401eef496e84ed98abac7a43efebca2b65d79b",
+        "LICENSE": "5bad448b737378e3d0c977ad0d0521fa37ad279a7e76ea9a31d9257eeb6953f5"
+      },
+      "distribution_notes": "仅随包 S/M/L/VL 变体；UL 不进首发常规档位；链顺序以官方模板为准",
+      "configuration_sha256": {
+        "scripts/kumiplayer_uosc_menu.lua": "EA735F3C2BB6FC07CCF7AD4EF60B39A93034046110858690BEAA5FD3CD466135"
+      }
+    },
+    {
+      "component": "mpv-stats-zh",
+      "version": "main@2026-07-12",
+      "upstream_repository": "https://github.com/yosh-wang/mpv-stats.lua-zh-chinese-translation-",
+      "license": "MIT（仓库 LICENSE.md）；注意：仓库 README 声明‘严禁任何形式的商业使用’与 LICENSE 存在矛盾，且未声明与官方 stats.lua（GPLv2+/LGPLv2.1+ 生态）的派生关系——发布前必须重新核对，当前仅限本地开发使用",
+      "source_artifact": {
+        "url": "https://raw.githubusercontent.com/yosh-wang/mpv-stats.lua-zh-chinese-translation-/main/stats.lua",
+        "sha256": "4F037D834A6D88B4615FCAF087963D04DFA814E7097621C87370F25184142302"
+      },
+      "bundled_files": [
+        "resources/mpv-runtime/portable_config/scripts/stats.lua",
+        "resources/mpv-runtime/portable_config/script-opts/stats.conf"
+      ],
+      "distribution_notes": "基于 mpv 内置 stats.lua（Argon-/mpv-stats）的中文翻译版；需 load-stats-overlay=no 禁用内置英文版避免同名脚本被重命名；附带 Windows CPU/GPU 统计模块（typeperf/nvidia-smi/powershell，失败显示 N/A）",
+      "configuration_sha256": {
+        "scripts/stats.lua": "4F037D834A6D88B4615FCAF087963D04DFA814E7097621C87370F25184142302"
+      },
+      "notices": [
+        "third_party/mpv/licenses/mpv-stats-zh/LICENSE.md"
+      ]
+    },
+    {
+      "component": "uosc_danmaku",
+      "version": "v2.2.0",
+      "upstream_repository": "https://github.com/Tony15246/uosc_danmaku",
+      "license": "MIT",
+      "source_artifact": {
+        "url": "https://github.com/Tony15246/uosc_danmaku/archive/refs/heads/main.zip",
+        "sha256": ""
+      },
+      "commit": "main",
+      "bundled_files": [
+        "resources/mpv-runtime/portable_config/scripts/uosc_danmaku/",
+        "resources/mpv-runtime/portable_config/script-opts/uosc_danmaku.conf"
+      ],
+      "notices": [
+        "third_party/mpv/licenses/uosc_danmaku/LICENSE"
+      ],
+      "distribution_notes": "api_server 改用官方代理 danmaku-api.152468.xyz（弹弹play 直连 403）；fallback_server 改用 dmku.hls.one（danmu.icu 域名已失守）；fetch_danmaku 无参数优先、format=json 回退（官方代理不接受 format=json）",
+      "configuration_sha256": {
+        "modules/options.lua": "B6A7EE58E32BF37AC3038537AAFF8A444216730D6B772C69E1FF7764AC38A3E0",
+        "apis/dandanplay.lua": "1E5CE7A1A57D5F7A4709E47F5871B08B9CE5F67ACAC521A88CE3404EA8E02EA3"
+      }
+    }
+  ]
+}

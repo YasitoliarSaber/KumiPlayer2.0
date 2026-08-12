@@ -1,0 +1,166 @@
+"""discovery_scan durable handler：Source Catalog 扫描 → 证据发现 → revision → 即时入队镜像。
+
+与规划员要求对应：
+- 按作品 closure 回调立即入队镜像：DiscoveryEngine.run(on_unit=...) 在边界结算后
+  立刻 confirmed revision 并 enqueue_mirror，不等整棵树扫完；
+- 背压真正接入扫描器：frontier 循环每轮检查 orchestrator.should_backoff()，
+  队列水位 >= 50 时协作式休眠等待，降到 25 以下恢复；
+- 单一 root 串行扫描（扫描 worker 专用线程），不同 root 的 scan job 由
+  resource_key=scan:{root_id} 互斥。
+"""
+
+from __future__ import annotations
+
+import time
+
+from app.catalog import store as catalog_store
+from app.catalog.discovery import DiscoveryCancelled, DiscoveryEngine
+from app.import_plan import revision_store
+from app.jobs.models import JobCancelledError
+from app.jobs.registry import register
+from app.pipeline import orchestrator
+
+
+def _build_openlist_client(source_id: str):
+    """按 source 记录构造 OpenList 客户端（凭据只存内存，不进 payload）。"""
+    from app.core.config import load_config
+    from app.integrations.openlist.client import OpenListClient
+
+    config = load_config()
+    return OpenListClient(
+        config.openlist_server_url,
+        config.openlist_username,
+        config.openlist_password,
+    )
+
+
+def _build_scanner(root: dict):
+    """按来源构造统一扫描器（补完 5：115/百度/本地接入 Source Catalog）。
+
+    - openlist：OpenList 客户端分页枚举；
+    - local：本地分页枚举（adapter 直通）；
+    - pan115 / baidu：目录树 TXT 一次性快照（adapter.snapshot_entries）。
+    """
+    from app.catalog.scanner import SourceCatalogScanner
+    from app.core.config import load_config
+    from app.integrations.openlist.client import OpenListClient
+    from app.sources.registry import get_source_adapter
+
+    source = str(root.get("source_id") or "")
+    if source.startswith("openlist") or source == "openlist":
+        config = load_config()
+        client = OpenListClient(
+            config.openlist_server_url,
+            config.openlist_username,
+            config.openlist_password,
+        )
+        return SourceCatalogScanner(source="openlist", client=client)
+    if source.startswith("local"):
+        adapter = get_source_adapter("local")
+        return SourceCatalogScanner(source="local", adapter=adapter, source_root=root.get("remote_locator") or "/")
+    # pan115 / baidu：目录树 TXT 输入文件必须从 job payload 显式传入
+    input_path = str(root.get("input_path") or "")
+    if not input_path:
+        raise ValueError(
+            f"{source} 来源的 discovery job 缺少 input_path（目录树 TXT 路径）"
+        )
+    adapter = get_source_adapter("pan115" if source.startswith("pan115") else "baidu")
+    return SourceCatalogScanner(
+        source="pan115" if source.startswith("pan115") else "baidu",
+        adapter=adapter, input_path=input_path, source_root=root.get("remote_locator") or "/",
+    )
+
+
+def _wait_for_backpressure(should_cancel) -> None:
+    """队列水位达到上限时协作式等待（不丢任务、不失败），降到恢复线继续。"""
+    while orchestrator.should_backoff():
+        if should_cancel is not None and should_cancel():
+            raise DiscoveryCancelled("取消请求：背压等待中")
+        time.sleep(1.0)
+
+
+def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=None) -> dict:
+    """扫描一个 source root，逐作品单元生成 revision 并即时入队 mirror。"""
+    root_id = str(payload.get("root_id") or "")
+    generation = int(payload.get("generation") or 0)
+    if not root_id:
+        raise ValueError("discovery payload 缺少 root_id")
+    root = catalog_store.get_source_root(root_id)
+    if root is None:
+        raise ValueError(f"source root 不存在: {root_id}")
+
+    scanner = _build_scanner(
+        {
+            "source_id": root.source_id,
+            "remote_locator": root.remote_locator,
+            "local_locator": root.local_locator,
+            "import_family": root.import_family,
+            "import_scope": root.import_scope,
+            "input_path": str(payload.get("input_path") or ""),
+        }
+    )
+    engine = DiscoveryEngine(
+        scanner,
+        source_id=root.source_id,
+        root_id=root_id,
+        generation=generation,
+    )
+
+    summary = {"plan_ready": 0, "needs_review": 0, "mirror_enqueued": 0}
+
+    def on_unit(result: dict) -> None:
+        if result.get("status") == "plan_ready" and result.get("revision_id"):
+            # closure 后仍须通过同一确认门槛；不确定的识别只能进入复核，
+            # 绝不能因“渐进导入”而绕过安全检查。
+            confirmed, _reason = revision_store.try_auto_confirm_revision(result["revision_id"])
+            if confirmed:
+                orchestrator.enqueue_mirror(result["revision_id"], result["unit_id"])
+                summary["plan_ready"] += 1
+                summary["mirror_enqueued"] += 1
+            else:
+                summary["needs_review"] += 1
+        elif result.get("status") == "needs_review":
+            summary["needs_review"] += 1
+        if progress_callback is not None:
+            progress_callback(
+                50, f"发现作品「{result.get('work_title') or result.get('boundary') or ''}」",
+                {
+                    "phase": "discovery_unit",
+                    "status": result.get("status"),
+                    "work_title": result.get("work_title") or "",
+                    "boundary": result.get("boundary") or "",
+                },
+            )
+
+    def rate_limiter() -> None:
+        _wait_for_backpressure(should_cancel)
+
+    try:
+        results = engine.run(
+            should_cancel=should_cancel,
+            progress_callback=progress_callback,
+            on_unit=on_unit,
+            rate_limiter=rate_limiter,
+        )
+    except DiscoveryCancelled as exc:
+        raise JobCancelledError(str(exc) or "任务已取消") from None
+
+    failed_paths = list(getattr(engine, "failed_paths", []))
+    summary["failed_count"] = len(failed_paths)
+    summary["failed_paths"] = failed_paths[:100]
+    if failed_paths and progress_callback is not None:
+        progress_callback(
+            100, f"扫描完成，{len(failed_paths)} 个目录暂不可用（再次导入可重试）",
+            {"phase": "discovery_done", "failed_count": len(failed_paths)},
+        )
+
+    return {
+        "root_id": root_id,
+        "generation": generation,
+        "units": results,
+        "summary": summary,
+    }
+
+
+def register_discovery_handler() -> None:
+    register("discovery_scan", handle_discovery_scan)

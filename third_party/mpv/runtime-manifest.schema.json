@@ -1,0 +1,121 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://kumiplayer.local/schemas/mpv/runtime-manifest.schema.json",
+  "title": "KumiPlayer MPV 运行时清单",
+  "description": "描述 KumiPlayer 使用的干净 MPV 二进制运行时来源、版本、校验和与分发状态。每个接入或升级的 MPV 运行时填写一份 runtime-manifest.json，本文件是该清单的 Schema。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "mpv_version",
+    "architecture",
+    "target_triple",
+    "upstream_repository",
+    "upstream_tag",
+    "upstream_commit",
+    "artifact_provider",
+    "artifact_filename",
+    "artifact_url",
+    "artifact_sha256",
+    "files",
+    "build_information",
+    "acquired_at",
+    "configuration_version",
+    "distribution_status",
+    "notes"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "运行时清单 Schema 版本，当前固定为 \"1.0\"。"
+    },
+    "mpv_version": {
+      "type": "string",
+      "description": "MPV 上游版本号，例如 \"0.39.0\"。"
+    },
+    "architecture": {
+      "type": "string",
+      "enum": ["x86_64", "aarch64", "x86"],
+      "description": "运行时架构。"
+    },
+    "target_triple": {
+      "type": "string",
+      "description": "构建目标三元组，例如 x86_64-w64-mingw32，用于区分 MinGW、MSVC 与 ARM 构建。"
+    },
+    "upstream_repository": {
+      "type": "string",
+      "format": "uri",
+      "description": "MPV 上游仓库地址，例如 https://github.com/mpv-player/mpv。"
+    },
+    "upstream_tag": {
+      "type": "string",
+      "description": "对应上游标签，例如 v0.39.0。"
+    },
+    "upstream_commit": {
+      "type": "string",
+      "description": "对应上游提交 SHA。"
+    },
+    "artifact_provider": {
+      "type": "string",
+      "description": "二进制来源提供方，例如 mpv-first-party-github-ci / scoop / 自建构建。"
+    },
+    "artifact_filename": {
+      "type": "string",
+      "description": "实际下载的原始压缩包文件名。"
+    },
+    "artifact_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "二进制下载地址。"
+    },
+    "artifact_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{64}$",
+      "description": "二进制 SHA-256 校验和。"
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "description": "运行时包含的文件清单。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "相对运行时根目录的文件路径。"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "description": "该文件 SHA-256 校验和。"
+          }
+        }
+      }
+    },
+    "build_information": {
+      "type": "object",
+      "description": "构建相关信息（若由 KumiPlayer 自建则必填）。",
+      "additionalProperties": true
+    },
+    "acquired_at": {
+      "type": "string",
+      "format": "date",
+      "description": "获取该运行时的时间（ISO 日期）。"
+    },
+    "configuration_version": {
+      "type": "string",
+      "description": "配套的 KumiPlayer 配置版本，指向 resources/mpv-runtime 下配置的版本标识。"
+    },
+    "distribution_status": {
+      "type": "string",
+      "enum": ["development-only", "qualified", "public-release"],
+      "description": "分发状态。development-only=仅本地开发；qualified=已通过验证；public-release=可进入正式安装包。未补齐许可证与验证材料前不得为 public-release。"
+    },
+    "notes": {
+      "type": "string",
+      "description": "补充说明：来源、验证情况、风险或回退方式。"
+    }
+  }
+}

@@ -1,0 +1,759 @@
+"""Source Catalog 存储（SQLite）。
+
+- source_roots 唯一（source_id + normalized_locator）；同来源重叠 root 拒绝；
+- 目录分页暂存 → 完整分页后单事务原子提交（node 新增/更新/tombstone +
+  directory checkpoint）；未完成分页不得产生 tombstone；
+- 所有提交带 generation fence（旧 generation 不得覆盖新 generation）；
+- 每批最多 500 条写入，支持取消检查与背压。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+from app.catalog.models import SourceNodeInput, SourceRootRecord
+from app.db.database import get_connection
+from app.db.transactions import transaction
+
+#: 单事务批量写入上限
+BATCH_WRITE_LIMIT = 500
+#: 目录深度保护线（防环/异常；不再是 12 层产品限制）
+MAX_DIRECTORY_DEPTH = 128
+#: 无原生 delta 的来源完成一次目录验证后，24 小时后进入滚动完整校验候选。
+VERIFY_INTERVAL = timedelta(hours=24)
+
+
+def now_iso() -> str:
+    return datetime.now(timezone(timedelta(hours=8))).isoformat()
+
+
+def normalize_locator(locator: str) -> str:
+    """规范化远端/本地定位（小写去尾斜杠；Windows 盘符保留大小写不敏感比较）。"""
+    value = (locator or "").strip()
+    if not value:
+        return ""
+    if "\\" in value and ":" in value:
+        return value.rstrip("\\/").lower()
+    return value.rstrip("/") or "/"
+
+
+# ============================================================
+# 来源与根
+# ============================================================
+
+def create_source(*, source_id: str, source_type: str, provider_id: str = "", ingest_method: str = "", connection_key: str = "", display_name: str = "") -> None:
+    conn = get_connection()
+    timestamp = now_iso()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO sources (
+            source_id, source_type, provider_id, ingest_method, connection_key,
+            capabilities_json, display_name, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, '{}', ?, 'active', ?, ?)
+        """,
+        (source_id, source_type, provider_id, ingest_method, connection_key, display_name, timestamp, timestamp),
+    )
+    conn.commit()
+
+
+def get_source(source_id: str) -> dict | None:
+    """按 source_id 读取来源记录（含 source_type / provider_id / connection_key）。"""
+    row = get_connection().execute(
+        "SELECT * FROM sources WHERE source_id = ?", (source_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _roots_with_prefix(source_id: str, normalized: str) -> list[SourceRootRecord]:
+    rows = get_connection().execute(
+        "SELECT * FROM source_roots WHERE source_id = ? ORDER BY normalized_locator",
+        (source_id,),
+    ).fetchall()
+    return [SourceRootRecord.from_row(row) for row in rows]
+
+
+def _locators_overlap(left: str, right: str) -> bool:
+    """两个规范化定位是否互为祖先，兼容 POSIX 与 Windows 分隔符。"""
+    left_value = (left or "").replace("\\", "/").rstrip("/") or "/"
+    right_value = (right or "").replace("\\", "/").rstrip("/") or "/"
+    if left_value == right_value:
+        return True
+    if left_value == "/" or right_value == "/":
+        return True
+    return left_value.startswith(right_value + "/") or right_value.startswith(left_value + "/")
+
+
+def create_source_root(
+    *,
+    source_id: str,
+    remote_locator: str,
+    local_locator: str = "",
+    import_family: str = "anime",
+    import_scope: str = "",
+    scan_policy: str = "standard",
+) -> SourceRootRecord:
+    """创建来源根；拒绝同来源中互相重叠的重复 root。"""
+    normalized = normalize_locator(remote_locator)
+    if not normalized:
+        raise ValueError("来源根定位不能为空")
+    for existing in _roots_with_prefix(source_id, normalized):
+        if _locators_overlap(normalized, existing.normalized_locator):
+            raise ValueError(
+                f"来源根与既有根重叠: {normalized} 与 {existing.normalized_locator}"
+            )
+    conn = get_connection()
+    timestamp = now_iso()
+    root_id = uuid.uuid4().hex
+    conn.execute(
+        """
+        INSERT INTO source_roots (
+            root_id, source_id, remote_locator, normalized_locator, local_locator,
+            import_family, import_scope, scan_policy, active_generation,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+        """,
+        (root_id, source_id, remote_locator, normalized, local_locator,
+         import_family, import_scope, scan_policy, timestamp, timestamp),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM source_roots WHERE root_id = ?", (root_id,)).fetchone()
+    return SourceRootRecord.from_row(row)
+
+
+def get_source_root(root_id: str) -> SourceRootRecord | None:
+    row = get_connection().execute(
+        "SELECT * FROM source_roots WHERE root_id = ?", (root_id,)
+    ).fetchone()
+    return SourceRootRecord.from_row(row) if row else None
+
+
+def list_source_roots(source_id: str = "") -> list[SourceRootRecord]:
+    if source_id:
+        rows = get_connection().execute(
+            "SELECT * FROM source_roots WHERE source_id = ? ORDER BY created_at", (source_id,)
+        ).fetchall()
+    else:
+        rows = get_connection().execute(
+            "SELECT * FROM source_roots ORDER BY created_at"
+        ).fetchall()
+    return [SourceRootRecord.from_row(row) for row in rows]
+
+
+# ============================================================
+# 导入批次
+# ============================================================
+
+def _batch_root_rows(batch_id: str) -> list[dict]:
+    rows = get_connection().execute(
+        """
+        SELECT batch_root.batch_id, batch_root.root_id, batch_root.sort_order,
+               batch_root.status, batch_root.generation, batch_root.error_kind,
+               root.source_id, root.remote_locator, root.normalized_locator,
+               root.local_locator, root.import_family, root.import_scope, root.scan_policy
+        FROM import_batch_roots AS batch_root
+        JOIN source_roots AS root ON root.root_id = batch_root.root_id
+        WHERE batch_root.batch_id = ?
+        ORDER BY batch_root.sort_order, batch_root.root_id
+        """,
+        (batch_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def create_import_batch(
+    *,
+    source_id: str,
+    roots: list[dict[str, Any]],
+    import_family: str = "anime",
+    mode: str = "auto_safe",
+) -> dict:
+    """原子创建一个导入批次及其多个不重叠来源根。
+
+    批次、root 与关系表必须作为单个事实写入：任一个 locator 非法、来源不存在
+    或与同来源既有/本批 root 重叠时，事务整体回滚，不留下半成品批次。
+    """
+    if not source_id:
+        raise ValueError("source_id 不能为空")
+    if not roots:
+        raise ValueError("导入批次至少需要一个来源根")
+
+    conn = get_connection()
+    timestamp = now_iso()
+    batch_id = uuid.uuid4().hex
+    prepared: list[dict[str, str]] = []
+
+    with transaction(conn) as tx:
+        if tx.execute(
+            "SELECT 1 FROM sources WHERE source_id = ?", (source_id,)
+        ).fetchone() is None:
+            raise ValueError("source 不存在")
+
+        existing = [
+            SourceRootRecord.from_row(row)
+            for row in tx.execute(
+                "SELECT * FROM source_roots WHERE source_id = ?", (source_id,)
+            ).fetchall()
+        ]
+        for raw_root in roots:
+            remote_locator = str(raw_root.get("remote_locator") or "").strip()
+            normalized = normalize_locator(remote_locator)
+            if not normalized:
+                raise ValueError("来源根定位不能为空")
+            # 同一目录重复导入：复用既有 root（幂等增量），不重复创建；
+            # 仅“重叠但不同”的 locator 才拒绝。
+            reused = next(
+                (p for p in existing if p.normalized_locator == normalized), None
+            )
+            if reused is not None:
+                prepared.append(
+                    {
+                        "root_id": reused.root_id,
+                        "remote_locator": reused.remote_locator,
+                        "normalized_locator": reused.normalized_locator,
+                        "local_locator": reused.local_locator
+                        or str(raw_root.get("local_locator") or "").strip(),
+                        "import_family": reused.import_family
+                        or str(raw_root.get("import_family") or import_family or "anime").strip(),
+                        "import_scope": reused.import_scope
+                        or str(raw_root.get("import_scope") or "").strip(),
+                        "scan_policy": reused.scan_policy or "standard",
+                        "reused": True,
+                    }
+                )
+                continue
+            for prior in [*existing, *prepared]:
+                prior_locator = (
+                    prior.normalized_locator
+                    if isinstance(prior, SourceRootRecord)
+                    else prior["normalized_locator"]
+                )
+                if _locators_overlap(normalized, prior_locator):
+                    raise ValueError(
+                        f"来源根与既有根重叠: {normalized} 与 {prior_locator}"
+                    )
+            prepared.append(
+                {
+                    "root_id": uuid.uuid4().hex,
+                    "remote_locator": remote_locator,
+                    "normalized_locator": normalized,
+                    "local_locator": str(raw_root.get("local_locator") or "").strip(),
+                    "import_family": str(raw_root.get("import_family") or import_family or "anime").strip(),
+                    "import_scope": str(raw_root.get("import_scope") or "").strip(),
+                    "scan_policy": str(raw_root.get("scan_policy") or "standard").strip(),
+                    "reused": False,
+                }
+            )
+
+        tx.execute(
+            """
+            INSERT INTO import_batches (
+                batch_id, status, mode, import_family, created_at, updated_at
+            ) VALUES (?, 'pending', ?, ?, ?, ?)
+            """,
+            (batch_id, mode, import_family or "anime", timestamp, timestamp),
+        )
+        for sort_order, root in enumerate(prepared):
+            if not root.get("reused"):
+                tx.execute(
+                    """
+                    INSERT INTO source_roots (
+                        root_id, source_id, remote_locator, normalized_locator, local_locator,
+                        import_family, import_scope, scan_policy, active_generation,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                    """,
+                    (
+                        root["root_id"], source_id, root["remote_locator"],
+                        root["normalized_locator"], root["local_locator"],
+                        root["import_family"], root["import_scope"], root["scan_policy"],
+                        timestamp, timestamp,
+                    ),
+                )
+            tx.execute(
+                """
+                INSERT INTO import_batch_roots (
+                    batch_id, root_id, sort_order, status, generation, error_kind
+                ) VALUES (?, ?, ?, 'pending', 0, '')
+                """,
+                (batch_id, root["root_id"], sort_order),
+            )
+
+    return get_import_batch(batch_id) or {}
+
+
+def get_import_batch(batch_id: str) -> dict | None:
+    row = get_connection().execute(
+        "SELECT * FROM import_batches WHERE batch_id = ?", (batch_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    batch = dict(row)
+    batch["roots"] = _batch_root_rows(batch_id)
+    return batch
+
+
+def list_import_batches(*, limit: int = 100) -> list[dict]:
+    rows = get_connection().execute(
+        "SELECT * FROM import_batches ORDER BY created_at DESC LIMIT ?", (limit,)
+    ).fetchall()
+    return [get_import_batch(str(row["batch_id"])) for row in rows]
+
+
+def list_import_batch_roots(batch_id: str) -> list[dict]:
+    return _batch_root_rows(batch_id)
+
+
+def update_import_batch(batch_id: str, *, status: str) -> None:
+    conn = get_connection()
+    cursor = conn.execute(
+        "UPDATE import_batches SET status = ?, updated_at = ? WHERE batch_id = ?",
+        (status, now_iso(), batch_id),
+    )
+    conn.commit()
+    if cursor.rowcount == 0:
+        raise KeyError(f"导入批次不存在: {batch_id}")
+
+
+def update_import_batch_root(
+    batch_id: str,
+    root_id: str,
+    *,
+    status: str | None = None,
+    generation: int | None = None,
+    error_kind: str | None = None,
+) -> None:
+    fields: dict[str, Any] = {}
+    if status is not None:
+        fields["status"] = status
+    if generation is not None:
+        fields["generation"] = generation
+    if error_kind is not None:
+        fields["error_kind"] = error_kind
+    if not fields:
+        return
+    assignments = ", ".join(f"{key} = ?" for key in fields)
+    values = [*fields.values(), batch_id, root_id]
+    conn = get_connection()
+    cursor = conn.execute(
+        f"UPDATE import_batch_roots SET {assignments} WHERE batch_id = ? AND root_id = ?",
+        values,
+    )
+    conn.commit()
+    if cursor.rowcount == 0:
+        raise KeyError(f"导入批次根不存在: {batch_id}/{root_id}")
+
+
+def bump_generation(root_id: str) -> int:
+    """递增 root 的 active_generation，返回新值。"""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE source_roots SET active_generation = active_generation + 1, updated_at = ? WHERE root_id = ?",
+        (now_iso(), root_id),
+    )
+    conn.commit()
+    row = conn.execute("SELECT active_generation FROM source_roots WHERE root_id = ?", (root_id,)).fetchone()
+    return int(row[0]) if row else 0
+
+
+def touch_successful_scan(root_id: str) -> None:
+    conn = get_connection()
+    conn.execute(
+        "UPDATE source_roots SET last_successful_scan_at = ?, updated_at = ? WHERE root_id = ?",
+        (now_iso(), now_iso(), root_id),
+    )
+    conn.commit()
+
+
+# ============================================================
+# scan_runs
+# ============================================================
+
+def create_scan_run(root_id: str, generation: int, mode: str = "full") -> str:
+    conn = get_connection()
+    run_id = uuid.uuid4().hex
+    conn.execute(
+        """
+        INSERT INTO scan_runs (run_id, root_id, generation, mode, status, started_at)
+        VALUES (?, ?, ?, ?, 'queued', ?)
+        """,
+        (run_id, root_id, generation, mode, now_iso()),
+    )
+    conn.commit()
+    return run_id
+
+
+def update_scan_run(run_id: str, status: str, error: str = "") -> None:
+    conn = get_connection()
+    conn.execute(
+        """
+        UPDATE scan_runs SET status = ?, finished_at = ?, error = ? WHERE run_id = ?
+        """,
+        (status, now_iso() if status in ("succeeded", "failed", "cancelled") else "", error, run_id),
+    )
+    conn.commit()
+
+
+# ============================================================
+# 目录检查点
+# ============================================================
+
+def upsert_directory(root_id: str, remote_path: str, *, parent_path: str = "", depth: int = 0) -> None:
+    conn = get_connection()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO source_directories (
+            root_id, remote_path, parent_path, depth, state
+        ) VALUES (?, ?, ?, ?, 'queued')
+        """,
+        (root_id, remote_path, parent_path, depth),
+    )
+    conn.commit()
+
+
+def get_directory(root_id: str, remote_path: str) -> dict | None:
+    row = get_connection().execute(
+        "SELECT * FROM source_directories WHERE root_id = ? AND remote_path = ?",
+        (root_id, remote_path),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def update_directory(root_id: str, remote_path: str, **fields: Any) -> None:
+    allowed = {
+        "state", "accepted_generation", "entry_count", "member_hash",
+        "last_verified_at", "next_verify_at", "retry_count", "last_error_kind",
+    }
+    assignments = [f"{key} = ?" for key in fields if key in allowed]
+    if not assignments:
+        return
+    values = [fields[key] for key in fields if key in allowed]
+    values.extend((root_id, remote_path))
+    get_connection().execute(
+        f"UPDATE source_directories SET {', '.join(assignments)} WHERE root_id = ? AND remote_path = ?",
+        values,
+    )
+    get_connection().commit()
+
+
+def list_pending_directories(root_id: str, *, limit: int = 200) -> list[dict]:
+    """frontier 扫描：待扫描（queued）目录按深度优先。
+
+    不领取 failed 目录：单次扫描中失败目录由调用方记录后跳过，避免同一轮
+    内无限重试卡死队列；下次任务触发时由 ``prepare_scan`` 统一恢复为
+    queued 再重试。
+    """
+    rows = get_connection().execute(
+        """
+        SELECT * FROM source_directories
+        WHERE root_id = ? AND state = 'queued'
+        ORDER BY depth ASC, remote_path ASC
+        LIMIT ?
+        """,
+        (root_id, limit),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_all_directories(root_id: str) -> list[dict]:
+    rows = get_connection().execute(
+        "SELECT * FROM source_directories WHERE root_id = ? ORDER BY depth, remote_path",
+        (root_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def prepare_scan(root_id: str, *, generation: int, mode: str = "incremental") -> None:
+    """把需要验证的目录写入持久 frontier。
+
+    ``incremental`` 只重新验证根目录、失败目录和到期目录；``full`` 才将整棵
+    已知目录树重新排队。这样 OpenList 的日常更新不会退化成每次全量递归扫描。
+    """
+    if mode not in {"incremental", "full"}:
+        raise ValueError(f"未知扫描模式: {mode}")
+    root = get_source_root(root_id)
+    if root is None:
+        raise ValueError("source root 不存在")
+    if generation < root.active_generation:
+        return
+    timestamp = now_iso()
+    conn = get_connection()
+    with transaction(conn) as tx:
+        existing = tx.execute(
+            "SELECT COUNT(*) AS count FROM source_directories WHERE root_id = ?",
+            (root_id,),
+        ).fetchone()
+        if not existing or int(existing["count"] or 0) == 0:
+            tx.execute(
+                """
+                INSERT OR IGNORE INTO source_directories (
+                    root_id, remote_path, parent_path, depth, state
+                ) VALUES (?, ?, '', 0, 'queued')
+                """,
+                (root_id, root.remote_locator),
+            )
+            return
+        if mode == "full":
+            tx.execute(
+                """
+                UPDATE source_directories SET state = 'queued'
+                WHERE root_id = ? AND state != 'scanning'
+                """,
+                (root_id,),
+            )
+            return
+        # 日常更新：根目录发现新增/移除直属成员；失败与到期目录负责滚动收敛。
+        tx.execute(
+            "UPDATE source_directories SET state = 'queued' WHERE root_id = ? AND remote_path = ?",
+            (root_id, root.remote_locator),
+        )
+        tx.execute(
+            """
+            UPDATE source_directories SET state = 'queued'
+            WHERE root_id = ? AND state = 'failed'
+            """,
+            (root_id,),
+        )
+        tx.execute(
+            """
+            UPDATE source_directories SET state = 'queued'
+            WHERE root_id = ? AND state = 'complete'
+              AND next_verify_at != '' AND next_verify_at <= ?
+            """,
+            (root_id, timestamp),
+        )
+
+
+def recover_interrupted_directories(root_id: str) -> int:
+    """重启恢复：遗留 scanning 恢复为 queued（complete 目录不重扫）。"""
+    conn = get_connection()
+    cursor = conn.execute(
+        "UPDATE source_directories SET state = 'queued', last_error_kind = 'interrupted' WHERE root_id = ? AND state = 'scanning'",
+        (root_id,),
+    )
+    conn.commit()
+    return cursor.rowcount
+
+
+# ============================================================
+# 分页暂存
+# ============================================================
+
+def new_stage_run() -> str:
+    return uuid.uuid4().hex
+
+
+def clear_stage(run_id: str) -> None:
+    conn = get_connection()
+    conn.execute("DELETE FROM source_stage_entries WHERE run_id = ?", (run_id,))
+    conn.commit()
+
+
+def add_stage_page(run_id: str, directory_path: str, page: int, entries: list[SourceNodeInput]) -> None:
+    conn = get_connection()
+    with transaction(conn) as tx:
+        tx.executemany(
+            """
+            INSERT OR REPLACE INTO source_stage_entries (
+                run_id, directory_path, remote_path, page, name, kind, size, mtime, logical_locator
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    run_id, directory_path, item.remote_path, page,
+                    item.name, item.kind, item.size, item.mtime,
+                    getattr(item, "logical_locator", "") or "",
+                )
+                for item in entries
+                if item.remote_path
+            ],
+        )
+
+
+def get_stage_entries(run_id: str) -> list[dict]:
+    rows = get_connection().execute(
+        "SELECT * FROM source_stage_entries WHERE run_id = ? ORDER BY page, remote_path",
+        (run_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def stage_member_hash(run_id: str) -> str:
+    """排序后的直属成员 hash（目录检查点用）。"""
+    lines = []
+    for row in sorted(get_stage_entries(run_id), key=lambda item: item["remote_path"]):
+        lines.append(
+            "\t".join(
+                (
+                    row["remote_path"],
+                    row["kind"],
+                    str(row["size"] if row["size"] is not None else ""),
+                    str(int(row["mtime"]) if row["mtime"] is not None else ""),
+                )
+            )
+        )
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+# ============================================================
+# 目录原子提交
+# ============================================================
+
+def commit_directory(
+    root_id: str,
+    remote_path: str,
+    run_id: str,
+    generation: int,
+    *,
+    max_batch: int = BATCH_WRITE_LIMIT,
+) -> dict:
+    """把完整分页读取的暂存区原子合并到 source_nodes 并落 directory checkpoint。
+
+    - 单事务：node 新增/更新 + 消失项 tombstone + checkpoint；
+    - 未完成分页（调用方保证）不得调用本函数，否则不产生 tombstone；
+    - 返回 diff 统计 {added, updated, missing, unchanged}。
+    """
+    conn = get_connection()
+    stage = get_stage_entries(run_id)
+    timestamp = now_iso()
+    member_hash = stage_member_hash(run_id)
+    stats = {"added": 0, "updated": 0, "missing": 0, "unchanged": 0}
+
+    with transaction(conn) as tx:
+        # active_generation 提交 fence：新 generation 开始后，旧 generation 的
+        # 迟到提交不得写入（否则会混入旧代事实、破坏增量语义）。
+        root_row = tx.execute(
+            "SELECT active_generation FROM source_roots WHERE root_id = ?", (root_id,)
+        ).fetchone()
+        if root_row is not None and int(root_row["active_generation"]) > generation:
+            tx.execute("DELETE FROM source_stage_entries WHERE run_id = ?", (run_id,))
+            return stats  # 丢弃旧代提交（不抛错，调用方按正常返回处理）
+
+        # 只读取本目录的直属成员（parent_path 精确匹配）：
+        # 若用 remote_path LIKE prefix% 会拉入深层子目录节点，
+        # 父目录提交时会把尚未扫描的深层内容误 tombstone。
+        current_rows = tx.execute(
+            "SELECT * FROM source_nodes WHERE root_id = ? AND parent_path = ?",
+            (root_id, remote_path),
+        ).fetchall()
+        current = {row["remote_path"]: row for row in current_rows}
+        stage_paths = set()
+        directory_row = tx.execute(
+            "SELECT depth FROM source_directories WHERE root_id = ? AND remote_path = ?",
+            (root_id, remote_path),
+        ).fetchone()
+        child_depth = int(directory_row["depth"] if directory_row else 0) + 1
+
+        for offset in range(0, len(stage), max_batch):
+            chunk = stage[offset:offset + max_batch]
+            for row in chunk:
+                remote = row["remote_path"]
+                stage_paths.add(remote)
+                existing = current.get(remote)
+                shape = (
+                    existing["kind"] == row["kind"]
+                    and existing["size"] == row["size"]
+                ) if existing else False
+                if existing is None:
+                    stats["added"] += 1
+                    tx.execute(
+                        """
+                        INSERT INTO source_nodes (
+                            root_id, remote_path, parent_path, name, kind, size, mtime,
+                            logical_locator,
+                            first_seen_generation, last_seen_generation, tombstone
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')
+                        """,
+                        (root_id, remote, row["directory_path"], row["name"], row["kind"],
+                         row["size"], row["mtime"], row.get("logical_locator") or "",
+                         generation, generation),
+                    )
+                elif shape and existing["mtime"] == row["mtime"]:
+                    stats["unchanged"] += 1
+                    tx.execute(
+                        """
+                        UPDATE source_nodes
+                        SET last_seen_generation = ?, tombstone = '',
+                            logical_locator = COALESCE(?, logical_locator)
+                        WHERE root_id = ? AND remote_path = ?
+                        """,
+                        (generation, row.get("logical_locator") or "", root_id, remote),
+                    )
+                else:
+                    stats["updated"] += 1
+                    tx.execute(
+                        """
+                        UPDATE source_nodes
+                        SET kind = ?, size = ?, mtime = ?, last_seen_generation = ?, tombstone = '',
+                            logical_locator = COALESCE(?, logical_locator)
+                        WHERE root_id = ? AND remote_path = ?
+                        """,
+                        (row["kind"], row["size"], row["mtime"], generation,
+                         row.get("logical_locator") or "", root_id, remote),
+                    )
+
+                # 目录 frontier 是持久状态：父目录一次完整提交后，把每个直属
+                # 子目录写成 queued。进程中断后 worker 从这里继续，不重建内存树。
+                if row["kind"] == "dir":
+                    tx.execute(
+                        """
+                        INSERT OR IGNORE INTO source_directories (
+                            root_id, remote_path, parent_path, depth, state
+                        ) VALUES (?, ?, ?, ?, 'queued')
+                        """,
+                        (root_id, remote, remote_path, child_depth),
+                    )
+
+        # 完整目录读取后：旧条目未出现且未 tombstone → missing
+        for remote, row in current.items():
+            if row["tombstone"]:
+                continue
+            if remote in stage_paths:
+                continue
+            if int(row["last_seen_generation"]) < generation:
+                stats["missing"] += 1
+                tx.execute(
+                    "UPDATE source_nodes SET tombstone = ? WHERE root_id = ? AND remote_path = ?",
+                    (timestamp, root_id, remote),
+                )
+
+        tx.execute("DELETE FROM source_stage_entries WHERE run_id = ?", (run_id,))
+        next_verify_at = (datetime.now(timezone(timedelta(hours=8))) + VERIFY_INTERVAL).isoformat()
+        tx.execute(
+            """
+            UPDATE source_directories
+            SET state = 'complete', accepted_generation = ?, entry_count = ?,
+                member_hash = ?, last_verified_at = ?, next_verify_at = ?, last_error_kind = ''
+            WHERE root_id = ? AND remote_path = ?
+            """,
+            (generation, len(stage), member_hash, timestamp, next_verify_at, root_id, remote_path),
+        )
+    return stats
+
+
+def update_node_provider(root_id: str, remote_path: str, provider_id: str, route_id: str) -> None:
+    """回填节点的提供商事实（目录级路由匹配结果，随入库持久化）。"""
+    get_connection().execute(
+        """
+        UPDATE source_nodes
+        SET provider_id = ?, route_id = ?, logical_locator = COALESCE(logical_locator, '')
+        WHERE root_id = ? AND remote_path = ?
+        """,
+        (provider_id, route_id, root_id, remote_path),
+    )
+    get_connection().commit()
+
+
+def list_nodes(root_id: str, *, include_tombstone: bool = False) -> list[dict]:
+    if include_tombstone:
+        rows = get_connection().execute(
+            "SELECT * FROM source_nodes WHERE root_id = ? ORDER BY remote_path", (root_id,)
+        ).fetchall()
+    else:
+        rows = get_connection().execute(
+            "SELECT * FROM source_nodes WHERE root_id = ? AND tombstone = '' ORDER BY remote_path",
+            (root_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]

@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "resources": {
+      "../packaging/runtime/backend/": "runtime/backend/",
+      "../packaging/runtime/mpv/": "runtime/mpv/",
+      "../packaging/runtime/root/WebView2Loader.dll": "WebView2Loader.dll"
+    }
+  }
+}

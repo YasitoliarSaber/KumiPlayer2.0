@@ -1,0 +1,105 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cargo/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+
+node_modules/
+dist/
+
+src-tauri/target/
+.build/
+packaging/runtime/
+
+logs/
+data/logs/
+runtime/
+
+# mpv runtime artifacts
+mpv/mpv.log
+mpv/mpv-plugin-check.log
+mpv/portable_config/cache/
+mpv/portable_config/watch_later/
+
+# Test data
+data/_test_local/
+
+# ===== 并发开发基线补充 2026-07-26 =====
+# 真实媒体库与用户数据：绝不纳入版本控制。
+# 含镜像 .strm、NFO、图片、播放记录、快照，以及可能残留明文凭据的 config.json。
+/data/
+/backend/data/
+
+# Python 虚拟环境
+/backend/.venv/
+/.venv/
+/backend/.pytest_runtime/
+
+# 构建与发布产物
+/release/
+/src-tauri/gen/
+
+# mpv 便携发行版（约 266MB 二进制，由 scripts/stage_mpv_runtime.ps1 消费，不纳入版本控制）
+/mpv/
+
+# 第三方干净 MPV 运行时二进制（目录说明跟踪，实际运行文件忽略）
+!/third_party/mpv/runtime/
+/third_party/mpv/runtime/*
+!/third_party/mpv/runtime/README.md
+
+# 工具运行时与本地环境
+/.reasonix/
+/.node_modules_cleanup_pending/
+/null/
+/.codex-vite.log
+/.env
+/.vscode/
+.claude/settings.local.json
+
+# 文档中未被引用的品牌概念图（磁盘保留，不纳入版本控制）
+/docs/assets/kumiplayer-brand-refined-concept.png
+
+# AI 旧内容归档：禁止删除文件，改为移动到此处
+/旧内容/
+
+# ===== 借鉴分析类文档 2026-08-10 =====
+# 外部项目借鉴分析仅供本地长期参考，不进入版本控制、不推送 GitHub。
+*项目分析与借鉴报告*.md
+
+# ===== 借鉴分析/参考类文档与 Agent 工作目录 2026-08-12 =====
+# 外部项目借鉴/调研/参考分析仅供本地长期参考：绝不进入版本控制、绝不推送 GitHub。
+# .context/ 是 Agent 跨会话工作目录（交接/调研/参考文档），一律不提交。
+.context/
+Fntv-Plus项目分析与借鉴报告_2026-07-28.md
+ScrapeFun项目分析与借鉴报告_2026-08-10.md
+KumiPlayer架构分析_2026-08-08.md
+
+# ===== 开发过程文档一律不提交（仅 README.md 公开）2026-08-12 =====
+docs/
+模式文档/
+AGENTS.md
+KumiPlayer主线程工作流控制器.md
+KumiPlayer任务对话提示词.md
+KumiPlayer架构分析_2026-08-08.md
+后端识别与规则库改进方案_2026-07-28.md
+媒体管理页面前端重构功能清单与设计参考_2026-07-30.md
+*.md
+!README.md
+
+# uosc_danmaku 第三方弹幕插件与运行数据（含凭据/历史），不提交
+resources/mpv-runtime/portable_config/scripts/uosc_danmaku/
+resources/mpv-runtime/portable_config/danmaku-history.json
+
+# 工具配置/开发基线/生图产物（不提交）
+.codex/
+.workbuddy/
+.github/
+.baseline-*.txt
+reasonix.toml
+skills-lock.json
+generated-images/

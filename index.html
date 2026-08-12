@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN" data-style="gallery" data-theme="fluent" data-motion="standard">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>KumiPlayer 2.0</title>
+    <script>
+      (() => {
+        try {
+          const persisted = JSON.parse(localStorage.getItem('kumiplayer-ui') || 'null');
+          const preferences = persisted && persisted.state ? persisted.state : {};
+          const savedTheme = preferences.appearanceMode === 'mono' ? 'mica' : preferences.appearanceMode;
+          const theme = ['fluent', 'cinema', 'mica'].includes(savedTheme) ? savedTheme : 'fluent';
+          const motion = ['reduced', 'standard', 'expressive'].includes(preferences.motionMode)
+            ? preferences.motionMode
+            : 'standard';
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.dataset.motion = motion;
+        } catch {
+          // 无法读取旧偏好时保留文档上的安全默认值，不阻断应用启动。
+        }
+      })();
+    </script>
+    <style data-kumi-boot-styles>
+      html {
+        --kumi-boot-bg: #eef3f9;
+        color-scheme: light;
+        background: var(--kumi-boot-bg);
+      }
+
+      html[data-theme='fluent'] {
+        --kumi-boot-bg: #eef3f9;
+        color-scheme: light;
+      }
+
+      html[data-theme='cinema'] {
+        --kumi-boot-bg: #080808;
+        color-scheme: dark;
+      }
+
+      html[data-theme='mica'] {
+        --kumi-boot-bg: #ffffff;
+        color-scheme: light;
+      }
+
+      html,
+      body,
+      #root {
+        min-height: 100%;
+        margin: 0;
+      }
+
+      /* 启动 splash 第二版：主题背景直接出现（不透明）+ 居中 96px 大图标（无外框）
+         一次性 opacity+scale 落位；configReady 到达即同步移除，不等待动画播完。 */
+      #kumi-boot-splash {
+        position: fixed;
+        z-index: 2147483647;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        pointer-events: none;
+        background: var(--kumi-boot-bg);
+      }
+
+      .kumi-boot-mark {
+        position: relative;
+        display: grid;
+        place-items: center;
+        opacity: 0;
+        transform: scale(.92);
+        animation: kumi-boot-enter 360ms cubic-bezier(.16, 1, .3, 1) 60ms forwards;
+      }
+
+      html[data-theme='cinema'] .kumi-boot-mark {
+        animation-duration: 280ms;
+      }
+
+      html[data-theme='mica'] .kumi-boot-mark {
+        animation-duration: 320ms;
+      }
+
+      .kumi-boot-mark img {
+        width: 96px;
+        height: 96px;
+        border-radius: 22px;
+      }
+
+      @keyframes kumi-boot-enter {
+        to { opacity: 1; transform: scale(1); }
+      }
+
+      html[data-motion='reduced'] .kumi-boot-mark {
+        opacity: 1;
+        transform: none;
+        animation: none;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .kumi-boot-mark {
+          opacity: 1;
+          transform: none;
+          animation: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="kumi-boot-splash" aria-hidden="true">
+      <div class="kumi-boot-mark">
+        <img src="/brand/kumiplayer-app-icon.svg" alt="" />
+      </div>
+    </div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

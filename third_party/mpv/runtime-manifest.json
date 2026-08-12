@@ -1,0 +1,132 @@
+{
+  "schema_version": "1.0",
+  "mpv_version": "0.41.0",
+  "architecture": "x86_64",
+  "target_triple": "x86_64-w64-mingw32",
+  "upstream_repository": "https://github.com/mpv-player/mpv",
+  "upstream_tag": "v0.41.0",
+  "upstream_commit": "g41f6a6450",
+  "artifact_provider": "mpv-first-party-github-ci",
+  "artifact_filename": "mpv-v0.41.0-x86_64-w64-mingw32.zip",
+  "artifact_url": "https://github.com/mpv-player/mpv/releases/download/v0.41.0/mpv-v0.41.0-x86_64-w64-mingw32.zip",
+  "artifact_sha256": "a49811c0752c108b8260636f9c6f6fcb97406641c98b30f1e7b500dfb20177de",
+  "files": [
+    {
+      "path": "avcodec-62.dll",
+      "sha256": "DA6E88180C23D5F27593364C781F9F4FBC62DD6305563FB15B97BA0AD4C82289"
+    },
+    {
+      "path": "avdevice-62.dll",
+      "sha256": "C4C7376AACBBBF0567627B4665E0C529DCFB31E3B10BEEA56E776CF7722EE6C2"
+    },
+    {
+      "path": "avfilter-11.dll",
+      "sha256": "62D619AB392A134EB40792C30F16FF823418B649E2F7A307FD11807DF3CCFE4E"
+    },
+    {
+      "path": "avformat-62.dll",
+      "sha256": "5A6E1752485017773435658453B1EBA769542FBF7F6F451D804A0F92A74F1DD3"
+    },
+    {
+      "path": "avutil-60.dll",
+      "sha256": "A1B0530106DD5A0292D183A3A9FD9A5817754FA532BB0DCDE3A24A98E0BA561A"
+    },
+    {
+      "path": "libass-9.dll",
+      "sha256": "5BD64A6EC88F00FE8E2B17E713E35D825DAD023A516423DCF6B068F5470FFEE5"
+    },
+    {
+      "path": "libdav1d.dll",
+      "sha256": "C6586274D646D68AB81830005B9B4AFC3FDC3B8EADA229DD6D6918D38FA59AB7"
+    },
+    {
+      "path": "libfreetype-6.dll",
+      "sha256": "CE7309487DB8BADEB4C52CA9C5D9B90C12CF8D18734C67E4B8D87F8D046955D7"
+    },
+    {
+      "path": "libfribidi-0.dll",
+      "sha256": "B788D4E865FDD6CBC39CB3D89D5BA04D8039D58B4BED345090196E8E5077B054"
+    },
+    {
+      "path": "libgcc_s_seh-1.dll",
+      "sha256": "306983C483D96A6D08A2DF044E360F0962E21DAC021BAF8311D3C0CB3B2C9DEF"
+    },
+    {
+      "path": "libharfbuzz-0.dll",
+      "sha256": "007D4832F00E370FAD9A255B5F83C6746E8CC77E210BE8781BF6791BD245205C"
+    },
+    {
+      "path": "libiconv-2.dll",
+      "sha256": "C5DAADC6C8021FA6759B106D14B733EA2A10CF91D3E9AE0EEAD2A04274C5A184"
+    },
+    {
+      "path": "liblcms2.dll",
+      "sha256": "94E5B99D06E5F1B0BC637C65D8FE736E21C898078B2D91267F93E8A6DBD64900"
+    },
+    {
+      "path": "libplacebo-358.dll",
+      "sha256": "5BD638535A1350803EBB371FB1AE76EBC9324F546AD67E7A1C38CDED870DCD20"
+    },
+    {
+      "path": "libshaderc_shared.dll",
+      "sha256": "326385A111F15DB45819FACABCD46714BF270D95F2095CFFD4D29A19C443888A"
+    },
+    {
+      "path": "libspirv-cross-c-shared.dll",
+      "sha256": "0D18BE367A9C4A6250AE5DDAF04201D4B01B9C5890E633679216FDCCCB43ADA7"
+    },
+    {
+      "path": "libssp-0.dll",
+      "sha256": "0B4CF4B0A5F4CEB08BC2B95E7837B72CE24C2A5E906C93EDD2661FACBCFE5173"
+    },
+    {
+      "path": "libstdc++-6.dll",
+      "sha256": "DC04A17D6E9FE93BCB0639E93ACA2811AD53C81C523E1909A2C24DAF827FD2CD"
+    },
+    {
+      "path": "libwinpthread-1.dll",
+      "sha256": "FC9F14551F6609DD51801DAEC2C194579D35345551EF84FE465CBDB3339C2A6F"
+    },
+    {
+      "path": "mpv-register.bat",
+      "sha256": "E3C354D13BFE4AE2B9BAFBD1B7609753C47F78A3A4989B082F34D5A938AA7A09"
+    },
+    {
+      "path": "mpv-unregister.bat",
+      "sha256": "D40F2F76E00E08287C39C15654E9350831E4418F1BD9619BC8DCFF0DFB055E91"
+    },
+    {
+      "path": "mpv.com",
+      "sha256": "86F720F6516A7B29B35CA4D9470A60541EECAEE085AB46C154ABCE4797867FA1"
+    },
+    {
+      "path": "mpv.exe",
+      "sha256": "3AD8364B572BFFC7980C5C4BB11B952B2DD2429C203971EBED890D214B6E07C1"
+    },
+    {
+      "path": "swresample-6.dll",
+      "sha256": "4214C5EF1F091218D2EB1554D769625E7F918AF5AFD6F518804AF1C61C058111"
+    },
+    {
+      "path": "swscale-9.dll",
+      "sha256": "75F9A2979BE77B3F1606A73C9C383BA46235030A9FE7C9327F944D2B1F5F787C"
+    },
+    {
+      "path": "vulkan-1.dll",
+      "sha256": "B2C068A078D86A6DF7F55A04634699A7656B09EE4F701C121E1DDBE6E98D77A3"
+    },
+    {
+      "path": "zlib1.dll",
+      "sha256": "F66DE1D6324848C68BB45A808882E396CEE910B0C561E848BEE9ED26558A3A50"
+    }
+  ],
+  "build_information": {
+    "provider": "MPV 官方 GitHub Actions CI",
+    "built_by": "mpv-player/mpv 官方 release 流程",
+    "mpv_self_reported": "v0.41.0-dev-g41f6a6450 (built on Dec 21 2025)"
+  },
+  "acquired_at": "2026-08-01",
+  "configuration_version": "mpv-runtime-config-2026-08-12-r14",
+  "distribution_status": "development-only",
+  "notes": "压缩包 SHA-256 来自 MPV 官方发布页，未在本机对原始 ZIP 重新计算；已对当前 27 个解压文件逐个计算并记录 SHA-256。upstream_commit 为 mpv.com --version 报告的构建短哈希，完整上游 SHA 未另行核对。第三方许可证与发布材料尚未完成，仅限本地开发使用。2026-08-10 新增播放器增强组件（uosc/thumbfast/Anime4K），来源、版本、SHA-256 与许可证统一记录于 components-manifest.json；配置版本随配置源变化更新。2026-08-10-r2 精简 Anime4K 菜单、增强 uosc 时间轴可读性并启用安全硬件解码回退。2026-08-10-r5 屏蔽 Ctrl+v 剪贴板加载，防止绕过受控队列；保留 mpv 官方默认键位。2026-08-10-r6 接入 mpv-stats.lua 中文翻译版（load-stats-overlay=no + scripts/stats.lua），许可证材料已补齐全套（mpv-stats-zh/LICENSE.md、mpv-v0.41.0/LICENSE.GPL/LGPL），mpv-stats-zh 的 README 与 LICENSE 矛盾仍在发布前复核清单中。2026-08-10-r8 切换完全自定义键位方案：input-builtin-bindings=no + input.conf 显式绑定，播放控制与画质调节键位已按旧整合包布局恢复（44 binds，r9）。2026-08-12-r12 分层架构：kumiplayer/ 自有层（脚本+强制配置）与 portable_config/ 可替换层分离，后端 --include/--script 加载，校验改自有层。r13 文档全面治理；r14 禁用 mpv 原生 OSD 进度条（演进记录重构/入口文档重写/快捷键表修正）。"
+}

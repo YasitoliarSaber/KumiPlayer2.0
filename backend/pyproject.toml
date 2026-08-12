@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kumiplayer-backend"
+version = "2.0.0"
+description = "KumiPlayer local media library backend and desktop tooling."
+readme = {text = "KumiPlayer local media library backend and desktop tooling.", content-type = "text/markdown"}
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "python-multipart>=0.0.6",
+    "websockets>=12.0",
+    "httpx[socks]>=0.25.0",
+    "pillow>=10.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+desktop = [
+    "pywebview>=5.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+src = [".", "../scripts"]
+exclude = [
+    ".git",
+    ".pytest_cache",
+    "__pycache__",
+    "data",
+    "src",
+    "mpv",
+    "node_modules",
+    "dist",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    "E501",
+]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "."
+files = ["app"]
+ignore_missing_imports = true
+check_untyped_defs = false
+warn_unused_ignores = false

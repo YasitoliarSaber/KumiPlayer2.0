@@ -1,0 +1,108 @@
+@layer recovery {
+  .recovery-screen {
+    display: grid;
+    min-height: 100vh;
+    padding: 32px;
+    place-items: center;
+    background: #171a1d;
+    color: #f5f7f8;
+    font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  }
+
+  .recovery-panel {
+    display: grid;
+    width: min(100%, 620px);
+    padding: 28px;
+    border: 1px solid rgb(255 255 255 / .14);
+    border-radius: 8px;
+    background: #22272b;
+    box-shadow: 0 20px 55px rgb(0 0 0 / .32);
+  }
+
+  .recovery-icon {
+    display: grid;
+    width: 42px;
+    height: 42px;
+    margin-bottom: 18px;
+    place-items: center;
+    border-radius: 50%;
+    background: rgb(225 186 83 / .14);
+    color: #e1ba53;
+  }
+
+  .recovery-copy > span {
+    color: rgb(255 255 255 / .58);
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
+  .recovery-copy h1 {
+    margin: 7px 0 9px;
+    font-size: 24px;
+    line-height: 1.25;
+  }
+
+  .recovery-copy p,
+  .recovery-status {
+    margin: 0;
+    color: rgb(255 255 255 / .72);
+    font-size: 14px;
+    line-height: 1.7;
+  }
+
+  .recovery-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 24px;
+  }
+
+  .recovery-actions button {
+    display: inline-flex;
+    min-height: 38px;
+    align-items: center;
+    gap: 8px;
+    padding: 0 13px;
+    border: 1px solid rgb(255 255 255 / .14);
+    border-radius: 6px;
+    background: rgb(255 255 255 / .06);
+    color: inherit;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 650;
+    cursor: pointer;
+  }
+
+  .recovery-actions button:hover:not(:disabled) { background: rgb(255 255 255 / .11); }
+  .recovery-actions button.primary { background: #e7ecef; color: #171a1d; }
+  .recovery-actions button.primary:hover:not(:disabled) { background: #fff; }
+  .recovery-actions button:disabled { cursor: default; opacity: .38; }
+  .recovery-actions button:focus-visible { outline: 2px solid #e1ba53; outline-offset: 2px; }
+
+  .recovery-status {
+    margin-top: 16px;
+    overflow-wrap: anywhere;
+  }
+
+  .recovery-detail {
+    margin-top: 18px;
+    color: rgb(255 255 255 / .58);
+    font-size: 12px;
+  }
+
+  .recovery-detail summary { cursor: pointer; }
+  .recovery-detail pre {
+    max-height: 180px;
+    margin: 10px 0 0;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  @media (max-width: 640px) {
+    .recovery-screen { padding: 16px; }
+    .recovery-panel { padding: 22px; }
+    .recovery-actions button { flex: 1 1 145px; justify-content: center; }
+  }
+}

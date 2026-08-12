@@ -1,0 +1,211 @@
+@layer foundation {
+  :root[data-style='gallery'] {
+    --app-bg: #ffffff;
+    --surface: #ffffff;
+    --surface-soft: #f3f5f7;
+    --surface-warm: #f7f2ee;
+    --text: #20242a;
+    --text-muted: #747b86;
+    --icon-muted: #626b78;
+    --icon-strong: #343b46;
+    --accent: #a16a46;
+    --accent-strong: #8f5833;
+    --border: #dce1e7;
+    --radius-card: 7px;
+    --radius-control: 8px;
+    --shadow-card: none;
+    --ease-out: cubic-bezier(.16, 1, .3, 1);
+  }
+
+  :root {
+    background-color: var(--app-bg);
+    color: var(--text);
+    font-family: 'Microsoft YaHei UI', 'Segoe UI Variable Text', 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, 'Helvetica Neue', Arial, sans-serif;
+    font-size: 17px;
+    line-height: 1.6;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    min-height: 100vh;
+    margin: 0;
+    padding: 0;
+    overscroll-behavior-y: contain;
+    font-size: 1rem;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    scrollbar-gutter: auto;
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  button {
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  img {
+    display: block;
+    max-width: 100%;
+  }
+
+  /* ------------------------------------------------------------------
+   * Fluent 2 权威 token 桥接层
+   * 值取自本地 @fluentui/tokens（webLightTheme / webDarkTheme），未加工。
+   * 用途：新增组件或页面直接消费 --kp-* 变量，避免继续在 index.css 末尾
+   *      堆补丁；旧代码不受影响。
+   * 覆盖优先级：本层位于 @layer foundation 内，后续 components/pages
+   *      layer 可自然覆盖。
+   * 参考：
+   *   - https://fluent2.microsoft.design/design-tokens
+   *   - https://fluent2.microsoft.design/color
+   *   - node_modules/@fluentui/tokens/lib/themes/*
+   * ------------------------------------------------------------------ */
+  :root {
+    /* 圆角阶梯 */
+    --kp-radius-none: 0;
+    --kp-radius-sm: 2px;
+    --kp-radius-md: 4px;
+    --kp-radius-lg: 6px;
+    --kp-radius-xl: 8px;
+    --kp-radius-2xl: 12px;
+    --kp-radius-3xl: 16px;
+    --kp-radius-4xl: 24px;
+    --kp-radius-circular: 10000px;
+
+    /* 描边宽度 */
+    --kp-stroke-thin: 1px;
+    --kp-stroke-thick: 2px;
+    --kp-stroke-thicker: 3px;
+    --kp-stroke-thickest: 4px;
+
+    /* 垂直间距（水平同值） */
+    --kp-space-xxs: 2px;
+    --kp-space-xs: 4px;
+    --kp-space-s-nudge: 6px;
+    --kp-space-s: 8px;
+    --kp-space-m-nudge: 10px;
+    --kp-space-m: 12px;
+    --kp-space-l: 16px;
+    --kp-space-xl: 20px;
+    --kp-space-xxl: 24px;
+    --kp-space-xxxl: 32px;
+
+    /* 字号 / 行高（Base 100..600） */
+    --kp-font-size-100: 10px;
+    --kp-font-size-200: 12px;
+    --kp-font-size-300: 14px;
+    --kp-font-size-400: 16px;
+    --kp-font-size-500: 20px;
+    --kp-font-size-600: 24px;
+    --kp-line-height-100: 14px;
+    --kp-line-height-200: 16px;
+    --kp-line-height-300: 20px;
+    --kp-line-height-400: 22px;
+    --kp-line-height-500: 28px;
+    --kp-line-height-600: 32px;
+
+    /* 动效时长 */
+    --kp-duration-ultra-fast: 50ms;
+    --kp-duration-faster: 100ms;
+    --kp-duration-fast: 150ms;
+    --kp-duration-normal: 200ms;
+    --kp-duration-gentle: 250ms;
+    --kp-duration-slow: 300ms;
+    --kp-duration-slower: 400ms;
+    --kp-duration-ultra-slow: 500ms;
+
+    /* 缓动曲线（Fluent 2 recommended set） */
+    --kp-curve-accelerate-mid: cubic-bezier(1, 0, 1, 1);
+    --kp-curve-decelerate-mid: cubic-bezier(0, 0, 0, 1);
+    --kp-curve-easy-ease: cubic-bezier(0.33, 0, 0.67, 1);
+    --kp-curve-easy-ease-max: cubic-bezier(0.8, 0, 0.2, 1);
+    --kp-curve-linear: cubic-bezier(0, 0, 1, 1);
+
+    /* 品牌锁定色（KumiPlayer 独有，非 Fluent） */
+    --kp-brand-navy: #121b2d;
+    --kp-brand-coral: #ff654f;
+  }
+
+  /* 浅色主题：fluent 与 mica 共用 Fluent 2 webLightTheme 中性阶
+     暗色主题：cinema 使用 webDarkTheme。
+     语义 token 与 --accent / --surface 等旧 token 并列存在，新代码优先用 --kp-* 系列。 */
+  :root[data-theme='fluent'],
+  :root[data-theme='mica'] {
+    --kp-color-bg-1: #ffffff;
+    --kp-color-bg-2: #fafafa;
+    --kp-color-bg-3: #f5f5f5;
+    --kp-color-bg-4: #f0f0f0;
+    --kp-color-bg-5: #ebebeb;
+    --kp-color-bg-6: #e6e6e6;
+    --kp-color-bg-alpha: rgba(255, 255, 255, 0.5);
+    --kp-color-bg-alpha-2: rgba(255, 255, 255, 0.8);
+    --kp-color-subtle-hover: #f5f5f5;
+    --kp-color-subtle-pressed: #e0e0e0;
+    --kp-color-fg-1: #242424;
+    --kp-color-fg-2: #424242;
+    --kp-color-fg-3: #616161;
+    --kp-color-fg-4: #707070;
+    --kp-color-fg-disabled: #bdbdbd;
+    --kp-color-fg-on-brand: #ffffff;
+    --kp-color-stroke-1: #d1d1d1;
+    --kp-color-stroke-2: #e0e0e0;
+    --kp-color-stroke-3: #f0f0f0;
+    --kp-color-stroke-accessible: #616161;
+    --kp-color-brand-bg: #0f6cbd;
+    --kp-color-brand-bg-hover: #115ea3;
+    --kp-color-brand-fg-1: #0f6cbd;
+    --kp-color-brand-fg-link: #115ea3;
+    --kp-color-brand-stroke: #0f6cbd;
+    --kp-shadow-2: 0 0 2px rgba(0, 0, 0, 0.12), 0 1px 2px rgba(0, 0, 0, 0.14);
+    --kp-shadow-4: 0 0 2px rgba(0, 0, 0, 0.12), 0 2px 4px rgba(0, 0, 0, 0.14);
+    --kp-shadow-8: 0 0 2px rgba(0, 0, 0, 0.12), 0 4px 8px rgba(0, 0, 0, 0.14);
+    --kp-shadow-16: 0 0 2px rgba(0, 0, 0, 0.12), 0 8px 16px rgba(0, 0, 0, 0.14);
+    --kp-shadow-28: 0 0 8px rgba(0, 0, 0, 0.12), 0 14px 28px rgba(0, 0, 0, 0.14);
+  }
+
+  :root[data-theme='cinema'] {
+    --kp-color-bg-1: #292929;
+    --kp-color-bg-2: #1f1f1f;
+    --kp-color-bg-3: #141414;
+    --kp-color-bg-4: #0a0a0a;
+    --kp-color-bg-5: #000000;
+    --kp-color-bg-6: #333333;
+    --kp-color-bg-alpha: rgba(26, 26, 26, 0.5);
+    --kp-color-bg-alpha-2: rgba(31, 31, 31, 0.7);
+    --kp-color-subtle-hover: #383838;
+    --kp-color-subtle-pressed: #2e2e2e;
+    --kp-color-fg-1: #ffffff;
+    --kp-color-fg-2: #d6d6d6;
+    --kp-color-fg-3: #adadad;
+    --kp-color-fg-4: #999999;
+    --kp-color-fg-disabled: #5c5c5c;
+    --kp-color-fg-on-brand: #ffffff;
+    --kp-color-stroke-1: #666666;
+    --kp-color-stroke-2: #525252;
+    --kp-color-stroke-3: #3d3d3d;
+    --kp-color-stroke-accessible: #adadad;
+    --kp-color-brand-bg: #115ea3;
+    --kp-color-brand-bg-hover: #0f6cbd;
+    --kp-color-brand-fg-1: #479ef5;
+    --kp-color-brand-fg-link: #479ef5;
+    --kp-color-brand-stroke: #479ef5;
+    --kp-shadow-2: 0 0 2px rgba(0, 0, 0, 0.24), 0 1px 2px rgba(0, 0, 0, 0.28);
+    --kp-shadow-4: 0 0 2px rgba(0, 0, 0, 0.24), 0 2px 4px rgba(0, 0, 0, 0.28);
+    --kp-shadow-8: 0 0 2px rgba(0, 0, 0, 0.24), 0 4px 8px rgba(0, 0, 0, 0.28);
+    --kp-shadow-16: 0 0 2px rgba(0, 0, 0, 0.24), 0 8px 16px rgba(0, 0, 0, 0.28);
+    --kp-shadow-28: 0 0 8px rgba(0, 0, 0, 0.24), 0 14px 28px rgba(0, 0, 0, 0.28);
+  }
+}
