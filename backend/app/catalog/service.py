@@ -19,6 +19,9 @@ from app.integrations.openlist.models import OpenListError
 MAX_PAGE_RETRIES = 2
 #: 网络错误类型（视为 stale/unknown，不判空）
 _STALE_ERROR_TYPES = ("network", "timeout", "rate_limit", "transient")
+#: 来源级安全失败：不得重试、不得转 PageConsistencyError 吞掉，必须向上传播
+#: （DiscoveryEngine → handler → JobDeferredError 等待冷却）
+_ABORT_SCAN_KINDS = frozenset({"risk_control", "rate_limit", "source_cooling_down"})
 
 
 class ScanCancelled(Exception):
@@ -198,6 +201,16 @@ def scan_directory_paginated(
         except PageConsistencyError as exc:
             last_error = exc
         except (OpenListError, OSError, ValueError) as exc:
+            # 来源级风控/限流/冷却：立即中止并向上传播（不重试、不转
+            # PageConsistencyError）。429 已在 client 层第一次响应即失败，
+            # 这里的 rate_limit 只可能是冷启动竞态，同样直接传播。
+            if getattr(exc, "kind", "") in _ABORT_SCAN_KINDS:
+                store.update_directory(
+                    root_id, remote_path,
+                    state="failed",
+                    last_error_kind=getattr(exc, "kind", "risk_control"),
+                )
+                raise
             last_error = exc
             if getattr(exc, "kind", type(exc).__name__.lower()) not in _STALE_ERROR_TYPES:
                 break  # 非网络错误不重试

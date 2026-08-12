@@ -80,6 +80,21 @@ class OpenListRiskControlError(OpenListError):
         super().__init__(message, status_code=405, kind="risk_control")
 
 
+class OpenListSourceCoolingDownError(OpenListError):
+    """来源处于冷却期，请求被网络准入层（最后一道门）拒绝。
+
+    在每次物理 HTTP attempt 之前由 ``source_health.can_request`` 抛出，
+    保证冷却期间**零网络请求**：不仅任务开始前拦截，扫描中途 405/429
+    触发冷却后，下一个目录的第一次 attempt 也会在这里立即失败。
+
+    与 OpenListRiskControlError 同级：都属于来源级安全失败，
+    不应被普通目录失败隔离逻辑吞掉（见 discovery / service 的传播）。
+    """
+
+    def __init__(self, message: str = "远端网盘疑似触发访问保护，KumiPlayer 已暂停该来源的自动请求"):
+        super().__init__(message, status_code=0, kind="source_cooling_down")
+
+
 class OpenListTimeoutError(OpenListError):
     """连接或读取超时。"""
 

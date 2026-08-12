@@ -677,3 +677,88 @@ class TestCooldownInterception:
         resp = client.get("/api/openlist/browse", params={"path": REMOTE_ROOT})
         assert resp.status_code == 200
         assert [e["name"] for e in resp.json()["entries"]] == ["动画", "说明.txt"]
+
+
+# ============================================================
+# 模块 1 Review Fix（R2）：冷却期间 API 入口零网络请求（网络准入层兜底）
+# ============================================================
+
+class TestCooldownNetworkAdmission:
+    """冷却中 routes/discover 与 legacy 导入任务体不发任何物理请求。
+
+    用真实 OpenListClient + MockTransport 替换 FakeOpenListClient，
+    直接统计物理请求次数（网络准入层在 client 内部，Fake 无法模拟）。
+    """
+
+    @pytest.fixture(autouse=True)
+    def real_client_factory(self, monkeypatch):
+        """把 app.api.openlist.OpenListClient 换成真实客户端 + MockTransport 工厂。"""
+        import httpx
+
+        from app.integrations.openlist.client import OpenListClient as RealClient
+        from app.integrations.openlist.governor import OpenListRequestGovernor
+
+        state = {"transport_calls": 0, "instances": []}
+
+        def handler(request):
+            state["transport_calls"] += 1
+            return httpx.Response(404, request=request)
+
+        def factory(server_url, username, password, **kwargs):
+            client = RealClient(
+                server_url, username, password,
+                transport=httpx.MockTransport(handler),
+                governor=OpenListRequestGovernor(rate_per_second=1000),
+                **kwargs,
+            )
+            state["instances"].append(client)
+            return client
+
+        monkeypatch.setattr("app.api.openlist.OpenListClient", factory)
+        return state
+
+    def _enter_cooldown(self, server_url="https://ol.example.com:5244", username="quark-user"):
+        from app.catalog import source_health
+        from app.integrations.openlist.governor import governor_connection_key
+
+        key = governor_connection_key(server_url, username)
+        source_health.enter_cooldown(key, reason_kind="risk_control", cooldown_seconds=3600)
+        return key
+
+    def test_routes_discover_cooling_down_zero_transport(self, client, tmp_path, real_client_factory):
+        """冷却中 routes/discover 被拒且零物理请求（此前无 API 层检查，靠准入层兜底）。"""
+        _save_config(client, tmp_path)
+        self._enter_cooldown()
+        resp = client.post("/api/openlist/routes/discover")
+        assert resp.status_code == 400
+        assert "访问保护" in resp.json()["detail"]
+        assert real_client_factory["transport_calls"] == 0
+
+    def test_legacy_scan_task_body_cooling_down_zero_transport(
+        self, tmp_path, real_client_factory,
+    ):
+        """legacy import/rescan 共用的任务体：冷却时构造 client 但零物理请求。"""
+        from app.api.openlist import _run_openlist_scan_task
+        from app.integrations.openlist.models import OpenListSourceCoolingDownError
+
+        self._enter_cooldown()
+        mount = tmp_path / "quark"
+        mount.mkdir()
+        with pytest.raises(OpenListSourceCoolingDownError):
+            _run_openlist_scan_task(
+                "https://ol.example.com:5244",
+                "quark-user",
+                "p@ssw0rd",
+                REMOTE_ROOT,
+                str(mount),
+                "anime",
+                "",
+            )
+        assert real_client_factory["transport_calls"] == 0
+
+    def test_routes_discover_healthy_still_works(self, client, tmp_path, real_client_factory):
+        """无冷却：routes/discover 正常发出物理请求（对照）。"""
+        _save_config(client, tmp_path)
+        resp = client.post("/api/openlist/routes/discover")
+        assert resp.status_code == 400  # MockTransport 固定 404 → 归一化为错误
+        assert real_client_factory["transport_calls"] >= 1

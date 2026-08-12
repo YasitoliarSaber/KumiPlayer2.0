@@ -11,6 +11,7 @@ import json
 import httpx
 import pytest
 
+from app.catalog import source_health as _source_health_module
 from app.integrations.openlist.client import (
     OpenListClient,
     join_remote_path,
@@ -24,12 +25,21 @@ from app.integrations.openlist.models import (
     OpenListEntry,
     OpenListError,
     OpenListNetworkError,
+    OpenListNotFoundError,
     OpenListPermissionError,
     OpenListRateLimitedError,
     OpenListRedirectError,
     OpenListRiskControlError,
+    OpenListSourceCoolingDownError,
     OpenListTimeoutError,
     OpenListValidationError,
+)
+
+#: R1（source_health 新语义）是否已落地：irrelevant kinds（auth/permission/
+#: not_found/validation/redirect/scan_limit）不累计不冷却 + 单探针原子准入。
+#: 未落地时相关用例跳过，由父会话在 R1 完成后统一验证。
+_R1_IRRELEVANT_LANDED = bool(
+    getattr(_source_health_module, "BREAKER_IRRELEVANT_KINDS", None)
 )
 
 
@@ -49,16 +59,37 @@ def _entry(name: str, is_dir: bool = False, size: int | None = None, modified: i
 
 def make_client(handler, **kwargs) -> OpenListClient:
     transport = httpx.MockTransport(handler)
+    # 限速语义由 test_openlist_governor.py 单独覆盖：默认注入快速 governor，
+    # 避免共享全局单例 1 req/s 拖慢既有用例（限速器本身不参与断言）；
+    # 测试可显式传入自定义 governor（如计数子类）覆盖默认。
+    kwargs.setdefault("governor", OpenListRequestGovernor(rate_per_second=1000))
     return OpenListClient(
         "https://ol.example.com",
         "user",
         "secret-pass",
         transport=transport,
-        # 限速语义由 test_openlist_governor.py 单独覆盖：这里注入快速 governor，
-        # 避免共享全局单例 1 req/s 拖慢既有用例（限速器本身不参与断言）。
-        governor=OpenListRequestGovernor(rate_per_second=1000),
         **kwargs,
     )
+
+
+@pytest.fixture(autouse=True)
+def isolated_db(tmp_path, monkeypatch):
+    """文件级 DB 隔离：客户端每次物理请求前都会查 source_health。
+
+    没有独立 DB 的测试会落到共享的 .pytest_runtime/data/kumiplayer.db
+    （含历史冷却记录），导致 can_request 误判 cooling_down。
+    """
+    from app.db.database import close_connection, init_db
+
+    db_path = tmp_path / "openlist_client.db"
+    monkeypatch.setattr("app.db.database._db_path", db_path)
+    import app.db.database as db_mod
+
+    if hasattr(db_mod._local, "connection"):
+        db_mod._local.connection = None
+    init_db()
+    yield
+    close_connection()
 
 
 # ============================================================
@@ -264,28 +295,61 @@ class TestListDir:
         with pytest.raises(OpenListAuthError):
             client.list_dir("/")
 
-    def test_429_respects_retry_after_then_succeeds(self):
+    def test_429_first_response_raises_no_hidden_retry(self):
+        """429 第一次响应即结束：不再 sleep+continue 隐藏重试。"""
+        calls = []
         sleeps = []
 
         def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/api/auth/login":
-                return _json_response(200, {"code": 200, "message": "success", "data": {"token": "t"}})
-            if len(sleeps) == 0:
-                return httpx.Response(429, headers={"retry-after": "2"}, request=request)
-            return _json_response(200, _fs_list_payload("/", [_entry("ok.mkv")]))
+            calls.append(1)
+            return httpx.Response(429, headers={"retry-after": "2"}, request=request)
 
-        client = make_client(handler, sleep=sleeps.append)
-        page = client.list_dir("/")
-        assert sleeps == [2.0]
-        assert [e.name for e in page.entries] == ["ok.mkv"]
+        client = make_client(handler, max_attempts=3, sleep=sleeps.append)
+        client._token = "t"
+        with pytest.raises(OpenListRateLimitedError) as exc:
+            client.list_dir("/")
+        assert len(calls) == 1  # 物理请求只有 1 次
+        assert sleeps == []  # 没有任何隐藏退避等待
+        assert exc.value.retry_after == 2.0
 
     def test_429_exhausted_raises_rate_limited(self):
+        """429 语义变更后：max_attempts 不改变行为，第一次响应即失败。"""
+        calls = []
+
         def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
             return httpx.Response(429, headers={"retry-after": "1"}, request=request)
 
         client = make_client(handler, max_attempts=2, sleep=lambda _: None)
+        client._token = "t"
         with pytest.raises(OpenListRateLimitedError):
             client.list_dir("/")
+        assert len(calls) == 1
+
+    def test_500_retries_all_through_governor(self):
+        """5xx 保留有限重试：三次物理请求每次都经过 governor acquire。"""
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            return httpx.Response(500, request=httpx.Request("POST", "http://test"))
+
+        class _CountingGovernor(OpenListRequestGovernor):
+            def __init__(self):
+                super().__init__(rate_per_second=1000)
+                self.acquire_calls = 0
+
+            def acquire(self, conn_key):
+                self.acquire_calls += 1
+                return super().acquire(conn_key)
+
+        governor = _CountingGovernor()
+        client = make_client(handler, max_attempts=3, sleep=lambda _: None, governor=governor)
+        client._token = "t"
+        with pytest.raises(OpenListNetworkError):
+            client.list_dir("/")
+        assert len(calls) == 3
+        assert governor.acquire_calls == 3  # 每个物理 attempt 都经过限速器
 
     def test_timeout_retries_then_raises(self):
         sleeps = []
@@ -460,19 +524,6 @@ class TestRiskControl:
 class TestSourceHealthReporting:
     """客户端最终结果按连接键上报 source_health（临时 SQLite 隔离）。"""
 
-    @pytest.fixture(autouse=True)
-    def db(self, tmp_path, monkeypatch):
-        from app.db.database import close_connection, init_db
-
-        db_path = tmp_path / "health.db"
-        monkeypatch.setattr("app.db.database._db_path", db_path)
-        import app.db.database as db_mod
-
-        if hasattr(db_mod._local, "connection"):
-            db_mod._local.connection = None
-        init_db()
-        yield
-        close_connection()
 
     def test_success_list_dir_records_healthy(self):
         from app.catalog import source_health
@@ -544,3 +595,163 @@ class TestSourceHealthReporting:
         assert record.reason_kind == "timeout"
         assert record.consecutive_failures == 1
         assert not record.in_cooldown  # 未达阈值，不冷却
+
+
+# ============================================================
+# 模块 1 Review Fix（R2）：网络准入层（最后一道门）+ 冷却零请求
+# ============================================================
+
+class TestNetworkAdmission:
+    """每次物理 attempt 前的 source_health 准入：冷却中零网络请求。"""
+
+
+    def test_cooling_down_list_dir_zero_transport_calls(self):
+        """冷却中 list_dir 直接抛 OpenListSourceCoolingDownError，物理请求数 == 0。"""
+        from app.catalog import source_health
+
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            return _json_response(200, _fs_list_payload("/", [_entry("ok.mkv")]))
+
+        client = make_client(handler)
+        client._token = "t"
+        source_health.enter_cooldown(
+            client._conn_key, reason_kind="risk_control", cooldown_seconds=3600,
+        )
+        with pytest.raises(OpenListSourceCoolingDownError) as exc:
+            client.list_dir("/")
+        assert calls == []  # 零物理请求
+        assert exc.value.kind == "source_cooling_down"
+        assert "访问保护" in str(exc.value)
+
+    def test_cooling_down_login_zero_transport_calls(self):
+        """冷却中 login 同样在准入处拦截，零物理请求。"""
+        from app.catalog import source_health
+
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            return _json_response(200, {"code": 200, "data": {"token": "t"}})
+
+        client = make_client(handler)
+        source_health.enter_cooldown(
+            client._conn_key, reason_kind="rate_limit", cooldown_seconds=3600,
+        )
+        with pytest.raises(OpenListSourceCoolingDownError):
+            client.login()
+        assert calls == []
+
+    def test_cooldown_expiry_probe_allows_request(self):
+        """冷却到期后单探针放行：list_dir 内部第一次 can_request 转 probe 并发请求。"""
+        from app.catalog import source_health
+
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            return _json_response(200, _fs_list_payload("/", [_entry("ok.mkv")]))
+
+        client = make_client(handler)
+        client._token = "t"
+        source_health.enter_cooldown(
+            client._conn_key, reason_kind="risk_control",
+            cooldown_seconds=100, now=1000.0,
+        )
+        # 真实 now 已超过冷却窗口：客户端内部第一次 can_request 原子占用
+        # 探针（返回 True），请求正常发出；探针成功后回 healthy。
+        page = client.list_dir("/")
+        assert page.total == 1
+        assert len(calls) == 1
+        record = source_health.get_health(client._conn_key)
+        assert record.state == "healthy"  # 探针成功后回 healthy
+
+    def test_probe_is_single_consumer(self):
+        """冷却到期单探针：第一个调用者占用后，并发调用者仍被拒绝。"""
+        from app.catalog import source_health
+
+        client = make_client(lambda request: _json_response(200))
+        client._token = "t"
+        source_health.enter_cooldown(
+            client._conn_key, reason_kind="risk_control",
+            cooldown_seconds=100, now=1000.0,
+        )
+        allowed, record = source_health.can_request(client._conn_key)
+        assert allowed and record.state == "probe"
+        # 探针已被占用：第二个调用者（如并发线程/下一个目录）被拒绝
+        allowed2, _ = source_health.can_request(client._conn_key)
+        assert not allowed2
+
+    def test_429_then_next_call_blocked_at_admission(self):
+        """429 触发冷却后，下一次 list_dir 在准入处被拦（零请求）。"""
+        from app.catalog import source_health
+
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            return httpx.Response(429, headers={"retry-after": "1"}, request=request)
+
+        client = make_client(handler, max_attempts=1, sleep=lambda _: None)
+        client._token = "t"
+        with pytest.raises(OpenListRateLimitedError):
+            client.list_dir("/")
+        assert len(calls) == 1
+        assert source_health.get_health(client._conn_key).in_cooldown
+        # 冷却中第二次调用：准入处直接拒绝，不再发请求
+        with pytest.raises(OpenListSourceCoolingDownError):
+            client.list_dir("/")
+        assert len(calls) == 1
+
+
+@pytest.mark.skipif(
+    not _R1_IRRELEVANT_LANDED,
+    reason="依赖 R1：source_health irrelevant kinds 未落地，由父会话在 R1 完成后统一验证",
+)
+class TestIrrelevantKindsNoCooldown:
+    """403/404/auth 连续失败不进入来源冷却（R1 契约：irrelevant kinds 不累计）。"""
+
+
+    def _assert_no_cooldown(self, client):
+        from app.catalog import source_health
+
+        record = source_health.get_health(client._conn_key)
+        assert not record.in_cooldown
+        assert record.consecutive_failures == 0
+
+    def test_403_times_three_no_cooldown(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return _json_response(200, {"code": 403, "message": "no", "data": None})
+
+        client = make_client(handler)
+        client._token = "t"
+        for _ in range(3):
+            with pytest.raises(OpenListPermissionError):
+                client.list_dir("/")
+        self._assert_no_cooldown(client)
+
+    def test_404_times_three_no_cooldown(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return _json_response(200, {"code": 404, "message": "gone", "data": None})
+
+        client = make_client(handler)
+        client._token = "t"
+        for _ in range(3):
+            with pytest.raises(OpenListNotFoundError):
+                client.list_dir("/")
+        self._assert_no_cooldown(client)
+
+    def test_auth_times_three_no_cooldown(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/auth/login":
+                return _json_response(200, {"code": 401, "message": "bad", "data": None})
+            return _json_response(200, {"code": 401, "message": "bad", "data": None})
+
+        client = make_client(handler)
+        client._token = "stale"
+        for _ in range(3):
+            with pytest.raises(OpenListAuthError):
+                client.list_dir("/")
+        self._assert_no_cooldown(client)

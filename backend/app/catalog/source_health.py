@@ -11,7 +11,13 @@
 - 最终收到 429 → cooling_down（不让 JobRunner 短时间高频自动重试）；
 - 连续 transient 失败（network/timeout/5xx 等）→ 达到阈值后才进入冷却；
   单个 500 不会把整个账号封死，几十个连续失败也不会永远扫下去；
-- 冷却结束后的下一次请求按 probe 处理：成功回 healthy，再遇风险立刻再冷却。
+- 目录级/根级 known non-transient 错误（auth/permission/not_found/validation/
+  redirect/scan_limit）**不参与 circuit-breaker**：不累计失败计数、不触发冷却，
+  仅更新最近失败原因与时间——403/404/认证失败是资源/路径问题，绝不能让它们
+  把整个网盘连接冻住 30 分钟；
+- 冷却结束后通过**原子单探针**放行：只有第一个调用者获得探针许可
+  （state 置 probe），其余并发调用者仍被拒绝，避免多探针并发；
+  探针成功回 healthy，再遇风险立刻再冷却。
 
 外部调用方通过 :func:`can_request` 拦截发请求前的检查；通过
 :func:`record_success` / :func:`record_failure` 上报每次最终结果。
@@ -41,10 +47,38 @@ STATE_HEALTHY = "healthy"
 STATE_COOLING_DOWN = "cooling_down"
 STATE_PROBE = "probe"
 
-#: 触发立即冷却的失败类型
+#: breaker relevant：参与 circuit-breaker 累计的失败类型。
+#: risk_control/rate_limit 立即冷却；其余累计 consecutive_failures 达
+#: TRANSIENT_FAILURE_THRESHOLD 后冷却（未知 kind 归入 "unknown"）。
+BREAKER_RELEVANT_KINDS = {
+    "risk_control",
+    "rate_limit",
+    "network",
+    "timeout",
+    "server_error",
+    "transient",
+    "page_consistency",
+    "unknown",
+}
+
+#: breaker irrelevant：目录级/根级 known non-transient 问题。
+#: 不累计 circuit-breaker failure count、不触发冷却，仅更新
+#: last_failure_at / reason_kind / updated_at（state / consecutive_failures /
+#: cooldown_until 保持原状）——403/404/auth 绝不能让整个连接进入冷却。
+BREAKER_IRRELEVANT_KINDS = {
+    "auth",
+    "permission",
+    "not_found",
+    "validation",
+    "redirect",
+    "scan_limit",
+}
+
+#: 触发立即冷却的失败类型（breaker relevant 子集）
 _IMMEDIATE_COOLDOWN_KINDS = {"risk_control", "rate_limit"}
-#: 计入连续失败计数的类型（其余未知类型一律按 transient 处理）
-_TRANSIENT_KINDS = {"network", "timeout", "server_error", "transient", "page_consistency", "unknown"}
+#: 计入连续失败计数的类型（breaker relevant 减去立即冷却部分；
+#: 其余未知类型一律归一化为 unknown 计入累计）
+_TRANSIENT_KINDS = BREAKER_RELEVANT_KINDS - _IMMEDIATE_COOLDOWN_KINDS
 
 
 class SourceHealthRecord:
@@ -182,9 +216,32 @@ def record_failure(source_id: str, kind: str, *, now: float | None = None) -> So
     """记录一次最终失败，并按失败类型推进状态机。
 
     返回更新后的记录；调用方可通过 ``in_cooldown`` 判断是否需要停止后续请求。
+
+    分类语义：
+    - breaker relevant：risk_control/rate_limit 立即冷却；其余累计连续失败，
+      达阈值才冷却（未知 kind 归为 ``unknown``）；
+    - breaker irrelevant（auth/permission/not_found/validation/redirect/
+      scan_limit）：目录级/根级 known non-transient 问题，不累计不冷却，
+      仅更新 last_failure_at / reason_kind / updated_at，state /
+      consecutive_failures / cooldown_until 保持原状。
     """
     now = now if now is not None else time.time()
     current = get_health(source_id)
+
+    if kind in BREAKER_IRRELEVANT_KINDS:
+        # known non-transient：不累计 circuit-breaker 计数、不触发冷却，
+        # 仅记录最近一次失败原因与时间；state / cooldown_until 保持原状。
+        _upsert(
+            source_id,
+            state=current.state,
+            reason_kind=kind,
+            consecutive_failures=current.consecutive_failures,
+            cooldown_until=current.cooldown_until,
+            last_failure_at=now,
+            last_success_at=current.last_success_at,
+            now=now,
+        )
+        return get_health(source_id)
 
     if kind in _IMMEDIATE_COOLDOWN_KINDS:
         cooldown = (
@@ -233,27 +290,39 @@ def can_request(source_id: str, *, now: float | None = None) -> tuple[bool, Sour
 
     返回 (allowed, record)：
     - 冷却中 → (False, record)；
-    - 冷却期已过 → 自动转为 probe 状态并返回 (True, record)，允许下一次
-      请求作为探针（probe 成功回 healthy，再遇风险立即再冷却）；
+    - 冷却期已过 → **原子单探针抢占**：仅第一个调用者获得探针许可，
+      (True, probe_record)（state 置 probe、cooldown_until 置 0）；
+      并发/后续调用者 (False, 最新 record)，防止多探针并发；
+    - probe 中（探针已发出、尚未上报结果）→ (False, record)；
     - 无记录 / healthy → (True, record)。
+
+    抢占通过 ``UPDATE ... WHERE source_id=? AND state='cooling_down'`` 保证
+    原子性：并发下只有一个调用者能匹配该条件（affected rowcount=1），
+    其余调用者 rowcount=0 判定未抢到。
     """
     now = now if now is not None else time.time()
     record = get_health(source_id)
     if record.state != STATE_COOLING_DOWN:
+        # probe 中不允许再发请求（单探针：一个来源同一时刻只允许一个探针）
+        if record.state == STATE_PROBE:
+            return False, record
         return True, record
     if now < record.cooldown_until:
         return False, record
-    # 冷却期已结束：转 probe，允许下一次请求探活
-    _upsert(
-        source_id,
-        state=STATE_PROBE,
-        reason_kind=record.reason_kind,
-        consecutive_failures=record.consecutive_failures,
-        cooldown_until=0.0,
-        last_failure_at=record.last_failure_at,
-        last_success_at=record.last_success_at,
-        now=now,
+    # 冷却期已结束：原子抢占单探针许可（并发下只有一个调用者能抢到）
+    conn = get_connection()
+    cursor = conn.execute(
+        """
+        UPDATE source_health
+        SET state = ?, cooldown_until = ?, updated_at = ?
+        WHERE source_id = ? AND state = ?
+        """,
+        (STATE_PROBE, 0.0, now, source_id, STATE_COOLING_DOWN),
     )
+    if cursor.rowcount == 0:
+        # 已被并发调用者抢先转为 probe：本调用者不得放行
+        return False, get_health(source_id)
+    conn.commit()
     return True, get_health(source_id)
 
 

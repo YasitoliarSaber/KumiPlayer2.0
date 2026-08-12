@@ -27,6 +27,11 @@ class DiscoveryCancelled(Exception):
     pass
 
 
+#: 扫描必须立即中止（并向 handler 传播为 JobDeferredError）的来源级错误类型。
+#: 普通 OpenListError（404/403/网络等）仍按目录失败隔离收集。
+_ABORT_SCAN_KINDS = frozenset({"risk_control", "rate_limit", "source_cooling_down"})
+
+
 def _check_cancel(should_cancel: Callable[[], bool] | None) -> None:
     if should_cancel is not None and should_cancel():
         raise DiscoveryCancelled()
@@ -187,7 +192,13 @@ class DiscoveryEngine:
                 )
             except ScanCancelled:
                 raise
-            except (PageConsistencyError, OpenListError, OSError, ValueError):
+            except (PageConsistencyError, OpenListError, OSError, ValueError) as exc:
+                # 来源级风控/限流/冷却：整棵扫描必须立即中止并向上传播
+                # （handler 转 JobDeferredError 等待冷却），绝不能当作普通
+                # 目录失败收集后继续扫描下一个目录（否则冷却期间仍会向
+                # 同一账号发请求）。普通错误保持 failed_paths 隔离。
+                if getattr(exc, "kind", "") in _ABORT_SCAN_KINDS:
+                    raise
                 # 单目录失败不中断整个 root：目录已由 service 标记 failed，
                 # 记录后继续扫描其余目录；下次任务触发时 prepare_scan 会
                 # 把 failed 恢复为 queued 统一重试（渐进收敛）。

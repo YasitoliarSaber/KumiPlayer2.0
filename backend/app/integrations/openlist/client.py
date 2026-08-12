@@ -48,6 +48,7 @@ from app.integrations.openlist.models import (
     OpenListRateLimitedError,
     OpenListRedirectError,
     OpenListRiskControlError,
+    OpenListSourceCoolingDownError,
     OpenListTimeoutError,
     OpenListValidationError,
 )
@@ -307,14 +308,27 @@ class OpenListClient:
 
         返回 (http_status, body)。401 认证失败仅允许一次重登重试。
 
+        网络准入（最后一道门）：**每个物理 attempt 之前**都执行
+        「source_health 健康准入 → governor 限速 acquire → HTTP 请求」。
+        冷却中（含扫描中途 405/429 触发冷却后）在下一次 attempt 的准入处
+        立即抛 :class:`OpenListSourceCoolingDownError`，不再发任何请求。
+
+        429 语义：**第一次响应即结束**，不再 sleep+continue 隐藏重试；
+        直接 raise :class:`OpenListRateLimitedError`，由外层统一上报
+        ``record_failure('rate_limit')`` 进入来源冷却。
+
         风控识别优先级最高：明确 405 拦截页时**立即失败为 risk_control**，
         不做第二、第三次自动重试，避免继续向同一账号发请求。
         """
-        # 连接级限速：同一连接键的请求间隔 >= 1/rate_per_second（锁外 sleep，
-        # 不同连接互不阻塞）。在真正发请求前准入。
-        self._governor.acquire(self._conn_key)
         last_error: Exception | None = None
         for attempt in range(self.max_attempts):
+            # 来源健康准入（每次 attempt 前）：冷却中零网络请求
+            allowed, _health = source_health.can_request(self._conn_key)
+            if not allowed:
+                raise OpenListSourceCoolingDownError()
+            # 连接级限速：同一连接键的请求间隔 >= 1/rate_per_second（锁外
+            # sleep，不同连接互不阻塞）。在真正发请求前准入。
+            self._governor.acquire(self._conn_key)
             try:
                 with self._client() as client:
                     response = client.post(path, json=payload, headers=self._headers())
@@ -341,10 +355,9 @@ class OpenListClient:
             code = int(body.get("code", status)) if isinstance(body, dict) else status
 
             if status == 429 or code == 429:
+                # 第一次响应即结束：429 不再隐藏重试，直接交外层分类
+                # （record_failure('rate_limit') → 来源冷却）
                 retry_after = self._parse_retry_after(response.headers.get("retry-after"))
-                if attempt + 1 < self.max_attempts:
-                    self._sleep(self._retry_delay(attempt, retry_after))
-                    continue
                 raise OpenListRateLimitedError(retry_after=retry_after)
 
             if status in (500, 502, 503, 504):
@@ -396,8 +409,14 @@ class OpenListClient:
     def login(self) -> str:
         """登录并返回 Token（进程内缓存，不落盘）。
 
-        公共请求入口：连接级限速 + 按最终结果上报 source_health。
+        公共请求入口：来源健康准入 + 连接级限速 + 按最终结果上报 source_health。
+        冷却中（含 429/风控触发的冷却）不发任何物理请求，立即抛
+        :class:`OpenListSourceCoolingDownError`；429 不重试。
         """
+        # 来源健康准入：冷却中零网络请求
+        allowed, _health = source_health.can_request(self._conn_key)
+        if not allowed:
+            raise OpenListSourceCoolingDownError()
         self._governor.acquire(self._conn_key)
         try:
             token = self._login_request()

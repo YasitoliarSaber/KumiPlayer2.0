@@ -134,6 +134,12 @@ class TestOpenListCatalogScan:
         assert min(intervals) >= 0.4  # 允许少量抖动
 
     def test_rate_limited_marks_stale_keeps_facts(self):
+        """429 不再隐藏重试（模块 1 Review Fix P0-2）：直接向上传播。
+
+        旧语义是 429 重试耗尽后转 PageConsistencyError；新语义是 client
+        第一次响应即失败，rate_limit 原样传播（来源冷却统一兜底），目录
+        仍标记 failed + last_error_kind=rate_limit，旧事实保留。
+        """
         root = _setup_root()
         generation = store.bump_generation(root.root_id)
         good = FakeClient(_make_tree(3))
@@ -144,7 +150,7 @@ class TestOpenListCatalogScan:
         old_nodes = store.list_nodes(root.root_id)
 
         failing = FakeClient(_make_tree(3), fail_path="/动画", fail_kind="rate_limit")
-        with pytest.raises(service.PageConsistencyError):
+        with pytest.raises(OpenListRateLimitedError):
             service.scan_directory_paginated(
                 OpenListDirectoryScanner(failing, rate_per_second=0),
                 root.root_id, "/动画", generation, per_page=100,
