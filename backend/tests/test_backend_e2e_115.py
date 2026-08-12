@@ -128,7 +128,8 @@ class TestEndToEnd115:
         assert "动画/作品A/OVA/OVA01.mkv" in paths
         # 真实播放路径：logical_locator 保留（不退化相对路径）
         for item in items:
-            assert item["real_path"].startswith("K:/115动画/")
+            # Windows 上 Path 拼接为反斜杠：统一转正斜杠后再断言前缀
+            assert item["real_path"].replace("\\", "/").startswith("K:/115动画/")
 
     def test_second_incremental_reuses_unit_and_parent_chain(self):
         """第二次增量：同一 root+boundary 复用 unit，新 revision 有 parent。"""
@@ -190,8 +191,10 @@ class TestEndToEnd115:
             "SELECT COUNT(*) AS c FROM media_units WHERE root_id = ?",
             (root.root_id,),
         ).fetchone()["c"]
-        # 两轮扫描后 unit 数量应等于作品数（2），不是 4
-        assert unit_count == 2
+        # 两轮扫描后 unit 数量应等于作品数（2）加上 root "/" 容器候选单元
+        # （“动画”分类目录被识别为结构段，root 按容器候选结算，_create_unit
+        # 按 root+boundary 复用，第二轮不会翻倍），共 3 个而不是 4 个
+        assert unit_count == 3
         # 内容变化的单元（作品A）有增量 revision 且带 parent 链；
         # 内容未变的单元（作品B）hash 去重，保持同一 revision（稳定 revision 语义）
         conn = get_connection()
