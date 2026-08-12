@@ -24,25 +24,146 @@ def now_iso() -> str:
     return datetime.now(timezone(timedelta(hours=8))).isoformat()
 
 
+class RevisionStatusError(RuntimeError):
+    """revision 状态不允许该操作（语义 409 冲突）。"""
+
+
+#: import_revision_items 全语义列（INSERT/UPDATE 共用，保持单一事实来源）。
+#: 除历史遗留列（logical_locator/real_path/override_json）外，与 ImportPlanItem 对齐。
+REVISION_ITEM_COLUMNS: tuple[str, ...] = (
+    "item_id", "source", "provider_id", "relative_path", "real_path",
+    "logical_locator", "resource_type", "action", "work_id", "work_title",
+    "original_title", "year", "media_type", "show_type", "series_group",
+    "card_type", "belongs_to_series", "relation_type", "group_type",
+    "season_number", "episode_number", "special_number", "title",
+    "target_dir", "target_strm_path", "confidence", "needs_review",
+    "override_json", "warnings_json", "reasons_json", "user_override_id",
+    "availability",
+)
+
+#: 不含主键列（item_id），供 UPDATE SET 使用。
+_ITEM_UPDATE_COLUMNS: tuple[str, ...] = tuple(
+    col for col in REVISION_ITEM_COLUMNS if col != "item_id"
+)
+
+
+#: semantic hash 字段集（规划员 2026-08-12 指定）。
+#: target_dir / target_filename / target_strm_path / warnings / reasons /
+#: user_override_id 是执行或审计载荷，不参与结构判定。
+_HASH_FIELDS: tuple[str, ...] = (
+    "relative_path", "resource_type", "action", "work_id", "work_title",
+    "original_title", "year", "media_type", "show_type", "series_group",
+    "card_type", "belongs_to_series", "relation_type", "group_type",
+    "season_number", "episode_number", "special_number", "title",
+    "confidence", "needs_review", "availability",
+)
+
+
+def _hash_value(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
 def items_hash(items: list[dict]) -> str:
-    """按条目规范字段排序计算 revision hash（结构变化才产生新 revision）。"""
+    """按条目规范字段排序计算 revision hash（语义变化才产生新 revision）。
+
+    仅包含识别/分类语义字段；镜像定位（target_*）、人工审计（warnings/
+    reasons/user_override_id）变化不产生新 revision。
+    """
     lines = []
     for item in sorted(items, key=lambda entry: str(entry.get("relative_path") or "")):
         lines.append(
-            "\t".join(
-                (
-                    str(item.get("relative_path") or ""),
-                    str(item.get("resource_type") or ""),
-                    str(item.get("work_id") or ""),
-                    str(item.get("series_group") or ""),
-                    str(item.get("group_type") or ""),
-                    str(item.get("season_number") or ""),
-                    str(item.get("episode_number") or ""),
-                    str(item.get("availability") or "available"),
-                )
-            )
+            "\t".join(_hash_value(item.get(field)) for field in _HASH_FIELDS)
         )
     return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+def _item_to_dict(item: Any, original: dict | None = None) -> dict:
+    """ImportPlanItem dataclass → revision item dict（patch 后重算 hash 用）。
+
+    original 为对应 SQLite 行（可选）：dataclass 未建模的历史遗留列
+    （logical_locator / override_json）从原行保留，避免全列 UPDATE 时被清空。
+    """
+    result = {
+        "id": str(getattr(item, "id", "") or ""),
+        "source": str(getattr(item, "source", "") or ""),
+        "provider_id": str(getattr(item, "provider_id", "") or ""),
+        "relative_path": str(getattr(item, "relative_path", "") or ""),
+        "real_path": str(getattr(item, "real_path", "") or ""),
+        "logical_locator": str(getattr(item, "logical_locator", "") or ""),
+        "resource_type": str(getattr(item, "resource_type", "") or "other"),
+        "action": str(getattr(item, "action", "") or "ignore"),
+        "work_id": str(getattr(item, "work_id", "") or ""),
+        "work_title": str(getattr(item, "work_title", "") or ""),
+        "original_title": str(getattr(item, "original_title", "") or ""),
+        "year": getattr(item, "year", None),
+        "media_type": str(getattr(item, "media_type", "") or ""),
+        "show_type": str(getattr(item, "show_type", "") or ""),
+        "series_group": str(getattr(item, "series_group", "") or ""),
+        "card_type": str(getattr(item, "card_type", "") or ""),
+        "belongs_to_series": str(getattr(item, "belongs_to_series", "") or ""),
+        "relation_type": str(getattr(item, "relation_type", "") or ""),
+        "group_type": str(getattr(item, "group_type", "") or ""),
+        "season_number": getattr(item, "season_number", None),
+        "episode_number": getattr(item, "episode_number", None),
+        "special_number": getattr(item, "special_number", None),
+        "title": str(getattr(item, "title", "") or ""),
+        "target_dir": str(getattr(item, "target_dir", "") or ""),
+        "target_strm_path": str(getattr(item, "target_strm_path", "") or ""),
+        "confidence": str(getattr(item, "confidence", "") or "medium"),
+        "needs_review": bool(getattr(item, "needs_review", False)),
+        "availability": str(getattr(item, "availability", "") or "available"),
+        "warnings": list(getattr(item, "warnings", []) or []),
+        "reasons": list(getattr(item, "reasons", []) or []),
+        "user_override_id": str(getattr(item, "user_override_id", "") or ""),
+        "override": {},
+    }
+    if original is not None:
+        # dataclass 未建模的历史遗留列：从原行保留，不做任何改写
+        result["logical_locator"] = original.get("logical_locator") or ""
+        try:
+            result["override"] = json.loads(original.get("override_json") or "{}")
+        except (TypeError, ValueError):
+            result["override"] = {}
+    return result
+
+
+def _item_row_values(revision_id: str, item: dict) -> tuple:
+    """revision item dict → 数据库行值（与 REVISION_ITEM_COLUMNS 对齐）。"""
+    return (
+        revision_id,
+        str(item.get("item_id") or item.get("id") or uuid.uuid4().hex),
+        str(item.get("source") or ""),
+        str(item.get("provider_id") or ""),
+        str(item.get("relative_path") or ""),
+        str(item.get("real_path") or ""),
+        str(item.get("logical_locator") or ""),
+        str(item.get("resource_type") or "other"),
+        str(item.get("action") or "ignore"),
+        str(item.get("work_id") or ""),
+        str(item.get("work_title") or ""),
+        str(item.get("original_title") or ""),
+        item.get("year"),
+        str(item.get("media_type") or ""),
+        str(item.get("show_type") or ""),
+        str(item.get("series_group") or ""),
+        str(item.get("card_type") or ""),
+        str(item.get("belongs_to_series") or ""),
+        str(item.get("relation_type") or ""),
+        str(item.get("group_type") or ""),
+        item.get("season_number"),
+        item.get("episode_number"),
+        item.get("special_number"),
+        str(item.get("title") or ""),
+        str(item.get("target_dir") or ""),
+        str(item.get("target_strm_path") or ""),
+        str(item.get("confidence") or "medium"),
+        int(bool(item.get("needs_review"))),
+        json.dumps(item.get("override") or {}, ensure_ascii=False),
+        json.dumps(list(item.get("warnings") or []), ensure_ascii=False),
+        json.dumps(list(item.get("reasons") or []), ensure_ascii=False),
+        str(item.get("user_override_id") or ""),
+        str(item.get("availability") or "available"),
+    )
 
 
 def create_revision(
@@ -84,31 +205,11 @@ def create_revision(
              source_generation, status, revision_hash, confirm_method, timestamp, timestamp),
         )
         for item in items:
+            columns_sql = ", ".join(("revision_id", *REVISION_ITEM_COLUMNS))
+            placeholders = ", ".join("?" for _ in range(len(REVISION_ITEM_COLUMNS) + 1))
             tx.execute(
-                """
-                INSERT INTO import_revision_items (
-                    revision_id, item_id, source, provider_id, relative_path,
-                    real_path, logical_locator, resource_type, action, work_id,
-                    work_title, series_group, card_type, group_type, season_number,
-                    episode_number, title, target_dir, target_strm_path,
-                    confidence, needs_review, override_json, availability
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    revision_id, str(item.get("id") or uuid.uuid4().hex),
-                    str(item.get("source") or ""), str(item.get("provider_id") or ""),
-                    str(item.get("relative_path") or ""), str(item.get("real_path") or ""),
-                    str(item.get("logical_locator") or ""), str(item.get("resource_type") or "other"),
-                    str(item.get("action") or "ignore"), str(item.get("work_id") or ""),
-                    str(item.get("work_title") or ""), str(item.get("series_group") or ""),
-                    str(item.get("card_type") or ""), str(item.get("group_type") or ""),
-                    item.get("season_number"),
-                    item.get("episode_number"), str(item.get("title") or ""),
-                    str(item.get("target_dir") or ""), str(item.get("target_strm_path") or ""),
-                    str(item.get("confidence") or "medium"), int(bool(item.get("needs_review"))),
-                    json.dumps(item.get("override") or {}, ensure_ascii=False),
-                    str(item.get("availability") or "available"),
-                ),
+                f"INSERT INTO import_revision_items ({columns_sql}) VALUES ({placeholders})",
+                _item_row_values(revision_id, item),
             )
     return load_revision(revision_id)  # type: ignore[return-value]
 
@@ -131,17 +232,27 @@ def _row_to_plan(revision: dict, items: list[dict]) -> Any:
                 action=item["action"],
                 work_id=item["work_id"],
                 work_title=item["work_title"],
+                original_title=item.get("original_title") or "",
+                year=item.get("year"),
+                media_type=item.get("media_type") or "",
+                show_type=item.get("show_type") or "",
                 series_group=item["series_group"],
                 card_type=item.get("card_type") or "",
+                belongs_to_series=item.get("belongs_to_series") or "",
+                relation_type=item.get("relation_type") or "",
                 group_type=item["group_type"],
                 season_number=item["season_number"],
                 episode_number=item["episode_number"],
+                special_number=item.get("special_number"),
                 title=item["title"],
                 target_dir=item["target_dir"],
                 target_strm_path=item["target_strm_path"],
                 confidence=item["confidence"],
                 needs_review=bool(item["needs_review"]),
                 availability=item["availability"],
+                warnings=_load_json_list(item.get("warnings_json")),
+                reasons=_load_json_list(item.get("reasons_json")),
+                user_override_id=item.get("user_override_id") or None,
             )
         )
     return ImportPlan(
@@ -154,6 +265,17 @@ def _row_to_plan(revision: dict, items: list[dict]) -> Any:
         created_at=revision["created_at"],
         updated_at=revision["updated_at"],
     )
+
+
+def _load_json_list(value: Any) -> list:
+    """宽容解析 JSON 列表列（None/空字符串 → []）。"""
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
 
 
 def load_revision(revision_id: str) -> dict | None:
@@ -190,6 +312,65 @@ def update_revision_status(revision_id: str, status: str) -> None:
         (status, now_iso(), revision_id),
     )
     conn.commit()
+
+
+def patch_draft_revision_item(revision_id: str, item_id: str, patch: dict) -> dict:
+    """对 draft revision 的条目做人工语义修正（V3 SQLite 唯一路径）。
+
+    - revision 不存在 → ValueError；
+    - revision 不是 draft（confirmed/executed/superseded/failed）→
+      RevisionStatusError（409 语义）；
+    - 复用 patch_plan_item 的纯 patch/validation 规则
+      （白名单/值约束/normalize/归位派生/归位质检，见 service.apply_patch_rules）；
+    - 事务内更新 import_revision_items 全语义列、重算 semantic_hash、
+      刷新 import_revisions.updated_at；
+    - 不回写旧 JSON save_import_plan（V3 以 SQLite 为唯一事实）。
+
+    返回重新装载的 revision（含 items）。
+    """
+    from app.import_plan.service import apply_patch_rules
+
+    revision = load_revision(revision_id)
+    if revision is None:
+        raise ValueError(f"revision 不存在: {revision_id}")
+    if revision["status"] != "draft":
+        raise RevisionStatusError(
+            f"revision 状态为 {revision['status']}，仅 draft 可人工修正"
+        )
+
+    plan = load_plan(revision_id)
+    if plan is None:
+        raise ValueError(f"无法装载 revision: {revision_id}")
+
+    item, error_msg = apply_patch_rules(plan, item_id, patch)
+    if error_msg is not None:
+        raise ValueError(error_msg)
+    if item is None:
+        raise ValueError(f"未找到 item_id={item_id}")
+
+    raw_items = {row["item_id"]: row for row in (revision.get("items") or [])}
+    items = [
+        _item_to_dict(entry, raw_items.get(entry.id))
+        for entry in plan.items
+    ]
+    new_hash = items_hash(items)
+    timestamp = now_iso()
+    conn = get_connection()
+    set_sql = ", ".join(f"{col} = ?" for col in _ITEM_UPDATE_COLUMNS)
+    with transaction(conn) as tx:
+        for entry in items:
+            row = _item_row_values(revision_id, entry)
+            # row = (revision_id, item_id, *values)
+            tx.execute(
+                f"UPDATE import_revision_items SET {set_sql} "
+                "WHERE revision_id = ? AND item_id = ?",
+                (*row[2:], revision_id, entry["id"]),
+            )
+        tx.execute(
+            "UPDATE import_revisions SET hash = ?, updated_at = ? WHERE revision_id = ?",
+            (new_hash, timestamp, revision_id),
+        )
+    return load_revision(revision_id)  # type: ignore[return-value]
 
 
 def try_auto_confirm_revision(revision_id: str) -> tuple[bool, str]:

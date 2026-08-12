@@ -361,22 +361,26 @@ def _check_invalid_items(items: list[ImportPlanItem], issues: list[PreviewIssue]
 # patch_plan_item
 # ============================================================
 
-def patch_plan_item(
+def apply_patch_rules(
     plan: ImportPlan,
     item_id: str,
     patch: dict,
-) -> tuple[ImportPlanItem | None, ImportPreview | None, str | None]:
-    """修正单个 ImportPlanItem
+) -> tuple[ImportPlanItem | None, str | None]:
+    """纯 patch/validation 规则（无 legacy filesystem override audit）。
+
+    供旧 JSON 路径 patch_plan_item 与 V3 SQLite 路径
+    patch_draft_revision_item 共用：normalize 默认值 → 白名单/值约束校验
+    → 应用 patch → 归位派生字段 → 归位质检（mutate）。
 
     返回:
-        (更新后的 item, 更新后的 preview, 错误信息)
+        (更新后的 item, 错误信息)
     """
     patch = _normalize_patch_defaults(patch)
 
     # 校验 patch
     is_valid, error_msg = validate_patch(patch)
     if not is_valid:
-        return None, None, error_msg
+        return None, error_msg
 
     # 查找 item
     target_item = None
@@ -386,7 +390,7 @@ def patch_plan_item(
             break
 
     if target_item is None:
-        return None, None, f"未找到 item_id={item_id}"
+        return None, f"未找到 item_id={item_id}"
 
     # 应用 patch
     apply_patch_to_item(target_item, patch)
@@ -397,7 +401,26 @@ def patch_plan_item(
     # 因为结构不一致继续失败。
     validate_import_plan_placement(plan, mutate=True)
 
-    # 保存 user_override
+    return target_item, None
+
+
+def patch_plan_item(
+    plan: ImportPlan,
+    item_id: str,
+    patch: dict,
+) -> tuple[ImportPlanItem | None, ImportPreview | None, str | None]:
+    """修正单个 ImportPlanItem（legacy JSON 路径）。
+
+    返回:
+        (更新后的 item, 更新后的 preview, 错误信息)
+    """
+    target_item, error_msg = apply_patch_rules(plan, item_id, patch)
+    if error_msg is not None:
+        return None, None, error_msg
+    if target_item is None:
+        return None, None, f"未找到 item_id={item_id}"
+
+    # 保存 user_override（legacy JSON filesystem audit；V3 不调用）
     override = build_user_override(plan.plan_id, item_id, plan.source, patch)
     save_user_override(override)
 

@@ -100,11 +100,31 @@ def init_db() -> None:
             conn.rollback()
             raise
 
-    # 轻量列迁移（不 bump user_version）：revision 需保留 card_type，
-    # 供镜像目录命名按 series_group 聚合（OpenList 系列多季合并一张卡）。
+    # 轻量列迁移（不 bump user_version）：import_revision_items 语义载荷。
+    # revision 需保留 card_type（镜像目录命名按 series_group 聚合，OpenList
+    # 系列多季合并一张卡）以及人工修正语义字段（original_title/year/…/user_override_id）；
+    # 旧 v3 库不重新执行整份 create_schema_v3()，因此逐个 ALTER 幂等补齐，
+    # 不要求用户重置数据库。
+    _REVISION_ITEM_EXTRA_COLUMNS = (
+        ("card_type", "TEXT NOT NULL DEFAULT ''"),
+        ("original_title", "TEXT NOT NULL DEFAULT ''"),
+        ("year", "INTEGER"),
+        ("media_type", "TEXT NOT NULL DEFAULT ''"),
+        ("show_type", "TEXT NOT NULL DEFAULT ''"),
+        ("belongs_to_series", "TEXT NOT NULL DEFAULT ''"),
+        ("relation_type", "TEXT NOT NULL DEFAULT ''"),
+        ("special_number", "INTEGER"),
+        ("warnings_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("reasons_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("user_override_id", "TEXT NOT NULL DEFAULT ''"),
+    )
     cols = [row[1] for row in conn.execute("PRAGMA table_info(import_revision_items)").fetchall()]
-    if cols and "card_type" not in cols:
-        conn.execute("ALTER TABLE import_revision_items ADD COLUMN card_type TEXT NOT NULL DEFAULT ''")
+    if cols:
+        for col_name, col_ddl in _REVISION_ITEM_EXTRA_COLUMNS:
+            if col_name not in cols:
+                conn.execute(
+                    f"ALTER TABLE import_revision_items ADD COLUMN {col_name} {col_ddl}"
+                )
         conn.commit()
 
     # 幂等轻量扩展（不 bump user_version）：来源级风控健康表。

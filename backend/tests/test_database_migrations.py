@@ -139,3 +139,78 @@ def test_source_health_survives_repeated_init(tmp_path, monkeypatch):
         assert connection.execute("PRAGMA user_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
     finally:
         connection.close()
+
+
+#: 旧 v3 import_revision_items 建表（无模块3 新增的 10 个语义列）
+_OLD_REVISION_ITEM_DDL = """
+CREATE TABLE import_revision_items (
+    revision_id TEXT NOT NULL REFERENCES import_revisions(revision_id) ON DELETE CASCADE,
+    item_id TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT '',
+    provider_id TEXT NOT NULL DEFAULT '',
+    relative_path TEXT NOT NULL DEFAULT '',
+    real_path TEXT NOT NULL DEFAULT '',
+    logical_locator TEXT NOT NULL DEFAULT '',
+    resource_type TEXT NOT NULL DEFAULT 'other',
+    action TEXT NOT NULL DEFAULT 'ignore',
+    work_id TEXT NOT NULL DEFAULT '',
+    work_title TEXT NOT NULL DEFAULT '',
+    series_group TEXT NOT NULL DEFAULT '',
+    card_type TEXT NOT NULL DEFAULT '',
+    group_type TEXT NOT NULL DEFAULT '',
+    season_number INTEGER,
+    episode_number INTEGER,
+    title TEXT NOT NULL DEFAULT '',
+    target_dir TEXT NOT NULL DEFAULT '',
+    target_strm_path TEXT NOT NULL DEFAULT '',
+    confidence TEXT NOT NULL DEFAULT 'medium',
+    needs_review INTEGER NOT NULL DEFAULT 0,
+    override_json TEXT NOT NULL DEFAULT '{}',
+    availability TEXT NOT NULL DEFAULT 'available',
+    PRIMARY KEY (revision_id, item_id)
+)
+"""
+
+
+def test_v3_lightweight_migration_backfills_revision_item_semantic_columns(tmp_path, monkeypatch):
+    """旧 v3 库缺语义列 → init_db 幂等补齐 → user_version 仍 3（不要求重置）。"""
+    from app.db import database
+
+    path = tmp_path / "v3_light_migrate.db"
+    _reset_database_module(database, path, monkeypatch)
+    database.init_db()
+
+    # 构造“旧 v3 库”：替换为无新增语义列的 import_revision_items
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("DROP TABLE import_revision_items")
+        connection.execute(_OLD_REVISION_ITEM_DDL)
+        connection.commit()
+    finally:
+        connection.close()
+
+    database.init_db()  # 轻量迁移：自动补齐，不要求用户重置
+
+    connection = sqlite3.connect(path)
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
+        cols = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(import_revision_items)").fetchall()
+        }
+        for col in (
+            "original_title", "year", "media_type", "show_type",
+            "belongs_to_series", "relation_type", "special_number",
+            "warnings_json", "reasons_json", "user_override_id",
+        ):
+            assert col in cols, f"缺少语义列: {col}"
+        # 再次 init_db：幂等
+    finally:
+        connection.close()
+
+    database.init_db()
+    connection = sqlite3.connect(path)
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
+    finally:
+        connection.close()
