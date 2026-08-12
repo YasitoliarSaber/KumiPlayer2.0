@@ -134,21 +134,42 @@ class TestPipelineJobs:
         ).fetchone()[0] == 1
 
     def test_closure_required_for_scrape(self):
-        """未 closure（有 queued 目录）→ unit_is_closed=False，不创建 scrape。"""
+        """未 closure（boundary 自身缺失或有 queued 目录）→ unit_is_closed=False。"""
         _ensure_unit("unit-open", boundary="/动画/作品", root_id="root-x")
         conn = get_connection()
         conn.execute(
             """
             INSERT INTO source_directories (
                 root_id, remote_path, parent_path, depth, state
-            ) VALUES ('root-x', '/动画/作品/Season 1', '/动画/作品', 1, 'queued')
+            ) VALUES ('root-x', '/动画/作品', '/动画', 1, 'complete')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO source_directories (
+                root_id, remote_path, parent_path, depth, state
+            ) VALUES (
+                'root-x',
+                '/动画/作品/Season 1',
+                '/动画/作品',
+                2,
+                'queued'
+            )
             """
         )
         conn.commit()
+
         assert orchestrator.unit_is_closed("unit-open") is False
 
-        conn.execute("UPDATE source_directories SET state = 'complete' WHERE remote_path = '/动画/作品/Season 1'")
+        conn.execute(
+            """
+            UPDATE source_directories
+            SET state = 'complete'
+            WHERE remote_path = '/动画/作品/Season 1'
+            """
+        )
         conn.commit()
+
         assert orchestrator.unit_is_closed("unit-open") is True
 
     def test_failed_dir_blocks_scrape_after_mirror(self):

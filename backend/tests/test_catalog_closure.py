@@ -98,3 +98,28 @@ class TestIsBoundaryComplete:
         # Season 2 曾经 failed，随后目录消失被删除 checkpoint（M2-A 语义）：
         # 行已不存在 → 不阻塞
         assert closure.is_boundary_complete("root-x", "/动画/作品") is True
+
+    def test_missing_boundary_with_complete_descendants_is_false(self):
+        """后代 complete 不能替代 boundary 自身的完整 checkpoint。"""
+        _insert("/动画/作品/Season 1", "complete")
+        _insert("/动画/作品/Season 2", "complete")
+
+        assert closure.is_boundary_complete(
+            "root-x",
+            "/动画/作品",
+        ) is False
+
+    def test_boundary_wildcards_are_matched_literally(self):
+        """boundary 名中的 % / _ 不能作为 SQL LIKE 通配符污染同级作品。"""
+        _insert("/动画/作品_100%", "complete")
+        _insert("/动画/作品_100%/Season 1", "complete")
+
+        # 如果仍使用 LIKE：
+        # /动画/作品_100%/% 会错误匹配下面这个同级作品。
+        _insert("/动画/作品A100XYZ/Season 1", "failed")
+
+        assert closure.is_boundary_complete(
+            "root-x",
+            "/动画/作品_100%",
+        ) is True
+

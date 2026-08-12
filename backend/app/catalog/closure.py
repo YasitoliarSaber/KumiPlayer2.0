@@ -23,15 +23,34 @@ _COMPLETE_STATE = "complete"
 
 
 def is_boundary_complete(root_id: str, boundary: str) -> bool:
-    """该 boundary 下所有当前有效的目录 checkpoint 必须全部 complete 才收口。"""
-    prefix = boundary.rstrip("/") + "/"
+    """该 boundary 自身及全部当前有效后代目录必须 complete 才收口。"""
+    normalized = boundary.rstrip("/") or "/"
+    prefix = "/" if normalized == "/" else normalized + "/"
+
     rows = get_connection().execute(
         """
-        SELECT state FROM source_directories
-        WHERE root_id = ? AND (remote_path = ? OR remote_path LIKE ?)
+        SELECT remote_path, state
+        FROM source_directories
+        WHERE root_id = ?
+          AND (
+              remote_path = ?
+              OR (
+                  substr(remote_path, 1, length(?)) = ?
+                  AND length(remote_path) > length(?)
+              )
+          )
         """,
-        (root_id, boundary, prefix + "%"),
+        (root_id, normalized, prefix, prefix, prefix),
     ).fetchall()
+
     if not rows:
         return False
-    return all(row["state"] == _COMPLETE_STATE for row in rows)
+
+    boundary_seen = False
+    for row in rows:
+        if row["remote_path"] == normalized:
+            boundary_seen = True
+        if row["state"] != _COMPLETE_STATE:
+            return False
+
+    return boundary_seen
