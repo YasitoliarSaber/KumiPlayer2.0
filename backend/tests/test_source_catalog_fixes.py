@@ -310,3 +310,110 @@ class TestProviderIntoRevision:
         provider_id2, route_id2 = DiscoveryEngine._provider_for_boundary(engine, "/电影/未归类")
         assert provider_id2 == PROVIDER_QUARK  # compat_provider("openlist")
         assert route_id2 == ""
+
+
+class TestMemberHashDrillDown:
+    """模块2 阶段C：按目录变化优先调度增量校验（mtime 精准下钻）。
+
+    - 已知 child 目录 mtime 变化 → 父目录完整提交后立即把 checkpoint 置回
+      'queued'（下钻验证），不等 24h rolling；
+    - mtime 未变 → 保持 'complete'，next_verify_at/24h rolling 保留；
+    - 新出现 child 目录 → 维持原有 INSERT queued 行为；
+    - 目录消失后重新出现（checkpoint 已被级联删除）且 mtime 变化 → 回退
+      INSERT 重建 queued checkpoint（UPDATE 未命中不得丢 checkpoint）。
+    """
+
+    def _commit_root_with_child(self, root_id: str, generation: int,
+                                child_mtime: float | None) -> dict:
+        """完整提交 /动画（直属 dir child A + root.txt），返回 commit stats。"""
+        run = catalog_store.new_stage_run()
+        _seed_stage(run, "/动画", [
+            {"remote_path": "/动画/A", "name": "A", "kind": "dir", "mtime": child_mtime},
+            {"remote_path": "/动画/root.txt", "name": "root.txt", "kind": "file",
+             "size": 10, "mtime": 1.0},
+        ])
+        return catalog_store.commit_directory(root_id, "/动画", run, generation)
+
+    def _complete_child(self, root_id: str, generation: int) -> None:
+        """扫描并完整提交 /动画/A，把 child checkpoint 置为 complete。"""
+        run = catalog_store.new_stage_run()
+        _seed_stage(run, "/动画/A", [
+            {"remote_path": "/动画/A/E01.mkv", "name": "E01.mkv", "kind": "file",
+             "size": 100, "mtime": 1.0},
+        ])
+        catalog_store.commit_directory(root_id, "/动画/A", run, generation)
+
+    def test_child_mtime_changed_requeues_immediately(self):
+        """已知 child 目录 mtime 变化 → 父目录完整提交后 checkpoint 立即 queued。"""
+        root = _make_root()
+        generation = 1
+        self._commit_root_with_child(root.root_id, generation, child_mtime=1.0)
+        self._complete_child(root.root_id, generation)
+        assert catalog_store.get_directory(root.root_id, "/动画/A")["state"] == "complete"
+
+        generation = 2
+        self._commit_root_with_child(root.root_id, generation, child_mtime=2.0)
+        child = catalog_store.get_directory(root.root_id, "/动画/A")
+        assert child is not None
+        assert child["state"] == "queued", child["state"]
+
+    def test_child_mtime_unchanged_keeps_complete(self):
+        """mtime 未变 → 保持 complete，不提前 queue（24h rolling 保留）。"""
+        root = _make_root()
+        generation = 1
+        self._commit_root_with_child(root.root_id, generation, child_mtime=1.0)
+        self._complete_child(root.root_id, generation)
+        before = catalog_store.get_directory(root.root_id, "/动画/A")
+        assert before["state"] == "complete"
+        assert before["next_verify_at"] != ""
+
+        generation = 2
+        self._commit_root_with_child(root.root_id, generation, child_mtime=1.0)
+        after = catalog_store.get_directory(root.root_id, "/动画/A")
+        assert after["state"] == "complete", after["state"]
+        # 未下钻：checkpoint 的 accepted_generation / next_verify_at 未被提前刷新
+        assert after["accepted_generation"] == before["accepted_generation"]
+        assert after["next_verify_at"] == before["next_verify_at"]
+
+    def test_new_child_directory_still_queued(self):
+        """新出现 child 目录 → 维持 INSERT queued 行为。"""
+        root = _make_root()
+        generation = 1
+        run = catalog_store.new_stage_run()
+        _seed_stage(run, "/动画", [
+            {"remote_path": "/动画/root.txt", "name": "root.txt", "kind": "file",
+             "size": 10, "mtime": 1.0},
+        ])
+        catalog_store.commit_directory(root.root_id, "/动画", run, generation)
+        assert catalog_store.get_directory(root.root_id, "/动画/A") is None
+
+        generation = 2
+        self._commit_root_with_child(root.root_id, generation, child_mtime=1.0)
+        child = catalog_store.get_directory(root.root_id, "/动画/A")
+        assert child is not None
+        assert child["state"] == "queued", child["state"]
+
+    def test_reappeared_child_mtime_changed_rebuilds_checkpoint(self):
+        """目录消失（checkpoint 级联删除）后重新出现且 mtime 变化 → 重建 queued。"""
+        root = _make_root()
+        generation = 1
+        self._commit_root_with_child(root.root_id, generation, child_mtime=1.0)
+        self._complete_child(root.root_id, generation)
+
+        # 第二轮：A 消失 → node tombstone + checkpoint 级联删除
+        generation = 2
+        run = catalog_store.new_stage_run()
+        _seed_stage(run, "/动画", [
+            {"remote_path": "/动画/root.txt", "name": "root.txt", "kind": "file",
+             "size": 10, "mtime": 1.0},
+        ])
+        catalog_store.commit_directory(root.root_id, "/动画", run, generation)
+        assert catalog_store.get_directory(root.root_id, "/动画/A") is None
+
+        # 第三轮：A 重新出现且 mtime 变化 → 必须重建 queued checkpoint
+        # （不能只靠 UPDATE——checkpoint 已删除，UPDATE 未命中会丢目录）
+        generation = 3
+        self._commit_root_with_child(root.root_id, generation, child_mtime=3.0)
+        child = catalog_store.get_directory(root.root_id, "/动画/A")
+        assert child is not None, "重新出现的目录必须重建 checkpoint"
+        assert child["state"] == "queued", child["state"]

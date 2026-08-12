@@ -697,14 +697,37 @@ def commit_directory(
                 # 目录 frontier 是持久状态：父目录一次完整提交后，把每个直属
                 # 子目录写成 queued。进程中断后 worker 从这里继续，不重建内存树。
                 if row["kind"] == "dir":
-                    tx.execute(
-                        """
-                        INSERT OR IGNORE INTO source_directories (
-                            root_id, remote_path, parent_path, depth, state
-                        ) VALUES (?, ?, ?, ?, 'queued')
-                        """,
-                        (root_id, remote, remote_path, child_depth),
-                    )
+                    # 阶段C（mtime 精准下钻）：已知 child 目录的直属 node mtime
+                    # 与上次入库不同（metadata 变化）→ 立即把 checkpoint 置回
+                    # queued，不等 24h rolling；UPDATE 未命中（目录曾消失、
+                    # checkpoint 已被级联删除）时回退 INSERT 重建 queued。
+                    # mtime 未变 → 保持原状态（complete 继续按 next_verify_at
+                    # 到期验证，24h rolling fallback 不变）。
+                    requeued = False
+                    if (
+                        existing is not None
+                        and existing["kind"] == "dir"
+                        and existing["mtime"] != row["mtime"]
+                    ):
+                        cursor = tx.execute(
+                            """
+                            UPDATE source_directories
+                            SET state = 'queued'
+                            WHERE root_id = ? AND remote_path = ?
+                              AND state != 'scanning'
+                            """,
+                            (root_id, remote),
+                        )
+                        requeued = cursor.rowcount > 0
+                    if not requeued:
+                        tx.execute(
+                            """
+                            INSERT OR IGNORE INTO source_directories (
+                                root_id, remote_path, parent_path, depth, state
+                            ) VALUES (?, ?, ?, ?, 'queued')
+                            """,
+                            (root_id, remote, remote_path, child_depth),
+                        )
 
         # 完整目录读取后：旧条目未出现且未 tombstone → missing
         for remote, row in current.items():
