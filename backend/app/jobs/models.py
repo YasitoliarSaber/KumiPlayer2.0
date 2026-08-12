@@ -14,6 +14,21 @@ class JobCancelledError(RuntimeError):
     """任务被取消（协作式）；正常终态，不属于执行失败。"""
 
 
+class JobDeferredError(RuntimeError):
+    """任务因来源级风控/冷却被延后（不是失败，也不是成功）。
+
+    runner 捕获后调用 ``store.defer_job``：回到 ``queued`` 并写入
+    ``not_before``，**不消耗 attempt、不标 failed、不标 succeeded**；
+    冷却结束后由 claim 循环自动重新领取执行。
+    """
+
+    def __init__(self, until_unix: float, message: str = "任务已延后，冷却结束后自动重试"):
+        super().__init__(message)
+        #: 允许重新领取的 Unix 时间戳（秒）；对应 jobs.not_before
+        self.until_unix = float(until_unix)
+        self.message = str(message)
+
+
 #: 任务状态
 QUEUED = "queued"
 RUNNING = "running"

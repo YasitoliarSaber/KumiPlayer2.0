@@ -21,6 +21,7 @@ from app.jobs.models import (
     SUCCEEDED,
     Job,
     JobCancelledError,
+    JobDeferredError,
 )
 from app.jobs.registry import get_handler
 
@@ -130,6 +131,15 @@ class JobRunner:
             store.finish_job(
                 job.job_id, self.worker_id, CANCELLED,
                 message="任务已取消", version=job.version,
+            )
+        except JobDeferredError as exc:
+            # 来源级风控/冷却：延后而非失败。回到 queued + not_before，
+            # 不消耗 attempt、不标 succeeded/failed；冷却结束后自动重领。
+            store.defer_job(
+                job.job_id, self.worker_id,
+                until_unix=exc.until_unix,
+                message=exc.message or "已因来源风控暂停，冷却结束后自动重试",
+                error=str(exc),
             )
         except Exception as exc:
             error_type = getattr(exc, "kind", "") or type(exc).__name__.lower()

@@ -14,11 +14,39 @@ from __future__ import annotations
 import time
 
 from app.catalog import store as catalog_store
+from app.catalog import source_health
 from app.catalog.discovery import DiscoveryCancelled, DiscoveryEngine
 from app.import_plan import revision_store
-from app.jobs.models import JobCancelledError
+from app.integrations.openlist.models import (
+    OpenListRateLimitedError,
+    OpenListRiskControlError,
+    OpenListSourceCoolingDownError,
+)
+from app.jobs.models import JobCancelledError, JobDeferredError
 from app.jobs.registry import register
 from app.pipeline import orchestrator
+
+#: 扫描过程中必须整棵中止并转 JobDeferredError 的来源级安全错误
+_RISK_ABORT_TYPES = (
+    OpenListRiskControlError,
+    OpenListRateLimitedError,
+    OpenListSourceCoolingDownError,
+)
+
+#: 风控延后的默认等待秒数（cooldown_until 缺失时兜底）
+_DEFER_FALLBACK_SECONDS = 3600.0
+
+
+def _defer_until(health_key: str) -> float:
+    """计算延后重试时间：优先 source_health 冷却结束时刻，缺失时按阈值兜底。"""
+    record = source_health.get_health(health_key)
+    now = time.time()
+    if record.cooldown_until > now:
+        return record.cooldown_until
+    return now + _DEFER_FALLBACK_SECONDS
+
+
+_DEFER_MESSAGE = "远端网盘疑似触发访问保护，KumiPlayer 已暂停该来源的自动请求，冷却结束后自动重试"
 
 
 def _build_openlist_client(source_id: str):
@@ -91,33 +119,25 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
 
     # 模块 1 冷却拦截：OpenList 来源在构造扫描器之前检查连接健康。
     # 冷却中不构造扫描器、不跑 engine、不请求远程；保留 Source Catalog 已有数据。
+    # 与 OpenListClient 上报一致：连接键 = sha256(server_url|username)
+    health_key = ""
     source = str(root.source_id or "")
     if source.startswith("openlist") or source == "openlist":
-        from app.catalog import source_health
         from app.core.config import load_config
         from app.integrations.openlist.governor import governor_connection_key
 
         config = load_config()
-        # 与 OpenListClient 上报一致：连接键 = sha256(server_url|username)
         health_key = governor_connection_key(
             config.openlist_server_url, config.openlist_username
         )
-        allowed, _record = source_health.can_request(health_key)
+        allowed, record = source_health.can_request(health_key)
         if not allowed:
-            return {
-                "root_id": root_id,
-                "generation": generation,
-                "units": [],
-                "summary": {
-                    "plan_ready": 0,
-                    "needs_review": 0,
-                    "mirror_enqueued": 0,
-                    "failed_count": 0,
-                    "failed_paths": [],
-                    "health": "cooling_down",
-                    "message": "远端网盘疑似触发访问保护，KumiPlayer 已暂停该来源的自动请求",
-                },
-            }
+            # 冷却中：延后而非成功。job 回到 queued + not_before=cooldown_until，
+            # 不消耗 attempt、不显示 succeeded/failed。
+            raise JobDeferredError(
+                until_unix=record.cooldown_until or _defer_until(health_key),
+                message=_DEFER_MESSAGE,
+            )
 
     scanner = _build_scanner(
         {
@@ -174,6 +194,15 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
         )
     except DiscoveryCancelled as exc:
         raise JobCancelledError(str(exc) or "任务已取消") from None
+    except _RISK_ABORT_TYPES as exc:
+        # 扫描中途触发来源级风控/限流/冷却：整棵扫描立即停止，转延后
+        # 等待冷却（不标 succeeded、不标 failed）。真实 OpenListClient 已
+        # 上报 record_failure 写入冷却，这里取 cooldown_until 作为重试时间；
+        # 未上报（测试假客户端等）时按阈值兜底。
+        raise JobDeferredError(
+            until_unix=_defer_until(health_key),
+            message=_DEFER_MESSAGE,
+        ) from None
 
     failed_paths = list(getattr(engine, "failed_paths", []))
     summary["failed_count"] = len(failed_paths)

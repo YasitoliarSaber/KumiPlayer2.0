@@ -1,16 +1,17 @@
 # -*- coding: utf-8 -*-
-"""模块 1 阶段 C：风险失败 → Source Catalog 旧节点完全保留。
+"""模块 1 阶段 C + R2：风险失败 → Source Catalog 旧节点完全保留。
 
 覆盖两条入口：
 
-1. ``discovery_handler.handle_discovery_scan`` 冷却拦截路径（阶段 B 已实现）：
+1. ``discovery_handler.handle_discovery_scan`` 冷却拦截路径：
    第一次扫描成功建立 source_nodes；连接被置为 cooling_down 后再次扫描 →
-   不构造扫描器、不发任何远程请求（FakeClient 调用计数不变）、旧节点与
-   directory checkpoint 全部保留（无删除、无 tombstone、状态不被清除）。
+   抛 JobDeferredError（R2：延后而非成功，job 不标 succeeded）、零请求、
+   旧节点与 directory checkpoint 全部保留（无删除、无 tombstone）。
 
 2. ``DiscoveryEngine`` 直接 run 时 client 抛 ``OpenListRiskControlError``：
-   engine.failed_paths 记录失败目录，已建立节点原样保留（无删除、无 tombstone），
-   directory checkpoint 未被清除（子目录保持 complete，根目录标记 failed 供重试）。
+   整棵扫描立即中止并向上传播（R2：不再收集 failed_paths 继续扫），
+   已建立节点原样保留，directory checkpoint 未被清除
+   （子目录保持 complete，根目录标记 failed 供重试）。
 
 全程临时 SQLite + FakeClient（httpx 无真实传输），不访问网络。
 """
@@ -162,15 +163,16 @@ class TestHandlerCooldownRetention:
         allowed, record = source_health.can_request(key)
         assert not allowed and record.state == "cooling_down"
 
-        # 第二次扫描：冷却拦截，零请求、零删除
-        result2 = handle_discovery_scan(
-            {"root_id": root.root_id, "generation": generation},
-            progress_callback=lambda *a, **k: None,
-            should_cancel=lambda: False,
-        )
-        assert result2["summary"]["health"] == "cooling_down"
-        assert "访问保护" in result2["summary"]["message"]
-        assert result2["units"] == []
+        # 第二次扫描：冷却延后（R2：JobDeferredError），零请求、零删除
+        from app.jobs.models import JobDeferredError
+
+        with pytest.raises(JobDeferredError) as exc:
+            handle_discovery_scan(
+                {"root_id": root.root_id, "generation": generation},
+                progress_callback=lambda *a, **k: None,
+                should_cancel=lambda: False,
+            )
+        assert "访问保护" in exc.value.message
         assert len(client.calls) == calls_after_first  # 没有向 client 发出任何新请求
         assert _node_paths(root.root_id)  # 旧节点全部保留
         _assert_no_tombstones(root.root_id)
@@ -185,7 +187,12 @@ class TestHandlerCooldownRetention:
 
 class TestEngineRiskFailureRetention:
     def test_risk_control_error_records_failed_paths_and_keeps_nodes(self, monkeypatch):
-        """engine 直接 run：client 抛 OpenListRiskControlError → failed_paths 记录、旧节点保留。"""
+        """engine 直接 run：client 抛 OpenListRiskControlError → 整棵中止传播、旧节点保留。
+
+        R2 语义（P0-1）：风险类错误不再收集为 failed_paths 继续扫，而是直接
+        向上传播（handler 转 JobDeferredError 等待冷却），避免冷却期间继续
+        向同一账号发请求。
+        """
         monkeypatch.setattr("app.core.config.load_config", lambda: _FakeConfig())
         root = _make_root()
         client = FakeOpenListClient()
@@ -215,13 +222,11 @@ class TestEngineRiskFailureRetention:
             root_id=root.root_id,
             generation=new_gen,
         )
-        results2 = engine2.run(should_cancel=lambda: False)
-        # 失败目录被 engine 记录（根目录重扫失败即停，不扩散到子目录）
-        assert engine2.failed_paths == ["/动画"]
+        # 风险类错误直接传播（不再收集 failed_paths 继续扫下一个目录）
+        with pytest.raises(OpenListRiskControlError):
+            engine2.run(should_cancel=lambda: False)
         # 只对失败目录发过一次请求；未向任何已完成目录发出新请求
         assert len(client.calls) == calls_before + 1
-        # 结尾基于持久目录重新结算已完成边界（数据库事实，零请求）
-        assert {r["boundary"] for r in results2} == {"/动画/作品A", "/动画/作品B"}
 
         # 旧节点原样保留：无删除、无 tombstone
         assert _node_paths(root.root_id) == before

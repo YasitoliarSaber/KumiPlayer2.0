@@ -331,6 +331,41 @@ def retry_job(job_id: str, worker_id: str, *, error: str, error_type: str) -> bo
     return cursor.rowcount > 0
 
 
+def defer_job(
+    job_id: str,
+    worker_id: str,
+    *,
+    until_unix: float,
+    message: str = "",
+    error: str = "",
+) -> bool:
+    """来源冷却延后：回到 queued 并设置 not_before（延后领取）。
+
+    与 retry_job 的关键区别：**不增加 attempt、不标 failed、不标
+    succeeded**。冷却结束后 ``claim_jobs`` 的 ``not_before <= now``
+    条件放行，任务自动重新领取执行。
+
+    ``not_before`` 时间格式与 ``now_iso`` 一致（+08:00 ISO 字符串），
+    保证与 claim 时的字符串比较语义一致。
+    """
+    conn = get_connection()
+    not_before = datetime.fromtimestamp(
+        max(0.0, float(until_unix)), tz=timezone(timedelta(hours=8))
+    ).isoformat()
+    cursor = conn.execute(
+        """
+        UPDATE jobs
+        SET status = 'queued', not_before = ?, message = ?, error = ?,
+            lease_owner = '', lease_until = '', version = version + 1,
+            updated_at = ?
+        WHERE job_id = ? AND lease_owner = ? AND status = 'running'
+        """,
+        (not_before, message, error, now_iso(), job_id, worker_id),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
 def cancel_job(job_id: str) -> bool:
     """请求取消：queued 直接终态 cancelled；running 置 cancel_requested（协作式）。"""
     conn = get_connection()
