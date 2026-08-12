@@ -142,9 +142,13 @@ def _create_durable_job(job_type="mirror_revision", source="pan115", **payload_e
 
 
 def test_tasks_api_get_durable_job_via_facade(durable_jobs_db):
-    """durable job id 通过统一任务门面返回 TaskRecord 兼容形状。"""
+    """durable job id 通过统一任务门面返回 TaskRecord 兼容形状。
+
+    jobs 表内部 queued 在门面出口适配为前端契约的 pending；内部状态机不动。
+    """
     from fastapi.testclient import TestClient
 
+    from app.jobs import store as job_store
     from app.main import app
 
     job = _create_durable_job()
@@ -155,9 +159,11 @@ def test_tasks_api_get_durable_job_via_facade(durable_jobs_db):
     assert data["task_id"] == job.job_id
     assert data["task_type"] == "mirror_revision"
     assert data["source"] == "pan115"
-    assert data["status"] == "queued"
+    assert data["status"] == "pending"  # 前端契约：queued → pending
     assert data["created_at"] == job.created_at
     assert "started_at" in data and "finished_at" in data and "result" in data
+    # 内部状态机不动：DB 仍是 queued（queued 是 jobs 表的内部事实）
+    assert job_store.get_job(job.job_id).status == "queued"
 
 
 def test_tasks_api_get_legacy_task_via_facade(durable_jobs_db):
@@ -240,7 +246,7 @@ def test_tasks_api_cancel_terminal_durable_job_keeps_result(durable_jobs_db):
 
 
 def test_tasks_api_list_includes_durable_job(durable_jobs_db):
-    """list 合并 durable job（Job.to_record_dict 形状）。"""
+    """list 合并 durable job（Job.to_record_dict 形状，queued → pending）。"""
     from fastapi.testclient import TestClient
 
     from app.main import app
@@ -255,7 +261,7 @@ def test_tasks_api_list_includes_durable_job(durable_jobs_db):
     item = durable_items[0]
     assert item["task_type"] == "scrape_revision"
     assert item["source"] == "tmdb"
-    assert item["status"] == "queued"
+    assert item["status"] == "pending"  # 列表出口同样适配 queued → pending
 
 
 def test_tasks_api_list_filters_durable_job(durable_jobs_db):
@@ -274,3 +280,51 @@ def test_tasks_api_list_filters_durable_job(durable_jobs_db):
     assert any(item["task_id"] == job.job_id for item in prefixed)
     other_source = client.get("/api/tasks?source=local").json()["tasks"]
     assert not any(item["task_id"] == job.job_id for item in other_source)
+
+
+def test_tasks_api_durable_status_passthrough(durable_jobs_db):
+    """running/succeeded/failed/cancelled 原样透传；仅 queued 适配为 pending。
+
+    GET /api/tasks/{id}、列表、cancel 后返回都统一走同一适配（_durable_record_dict）。
+    """
+    from fastapi.testclient import TestClient
+
+    from app.jobs import store as job_store
+    from app.jobs.models import FAILED, RUNNING, SUCCEEDED
+    from app.main import app
+
+    client = TestClient(app)
+
+    # running：领取后原样透传
+    running_job = _create_durable_job(job_type="mirror_revision", source="pan115")
+    claimed = job_store.claim_jobs("test-worker")
+    assert claimed and claimed[0].job_id == running_job.job_id
+    data = client.get(f"/api/tasks/{running_job.job_id}").json()
+    assert data["status"] == RUNNING
+    # 列表同样透传 running
+    listed = client.get("/api/tasks?limit=100").json()["tasks"]
+    listed_running = next(item for item in listed if item["task_id"] == running_job.job_id)
+    assert listed_running["status"] == RUNNING
+
+    # succeeded：终态原样透传
+    ok_job = _create_durable_job(job_type="mirror_revision", source="pan115")
+    claimed = job_store.claim_jobs("test-worker")
+    assert claimed and claimed[0].job_id == ok_job.job_id
+    assert job_store.finish_job(ok_job.job_id, "test-worker", SUCCEEDED, version=claimed[0].version)
+    data = client.get(f"/api/tasks/{ok_job.job_id}").json()
+    assert data["status"] == SUCCEEDED
+
+    # failed：终态原样透传
+    failed_job = _create_durable_job(job_type="mirror_revision", source="pan115")
+    claimed = job_store.claim_jobs("test-worker")
+    assert claimed and claimed[0].job_id == failed_job.job_id
+    assert job_store.finish_job(
+        failed_job.job_id, "test-worker", FAILED, version=claimed[0].version, error="boom"
+    )
+    data = client.get(f"/api/tasks/{failed_job.job_id}").json()
+    assert data["status"] == FAILED
+
+    # cancelled：cancel 响应透传 cancelled（内部也是 cancelled）
+    cancelled_job = _create_durable_job(job_type="mirror_revision", source="pan115")
+    data = client.post(f"/api/tasks/{cancelled_job.job_id}/cancel").json()
+    assert data["status"] == "cancelled"

@@ -68,18 +68,22 @@ test('确认并继续在已确认状态下保持可点击，阻塞性问题与�
   assert.doesNotMatch(disabledExpression, /reviewItems/);
 });
 
-test('确认并继续只在 draft 提交确认，confirmed 只刷新预览并进入工作台', () => {
+test('确认并继续在 draft 与 confirmed 都走幂等确认门面，durable 挂接、legacy 不自动生成', () => {
   const confirmPlan = page.slice(
     page.indexOf('const confirmPlan = async () => {'),
     page.indexOf('const saveItem = async () => {'),
   );
-  // confirm API 只出现一次，且必须位于 draft 分支内
+  // 幂等确认门面：confirm API 只出现一次，不再被 draft 状态分支包裹
+  // （confirmed 恢复场景同样调用，由后端幂等/ensure 语义保证安全）
   assert.equal((confirmPlan.match(/importsApi\.confirm\(/g) || []).length, 1);
-  assert.match(confirmPlan, /if \(preview\.status === 'draft'\) \{[\s\S]*?await importsApi\.confirm\(source, activeEntry\.planId\);[\s\S]*?\}/);
-  // 已确认状态继续路径：刷新预览并进入工作台，不重复确认
+  assert.match(confirmPlan, /await importsApi\.confirm\(source, activeEntry\.planId\);/);
+  assert.doesNotMatch(confirmPlan, /if \(preview\.status === 'draft'\)/);
+  // durable 响应挂接已入队/恢复的镜像任务
+  assert.match(confirmPlan, /setTask\(await tasksApi\.get\(confirmed\.job_id\)\)/);
+  // 确认后刷新预览并进入工作台
   assert.match(confirmPlan, /importsApi\.getPreview\(source, activeEntry\.planId\)/);
   assert.match(confirmPlan, /updateEntry\(activeEntry\.id, \{ preview: confirmedPreview \}\)/);
   assert.match(confirmPlan, /setStep\('workbench'\)/);
-  // 不自动创建镜像或刮削任务
-  assert.doesNotMatch(confirmPlan, /mirrorApi|scrapeApi|startTask\(/);
+  // legacy 不自动创建镜像或刮削任务（工作台手动启动，避免重复生成）
+  assert.doesNotMatch(confirmPlan, /mirrorApi\.generate|scrapeApi|startTask\(/);
 });

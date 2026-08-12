@@ -2,9 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-// 模块3 C2：V3 人工确认 split-brain 修复 —— 前端 durable confirm 分流契约测试。
+// 模块3 C2+C3 Review Fix B：V3 恢复链 durable confirm 分流 + queued 状态适配 契约测试。
 // 静态契约模式（与 tests/*.test.ts 现有模式一致）：直接断言源码中的分流逻辑，
-// 证明 durable confirm response → 不调用 mirrorApi.generate()。
+// 证明 confirmed preview 恢复场景同样走幂等 confirm → durable job 挂接，
+// 不再掉回 legacy mirrorApi.generate() 造成双轨。
 
 const page = readFileSync(new URL('../src/pages/MediaManagementPage.tsx', import.meta.url), 'utf8');
 const importsTs = readFileSync(new URL('../src/api/imports.ts', import.meta.url), 'utf8');
@@ -14,27 +15,75 @@ test('importsApi.confirm 响应类型包含 durable 分流字段', () => {
   assert.match(importsTs, /job_id\?: string/);
 });
 
+test('自动流水线：confirm 调用不再限定 draft（confirmed preview 恢复同样走幂等 confirm）', () => {
+  // Blocker 3：preview 已 confirmed 的恢复场景（OpenList batch 恢复/刷新页面）
+  // 也必须调用 confirm，由后端幂等/ensure 语义返回 durable job_id。
+  assert.match(page, /const confirmed = await importsApi\.confirm\(source, planId\);/);
+  assert.doesNotMatch(page, /previewStatus === 'draft'/);
+  assert.doesNotMatch(page, /let durableTaskId = ''/);
+});
+
 test('自动流水线：V3 durable confirm 直接挂接后端任务，不再调用 mirrorApi.generate', () => {
   // durable + job_id → tasksApi.get(job_id)（不生成镜像）
-  assert.match(page, /confirmed\.execution_mode === 'durable' && confirmed\.job_id/);
-  assert.match(page, /setTask\(await tasksApi\.get\(durableTaskId\)\)/);
+  assert.match(page, /if \(confirmed\.execution_mode === 'durable' && confirmed\.job_id\)/);
   assert.match(page, /setTask\(await tasksApi\.get\(confirmed\.job_id\)\)/);
   // legacy 分支仍保留 mirrorApi.generate（旧 JSON 计划行为不变）
   assert.match(page, /const created = await mirrorApi\.generate\(source, planId\);/);
 });
 
 test('durable 分支内不得出现 mirrorApi.generate 调用', () => {
-  // 自动流水线：durableTaskId 设置块到 mirrorApi.generate 之间，
-  // durable 路径只用 tasksApi.get(durableTaskId)，generate 只属于 legacy 分支
-  const start = page.indexOf('let durableTaskId = \'\';');
-  const generateAt = page.indexOf('const created = await mirrorApi.generate(source, planId);');
-  const durablePath = page.slice(start, generateAt);
-  assert.match(durablePath, /if \(durableTaskId\) \{/);
-  assert.match(durablePath, /setTask\(await tasksApi\.get\(durableTaskId\)\)/);
-  // durable 设置块内不允许出现 mirrorApi.generate
-  const durableGuard = page.slice(
-    page.indexOf("if (confirmed.execution_mode === 'durable' && confirmed.job_id) {"),
-    page.indexOf('} else {', page.indexOf('durableTaskId = confirmed.job_id;')),
-  );
-  assert.doesNotMatch(durableGuard, /mirrorApi\.generate\(source, planId\)/);
+  // 自动流水线：durable 判断块到 legacy else 之间，durable 路径只用
+  // tasksApi.get(confirmed.job_id)，generate 只属于 legacy 分支。
+  const start = page.indexOf("if (confirmed.execution_mode === 'durable' && confirmed.job_id) {");
+  assert.ok(start >= 0, 'durable 分流块不存在');
+  const elseAt = page.indexOf('} else {', start);
+  assert.ok(elseAt > start, 'legacy else 分支不存在');
+  const durablePath = page.slice(start, elseAt);
+  assert.match(durablePath, /setTask\(await tasksApi\.get\(confirmed\.job_id\)\)/);
+  assert.doesNotMatch(durablePath, /mirrorApi\.generate/);
+});
+
+test('confirmPlan：draft 与 confirmed 都调用幂等 confirm 并挂接 durable job', () => {
+  // 手动确认按钮同样走幂等确认门面：confirmed 恢复（页面刷新后 preview 已
+  // confirmed）也能拿到 durable job_id，不再跳过 confirm 直接进工作台。
+  const start = page.indexOf('const confirmPlan = async () =>');
+  assert.ok(start >= 0, 'confirmPlan 不存在');
+  const end = page.indexOf('const saveItem = async () =>', start);
+  assert.ok(end > start, 'confirmPlan 区域边界未找到');
+  const block = page.slice(start, end);
+  assert.match(block, /const confirmed = await importsApi\.confirm\(source, activeEntry\.planId\);/);
+  assert.doesNotMatch(block, /preview\.status === 'draft'/);
+  assert.doesNotMatch(block, /previewStatus === 'draft'/);
+  assert.match(block, /setTask\(await tasksApi\.get\(confirmed\.job_id\)\)/);
+  // 手动路径 legacy 分支不自动生成镜像（进工作台由用户启动），保持现状
+  assert.doesNotMatch(block, /mirrorApi\.generate/);
+});
+
+test('恢复链分流：confirmed preview + durable → tasksApi.get(job_id)，不出现 legacy 生成', () => {
+  // 静态契约：auto-pipeline 的 confirm 调用为无条件语句（不再被 draft 状态
+  // 分支包裹），恢复场景（previewStatus === 'confirmed'）同样命中 durable 挂接。
+  const confirmAt = page.indexOf('const confirmed = await importsApi.confirm(source, planId);');
+  assert.ok(confirmAt >= 0, 'auto-pipeline confirm 调用不存在');
+  const before = page.slice(Math.max(0, confirmAt - 300), confirmAt);
+  // confirm 调用之前的 300 字符内不允许出现 draft 条件包裹
+  assert.doesNotMatch(before, /if \(previewStatus === 'draft'\)/);
+  assert.doesNotMatch(before, /if \(preview\.status === 'draft'\)/);
+  // durable 挂接与 legacy 生成二者必居其一，且 durable 分支优先挂接任务
+  const after = page.slice(confirmAt);
+  assert.match(after, /if \(confirmed\.execution_mode === 'durable' && confirmed\.job_id\)/);
+  assert.match(after, /setTask\(await tasksApi\.get\(confirmed\.job_id\)\)/);
+});
+
+test('confirmed preview + 无 durable 标识 → legacy mirrorApi.generate 保留', () => {
+  // 旧 JSON 计划：confirm 响应无 durable 字段时保持 legacy 生成路径（不丢失）
+  const start = page.indexOf('const confirmed = await importsApi.confirm(source, planId);');
+  assert.ok(start >= 0);
+  const legacyGenerate = page.indexOf('const created = await mirrorApi.generate(source, planId);', start);
+  assert.ok(legacyGenerate > start, 'legacy mirrorApi.generate 分支缺失');
+  const between = page.slice(start, legacyGenerate);
+  // legacy 分支路径由 else 承接（durable 判断后的兜底）
+  assert.match(between, /} else \{/);
+  // generate 之后立即挂接 legacy 任务
+  const afterGenerate = page.slice(legacyGenerate, legacyGenerate + 200);
+  assert.match(afterGenerate, /setTask\(await tasksApi\.get\(created\.task_id\)\)/);
 });

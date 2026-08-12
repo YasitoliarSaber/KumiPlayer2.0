@@ -315,26 +315,23 @@ export default function MediaManagementPage() {
     autoPipelineEntryRef.current = pipelineKey;
     const entryId = activeEntry.id;
     const planId = activeEntry.planId;
-    const previewStatus = activeEntry.preview.status;
     void (async () => {
       try {
         setActionError('');
-        let durableTaskId = '';
-        if (previewStatus === 'draft') {
-          const confirmed = await importsApi.confirm(source, planId);
-          if (confirmed.execution_mode === 'durable' && confirmed.job_id) {
-            // V3：镜像 job 已由后端确认事务入队，前端无需再生成
-            durableTaskId = confirmed.job_id;
-          }
-        }
+        // 幂等确认门面：draft → confirm+入队，confirmed → ensure（后端幂等）。
+        // 恢复场景（preview 已 confirmed，如 OpenList batch 恢复/刷新页面）同样
+        // 拿到 durable job_id，避免掉回 legacy mirror 生成造成双轨。
+        const confirmed = await importsApi.confirm(source, planId);
         const confirmedPreview = await importsApi.getPreview(source, planId);
         updateEntry(entryId, { preview: confirmedPreview, status: 'parsed' });
         setTask(null);
         setTaskKind('mirror');
         setStep('workbench');
-        if (durableTaskId) {
-          setTask(await tasksApi.get(durableTaskId));
+        if (confirmed.execution_mode === 'durable' && confirmed.job_id) {
+          // V3：镜像 job 已由后端确认/ensure 事务入队（或恢复已有 job），前端不再生成
+          setTask(await tasksApi.get(confirmed.job_id));
         } else {
+          // legacy：旧 JSON 计划保持原行为，由前端生成镜像
           const created = await mirrorApi.generate(source, planId);
           setTask(await tasksApi.get(created.task_id));
         }
@@ -1405,14 +1402,13 @@ export default function MediaManagementPage() {
     if (preview.status !== 'draft' && preview.status !== 'confirmed') return;
     setActionError('');
     try {
-      // 已确认计划不重复提交确认：仅 draft 调用确认 API，confirmed 直接刷新预览并进入工作台。
-      if (preview.status === 'draft') {
-        const confirmed = await importsApi.confirm(source, activeEntry.planId);
-        if (confirmed.execution_mode === 'durable' && confirmed.job_id) {
-          // V3：后端已入队 durable mirror job，工作台直接挂接该任务，不再重复生成
-          setTaskKind('mirror');
-          setTask(await tasksApi.get(confirmed.job_id));
-        }
+      // 幂等确认门面：draft → confirm+入队，confirmed → ensure（后端幂等）；
+      // durable 响应直接挂接已入队/恢复的镜像任务，legacy 进工作台由用户启动镜像。
+      const confirmed = await importsApi.confirm(source, activeEntry.planId);
+      if (confirmed.execution_mode === 'durable' && confirmed.job_id) {
+        // V3：后端已入队（或恢复已有）durable mirror job，工作台直接挂接，不再重复生成
+        setTaskKind('mirror');
+        setTask(await tasksApi.get(confirmed.job_id));
       }
       const confirmedPreview = await importsApi.getPreview(source, activeEntry.planId);
       updateEntry(activeEntry.id, { preview: confirmedPreview });

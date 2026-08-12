@@ -3,10 +3,11 @@
 
 任务门面：legacy TaskManager（内存 + SQLite 历史）与 durable job（jobs 表）
 双轨合并。durable job 统一以 ``Job.to_record_dict()``（TaskRecord 兼容形状）
-暴露，source 取 payload 实际字段，不凭空猜测；legacy 任务保持原 TaskRecord
-形状。查询按 legacy-first 语义：legacy 任务走原有路径，未命中才回退 durable
-job。legacy id（``task_xxx``）与 durable id（32 位 uuid hex）空间不重叠，
-任一 id 至多命中一条链路，durable 预检不会遮蔽 legacy 命中。
+暴露，source 取 payload 实际字段，不凭空猜测；jobs 表内部 queued 状态在
+门面出口统一适配为前端契约的 pending（内部状态机不变）。legacy 任务保持原
+TaskRecord 形状。查询按 legacy-first 语义：legacy 任务走原有路径，未命中才
+回退 durable job。legacy id（``task_xxx``）与 durable id（32 位 uuid hex）
+空间不重叠，任一 id 至多命中一条链路，durable 预检不会遮蔽 legacy 命中。
 """
 
 from dataclasses import asdict
@@ -54,6 +55,19 @@ def _record_to_dict(record):
     return data
 
 
+def _durable_record_dict(job):
+    """durable Job → TaskRecord JSON 形状；内部 queued 适配为前端 pending。
+
+    jobs 表内部状态机保留 queued（内部事实），只在任务门面出口做适配，
+    与 TaskManager._job_to_record 的 queued→pending 语义一致（manager.py），
+    保证 GET/列表/cancel 响应统一符合前端 TaskRecord 契约。
+    """
+    record = job.to_record_dict()
+    if record.get("status") == "queued":
+        record["status"] = "pending"
+    return _record_to_dict(record)
+
+
 def _record_task_type(record) -> str:
     return record["task_type"] if isinstance(record, dict) else record.task_type
 
@@ -72,7 +86,7 @@ def list_tasks(
     # 形状）；这里把 durable 项替换为 Job.to_record_dict() 形状，保持统一门面。
     # source/task_type 过滤由 manager 按两种链路分别应用，接口语义不变。
     records = [
-        durable_by_id[item.task_id].to_record_dict()
+        _durable_record_dict(durable_by_id[item.task_id])
         if item.task_id in durable_by_id
         else item
         for item in manager.list_tasks(task_type=task_type, source=source)
@@ -97,7 +111,7 @@ def get_task(task_id: str):
     manager = get_task_manager()
     job = _get_durable_job(task_id)
     if job is not None:
-        return _record_to_dict(job.to_record_dict())
+        return _durable_record_dict(job)
     record = manager.get_task(task_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
@@ -117,7 +131,7 @@ def cancel_task(task_id: str):
     if job is not None:
         job_store.cancel_job(task_id)
         updated = _get_durable_job(task_id) or job
-        return _record_to_dict(updated.to_record_dict())
+        return _durable_record_dict(updated)
     record = manager.get_task(task_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
