@@ -309,7 +309,16 @@ class OpenListClient:
         返回 (http_status, body)。401 认证失败仅允许一次重登重试。
 
         网络准入（最后一道门）：**每个物理 attempt 之前**都执行
-        「source_health 健康准入 → governor 限速 acquire → HTTP 请求」。
+        「peek 快速预检 → governor 限速 acquire → source_health 最终准入
+        → HTTP 请求」。
+
+        - ``peek_request_allowed``（只读、不消费探针）：明确未到期冷却时
+          直接拒绝，零网络请求、不进入限速队列；
+        - ``governor.acquire``：连接级限速等待；
+        - ``can_request``（唯一消费探针的入口）：**governor 等待期间**
+          新建立的冷却（另一请求返回 405/429 触发）在此拦截——这是物理
+          HTTP 前最后一道门，绝不在拿过 admission 后仍发请求。
+
         冷却中（含扫描中途 405/429 触发冷却后）在下一次 attempt 的准入处
         立即抛 :class:`OpenListSourceCoolingDownError`，不再发任何请求。
 
@@ -322,13 +331,19 @@ class OpenListClient:
         """
         last_error: Exception | None = None
         for attempt in range(self.max_attempts):
-            # 来源健康准入（每次 attempt 前）：冷却中零网络请求
-            allowed, _health = source_health.can_request(self._conn_key)
-            if not allowed:
+            # 快速预检（只读、不消费探针）：明确未到期冷却 → 直接拒绝，
+            # 不进入限速队列、不发任何请求
+            peek_allowed, _ = source_health.peek_request_allowed(self._conn_key)
+            if not peek_allowed:
                 raise OpenListSourceCoolingDownError()
             # 连接级限速：同一连接键的请求间隔 >= 1/rate_per_second（锁外
-            # sleep，不同连接互不阻塞）。在真正发请求前准入。
+            # sleep，不同连接互不阻塞）。
             self._governor.acquire(self._conn_key)
+            # 真正最终准入（消费探针）：governor 等待期间新建立的冷却
+            # （另一请求 405/429 触发）在此拦截——物理 HTTP 前最后一道门
+            allowed, _ = source_health.can_request(self._conn_key)
+            if not allowed:
+                raise OpenListSourceCoolingDownError()
             try:
                 with self._client() as client:
                     response = client.post(path, json=payload, headers=self._headers())
@@ -412,12 +427,20 @@ class OpenListClient:
         公共请求入口：来源健康准入 + 连接级限速 + 按最终结果上报 source_health。
         冷却中（含 429/风控触发的冷却）不发任何物理请求，立即抛
         :class:`OpenListSourceCoolingDownError`；429 不重试。
+
+        准入顺序与 :meth:`_post` 一致（peek 预检 → governor → 最终准入），
+        governor 等待期间新建立的冷却在最终准入处拦截。
         """
-        # 来源健康准入：冷却中零网络请求
-        allowed, _health = source_health.can_request(self._conn_key)
+        # 快速预检（只读、不消费探针）：明确未到期冷却 → 直接拒绝
+        peek_allowed, _ = source_health.peek_request_allowed(self._conn_key)
+        if not peek_allowed:
+            raise OpenListSourceCoolingDownError()
+        # 连接级限速
+        self._governor.acquire(self._conn_key)
+        # 真正最终准入（消费探针；governor 等待期间新冷却在此拦截）
+        allowed, _ = source_health.can_request(self._conn_key)
         if not allowed:
             raise OpenListSourceCoolingDownError()
-        self._governor.acquire(self._conn_key)
         try:
             token = self._login_request()
         except OpenListSourceCoolingDownError:

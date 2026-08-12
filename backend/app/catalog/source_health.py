@@ -488,41 +488,62 @@ def can_request(source_id: str, *, now: float | None = None) -> tuple[bool, Sour
     :func:`peek_request_allowed`，避免上层预检抢占唯一探针许可。
 
     返回 (allowed, record)：
-    - 冷却中 → (False, record)；
+    - 冷却中（未到期）→ (False, record)；
     - 冷却期已过 → **原子单探针抢占**：仅第一个调用者获得探针许可，
       (True, probe_record)（state 置 probe、cooldown_until 置 0）；
       并发/后续调用者 (False, 最新 record)，防止多探针并发；
     - probe 中（探针已发出、尚未上报结果）→ (False, record)；
     - 无记录 / healthy → (True, record)。
 
-    抢占通过 ``UPDATE ... WHERE source_id=? AND state='cooling_down'`` 保证
-    原子性：并发下只有一个调用者能匹配该条件（affected rowcount=1），
-    其余调用者 rowcount=0 判定未抢到。
+    **原子化（最终准入 Fix）**：整个「读 → 判断 → 写」在单个 ``BEGIN
+    IMMEDIATE`` 事务内完成（:func:`_transition`）。冷却期已过时在**同一
+    事务内**转 probe：
+
+    - ``BEGIN IMMEDIATE`` + busy_timeout=5000 把并发写事务串行化，本调用者
+      事务内 SELECT 读到的一定是最近一次**已提交**的写结果；
+    - 若并发 ``record_failure('risk_control')`` 先提交并把 cooldown_until
+      延长到未来，本调用者在事务内读到新值 → ``now < cooldown_until`` →
+      (False, record)——**绝不可能用陈旧「已过期」判断绕过新冷却**
+      （旧实现：先 get_health() 读、再独立 ``UPDATE ... WHERE state=
+      'cooling_down'``（不检查 cooldown_until）分两步，陈旧读与写入之间
+      并发延长冷却会被误命中并改写成 probe/cooldown=0）；
+    - 只有本调用者自己完成「cooling_down(已过期) → probe」转换时才返回
+      True；转换提交后若被更强的并发安全事件（risk_control）重新冷却，
+      重读的最新记录为 cooling_down → 仍返回 False。
     """
     now = now if now is not None else time.time()
-    record = get_health(source_id)
-    if record.state != STATE_COOLING_DOWN:
-        # probe 中不允许再发请求（单探针：一个来源同一时刻只允许一个探针）
-        if record.state == STATE_PROBE:
-            return False, record
-        return True, record
-    if now < record.cooldown_until:
-        return False, record
-    # 冷却期已结束：原子抢占单探针许可（并发下只有一个调用者能抢到）
-    conn = get_connection()
-    cursor = conn.execute(
-        """
-        UPDATE source_health
-        SET state = ?, cooldown_until = ?, updated_at = ?
-        WHERE source_id = ? AND state = ?
-        """,
-        (STATE_PROBE, 0.0, now, source_id, STATE_COOLING_DOWN),
-    )
-    if cursor.rowcount == 0:
-        # 已被并发调用者抢先转为 probe：本调用者不得放行
-        return False, get_health(source_id)
-    conn.commit()
-    return True, get_health(source_id)
+    transitioned_to_probe = False
+
+    def _fn(current: SourceHealthRecord) -> dict | None:
+        nonlocal transitioned_to_probe
+        if current.state != STATE_COOLING_DOWN:
+            # healthy / 无记录 / probe：不改写（probe 由上次调用者持有，
+            # 未上报前不允许再发请求——单探针保护）
+            return None
+        if now < current.cooldown_until:
+            # 冷却未到期（含并发刚延长的冷却）：不允许
+            return None
+        # 冷却期已结束：事务内原子转 probe（唯一消费探针的路径；
+        # 串行化保证此判断基于最新已提交值，绝不可能绕过新 cooldown）
+        transitioned_to_probe = True
+        return {
+            "state": STATE_PROBE,
+            "reason_kind": current.reason_kind,
+            "consecutive_failures": current.consecutive_failures,
+            "cooldown_until": 0.0,
+            "last_failure_at": current.last_failure_at,
+            "last_success_at": current.last_success_at,
+        }
+
+    record = _transition(source_id, _fn, now=now)
+    if record.state == STATE_COOLING_DOWN:
+        # 冷却中：本调用者转 probe 提交后可能被并发 risk_control 重新冷却
+        # （重读即最新值），未到期则拒绝；防御性保留过期放行分支
+        return now >= record.cooldown_until, record
+    if record.state == STATE_PROBE:
+        # 仅当本调用者自己完成「过期冷却 → probe」转换时才放行（单探针）
+        return transitioned_to_probe, record
+    return True, record  # healthy / 无记录
 
 
 def list_health() -> list[SourceHealthRecord]:

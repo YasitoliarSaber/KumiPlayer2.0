@@ -972,3 +972,106 @@ class TestAtomicTransitions:
         )
         assert rec.cooldown_until >= expected  # 单调：不短于较长冷却
         assert rec.reason_kind == "risk_control"  # 更强原因最终保持
+
+
+# ============================================================
+# 模块 1 最终准入原子化：can_request 陈旧过期判断不能绕过新 cooldown
+# ============================================================
+
+class TestFinalAdmissionAtomicCanRequest:
+    """规划员第四次审核点名（P0 准入竞态）：can_request 自身原子化。
+
+    旧实现：先 ``get_health()`` 读、再独立 ``UPDATE ... WHERE state=
+    'cooling_down'``（**不检查 cooldown_until**）→ commit()，两步分离：
+    - 线程 A 读到旧 cooldown 已过期；
+    - 线程 B ``record_failure('risk_control')`` 把 cooldown 延长到未来 6h
+      （state 仍 cooling_down）；
+    - A 的 UPDATE 仍命中（WHERE 只看 state）→ 把 B 刚建立的 6h 风控改写成
+      probe / cooldown=0，绕过。
+
+    新实现：can_request 在单个 ``BEGIN IMMEDIATE`` 事务内完成「SELECT 最新
+    state → 判断 → 若冷却且过期则转 probe」。以下测试用
+    ``_test_after_read_hook`` 精确制造交错：A 在事务内读到过期值后暂停
+    （持有写锁），B 的 risk_control 冷却在锁外排队；放行 A 提交 probe 后
+    B 基于最新值写入 cooling_down 6h——最终冷却保持，A 的陈旧过期判断
+    不可能绕过 B 刚建立的新冷却。
+    """
+
+    def test_stale_expired_read_cannot_bypass_new_cooldown(self, health_db, monkeypatch):
+        """A 陈旧过期读(6h 已过) 与 B risk_control 延长冷却交错 → 冷却保持。
+
+        最终断言：state==cooling_down、allowed==False、cooldown_until==
+        B 时刻 + 6h、**不是 probe**。旧实现（独立 UPDATE 无 cooldown_until
+        条件）下 A 的 UPDATE 会把 B 的冷却改写成 probe → 本测试失败。
+        """
+        import threading
+
+        from app.db import database as db_mod
+
+        src = "final-admission-1"
+        # 预置冷却：旧 cooldown_until = T0 + 6h（相对 now=expiry 已过期）
+        sh.record_failure(src, "risk_control", now=T0)
+        expiry = T0 + RISK_CONTROL_COOLDOWN_SECONDS + 1  # A 视角：旧冷却已过期
+        b_now = T0 + RISK_CONTROL_COOLDOWN_SECONDS + 2  # B 的冷却写入时刻
+
+        read_done = threading.Event()
+        proceed = threading.Event()
+        risk_entered = threading.Event()
+        errors: list[BaseException] = []
+        paused = False
+
+        def hook(conn, source_id, current):
+            nonlocal paused
+            # 只暂停第一个进入事务的调用者（A 的 can_request）；B 的
+            # record_failure 在 A 提交后才获得写锁，此时不再暂停
+            if source_id == src and not paused:
+                paused = True
+                read_done.set()
+                if not proceed.wait(timeout=10):
+                    raise TimeoutError("hook wait timed out")
+
+        def run_caller_a():
+            try:
+                # A：事务内读到旧 cooldown 已过期，经 hook 暂停等待放行
+                sh.can_request(src, now=expiry)
+            except BaseException as exc:  # pragma: no cover
+                errors.append(exc)
+            finally:
+                db_mod.close_connection()
+
+        def run_risk_b():
+            try:
+                risk_entered.set()
+                # B：把冷却延长到未来 6h（state 仍 cooling_down）
+                sh.record_failure(src, "risk_control", now=b_now)
+            except BaseException as exc:  # pragma: no cover
+                errors.append(exc)
+            finally:
+                db_mod.close_connection()
+
+        monkeypatch.setattr(sh, "_test_after_read_hook", hook)
+        t_a = threading.Thread(target=run_caller_a)
+        t_b = threading.Thread(target=run_risk_b)
+        t_a.start()
+        assert read_done.wait(timeout=10)  # A 已读到过期值并暂停（写锁持有）
+        t_b.start()
+        assert risk_entered.wait(timeout=10)  # B 已发起（在 BEGIN 处等写锁）
+        proceed.set()  # 放行 A：提交其「过期→probe」转换
+        t_a.join(timeout=10)
+        t_b.join(timeout=10)
+        monkeypatch.setattr(sh, "_test_after_read_hook", None)
+
+        assert not errors
+        rec = sh.get_health(src)
+        # B 的冷却必须保持：不是 probe、cooldown_until 是未来 6h 值
+        assert rec.state == sh.STATE_COOLING_DOWN
+        assert rec.reason_kind == "risk_control"
+        assert rec.cooldown_until == b_now + RISK_CONTROL_COOLDOWN_SECONDS
+        assert rec.in_cooldown
+
+        # B 提交后任何准入调用（即使以 A 的陈旧时刻）都返回 False：
+        # 新冷却未被绕过
+        allowed, rec2 = sh.can_request(src, now=expiry)
+        assert allowed is False
+        assert rec2.state == sh.STATE_COOLING_DOWN
+        assert rec2.cooldown_until == b_now + RISK_CONTROL_COOLDOWN_SECONDS

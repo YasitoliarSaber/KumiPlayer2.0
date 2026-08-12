@@ -836,3 +836,117 @@ class TestFinalPatchCooldownAdmission:
         page = client.list_dir("/")
         assert page.total == 1
         assert len(calls) == 2
+
+
+# ============================================================
+# 模块 1 最终准入顺序：governor 等待期间进入 cooldown → transport 0 次
+# ============================================================
+
+class TestFinalAdmissionGovernorOrder:
+    """规划员第四次审核点名（P0 准入竞态）：Client 最终网络准入顺序。
+
+    旧顺序：can_request（拿 admission）→ governor.acquire（等待 1 秒）→
+    HTTP——governor 等待期间另一请求返回 405 进入冷却，本请求已拿过
+    admission，睡完仍会发。
+
+    新顺序（每个 physical attempt）：peek（只读预检、不消费探针）→
+    governor.acquire（限速等待）→ can_request（真正最终准入、消费探针）
+    → HTTP：最后一道门在 governor 之后，等待期间新建立的冷却在最终准入
+    处拦截，transport 零调用。
+
+    以下测试用自定义阻塞 governor 精确制造交错（Event 同步，禁 sleep
+    猜时序）：请求已通过 peek 并进入 governor 等待 → 另一线程把来源置为
+    risk_control 冷却 → 放行 governor → 最终 can_request 拒绝 → 断言
+    transport calls==0 且抛 OpenListSourceCoolingDownError。
+    """
+
+    def test_governor_wait_cooldown_blocks_transport(self):
+        import threading
+
+        from app.catalog import source_health
+        from app.db import database as db_mod
+
+        calls: list = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            return _json_response(200, _fs_list_payload("/", [_entry("ok.mkv")]))
+
+        class _BlockingGovernor(OpenListRequestGovernor):
+            """acquire 处 Event 阻塞：模拟限速等待期间另一请求触发冷却。"""
+
+            def __init__(self):
+                super().__init__(rate_per_second=1000)
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def acquire(self, conn_key):
+                self.entered.set()
+                if not self.release.wait(timeout=10):
+                    raise TimeoutError("governor acquire timed out")
+                return super().acquire(conn_key)
+
+        governor = _BlockingGovernor()
+        client = make_client(handler, governor=governor)
+        client._token = "t"
+        conn_key = client._conn_key
+
+        errors: list[BaseException] = []
+
+        def run_request():
+            try:
+                client.list_dir("/")
+            except BaseException as exc:  # pragma: no cover
+                errors.append(exc)
+            finally:
+                db_mod.close_connection()
+
+        thread = threading.Thread(target=run_request)
+        thread.start()
+        assert governor.entered.wait(timeout=10)  # 已通过 peek、进入 governor 等待
+        # 请求等待限速期间：另一请求返回 405/429 → 来源进入冷却
+        source_health.record_failure(conn_key, "risk_control")
+        governor.release.set()  # 放行 governor
+        thread.join(timeout=10)
+
+        assert calls == []  # 物理请求 0 次：governor 之后的最终准入拦截
+        assert len(errors) == 1
+        assert isinstance(errors[0], OpenListSourceCoolingDownError)
+        assert errors[0].kind == "source_cooling_down"
+        assert source_health.get_health(conn_key).in_cooldown
+
+    def test_peek_deny_does_not_enter_governor(self):
+        """明确未到期冷却：peek 直接拒绝，不进入限速队列、零请求。"""
+        import threading
+
+        from app.catalog import source_health
+
+        calls: list = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            return _json_response(200, _fs_list_payload("/", [_entry("ok.mkv")]))
+
+        class _CountingGovernor(OpenListRequestGovernor):
+            def __init__(self):
+                super().__init__(rate_per_second=1000)
+                self.acquire_calls = 0
+
+            def acquire(self, conn_key):
+                self.acquire_calls += 1
+                return super().acquire(conn_key)
+
+        governor = _CountingGovernor()
+        client = make_client(handler, governor=governor)
+        client._token = "t"
+        source_health.enter_cooldown(
+            client._conn_key, reason_kind="risk_control", cooldown_seconds=3600,
+        )
+
+        with pytest.raises(OpenListSourceCoolingDownError):
+            client.list_dir("/")
+
+        assert calls == []  # 零物理请求
+        assert governor.acquire_calls == 0  # peek 拒绝不进入限速队列
+        # probe 未被消费：冷却保持 cooling_down（peek 只读）
+        assert source_health.get_health(client._conn_key).state == "cooling_down"
