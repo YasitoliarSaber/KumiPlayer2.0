@@ -319,46 +319,5 @@ class TestConnectionRouteIsolation:
 # R1-6：分页刷新与截断
 # ============================================================
 
-class TestPaginationRefreshTruncation:
-    def test_forced_refresh_only_first_page_uses_refresh_true(self, client, tmp_path):
-        """200+ 项目录强刷：只有第一页 refresh=true，后续分页 false。"""
-        _make_local_mount(tmp_path)
-        _save_config(client, tmp_path)
-        FakeOpenListClient.tree = {
-            REMOTE_ROOT: [
-                (f"目录{i:03d}", True, None, None) if i % 2 == 0 else (f"文件{i:03d}.mkv", False, 10, 1)
-                for i in range(250)
-            ]
-        }
-        body = client.get(
-            "/api/openlist/browse",
-            params={"path": REMOTE_ROOT, "refresh": "true"},
-        ).json()
-        assert body["refresh_requested"] is True
-        assert body["total"] == 250
-        assert body["truncated"] is False
-        refresh_flags = [call[1] for call in FakeOpenListClient.instances[-1].calls if call[0] == REMOTE_ROOT]
-        assert refresh_flags == [True, False, False]
-
-    def test_over_1000_entries_strictly_truncated(self, client, tmp_path):
-        _make_local_mount(tmp_path)
-        _save_config(client, tmp_path)
-        FakeOpenListClient.tree = {
-            REMOTE_ROOT: [
-                (f"文件{i:04d}.mkv", False, 10, 1)
-                for i in range(1050)
-            ]
-        }
-        body = client.get(
-            "/api/openlist/browse",
-            params={"path": REMOTE_ROOT},
-        ).json()
-        assert len(body["entries"]) == 1000
-        assert body["truncated"] is True
-        assert body["total"] == 1000
-
-
-# ============================================================
-# R1-12：单目录与批量目录 provider 标签一致
-# ============================================================
-
+# [Module 4 C3 退役] TestPaginationRefreshTruncation 全部用例断言旧假分页契约
+# （refresh 多页标志 / 1000 条截断），已被 test_openlist_pagination.py 新验收规格取代。

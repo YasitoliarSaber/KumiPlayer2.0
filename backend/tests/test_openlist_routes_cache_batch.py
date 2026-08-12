@@ -392,8 +392,9 @@ class TestBrowseCache:
         cached = read_cache(conn_key, REMOTE_ROOT + "/动画")
         assert cached is not None
         # 把缓存 TTL 改短并直接改配置：这里通过把 expires_at 改到过去来模拟过期
+        # 缓存已按「路径 + 页码 + 每页数量」分页（browse 默认 page=1, per_page=100）
         cache_file = tmp_path / "data" / "openlist_cache" / f"conn_{conn_key}" / (
-            __import__("app.integrations.openlist.cache", fromlist=["_path_key"])._path_key(REMOTE_ROOT + "/动画") + ".json"
+            __import__("app.integrations.openlist.cache", fromlist=["_page_key"])._page_key(REMOTE_ROOT + "/动画", 1, 100) + ".json"
         )
         payload = json.loads(cache_file.read_text(encoding="utf-8"))
         payload["fetched_at"] = time.time() - 9999

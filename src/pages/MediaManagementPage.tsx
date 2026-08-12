@@ -159,6 +159,11 @@ export default function MediaManagementPage() {
   const [openlistEntries, setOpenlistEntries] = useState<OpenListEntry[] | null>(null);
   const [openlistBrowseLoading, setOpenlistBrowseLoading] = useState(false);
   const [openlistBrowseError, setOpenlistBrowseError] = useState('');
+  // 模块4 C3：browse 真分页状态（一次只拉一页，loadMore 追加，绝不在进入目录后自动拉完所有页）
+  const [openlistCurrentPage, setOpenlistCurrentPage] = useState(1);
+  const [openlistHasMore, setOpenlistHasMore] = useState(false);
+  const [openlistTotalCount, setOpenlistTotalCount] = useState(0);
+  const [openlistLoadingMore, setOpenlistLoadingMore] = useState(false);
   const [openlistScanTask, setOpenlistScanTask] = useState<TaskRecord | null>(null);
   const [openlistImporting, setOpenlistImporting] = useState(false);
   const [openlistNotice, setOpenlistNotice] = useState('');
@@ -627,6 +632,10 @@ export default function MediaManagementPage() {
       setOpenlistRemoteRoot(result.remote_root);
       openlistPathRef.current = result.path;
       setOpenlistEntries(result.entries);
+      // 进入目录 / 刷新：重置 page=1，replace 当前层条目
+      setOpenlistCurrentPage(result.page > 0 ? result.page : 1);
+      setOpenlistHasMore(Boolean(result.has_more));
+      setOpenlistTotalCount(result.total || 0);
       setOpenlistCacheMeta(result.cache || null);
       // 有界预取：只预取当前层少量直接子目录（后端单并发、generation 可取消、不递归、失败静默）
       const childDirs = result.entries.filter((entry) => entry.is_dir).slice(0, Math.max(0, openlistPrefetchLimit));
@@ -638,6 +647,32 @@ export default function MediaManagementPage() {
       setOpenlistBrowseError((error as Error).message);
     } finally {
       if (seq === openlistBrowseSeqRef.current) setOpenlistBrowseLoading(false);
+    }
+  };
+
+  // 模块4 C3：加载下一页（一次只拉一页并追加；纯 UI 防御：按 remote_path 轻量去重防重复）
+  const loadMoreOpenlist = async () => {
+    if (openlistLoadingMore || !openlistHasMore) return;
+    const seq = openlistBrowseSeqRef.current; // 期间导航会递增 seq，使本请求过期
+    setOpenlistLoadingMore(true);
+    try {
+      const nextPage = openlistCurrentPage + 1;
+      const result = await openlistApi.browse(openlistPathRef.current, nextPage, false);
+      if (seq !== openlistBrowseSeqRef.current) return; // 已导航到其他目录：丢弃
+      setOpenlistEntries((current) => {
+        if (!current) return result.entries;
+        const seen = new Set(current.map((entry) => entry.remote_path));
+        const fresh = result.entries.filter((entry) => !seen.has(entry.remote_path));
+        return [...current, ...fresh];
+      });
+      setOpenlistCurrentPage(result.page > 0 ? result.page : nextPage);
+      setOpenlistHasMore(Boolean(result.has_more));
+      if (result.total > 0) setOpenlistTotalCount(result.total);
+    } catch (error) {
+      if (seq !== openlistBrowseSeqRef.current) return;
+      setOpenlistBrowseError((error as Error).message);
+    } finally {
+      if (seq === openlistBrowseSeqRef.current) setOpenlistLoadingMore(false);
     }
   };
 
@@ -1741,7 +1776,12 @@ export default function MediaManagementPage() {
                           </div>
                           {openlistEntries.length === 0 && <div className="media-directory-empty">此目录为空。</div>}
                           <div className="media-openlist-foot">
-                            <span>{openlistPath} · 共 {openlistEntries.length} 项</span>
+                            <span>{openlistPath} · {openlistTotalCount > 0 ? `已加载 ${openlistEntries.length} / ${openlistTotalCount} 项` : `已加载 ${openlistEntries.length} 项`}</span>
+                            {openlistHasMore && (
+                              <Button appearance="secondary" disabled={openlistLoadingMore} onClick={() => void loadMoreOpenlist()}>
+                                {openlistLoadingMore ? '正在加载…' : '加载更多'}
+                              </Button>
+                            )}
                             <Button appearance="secondary" icon={<ScanLine size={15} />} disabled={openlistImporting} onClick={() => void startOpenlistImport()}>导入当前文件夹</Button>
                             <Button appearance="primary" icon={openlistImporting ? <Spinner size="tiny" /> : <FolderOpen size={15} />} disabled={!openlistSelection.length || openlistImporting} onClick={() => void startOpenlistBatchImport()}>批量导入 {openlistSelection.length} 个目录</Button>
                           </div>

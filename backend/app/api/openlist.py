@@ -213,11 +213,60 @@ def _require_route_for_import(config, remote_path: str) -> tuple[str, str]:
     return route_id, provider_id
 
 
-def _fetch_dir_entries(client: OpenListClient, path: str, *, refresh: bool = False) -> tuple[list[dict], bool]:
-    """分页拉取单个目录的全部条目（不递归），白名单字段。
+def _fetch_dir_page(
+    client: OpenListClient,
+    path: str,
+    page: int,
+    per_page: int,
+    *,
+    refresh: bool = False,
+) -> dict:
+    """只请求当前页（绝不偷偷拉后续页），返回分页载荷（白名单字段）。
 
-    - 强制刷新只在第一页传 refresh=true，后续分页传 false（避免分页过程中反复刷新）；
-    - 结果严格不超过 _BROWSE_MAX_ENTRIES 项，超限裁剪并标记 truncated。
+    - total > 0 时 has_more = page*per_page < total；
+    - total 未知（0）时 has_more = len(entries) == per_page（满页推断），
+      且不把本页数量冒充 total。
+    """
+    try:
+        dir_page = client.list_dir(path, page=page, per_page=per_page, refresh=refresh)
+    except OpenListError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    entries = [
+        {
+            "name": item.name,
+            "is_dir": item.is_dir,
+            "size": item.size,
+            "modified": item.modified,
+            "remote_path": item.remote_path,
+        }
+        for item in dir_page.entries
+    ]
+    total = int(getattr(dir_page, "total", 0) or 0)
+    if total > 0:
+        has_more = page * per_page < total
+    else:
+        has_more = len(entries) == per_page
+    return {
+        "entries": entries,
+        "page": int(page),
+        "per_page": int(per_page),
+        "total": total,
+        "has_more": has_more,
+    }
+
+
+def _collect_immediate_children_bounded(
+    client: OpenListClient,
+    path: str,
+    *,
+    refresh: bool = False,
+    limit: int = _BROWSE_MAX_ENTRIES,
+) -> tuple[list[dict], bool]:
+    """有界收集单层全部直接子项（provider route discovery 专用），不递归。
+
+    与 UI browse 的逐页拉取（_fetch_dir_page）分离，不共用含糊 helper；
+    结果不超过 limit 项，超限裁剪并标记 truncated；强制刷新只在第一页传
+    refresh=true（避免分页过程中反复刷新）。
     """
     entries: list[dict] = []
     page = 1
@@ -244,8 +293,8 @@ def _fetch_dir_entries(client: OpenListClient, path: str, *, refresh: bool = Fal
             for item in dir_page.entries
         )
         last_total = dir_page.total or 0
-        if len(entries) >= _BROWSE_MAX_ENTRIES:
-            entries = entries[:_BROWSE_MAX_ENTRIES]
+        if len(entries) >= limit:
+            entries = entries[:limit]
             truncated = True
             break
         if not dir_page.entries:
@@ -256,6 +305,11 @@ def _fetch_dir_entries(client: OpenListClient, path: str, *, refresh: bool = Fal
             break
         page += 1
     return entries, truncated
+
+
+def _fetch_dir_entries(client: OpenListClient, path: str, *, refresh: bool = False) -> tuple[list[dict], bool]:
+    """兼容别名：等价于有界收集器（旧测试/旧调用保留引用，UI browse 不使用）。"""
+    return _collect_immediate_children_bounded(client, path, refresh=refresh)
 
 
 def _get_refresh_executor():
@@ -279,13 +333,17 @@ def _schedule_background_refresh(
     username: str,
     password: str,
     ttl_minutes: int,
+    *,
+    page: int = 1,
+    per_page: int = _BROWSE_PER_PAGE,
 ) -> None:
-    """过期缓存的后台刷新：refresh=false 重新读取当前层并更新；失败保留旧缓存。
+    """过期缓存的后台刷新：refresh=false 重新读取「当前页」并更新；失败保留旧缓存。
 
-    按「连接 + 路径」去重；有界线程池执行，超过上限时跳过本次（下次访问再刷新）。
+    按「连接 + 路径 + 页码」去重；有界线程池执行，超过上限时跳过本次（下次访问再刷新）。
+    只刷新请求的页码，不刷新整个目录。
     """
     global _refresh_active
-    key = (conn_key, remote_path)
+    key = (conn_key, remote_path, int(page), int(per_page))
     with _refresh_guard:
         if _refresh_inflight.get(key):
             return
@@ -304,8 +362,14 @@ def _schedule_background_refresh(
             if not allowed:
                 return
             client = OpenListClient(server_url, username, password)
-            entries, _truncated = _fetch_dir_entries(client, remote_path, refresh=False)
-            write_cache(conn_key, remote_path, entries, ttl_minutes)
+            page_payload = _fetch_dir_page(
+                client, remote_path, int(page), int(per_page), refresh=False
+            )
+            write_cache(
+                conn_key, remote_path, page_payload["entries"], ttl_minutes,
+                page=page, per_page=per_page,
+                total=page_payload["total"], has_more=page_payload["has_more"],
+            )
         except Exception:
             # 后台刷新失败：保留最后一次有效缓存，前端显示非阻塞提示
             pass
@@ -453,14 +517,22 @@ def save_connection_config(req: SaveConfigRequest):
 # ============================================================
 
 @router.get("/browse")
-def browse(path: str = "", page: int = 1, refresh: bool = False):
-    """单层目录浏览：只请求当前目录，绝不递归扫描。
+def browse(path: str = "", page: int = 1, per_page: int = _BROWSE_PER_PAGE, refresh: bool = False):
+    """单层目录浏览（真分页）：一次请求只拉一页，绝不递归扫描。
 
-    - 普通浏览（refresh=false）：优先本地缓存；缓存新鲜直接返回（不触碰上游）；
-      缓存过期返回 stale 数据并后台刷新（refresh=false）；无缓存才请求 OpenList。
-    - 显式强制刷新（refresh=true）：只刷新当前层并更新缓存，不递归后代；
+    - page >= 1，1 <= per_page <= 100（默认 100）；
+    - total > 0 → has_more = page*per_page < total；total=0（未知）→
+      has_more = 本页是否满页（len(entries) == per_page）；
+    - 普通浏览（refresh=false）：优先本地分页缓存；缓存新鲜直接返回（不触碰上游）；
+      缓存过期返回 stale 数据并后台只刷新当前页；无缓存才请求 OpenList；
+    - 显式强制刷新（refresh=true）：只刷新请求的页码并更新缓存，不递归后代；
       失败时保留最后一次有效缓存。
     """
+    if page < 1:
+        raise HTTPException(status_code=400, detail="page 必须大于等于 1")
+    if per_page < 1 or per_page > 100:
+        raise HTTPException(status_code=400, detail="per_page 必须在 1 到 100 之间")
+
     config = load_config()
     remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
     path = normalize_remote_path(path) if path else remote_root
@@ -485,10 +557,12 @@ def browse(path: str = "", page: int = 1, refresh: bool = False):
     )
     if not allowed:
         if not refresh:
-            cached = read_cache(conn_key, path)
+            cached = read_cache(conn_key, path, page=page, per_page=per_page)
             if cached is not None and cached["fresh"]:
                 return _browse_payload(
                     path, parent_path, remote_root, cached["entries"],
+                    page=cached["page"], per_page=cached["per_page"],
+                    total=cached["total"], has_more=cached["has_more"],
                     cache={"cached": True, "status": "fresh", "refreshing": False,
                            "refresh_failed": False, "health": "cooling_down",
                            "fetched_at": cached["fetched_at"],
@@ -500,26 +574,31 @@ def browse(path: str = "", page: int = 1, refresh: bool = False):
         )
 
     if not refresh:
-        cached = read_cache(conn_key, path)
+        cached = read_cache(conn_key, path, page=page, per_page=per_page)
         if cached is not None:
             if cached["fresh"]:
                 # 缓存命中：不构造客户端、不触碰上游
                 return _browse_payload(
                     path, parent_path, remote_root, cached["entries"],
+                    page=cached["page"], per_page=cached["per_page"],
+                    total=cached["total"], has_more=cached["has_more"],
                     cache={"cached": True, "status": "fresh", "refreshing": False,
                            "refresh_failed": False, "fetched_at": cached["fetched_at"],
                            "expires_at": cached["expires_at"]},
                 )
-            # stale-while-revalidate：先显示缓存，后台刷新当前层
+            # stale-while-revalidate：先显示缓存，后台只刷新当前页
             _schedule_background_refresh(
                 conn_key, path,
                 config.openlist_server_url,
                 config.openlist_username,
                 config.openlist_password,
                 ttl_minutes,
+                page=page, per_page=per_page,
             )
             return _browse_payload(
                 path, parent_path, remote_root, cached["entries"],
+                page=cached["page"], per_page=cached["per_page"],
+                total=cached["total"], has_more=cached["has_more"],
                 cache={"cached": True, "status": "stale", "refreshing": True,
                        "refresh_failed": False, "fetched_at": cached["fetched_at"],
                        "expires_at": cached["expires_at"]},
@@ -527,14 +606,16 @@ def browse(path: str = "", page: int = 1, refresh: bool = False):
 
     client = _client_from_config(config)  # 需要实际请求时才构造客户端
     try:
-        entries, truncated = _fetch_dir_entries(client, path, refresh=refresh)
+        page_payload = _fetch_dir_page(client, path, page, per_page, refresh=refresh)
     except HTTPException as exc:
         if refresh:
-            cached = read_cache(conn_key, path)
+            cached = read_cache(conn_key, path, page=page, per_page=per_page)
             if cached is not None:
                 # 显式强制刷新失败：保留旧缓存，非阻塞提示
                 return _browse_payload(
                     path, parent_path, remote_root, cached["entries"],
+                    page=cached["page"], per_page=cached["per_page"],
+                    total=cached["total"], has_more=cached["has_more"],
                     cache={"cached": True, "status": "stale", "refreshing": False,
                            "refresh_failed": True, "error": str(exc.detail),
                            "fetched_at": cached["fetched_at"],
@@ -542,10 +623,15 @@ def browse(path: str = "", page: int = 1, refresh: bool = False):
                 )
         raise exc
 
-    write_cache(conn_key, path, entries, ttl_minutes)
+    write_cache(
+        conn_key, path, page_payload["entries"], ttl_minutes,
+        page=page, per_page=per_page,
+        total=page_payload["total"], has_more=page_payload["has_more"],
+    )
     payload = _browse_payload(
-        path, parent_path, remote_root, entries,
-        truncated=truncated,
+        path, parent_path, remote_root, page_payload["entries"],
+        page=page, per_page=per_page,
+        total=page_payload["total"], has_more=page_payload["has_more"],
         cache={"cached": False, "status": "none", "refreshing": False,
                "refresh_failed": False, "fetched_at": None, "expires_at": None},
     )
@@ -560,16 +646,36 @@ def _browse_payload(
     remote_root: str,
     entries: list[dict],
     *,
+    page: int = 1,
+    per_page: int = _BROWSE_PER_PAGE,
+    total: int = 0,
+    has_more: bool | None = None,
     truncated: bool = False,
     cache: dict,
 ) -> dict:
+    """分页浏览响应载荷。
+
+    total > 0 → has_more = page*per_page < total；total 未知（0）→ 优先用显式
+    has_more，否则按满页推断（len(entries) == per_page）。truncated 仅由有界
+    收集器（route discovery）使用，不再代表浏览 1000 截断。
+    """
+    total = int(total or 0)
+    if total > 0:
+        has_more_value = page * per_page < total
+    elif has_more is not None:
+        has_more_value = bool(has_more)
+    else:
+        has_more_value = len(entries) == per_page
     return {
         "path": path,
         "parent_path": parent_path,
         "remote_root": remote_root,
         "entries": entries,
-        "total": len(entries),
-        "truncated": truncated or len(entries) >= _BROWSE_MAX_ENTRIES,
+        "page": int(page),
+        "per_page": int(per_page),
+        "total": total,
+        "has_more": has_more_value,
+        "truncated": bool(truncated),
         "cache": cache,
     }
 
@@ -636,7 +742,7 @@ def prefetch(req: PrefetchRequest):
             with _prefetch_generation_guard:
                 if _prefetch_generation != my_generation:
                     break
-            cached = read_cache(conn_key, path)
+            cached = read_cache(conn_key, path, page=1, per_page=_BROWSE_PER_PAGE)
             if cached is not None and cached["fresh"]:
                 skipped += 1
                 continue
@@ -647,8 +753,14 @@ def prefetch(req: PrefetchRequest):
                         config.openlist_username,
                         config.openlist_password,
                     )
-                entries, _truncated = _fetch_dir_entries(client, path, refresh=False)
-                write_cache(conn_key, path, entries, ttl_minutes)
+                # 预取只拉当前层 page 1（有上限、不递归）；继续走 OpenListClient
+                #（Module 1 governor + circuit breaker 自动覆盖），不得绕过。
+                page_payload = _fetch_dir_page(client, path, 1, _BROWSE_PER_PAGE, refresh=False)
+                write_cache(
+                    conn_key, path, page_payload["entries"], ttl_minutes,
+                    page=1, per_page=_BROWSE_PER_PAGE,
+                    total=page_payload["total"], has_more=page_payload["has_more"],
+                )
                 prefetched += 1
             except Exception:
                 # 预取失败静默：不影响浏览主链路
@@ -702,7 +814,8 @@ def discover_routes():
     client = _client_from_config(config)
     remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
     try:
-        entries, _truncated = _fetch_dir_entries(client, remote_root, refresh=False)
+        # 有界收集器：读配置根目录全部直接子项（有数量上限），与 UI browse 逐页拉取分离
+        entries, _truncated = _collect_immediate_children_bounded(client, remote_root, refresh=False)
     except HTTPException as exc:
         raise exc
     existing = {normalize_route_prefix(route.remote_prefix): route for route in _routes_from_config(config)}

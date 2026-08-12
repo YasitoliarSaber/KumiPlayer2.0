@@ -46,15 +46,26 @@ def connection_key(server_url: str, username: str, remote_root: str) -> str:
 
 
 def _path_key(remote_path: str) -> str:
+    """(兼容保留) 规范化远端路径哈希；page-aware 缓存实际使用 _page_key。"""
     return hashlib.sha256(normalize_remote_path(remote_path).encode("utf-8")).hexdigest()[:16]
+
+
+def _page_key(remote_path: str, page: int, per_page: int) -> str:
+    """页维度缓存 key：规范化路径 + 页码 + 每页数量。
+
+    不同页码/每页数量是相互独立的缓存条目；旧整目录缓存（纯路径 key）
+    自然 miss，不做迁移。
+    """
+    raw = f"{normalize_remote_path(remote_path)}|page={int(page)}|per_page={int(per_page)}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def _cache_root(conn_key: str) -> Path:
     return get_data_dir() / "openlist_cache" / f"conn_{conn_key}"
 
 
-def _entry_file(conn_key: str, remote_path: str) -> Path:
-    return _cache_root(conn_key) / f"{_path_key(remote_path)}.json"
+def _entry_file(conn_key: str, remote_path: str, page: int, per_page: int) -> Path:
+    return _cache_root(conn_key) / f"{_page_key(remote_path, page, per_page)}.json"
 
 
 def _index_path(conn_key: str) -> Path:
@@ -138,14 +149,21 @@ def _evict_locked(conn_key: str, index: dict) -> None:
         index.pop(path_key, None)
 
 
-def read_cache(conn_key: str, remote_path: str, *, now: float | None = None) -> dict | None:
-    """读取单层目录缓存。
+def read_cache(
+    conn_key: str,
+    remote_path: str,
+    *,
+    page: int = 1,
+    per_page: int = 100,
+    now: float | None = None,
+) -> dict | None:
+    """读取单层目录某一页的缓存。
 
-    返回 ``{path, entries, fetched_at, expires_at, content_hash, entry_count, fresh}``；
-    无缓存返回 None。``fresh = expires_at > now``。
+    返回 ``{path, entries, page, per_page, total, has_more, fetched_at, expires_at,
+    content_hash, entry_count, fresh}``；无缓存返回 None。``fresh = expires_at > now``。
     """
     now = now if now is not None else time.time()
-    file_path = _entry_file(conn_key, remote_path)
+    file_path = _entry_file(conn_key, remote_path, page, per_page)
     try:
         payload = json.loads(file_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError):
@@ -159,7 +177,7 @@ def read_cache(conn_key: str, remote_path: str, *, now: float | None = None) -> 
         return None
     with _cache_lock:
         index = _read_index(conn_key)
-        path_key = _path_key(remote_path)
+        path_key = _page_key(remote_path, page, per_page)
         meta = index.get(path_key)
         if meta is not None:
             meta["last_accessed_at"] = now
@@ -167,6 +185,10 @@ def read_cache(conn_key: str, remote_path: str, *, now: float | None = None) -> 
     return {
         "path": str(payload.get("path") or normalize_remote_path(remote_path)),
         "entries": entries,
+        "page": int(payload.get("page") or page),
+        "per_page": int(payload.get("per_page") or per_page),
+        "total": int(payload.get("total") or 0),
+        "has_more": bool(payload.get("has_more", False)),
         "fetched_at": fetched_at,
         "expires_at": expires_at,
         "content_hash": str(payload.get("content_hash") or ""),
@@ -181,9 +203,17 @@ def write_cache(
     entries: list[dict],
     ttl_minutes: int,
     *,
+    page: int = 1,
+    per_page: int = 100,
+    total: int | None = None,
+    has_more: bool | None = None,
     now: float | None = None,
 ) -> dict:
-    """写入单层目录缓存（白名单字段），并更新 LRU 索引与容量淘汰。"""
+    """写入单层目录某一页的缓存（白名单字段），并更新 LRU 索引与容量淘汰。
+
+    ``total`` 未传时按整目录语义保存 ``len(entries)``（旧调用兼容）；
+    分页调用应显式传 ``total``（0 表示总数未知）与 ``has_more``。
+    """
     now = now if now is not None else time.time()
     ttl_seconds = max(1, int(ttl_minutes or 1440)) * 60
     normalized = normalize_remote_path(remote_path)
@@ -195,12 +225,16 @@ def write_cache(
     payload = {
         "path": normalized,
         "entries": safe_entries,
+        "page": int(page),
+        "per_page": int(per_page),
+        "total": len(safe_entries) if total is None else int(total),
+        "has_more": False if has_more is None else bool(has_more),
         "fetched_at": now,
         "expires_at": now + ttl_seconds,
         "content_hash": content_hash(safe_entries),
         "entry_count": len(safe_entries),
     }
-    path_key = _path_key(normalized)
+    path_key = _page_key(normalized, page, per_page)
     root = _cache_root(conn_key)
     root.mkdir(parents=True, exist_ok=True)
     file_path = root / f"{path_key}.json"
