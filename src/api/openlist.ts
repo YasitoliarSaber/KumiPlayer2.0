@@ -21,13 +21,19 @@ export interface OpenListCacheMeta {
   expires_at: number | null
 }
 
+// browse 契约（模块4 C3）：一次请求只拉一页（page >= 1, 1 <= per_page <= 100）。
+// total > 0 表示总数已知（has_more = page*per_page < total）；total = 0 表示未知（has_more = len(entries) == per_page）。
 export interface OpenListBrowseResult {
   path: string
   parent_path: string | null
   remote_root: string
   entries: OpenListEntry[]
+  page: number
+  per_page: number
   total: number
-  truncated: boolean
+  has_more: boolean
+  // 兼容字段：不再代表 1000 截断语义，新后端可能不再返回
+  truncated?: boolean
   refresh_requested?: boolean
   cache: OpenListCacheMeta
 }
@@ -133,9 +139,9 @@ export const openlistApi = {
     api.post<OpenListTestResult>('/api/openlist/test-connection', payload),
   saveConfig: (payload: OpenListConfigPayload) =>
     api.post<OpenListSaveResult>('/api/openlist/config', payload),
-  browse: (path = '', page = 1, refresh = false) =>
+  browse: (path = '', page = 1, refresh = false, perPage = 100) =>
     api.get<OpenListBrowseResult>(
-      `/api/openlist/browse?path=${encodeURIComponent(path)}&page=${page}&refresh=${refresh ? 'true' : 'false'}`,
+      `/api/openlist/browse?path=${encodeURIComponent(path)}&page=${page}&per_page=${perPage}&refresh=${refresh ? 'true' : 'false'}`,
     ),
   prefetch: (paths: string[]) =>
     api.post<OpenListPrefetchResult>('/api/openlist/prefetch', { paths }),
@@ -150,14 +156,6 @@ export const openlistApi = {
     api.get<OpenListImportBatch>(`/api/openlist/import-batches/${batchId}`),
   cancelImportBatch: (batchId: string) =>
     api.post<OpenListImportBatch>(`/api/openlist/import-batches/${batchId}/cancel`, {}),
-  importRemote: (remotePath: string, importFamily: string, importScope = '') =>
-    api.post<OpenListTaskResult>('/api/openlist/import', {
-      remote_path: remotePath,
-      import_family: importFamily,
-      import_scope: importScope,
-    }),
-  batchImport: (payload: OpenListBatchImportPayload) =>
-    api.post<OpenListTaskResult>('/api/openlist/batch-import', payload),
   rescanPreset: (presetId: string) =>
     api.post<OpenListTaskResult>(`/api/openlist/presets/${presetId}/rescan`, {}),
 }

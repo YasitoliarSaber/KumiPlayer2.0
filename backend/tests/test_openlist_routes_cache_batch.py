@@ -527,163 +527,14 @@ class TestPrefetch:
 # ============================================================
 # 批量导入
 # ============================================================
-
-class TestBatchImport:
-    def test_rejects_parent_child_overlap(self, client, tmp_path):
-        _make_local_mount(tmp_path)
-        _save_config(client, tmp_path)
-        _save_routes(
-            client,
-            [{"route_id": "r1", "label": "动画", "remote_prefix": REMOTE_ROOT + "/动画", "provider_id": "quark", "enabled": True}],
-        )
-        resp = client.post(
-            "/api/openlist/batch-import",
-            json={
-                "remote_paths": [REMOTE_ROOT + "/动画", REMOTE_ROOT + "/动画/冰菓"],
-                "import_family": "anime",
-            },
-        )
-        assert resp.status_code == 400
-        assert "父子重叠" in resp.json()["detail"]
-
-    def test_rejects_unclassified_path(self, client, tmp_path):
-        _make_local_mount(tmp_path)
-        _save_config(client, tmp_path)
-        resp = client.post(
-            "/api/openlist/batch-import",
-            json={"remote_paths": [REMOTE_ROOT + "/动画"], "import_family": "anime"},
-        )
-        assert resp.status_code == 400
-        assert "尚未归类" in resp.json()["detail"]
-
-    def test_rejects_over_limit(self, client, tmp_path):
-        _make_local_mount(tmp_path)
-        _save_config(client, tmp_path)
-        _save_routes(client)
-        paths = [f"{REMOTE_ROOT}/动画/目录{i}" for i in range(21)]
-        resp = client.post(
-            "/api/openlist/batch-import",
-            json={"remote_paths": paths, "import_family": "anime"},
-        )
-        assert resp.status_code == 400
-        assert "一次最多导入" in resp.json()["detail"]
-
-    def test_batch_success_creates_independent_presets(self, client, tmp_path):
-        _make_local_mount(tmp_path)
-        _save_config(client, tmp_path)
-        _save_routes(
-            client,
-            [{"route_id": "r1", "label": "动画", "remote_prefix": REMOTE_ROOT + "/动画", "provider_id": "quark", "enabled": True}],
-        )
-        resp = client.post(
-            "/api/openlist/batch-import",
-            json={"remote_paths": [REMOTE_ROOT + "/动画/冰菓", REMOTE_ROOT + "/动画/真人"], "import_family": "anime"},
-        )
-        assert resp.status_code == 200, resp.text
-        record = _wait_task(client, resp.json()["task_id"])
-        assert record["status"] == "succeeded", record
-        result = record["result"]
-        assert result["succeeded"] == 2
-        assert result["failed"] == 0
-        for item in result["batch"]:
-            assert item["status"] == "success"
-            assert item["provider_id"] == "quark"
-            assert item["preset_id"]
-            assert item["plan_id"]
-
-        from app.media_presets.store import list_presets
-        presets = list_presets()
-        assert len(presets) == 2
-        assert {preset.remote_locator for preset in presets} == {
-            REMOTE_ROOT + "/动画/冰菓", REMOTE_ROOT + "/动画/真人",
-        }
-        for preset in presets:
-            assert preset.provider_id == "quark"
-            assert preset.ingest_method == "openlist_api"
-            assert preset.source_route_id == "r1"
-
-    def test_batch_strictly_serial(self, client, tmp_path):
-        """严格串行：一个目录完整扫完才开始下一个。"""
-        _make_local_mount(tmp_path)
-        _save_config(client, tmp_path)
-        _save_routes(client)
-        resp = client.post(
-            "/api/openlist/batch-import",
-            json={"remote_paths": [REMOTE_ROOT + "/动画/冰菓", REMOTE_ROOT + "/动画/真人"], "import_family": "anime"},
-        )
-        _wait_task(client, resp.json()["task_id"])
-        calls = FakeOpenListClient.instances[-1].calls
-        paths = [call[0] for call in calls]
-        assert paths[0] == REMOTE_ROOT + "/动画/冰菓"
-        first_real = next(
-            (index for index, path in enumerate(paths) if path == REMOTE_ROOT + "/动画/真人"),
-            None,
-        )
-        assert first_real is not None
-        # 一旦开始扫描第二个目录，后面不再出现第一个目录
-        assert all(path == REMOTE_ROOT + "/动画/真人" for path in paths[first_real:])
-
-    def test_batch_partial_failure_isolation(self, client, tmp_path):
-        """一个目录失败不回滚其他成功目录；错误消息安全。"""
-        _make_local_mount(tmp_path)
-        _save_config(client, tmp_path)
-        _save_routes(
-            client,
-            [
-                {"route_id": "r1", "label": "冰菓", "remote_prefix": REMOTE_ROOT + "/动画/冰菓", "provider_id": "quark", "enabled": True},
-                {"route_id": "r2", "label": "真人", "remote_prefix": REMOTE_ROOT + "/动画/真人", "provider_id": "quark", "enabled": True},
-            ],
-        )
-        # 本地挂载中移除冰菓目录 → 该目录扫描失败
-        import shutil
-        shutil.rmtree(tmp_path / "quark" / "动画" / "冰菓")
-        resp = client.post(
-            "/api/openlist/batch-import",
-            json={"remote_paths": [REMOTE_ROOT + "/动画/冰菓", REMOTE_ROOT + "/动画/真人"], "import_family": "anime"},
-        )
-        record = _wait_task(client, resp.json()["task_id"])
-        assert record["status"] == "succeeded", record
-        result = record["result"]
-        assert result["succeeded"] == 1
-        assert result["failed"] == 1
-        by_path = {item["remote_path"]: item for item in result["batch"]}
-        assert by_path[REMOTE_ROOT + "/动画/冰菓"]["status"] == "error"
-        assert "token" not in json.dumps(result, ensure_ascii=False).lower()
-        assert "password" not in json.dumps(result, ensure_ascii=False).lower()
-        # 成功目录已形成独立预设
-        from app.media_presets.store import list_presets
-        assert len(list_presets()) == 1
-        assert list_presets()[0].remote_locator == REMOTE_ROOT + "/动画/真人"
-
-    def test_batch_cancel_stops_unstarted_directories(self, client, tmp_path):
-        _make_local_mount(tmp_path)
-        _save_config(client, tmp_path)
-        _save_routes(client)
-        original_list = FakeOpenListClient._list_dir_default
-
-        def slow_list_dir(self, path, page=1, per_page=100, refresh=False):
-            time.sleep(0.05)
-            return original_list(self, path, page=page, per_page=per_page, refresh=refresh)
-
-        FakeOpenListClient.list_dir = slow_list_dir
-        resp = client.post(
-            "/api/openlist/batch-import",
-            json={"remote_paths": [REMOTE_ROOT + "/动画/冰菓", REMOTE_ROOT + "/动画/真人"], "import_family": "anime"},
-        ).json()
-        client.post(f"/api/tasks/{resp['task_id']}/cancel")
-        record = _wait_task(client, resp["task_id"])
-        assert record["status"] == "cancelled"
-        # 未开始的目录不被扫描
-        calls = FakeOpenListClient.instances[-1].calls
-        assert all(call[0] == REMOTE_ROOT + "/动画/冰菓" for call in calls)
-
-
-# ============================================================
-# 旧预设兼容
-# ============================================================
-
 class TestLegacyPresetCompatibility:
-    def _write_legacy_preset_index(self, tmp_path: Path, *, source_root: str = "K:\\夸克\\动画") -> None:
+    def _write_legacy_preset_index(
+        self,
+        tmp_path: Path,
+        *,
+        source_root: str = "K:\\夸克\\动画",
+        remote_locator: str = "/夸克网盘/动画",
+    ) -> None:
         index = tmp_path / "data" / "media_presets" / "index.json"
         index.parent.mkdir(parents=True, exist_ok=True)
         index.write_text(
@@ -699,7 +550,7 @@ class TestLegacyPresetCompatibility:
                             "import_family": "anime",
                             "import_scope": "",
                             "update_mode": "openlist_scan",
-                            "remote_locator": "/夸克网盘/动画",
+                            "remote_locator": remote_locator,
                             "version_count": 1,
                             "versions": [
                                 {
@@ -708,7 +559,7 @@ class TestLegacyPresetCompatibility:
                                     "original_name": "动画（OpenList）",
                                     "archive_path": "media_presets/legacy-1/versions/v1.json",
                                     "input_type": "openlist",
-                                    "remote_locator": "/夸克网盘/动画",
+                                    "remote_locator": remote_locator,
                                 }
                             ],
                         }
@@ -762,28 +613,18 @@ class TestLegacyPresetCompatibility:
         _make_local_mount(tmp_path)
         _save_config(client, tmp_path)
         _save_routes(client)
-        # 先正常导入创建带完整基线的预设
-        resp = client.post(
-            "/api/openlist/import",
-            json={"remote_path": REMOTE_ROOT + "/动画/冰菓", "import_family": "anime"},
+        # 直接构造旧格式预设索引（legacy /import 已退役，C2 后不再走旧递归链创建）
+        # 目录选子路径 /夸克网盘/动画/冰菓：与 route prefix 不重叠、与历史测试残留 root 亦不冲突
+        self._write_legacy_preset_index(
+            tmp_path,
+            source_root=str(tmp_path / "quark" / "动画" / "冰菓"),
+            remote_locator=REMOTE_ROOT + "/动画/冰菓",
         )
-        assert resp.status_code == 200
-        first = _wait_task(client, resp.json()["task_id"])
-        assert first["status"] == "succeeded", first
-
-        # 模拟旧格式：从磁盘索引移除新字段（provider/ingest/route）
-        index_path = tmp_path / "data" / "media_presets" / "index.json"
-        raw = json.loads(index_path.read_text(encoding="utf-8"))
-        for preset in raw["presets"]:
-            preset.pop("provider_id", None)
-            preset.pop("ingest_method", None)
-            preset.pop("source_route_id", None)
-        index_path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
 
         # 读取时兼容回填，不重写媒体库 ID
         from app.media_presets.store import list_presets
         preset = list_presets()[0]
-        assert preset.preset_id == first["result"]["preset_id"]
+        assert preset.preset_id == "legacy-1"
         assert preset.provider_id == "quark"
         assert preset.ingest_method == "openlist_api"
 
@@ -801,28 +642,3 @@ class TestLegacyPresetCompatibility:
 
 
 # ============================================================
-# .strm 契约源：OpenList 快照 real_path 恒为本地绝对路径
-# ============================================================
-
-class TestStrmSourceContract:
-    def test_openlist_snapshot_real_paths_are_local_absolute(self, client, tmp_path):
-        _make_local_mount(tmp_path)
-        _save_config(client, tmp_path)
-        _save_routes(client)
-        resp = client.post(
-            "/api/openlist/import",
-            json={"remote_path": REMOTE_ROOT + "/动画/冰菓", "import_family": "anime"},
-        )
-        assert resp.status_code == 200
-        record = _wait_task(client, resp.json()["task_id"])
-        assert record["status"] == "succeeded", record
-        from app.raw.store import load_raw_snapshot
-        snapshot = load_raw_snapshot(record["result"]["snapshot_id"])
-        assert snapshot is not None
-        assert snapshot.video_count == 2
-        for file_item in snapshot.files:
-            real = str(file_item.real_path or "")
-            assert real.startswith(str(tmp_path / "quark"))  # 本地绝对路径
-            assert not real.startswith(("http://", "https://"))
-            assert "token" not in real.lower()
-            assert "authorization" not in real.lower()

@@ -7,12 +7,45 @@
 
 from pathlib import Path
 
+import json
 import pytest
 
-from app.integrations.openlist.manifest import write_manifest
+from app.integrations.openlist.manifest import MANIFEST_FORMAT, MANIFEST_FORMAT_VERSION
 from app.integrations.openlist.models import OpenListEntry
 from app.sources.openlist import OpenListAdapter, make_snapshot_id
 from app.sources.registry import get_source_adapter
+
+
+def _write_manifest(
+    tmp_path: Path,
+    manifest_id: str,
+    entries,
+    remote_locator: str,
+    source_root: str,
+) -> Path:
+    """直接构造 legacy 清单 JSON（旧 write_manifest 已退役，只保留读路径）。"""
+    path = tmp_path / f"{manifest_id}.json"
+    payload = {
+        "format": MANIFEST_FORMAT,
+        "format_version": MANIFEST_FORMAT_VERSION,
+        "manifest_id": manifest_id,
+        "source": "openlist",
+        "remote_locator": remote_locator,
+        "source_root": source_root,
+        "entries": [
+            {
+                "name": entry.name,
+                "is_dir": entry.is_dir,
+                "size": entry.size,
+                "modified": entry.modified,
+                "remote_path": entry.remote_path,
+                "depth": entry.depth,
+            }
+            for entry in entries
+        ],
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return path
 
 
 def _entries():
@@ -35,13 +68,13 @@ def _entries():
 
 def _write(tmp_path: Path) -> Path:
     manifest_id = make_snapshot_id("/夸克网盘/动画", "deadbeef")
-    path, _ = write_manifest(
+    return _write_manifest(
+        tmp_path,
         manifest_id,
         _entries(),
-        remote_locator="/夸克网盘/动画",
-        source_root=str(tmp_path / "本地动画"),
+        "/夸克网盘/动画",
+        str(tmp_path / "本地动画"),
     )
-    return path
 
 
 class TestOpenListAdapter:
@@ -87,11 +120,12 @@ class TestOpenListAdapter:
     def test_entries_outside_locator_skipped(self, tmp_path):
         """远端路径不在选中目录之下 → 跳过，不进入快照。"""
         manifest_id = make_snapshot_id("/夸克网盘/动画", "beef")
-        path, _ = write_manifest(
+        path = _write_manifest(
+            tmp_path,
             manifest_id,
             [OpenListEntry(name="越界.mkv", is_dir=False, remote_path="/其它网盘/越界.mkv", depth=1)],
-            remote_locator="/夸克网盘/动画",
-            source_root=str(tmp_path),
+            "/夸克网盘/动画",
+            str(tmp_path),
         )
         snapshot = OpenListAdapter().parse(str(path), str(tmp_path))
         assert snapshot.file_count == 0

@@ -7,9 +7,7 @@ POST   /api/openlist/prefetch              有界预取当前层少量直接子�
 GET    /api/openlist/routes                读取提供商路由（含推导本地路径预览）
 POST   /api/openlist/routes/discover       从远端总根读取直接子目录并给出提供商建议（不自动保存）
 PUT    /api/openlist/routes                保存提供商路由（校验前缀合法/不重复/归属 provider）
-POST   /api/openlist/import                单目录后台递归扫描（兼容旧入口，需归类 provider）
-POST   /api/openlist/batch-import          多目录选择篮批量导入（严格串行、失败隔离、可取消）
-POST   /api/openlist/presets/{id}/rescan   按预设保存的远端定位增量更新
+POST   /api/openlist/presets/{id}/rescan   按预设保存的远端定位增量更新（Source Catalog 增量链路）
 
 安全边界：
 - 前端绝不直连 OpenList；所有外部 HTTP 只由本模块发起；
@@ -18,7 +16,6 @@ POST   /api/openlist/presets/{id}/rescan   按预设保存的远端定位增量�
 - 本地浏览缓存只存白名单字段，禁止缓存凭据 / Token / 直链 / 内部 path；
 - 导入路径必须位于配置的映射根路径之下，并归属启用的提供商路由（或 other）；
 - 普通浏览绝不递归扫描，预取有预算、单并发、可取消且不递归后代；
-- 批量导入严格串行，单个目录失败不回滚其他成功目录。
 """
 
 import ipaddress
@@ -29,7 +26,6 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
 
-from app.api.imports import _diff_to_dict
 from app.catalog import source_health
 from app.core.config import load_config, save_config
 from app.integrations.openlist.cache import (
@@ -56,7 +52,6 @@ from app.integrations.openlist.providers import (
     normalize_route_prefix,
     provider_for_remote,
 )
-from app.media_presets.service import scan_openlist_preset
 from app.media_presets.store import get_preset
 from app.tasks.registry import get_task_manager
 
@@ -124,16 +119,6 @@ class SaveConfigRequest(BaseModel):
     allow_insecure_http: bool = False
     cache_ttl_minutes: int | None = None
     prefetch_limit: int | None = None
-
-
-class ImportRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    remote_path: str
-    import_family: str = "anime"
-    import_scope: str = ""
-
-
 class BatchImportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -784,346 +769,9 @@ def save_routes(req: SaveRoutesRequest):
     return {"routes": [_route_public(route, config) for route in routes]}
 
 
-# ============================================================
-# 导入（单目录 / 批量）
-# ============================================================
-
-def _safe_batch_error(exc: Exception) -> str:
-    """把单目录失败转成安全消息：不暴露 Token、服务端原始错误或内部细节。
-
-    - HTTPException / OpenListError 的消息已经归一化安全，可直接展示；
-    - 未知异常一律返回固定安全提示（受控日志可记录类型与脱敏信息）。
-    """
-    from app.integrations.openlist.models import OpenListError
-
-    if isinstance(exc, HTTPException):
-        return str(exc.detail)
-    if isinstance(exc, OpenListError):
-        return str(exc)
-    # 未知异常：绝不把 str(exc) 直接返回前端（可能包含本地路径/服务 URL）
-    import logging
-
-    logging.getLogger(__name__).warning(
-        "OpenList 目录扫描未知失败: %s", type(exc).__name__
-    )
-    return "该目录扫描失败，请稍后重试或检查连接配置"
-
-
-def _run_openlist_scan_task(
-    server_url: str,
-    username: str,
-    password: str,
-    remote_locator: str,
-    local_root: str,
-    import_family: str,
-    import_scope: str,
-    *,
-    preset_id: str = "",
-    provider_id: str = "",
-    source_route_id: str = "",
-    progress_callback=None,
-    should_cancel=None,
-) -> dict:
-    """单目录后台任务体：递归扫描 → 清单 → RawSnapshot → 预设增量/新建。
-
-    凭据只存在于本线程内存；返回结果不含任何敏感值。
-    """
-    from app.integrations.openlist.scan import _ScanCancelled
-    from app.tasks.models import TaskCancelledError
-
-    client = OpenListClient(server_url, username, password)
-    try:
-        if preset_id:
-            preset = get_preset(preset_id)
-            if preset is None or preset.source != "openlist":
-                raise ValueError("OpenList 媒体库预设不存在或已被删除")
-            result = scan_openlist_preset(
-                client,
-                preset.remote_locator,
-                preset.source_root,
-                preset.import_family,
-                preset.import_scope,
-                preset=preset,
-                progress_callback=progress_callback,
-                should_cancel=should_cancel,
-            )
-        else:
-            result = scan_openlist_preset(
-                client,
-                remote_locator,
-                local_root,
-                import_family,
-                import_scope,
-                provider_id=provider_id,
-                source_route_id=source_route_id,
-                progress_callback=progress_callback,
-                should_cancel=should_cancel,
-            )
-    except HTTPException as exc:
-        raise ValueError(str(exc.detail)) from None
-    except _ScanCancelled:
-        raise TaskCancelledError("任务已停止") from None
-
-    preset, version, plan, diff, reused, unchanged = result
-    payload = {
-        "plan_id": plan.plan_id,
-        "preset_id": preset.preset_id,
-        "version_id": version.version_id,
-        "snapshot_id": preset.current_snapshot_id,
-        "reused_preset": reused,
-        "unchanged": unchanged,
-        "provider_id": preset.provider_id,
-        "video_count": preset.video_count,
-        "work_count": preset.work_count,
-    }
-    if diff is not None:
-        payload["diff_id"] = diff.diff_id
-        payload["diff"] = _diff_to_dict(diff)
-    return payload
-
-
-def _submit_openlist_task(task_type: str, args: tuple, message: str, **kwargs) -> dict:
-    manager = get_task_manager()
-    try:
-        record = manager.submit(
-            task_type, "openlist", _run_openlist_scan_task, *args, message=message, **kwargs
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from None
-    return {"task_id": record.task_id, "task_status": record.status}
-
-
-@router.post("/import")
-def import_remote_folder(req: ImportRequest):
-    """选择远端文件夹后提交后台递归扫描（兼容单目录入口）。
-
-    导入前必须已归类到启用的提供商路由（或明确归类为其他远程来源）。
-    """
-    config = load_config()
-    remote_locator = normalize_remote_path(req.remote_path)
-    _ensure_within_remote_root(
-        normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/",
-        remote_locator,
-    )
-    route_id, provider_id = _require_route_for_import(config, remote_locator)
-    local_root = _local_root_for_remote(config, remote_locator)
-    if not local_root.is_dir():
-        raise HTTPException(
-            status_code=400,
-            detail="本地挂载路径不存在或不可访问，请确认网盘已挂载并映射到本地",
-        )
-    return _submit_openlist_task(
-        "openlist_import",
-        (
-            config.openlist_server_url,
-            config.openlist_username,
-            config.openlist_password,
-            remote_locator,
-            str(local_root),
-            (req.import_family or "anime").strip(),
-            (req.import_scope or "").strip(),
-        ),
-        "扫描 OpenList 目录",
-        provider_id=provider_id,
-        source_route_id=route_id,
-    )
-
-
-def _run_openlist_batch_import_task(
-    server_url: str,
-    username: str,
-    password: str,
-    remote_root: str,
-    mount_root: str,
-    routes_snapshot: list[dict],
-    paths: list[str],
-    import_family: str,
-    import_scope: str,
-    *,
-    progress_callback=None,
-    should_cancel=None,
-) -> dict:
-    """批量导入任务体：严格串行扫描每个目录，失败隔离，取消后不再启动未开始的目录。
-
-    部分结果持久化：每完成一个目录立即通过 progress_callback result_patch 持久化
-    完整 batch_items（remote_path/status/preset_id/plan_id/provider_id/version_id/message），
-    取消/重启后 TaskRecord.result 仍保留已完成目录的确认计划信息。
-    """
-    from app.integrations.openlist.scan import _ScanCancelled
-    from app.integrations.openlist.providers import OpenListRouteConfig, provider_for_remote
-    from app.tasks.models import TaskCancelledError
-
-    client = OpenListClient(server_url, username, password)
-    routes = [
-        OpenListRouteConfig(**item)
-        for item in routes_snapshot
-        if isinstance(item, dict)
-    ]
-    # 骨架：全部路径先标记为 pending（未开始），逐项完成后更新
-    results: list[dict] = [
-        {
-            "remote_path": remote_locator,
-            "status": "pending",
-            "preset_id": "",
-            "plan_id": "",
-            "provider_id": provider_for_remote(routes, remote_locator)[1],
-            "version_id": "",
-            "reused_preset": False,
-            "unchanged": False,
-            "message": "尚未开始",
-        }
-        for remote_locator in paths
-    ]
-    by_path = {item["remote_path"]: item for item in results}
-    total = len(paths)
-
-    def _persist_batch(index: int, message: str) -> None:
-        if progress_callback is None:
-            return
-        progress_callback(
-            int((index + 1) * 99 // total) if total else 99,
-            message,
-            {
-                "phase": "openlist_batch",
-                "batch_index": index,
-                "batch_total": total,
-                "current_remote_path": paths[index],
-                "batch_items": list(results),
-                "batch_summary": {
-                    "succeeded": sum(1 for item in results if item["status"] == "success"),
-                    "failed": sum(1 for item in results if item["status"] == "error"),
-                    "pending": sum(1 for item in results if item["status"] == "pending"),
-                },
-            },
-        )
-
-    for index, remote_locator in enumerate(paths):
-        if should_cancel is not None and should_cancel():
-            # 取消：未开始目录保持 pending（前端解析为“未处理”）；
-            # 已完成目录的 batch_items 已通过正常 progress_callback 持久化。
-            # 注意：manager 在取消态调用 progress_callback 会直接抛 TaskCancelledError，
-            # 因此这里不尝试再 patch，直接退出。
-            raise TaskCancelledError("批量导入已取消")
-        route_id, provider_id = provider_for_remote(routes, remote_locator)
-        try:
-            local_root = derive_local_path(mount_root, remote_root, remote_locator)
-            if not Path(local_root).expanduser().is_dir():
-                raise HTTPException(
-                    status_code=400,
-                    detail="本地挂载路径不存在或不可访问，请确认网盘已挂载并映射到本地",
-                )
-            preset, version, plan, diff, reused, unchanged = scan_openlist_preset(
-                client,
-                remote_locator,
-                local_root,
-                import_family,
-                import_scope,
-                provider_id=provider_id,
-                source_route_id=route_id,
-                progress_callback=progress_callback,
-                should_cancel=should_cancel,
-            )
-            by_path[remote_locator].update(
-                {
-                    "status": "success",
-                    "preset_id": preset.preset_id,
-                    "plan_id": plan.plan_id,
-                    "provider_id": preset.provider_id,
-                    "version_id": version.version_id,
-                    "reused_preset": reused,
-                    "unchanged": unchanged,
-                    "message": "扫描完成，请确认导入计划",
-                }
-            )
-        except _ScanCancelled:
-            # 扫描中途取消：未开始目录保持 pending（前端解析为“未处理”）
-            raise TaskCancelledError("任务已停止") from None
-        except Exception as exc:
-            by_path[remote_locator].update(
-                {
-                    "status": "error",
-                    "provider_id": provider_id,
-                    "message": _safe_batch_error(exc),
-                }
-            )
-        _persist_batch(
-            index,
-            f"批量导入 {index + 1}/{total}：{PurePosixPath(remote_locator).name or remote_locator}",
-        )
-
-    succeeded = sum(1 for item in results if item["status"] == "success")
-    return {
-        "batch_items": results,
-        "batch": results,
-        "succeeded": succeeded,
-        "failed": total - succeeded,
-    }
-
-
-@router.post("/batch-import")
-def batch_import(req: BatchImportRequest):
-    """多目录选择篮批量导入：严格串行、失败隔离、可取消、与 TaskManager 恢复兼容。
-
-    后端再次校验：路径位于远端总根内、归属启用路由（或 other）、
-    批次内无父子重叠、数量上限。
-    """
-    config = load_config()
-    remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
-    mount_root = (config.openlist_mount_root or "").strip()
-    if not mount_root:
-        raise HTTPException(status_code=400, detail=_NOT_CONFIGURED_MESSAGE)
-
-    if not req.remote_paths:
-        raise HTTPException(status_code=400, detail="请先选择至少一个目录")
-    if len(req.remote_paths) > _BATCH_MAX_PATHS:
-        raise HTTPException(status_code=400, detail=f"一次最多导入 {_BATCH_MAX_PATHS} 个目录")
-
-    normalized: list[str] = []
-    for raw in req.remote_paths:
-        path = normalize_remote_path(raw)
-        _ensure_within_remote_root(remote_root, path)
-        _require_route_for_import(config, path)
-        if path not in normalized:
-            normalized.append(path)
-
-    # 父子重叠校验：排序后检查任一路径是否为另一路径的祖先
-    ordered = sorted(normalized)
-    for index, path in enumerate(ordered):
-        for other in ordered[index + 1:]:
-            if is_ancestor_or_self(path, other):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"选择目录存在父子重叠：{path} 与 {other} 只能保留其中一个",
-                )
-
-    family = (req.import_family or "anime").strip()
-    scope = (req.import_scope or "").strip()
-    routes_snapshot = [vars(route) for route in _routes_from_config(config)]
-    manager = get_task_manager()
-    try:
-        record = manager.submit(
-            "openlist_batch_import",
-            "openlist",
-            _run_openlist_batch_import_task,
-            config.openlist_server_url,
-            config.openlist_username,
-            config.openlist_password,
-            remote_root,
-            mount_root,
-            routes_snapshot,
-            normalized,
-            family,
-            scope,
-            message=f"批量导入 {len(normalized)} 个 OpenList 目录",
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from None
-    return {"task_id": record.task_id, "task_status": record.status}
-
-
 @router.post("/presets/{preset_id}/rescan")
 def rescan_openlist_preset(preset_id: str):
-    """按预设保存的远端定位增量更新（模块4：preset rescan → Source Catalog 增量链路）。
+    """按预设保存的远端定位增量更新（Source Catalog 增量链路）（模块4：preset rescan → Source Catalog 增量链路）。
 
     预设远端定位 → exact SourceRoot（缺失则一次性注册；与既有 root 祖先/后代
     重叠且无 exact match 时 409 安全失败，不放宽 overlap 规则）→

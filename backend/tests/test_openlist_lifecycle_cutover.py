@@ -191,23 +191,22 @@ class TestPresetRescanCutover:
         assert resp.json()["generation"] == 2
         assert len(catalog_store.list_source_roots(source_id=_source_id())) == 1
 
-    def test_rescan_does_not_call_scan_openlist_preset(self, client, tmp_path, monkeypatch):
-        """rescan 走 Source Catalog 链：不调用 scan_openlist_preset、不写 Manifest。"""
+    def test_rescan_does_not_call_scan_openlist_preset(self, client, tmp_path):
+        """rescan 走 Source Catalog 链：旧链 scan_openlist_preset 已退役、不写 Manifest。"""
+        import importlib
+
         from app.media_presets.store import get_preset
 
         _save_config(client, tmp_path)
         _save_routes(client)
         _create_preset()
-        called = []
 
-        def _forbidden(*args, **kwargs):
-            called.append(args)
-            raise AssertionError("旧链 scan_openlist_preset 不应被调用")
+        # C2 静态契约：旧递归链已退役，api.openlist 不再导出 scan_openlist_preset
+        api_openlist = importlib.import_module("app.api.openlist")
+        assert not hasattr(api_openlist, "scan_openlist_preset")
 
-        monkeypatch.setattr("app.api.openlist.scan_openlist_preset", _forbidden)
         resp = client.post("/api/openlist/presets/preset-ol-1/rescan")
         assert resp.status_code == 200, resp.text
-        assert called == []
 
         # 旧链产物（snapshot/version/plan）不被写入预设
         preset = get_preset("preset-ol-1")

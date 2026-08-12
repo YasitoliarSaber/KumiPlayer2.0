@@ -14,7 +14,6 @@ const titleBar = readFileSync(new URL('../src/components/shell/DesktopTitleBar.t
 const workDetailPage = readFileSync(new URL('../src/pages/WorkDetailPage.tsx', import.meta.url), 'utf8');
 const maintenancePanel = readFileSync(new URL('../src/components/media/LibraryMaintenancePanel.tsx', import.meta.url), 'utf8');
 const libraryStore = readFileSync(new URL('../src/stores/library.ts', import.meta.url), 'utf8');
-const scanPy = readFileSync(new URL('../backend/app/integrations/openlist/scan.py', import.meta.url), 'utf8');
 const tasksDbPy = readFileSync(new URL('../backend/app/db/tasks.py', import.meta.url), 'utf8');
 const libraryService = readFileSync(new URL('../backend/app/library/service.py', import.meta.url), 'utf8');
 const libraryStorePy = readFileSync(new URL('../backend/app/library/store.py', import.meta.url), 'utf8');
@@ -138,20 +137,25 @@ test('公共配置类型只暴露 openlist_configured，不携带凭据字段', 
   assert.doesNotMatch(configTypes, /openlist_password: string/);
 });
 
-test('OpenList 前端 API 覆盖浏览、路由、预取与批量导入', () => {
+test('OpenList 前端 API 覆盖浏览、路由、预取与 durable 批量导入', () => {
   assert.match(openlistApi, /testConnection:/);
   assert.match(openlistApi, /saveConfig:/);
   assert.match(openlistApi, /browse:/);
-  assert.match(openlistApi, /importRemote:/);
   assert.match(openlistApi, /rescanPreset:/);
   assert.match(openlistApi, /prefetch:/);
   assert.match(openlistApi, /getRoutes:/);
   assert.match(openlistApi, /discoverRoutes:/);
   assert.match(openlistApi, /saveRoutes:/);
-  assert.match(openlistApi, /batchImport:/);
+  // V2 durable batch 链路（C2 起旧 /import 与 /batch-import 已退役）
+  assert.match(openlistApi, /createImportBatch:/);
+  assert.match(openlistApi, /getImportBatch:/);
+  assert.match(openlistApi, /cancelImportBatch:/);
+  assert.doesNotMatch(openlistApi, /importRemote:/);
+  assert.doesNotMatch(openlistApi, /batchImport:/);
+  assert.doesNotMatch(openlistApi, /\/api\/openlist\/batch-import/);
   assert.match(openlistApi, /\/api\/openlist\/browse/);
-  assert.match(openlistApi, /\/api\/openlist\/import/);
-  assert.match(openlistApi, /\/api\/openlist\/batch-import/);
+  assert.match(openlistApi, /\/api\/openlist\/import-batch/);
+  assert.match(openlistApi, /\/api\/openlist\/import-batches/);
   assert.match(openlistApi, /\$\{refresh \? 'true' : 'false'\}/);
   assert.match(openlistApi, /\/api\/openlist\/routes/);
 });
@@ -291,16 +295,6 @@ test('来源筛选按作品来源列表过滤（跨来源合并作品可见）',
 test('OpenList 首发禁用新番追更，并说明原因', () => {
   assert.match(mediaPage, /value="seasonal" disabled=\{source === 'openlist'\}/);
   assert.match(mediaPage, /首发暂不支持 OpenList 自动追更/);
-});
-
-test('后端扫描进度合同：不伪造整体总量，提供目录级计数', () => {
-  assert.match(scanPy, /"overall_total_known": False/);
-  assert.match(scanPy, /"scanned_directory_count"/);
-  assert.match(scanPy, /"queued_directory_count"/);
-  assert.match(scanPy, /"found_video_candidate_count"/);
-  assert.match(scanPy, /current_directory_total/);
-  assert.match(scanPy, /current_directory_collected/);
-  assert.match(scanPy, /phase/);
 });
 
 test('后端重启后遗留任务收口为可读失败，错误信息指向重新扫描', () => {

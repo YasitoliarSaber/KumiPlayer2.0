@@ -169,3 +169,62 @@ def test_large_library_surfaces_use_zustand_selectors():
         if re.search(r"useLibraryStore\(\s*\)", (ROOT / path).read_text(encoding="utf-8"))
     ]
     assert offenders == []
+
+
+# ============================================================
+# 模块4 C2：OpenList 旧递归导入主路径退役
+# ============================================================
+
+def test_openlist_legacy_recursive_import_chain_is_removed():
+    """旧递归导入链（scan_openlist_preset / scan_remote_tree / legacy API 路由）已退役。"""
+    # 旧链专用模块与测试已删除
+    assert not (ROOT / "backend/app/integrations/openlist/scan.py").exists()
+    assert not (ROOT / "backend/tests/test_openlist_scan.py").exists()
+
+    # openlist normal API 不得引用旧递归链符号（scan / manifest 写路径）
+    openlist_api = (ROOT / "backend/app/api/openlist.py").read_text(encoding="utf-8")
+    # 排除保留的新链函数名 rescan_openlist_preset（其名字含子串 scan_openlist_preset）
+    api_without_rescan = openlist_api.replace("rescan_openlist_preset", "")
+    assert "scan_openlist_preset" not in api_without_rescan
+    assert "scan_remote_tree" not in openlist_api
+    assert "openlist.scan" not in openlist_api
+    assert "import openlist.manifest" not in openlist_api
+    # legacy /import 与 /batch-import 路由已删除（rescan 与 durable import-batch 保留）
+    assert '@router.post("/import")' not in openlist_api
+    assert '@router.post("/batch-import")' not in openlist_api
+    assert '@router.post("/import-batch")' in openlist_api
+    assert '@router.post("/presets/{preset_id}/rescan")' in openlist_api
+
+    # media_presets.service 不再保留旧链实现
+    service = (ROOT / "backend/app/media_presets/service.py").read_text(encoding="utf-8")
+    assert "def scan_openlist_preset(" not in service
+    assert "_discard_openlist_manifest" not in service
+    assert "_openlist_manifest_size" not in service
+
+    # manifest.py 只保留只读接口（历史清单仍需被 sources/openlist 读取）
+    manifest = (ROOT / "backend/app/integrations/openlist/manifest.py").read_text(encoding="utf-8")
+    assert "def read_manifest(" in manifest
+    assert "def write_manifest(" not in manifest
+    assert "canonical_sha256" not in manifest
+
+    # 前端不再暴露旧导入入口
+    frontend = (ROOT / "src/api/openlist.ts").read_text(encoding="utf-8")
+    assert "importRemote" not in frontend
+    assert "batchImport" not in frontend
+    assert "'/api/openlist/import'" not in frontend
+
+
+def test_openlist_shared_scanner_and_raw_snapshot_stay():
+    """新链共用件与 RawSnapshot 必须保留（防误删护栏）。"""
+    # Source Catalog 扫描器仍使用 OpenListDirectoryScanner（新链真实 runtime caller）
+    catalog = (ROOT / "backend/app/catalog/scanner.py").read_text(encoding="utf-8")
+    assert "OpenListDirectoryScanner" in catalog
+    assert (ROOT / "backend/app/integrations/openlist/scanner.py").exists()
+
+    # sources/openlist 仍需读取 legacy 清单
+    sources = (ROOT / "backend/app/sources/openlist.py").read_text(encoding="utf-8")
+    assert "read_manifest" in sources
+
+    # RawSnapshot / raw store 是 115/百度/local 兼容路径的共用件，不允许删除
+    assert (ROOT / "backend/app/raw/models.py").exists()
+    assert (ROOT / "backend/app/raw/store.py").exists()
