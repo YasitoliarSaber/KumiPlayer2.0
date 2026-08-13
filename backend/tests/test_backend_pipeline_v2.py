@@ -30,6 +30,18 @@ def db(tmp_path, monkeypatch):
     close_connection()
 
 
+
+
+def _set_current(unit_id: str, revision_id: str) -> None:
+    """Module 5 execution fence：mirror/scrape 只消费 current revision。"""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE media_units SET current_revision_id = ? WHERE unit_id = ?",
+        (revision_id, unit_id),
+    )
+    conn.commit()
+
+
 def _ensure_unit(unit_id: str, boundary: str = "/动画/作品", root_id: str = "root-x") -> None:
     conn = get_connection()
     conn.execute(
@@ -82,14 +94,19 @@ class TestPipelineJobs:
             runner_a.stop()
             runner_b.stop()
 
-    def test_mirror_handler_registers_artifacts(self):
+    def test_mirror_handler_registers_artifacts(self, tmp_path):
         """mirror 成功后登记 artifact_records（幂等：重复执行不重复登记）。"""
         _ensure_unit("unit-1")
         revision = revision_store.create_revision(
             unit_id="unit-1", source_generation=1, items=_make_items(["a.mkv"]),
             status="confirmed",
         )
+        _set_current("unit-1", revision["revision_id"])
         plan = revision_store.load_plan(revision["revision_id"])
+        # Review Fix：artifact 登记以 MirrorItemResult.strm_path 为准且必须真实存在
+        generated_strm = tmp_path / "mirror" / "作品" / "S01" / "a.strm"
+        generated_strm.parent.mkdir(parents=True, exist_ok=True)
+        generated_strm.write_text("K:/115动画/a.mkv", encoding="utf-8")
 
         from app.mirror.result import MirrorGenerateResult, MirrorItemResult
 
@@ -99,7 +116,7 @@ class TestPipelineJobs:
             generated_count=1, items=[
                 MirrorItemResult(
                     item_id="i-0", source="openlist", status="generated",
-                    strm_path="mirror/作品/S01/a.mkv", real_path="a.mkv",
+                    strm_path=str(generated_strm), real_path="a.mkv",
                 ),
             ],
         )
@@ -197,6 +214,7 @@ class TestPipelineJobs:
             unit_id="unit-bad", source_generation=1, items=_make_items(["a.mkv"]),
             status="confirmed",
         )
+        _set_current("unit-bad", revision["revision_id"])
         from app.mirror.result import MirrorGenerateResult
 
         fake_result = MirrorGenerateResult(
@@ -246,6 +264,7 @@ class TestPipelineJobs:
             unit_id="unit-ok", source_generation=1, items=_make_items(["a.mkv"]),
             status="confirmed",
         )
+        _set_current("unit-ok", revision["revision_id"])
         from app.mirror.result import MirrorGenerateResult
 
         fake_result = MirrorGenerateResult(
@@ -291,6 +310,7 @@ class TestPipelineJobs:
             unit_id="unit-2", source_generation=1, items=_make_items(["b.mkv"]),
             status="confirmed",
         )
+        _set_current("unit-2", revision["revision_id"])
         job = job_store.create_job(
             job_type="mirror_revision", resource_key=f"mirror:{revision['revision_id']}",
             payload={"revision_id": revision["revision_id"], "unit_id": "unit-2"},

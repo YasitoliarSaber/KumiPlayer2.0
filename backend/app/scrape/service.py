@@ -782,10 +782,21 @@ def _remove_bracketed_season_markers(title: str) -> str:
 
 
 def _learned_search_queries(target: ScrapeTarget) -> List[str]:
-    """Reuse manual search terms that previously produced a successful scrape."""
+    """Reuse manual search terms that previously produced a successful scrape.
+
+    Module 5 Review Fix：V3 target 只从 SQLite all-bindings 学习（绝不读
+    legacy JSON，避免 stale ScrapeMap 改变候选 query 顺序/内容）；legacy
+    target 继续 scrape_map.json。
+    """
     try:
-        from app.scrape.store import load_scrape_map
-        items = load_scrape_map().items
+        from app.scrape.effective_store import is_v3_revision, load_all_bindings_scrape_map
+
+        if is_v3_revision(target.import_plan_id):
+            items = load_all_bindings_scrape_map().items
+        else:
+            from app.scrape.store import load_scrape_map
+
+            items = load_scrape_map().items
     except Exception:
         logger.debug("load learned scrape queries failed", exc_info=True)
         return []

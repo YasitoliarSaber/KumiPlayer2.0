@@ -250,9 +250,16 @@ def test_v3_projection_dataflow_gate():
     assert "list_current_revisions" in library_handler
     # current revision 权威查询基于 media_units.current_revision_id
     assert "u.current_revision_id" in revision_store_src
-    # V3 scrape binding 稳定 identity（binding_id = scrape_target_id）
-    assert "binding_id = item.scrape_target_id or item.work_id" in effective_store
+    # V3 scrape binding 稳定 identity（binding_id 严格 = scrape_target_id，不 fallback work_id）
+    assert "binding_id = item.scrape_target_id" in effective_store
+    assert "or item.work_id" not in effective_store
     assert "ON CONFLICT (binding_id) DO UPDATE" in effective_store
+    # provider_id 从当前 import_revisions 事实填入
+    assert "SELECT provider_id FROM import_revisions WHERE revision_id = ?" in effective_store
+    # durable handler 对 stale/superseded job 的 current-revision execution fence
+    assert "is_current_revision" in handlers
+    # current revision 权威门禁查询
+    assert "def is_current_revision(" in revision_store_src
     # artifact upsert 同 path 重写时 attribution 切到当前 revision
     artifacts_store = (ROOT / "backend/app/pipeline/artifacts.py").read_text(encoding="utf-8")
     assert "ON CONFLICT (kind, path) DO UPDATE" in artifacts_store

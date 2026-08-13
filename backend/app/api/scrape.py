@@ -116,7 +116,11 @@ def _get_target_or_restore(target_id: str) -> Optional[ScrapeTarget]:
 
 
 def _restore_target_from_scrape_map(target_id: str) -> Optional[ScrapeTarget]:
-    """恢复 target 信息：V3 SQLite binding 优先（metadata_json），legacy JSON 兜底。"""
+    """恢复 target 信息：V3 SQLite binding 优先（metadata_json），legacy JSON 兜底。
+
+    Module 5 Review Fix：openlist 已进入 V3——SQLite 未命中时绝不从 legacy
+    JSON ScrapeMap 恢复 openlist target（fail closed），legacy 来源不受限。
+    """
     try:
         from app.scrape.effective_store import load_all_bindings_scrape_map
         from app.scrape.store import load_scrape_map
@@ -127,7 +131,11 @@ def _restore_target_from_scrape_map(target_id: str) -> Optional[ScrapeTarget]:
         )
         if item is None:
             item = next(
-                (i for i in load_scrape_map().items if i.scrape_target_id == target_id),
+                (
+                    i
+                    for i in load_scrape_map().items
+                    if i.scrape_target_id == target_id and i.source != "openlist"
+                ),
                 None,
             )
         if item is None:
@@ -223,9 +231,10 @@ def _library_scrape_target_refs(
 
             sources = [source for source in ("pan115", "baidu", "local", "openlist")]
             for src in sources:
-                # Module 5：V3 current revisions 优先；无 V3 state 才回退 legacy latest
+                # Module 5：V3 current revisions 优先；openlist current 缺失时
+                # 绝不回退 legacy latest（fail closed），仅 legacy 来源允许回退
                 plans = revision_store.list_current_plans(src)
-                if not plans:
+                if not plans and src != "openlist":
                     legacy_plan = load_latest_confirmed_import_plan(src)
                     if legacy_plan is not None:
                         plans = [legacy_plan]

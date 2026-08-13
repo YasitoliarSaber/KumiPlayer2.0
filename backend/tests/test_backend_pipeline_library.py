@@ -54,6 +54,17 @@ def _make_items(paths):
     ]
 
 
+
+
+def _set_current(unit_id: str, revision_id: str) -> None:
+    """Module 5：rebuild/mirror/scrape 只消费 current revision（execution fence）。"""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE media_units SET current_revision_id = ? WHERE unit_id = ?",
+        (revision_id, unit_id),
+    )
+    conn.commit()
+
 class TestMirrorFailure:
     def test_mirror_failed_does_not_register_artifacts_or_scrape(self, monkeypatch):
         """mirror failed：不登记 artifact、不创建 scrape job。"""
@@ -63,6 +74,7 @@ class TestMirrorFailure:
             status="confirmed",
         )
         revision_id = revision["revision_id"]
+        _set_current("unit-1", revision_id)
         calls = []
 
         class FakeOrch:
@@ -96,7 +108,7 @@ class TestMirrorFailure:
         ).fetchone()[0]
         assert count == 0  # 未登记 artifact
 
-    def test_mirror_partial_failed_no_scrape_but_registers_generated(self, monkeypatch):
+    def test_mirror_partial_failed_no_scrape_but_registers_generated(self, monkeypatch, tmp_path):
         """partial_failed：不触发 scrape，但成功项登记 artifact。"""
         _ensure_unit("unit-2")
         revision = revision_store.create_revision(
@@ -104,7 +116,11 @@ class TestMirrorFailure:
             status="confirmed",
         )
         revision_id = revision["revision_id"]
+        _set_current("unit-2", revision_id)
         calls = []
+        # Review Fix：artifact 登记要求 strm_path 真实 is_file()
+        generated_strm = tmp_path / "a.strm"
+        generated_strm.write_text("K:/115动画/作品/01.mkv", encoding="utf-8")
 
         class FakeOrch:
             @staticmethod
@@ -122,7 +138,7 @@ class TestMirrorFailure:
             mirror_root="K:/mirror", status="partial_failed",
             generated_count=1, failed_count=1,
             items=[
-                MirrorItemResult(item_id="i-0", source="openlist", status="generated", strm_path="K:/mirror/a.strm"),
+                MirrorItemResult(item_id="i-0", source="openlist", status="generated", strm_path=str(generated_strm)),
                 MirrorItemResult(item_id="i-1", source="openlist", status="failed", strm_path="K:/mirror/b.strm"),
             ],
         )
@@ -149,6 +165,7 @@ class TestScrapeErrorPropagation:
             unit_id="unit-3", source_generation=1, items=_make_items(["c.mkv"]),
             status="confirmed",
         )
+        _set_current("unit-3", revision["revision_id"])
         with patch(
             "app.scrape.auto.run_auto_scrape",
             return_value={"status": "failed", "error": "TMDB 限流"},
@@ -176,6 +193,7 @@ class TestScrapeBindingAndLibraryRebuild:
             unit_id="unit-4", source_generation=1, items=_make_items(["d.mkv"]),
             status="confirmed",
         )
+        _set_current("unit-4", revision["revision_id"])
         rebuild_jobs = []
         scrape_kwargs = {}
 

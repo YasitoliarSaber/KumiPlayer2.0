@@ -644,6 +644,33 @@ def latest_confirmed_revision(unit_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def is_current_revision(revision_id: str) -> bool:
+    """当前语义事实门禁：revision 必须同时满足——
+
+    - 真实存在；
+    - status ∈ confirmed/executed；
+    - revision.unit_id 与对应 media_unit 一致；
+    - media_units.current_revision_id == revision_id。
+
+    superseded/draft/悬空指针一律 False。durable mirror/scrape handler 在任何
+    外部或文件副作用之前用它拦截 stale job（no-op 正常结束，不标业务失败）。
+    """
+    if not revision_id:
+        return False
+    row = get_connection().execute(
+        """
+        SELECT 1 FROM media_units u
+        JOIN import_revisions r
+          ON r.revision_id = u.current_revision_id
+         AND r.unit_id = u.unit_id
+        WHERE r.revision_id = ?
+          AND r.status IN ('confirmed', 'executed')
+        """,
+        (revision_id,),
+    ).fetchone()
+    return row is not None
+
+
 def list_current_revisions(source: str = "") -> list[dict]:
     """当前语义事实：``media_units.current_revision_id`` 指向的 confirmed/executed revision。
 

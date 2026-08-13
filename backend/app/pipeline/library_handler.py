@@ -138,7 +138,9 @@ def handle_library_rebuild(payload: dict, progress_callback=None, should_cancel=
     updated = 0
     fragments: list = []
     current_revision_ids: set[str] = set()
-    source_plans: dict[str, object] = {}
+    # 同一 source 的全部 current plans 都参与关系重建（不能只保留第一个 plan，
+    # 否则后续 unit 的 related_works 会被第一个 plan 覆盖重写为空）
+    source_plans: dict[str, list] = {}
 
     for revision in revisions:
         items = [
@@ -165,18 +167,29 @@ def handle_library_rebuild(payload: dict, progress_callback=None, should_cancel=
             continue
         if fragment.works:
             fragments.append((plan, fragment))
-            source_plans.setdefault(plan.source, plan)
+            source_plans.setdefault(plan.source, []).append(plan)
 
     # 合并 → 一次发布最终 Index
     merged = LibraryIndex()
     for _plan, fragment in fragments:
         merged.works.extend(fragment.works)
     merged.works = _deduplicate_library_works(merged.works)
-    for source, plan in source_plans.items():
-        rebuild_related_works_for_plan(
-            [work for work in merged.works if work.source == source],
-            plan,
-        )
+    for source, plans in source_plans.items():
+        source_works = [work for work in merged.works if work.source == source]
+        if len(plans) == 1:
+            relation_plan = plans[0]
+        else:
+            # 关系投影专用聚合视图：同 source 全部 current plans 的 items 并集，
+            # 保证每个 current unit 的系列/剧场版关系都被保留
+            from app.import_plan.models import ImportPlan
+
+            relation_plan = ImportPlan(
+                plan_id=f"aggregate:{source}",
+                source=source,
+                status="confirmed",
+                items=[item for plan in plans for item in plan.items],
+            )
+        rebuild_related_works_for_plan(source_works, relation_plan)
     for source in source_plans:
         merged.source_summary = _refresh_source_summary_from_works(
             merged.source_summary, source, merged.works

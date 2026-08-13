@@ -12,28 +12,36 @@ from app.import_plan import revision_store
 from app.jobs.registry import register
 
 
-def _register_artifacts(revision_id: str, plan: Any, succeeded_item_ids: set[str]) -> int:
-    """只登记生成器已确认写入的 .strm 产物。
+def _register_artifacts(revision_id: str, plan: Any, result_items: list) -> int:
+    """登记真实物化的 .strm：以 ``MirrorItemResult`` 为唯一证据。
 
-    revision 的 target 路径只是计划/执行投影，不能证明文件写入成功；必须以
-    ``MirrorItemResult.status == generated`` 为唯一事实来源。同 path 被新
-    revision 重写时 attribution 切到当前 revision（upsert，非 INSERT OR IGNORE）。
+    - status == generated：strm_path 必须真实 is_file()；
+    - status == skipped + strm_path 非空 + 文件存在（generator「内容相同，跳过」
+      语义，且回填了 target 路径）→ 同样登记——crash recovery：首次写盘成功
+      但 artifact 登记前进程崩溃，重跑时 generator 判定内容相同走 skipped，
+      这里把 artifact 补回来，Library projection 不再误判不可播放；
+    - ignored/failed 或空路径 → 不登记。
+
+    artifact path 以 ``MirrorItemResult.strm_path`` 为准，不从 plan 猜。
     """
+    from pathlib import Path
+
     from app.pipeline.artifacts import upsert_artifact
 
+    work_by_item = {str(item.id): (item.work_id or "") for item in plan.items}
     registered = 0
-    for item in plan.items:
-        if (
-            item.action != "generate_strm"
-            or not item.target_strm_path
-            or item.id not in succeeded_item_ids
-        ):
+    for result_item in result_items:
+        status = str(getattr(result_item, "status", "") or "")
+        path_value = str(getattr(result_item, "strm_path", "") or "")
+        if status not in ("generated", "skipped") or not path_value:
+            continue
+        if not Path(path_value).is_file():
             continue
         upsert_artifact(
             kind="strm",
-            path=item.target_strm_path,
+            path=path_value,
             revision_id=revision_id,
-            work_id=item.work_id or "",
+            work_id=work_by_item.get(str(getattr(result_item, "item_id", "") or ""), ""),
         )
         registered += 1
     return registered
@@ -46,6 +54,10 @@ def handle_mirror_revision(payload: dict, progress_callback=None, should_cancel=
     revision_id = str(payload.get("revision_id") or "")
     if not revision_id:
         raise ValueError("mirror payload 缺少 revision_id")
+    # Module 5 Review Fix：stale/superseded job 在任何副作用前 no-op 正常结束
+    # （不访问网络、不写文件、不写 binding/artifact、不 enqueue 下游、不重试）。
+    if not revision_store.is_current_revision(revision_id):
+        return {"status": "obsolete", "revision_id": revision_id, "mirror_status": "skipped"}
     plan = revision_store.load_plan(revision_id)
     if plan is None:
         raise ValueError(f"revision 不存在: {revision_id}")
@@ -61,12 +73,9 @@ def handle_mirror_revision(payload: dict, progress_callback=None, should_cancel=
         )
     revision_store.persist_execution_fields(plan)
     generated = int(getattr(result, "generated_count", 0) or 0)
-    succeeded_item_ids = {
-        str(item.item_id) for item in (getattr(result, "items", []) or [])
-        if getattr(item, "status", "") == "generated"
-    }
-    if succeeded_item_ids:
-        _register_artifacts(revision_id, plan, succeeded_item_ids)
+    result_items = list(getattr(result, "items", []) or [])
+    if result_items:
+        _register_artifacts(revision_id, plan, result_items)
     if result_status == "success":
         # mirror 成功后、单元 closure 时进入刮削（scrape 全局单通道由 resource_key 保证）
         unit_id = str(payload.get("unit_id") or "")
@@ -100,6 +109,10 @@ def handle_scrape_revision(payload: dict, progress_callback=None, should_cancel=
     source = str(payload.get("source") or "openlist")
     if not revision_id:
         raise ValueError("scrape payload 缺少 revision_id")
+    # Module 5 Review Fix：stale/superseded job 在任何副作用前 no-op 正常结束，
+    # 绝不调用 run_auto_scrape（0 网络、0 文件、0 binding、0 下游）。
+    if not revision_store.is_current_revision(revision_id):
+        return {"status": "obsolete", "revision_id": revision_id, "scrape": {"status": "skipped"}}
     result = run_auto_scrape(
         source,
         plan_id=revision_id,

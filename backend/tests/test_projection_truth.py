@@ -474,11 +474,10 @@ class TestLibraryProjection:
                 ]
                 assert playable == []
 
-    def test_rebuild_survives_deleted_library_index_json(self, tmp_path):
-        """二十四：删掉 library_index.json 后仍能从 SQLite current state 重建。"""
-        from pathlib import Path as P
-
-        from app.library.store import load_library_index
+    def test_rebuild_survives_deleted_library_index_json(self, tmp_path, monkeypatch):
+        """二十四/七：真正删除 data/cache/library_index.json 后，无 legacy JSON
+        事实源（latest/scrape_map 被炸）仍能从 SQLite current state 重建。"""
+        from app.library.store import _get_index_path, load_library_index
 
         self._ensure_source_root()
         strm = tmp_path / "mirror" / "ep1.strm"
@@ -494,16 +493,20 @@ class TestLibraryProjection:
         first = load_library_index()
         assert len(first.works) == 1
 
-        # 删除投影 JSON → 再次重建必须恢复（且不依赖 legacy latest/scrape_map JSON）
-        index_path = P(get_connection().execute("SELECT 1").fetchone() and "" or "")
-        from app.core.paths import get_data_dir
+        # 真正删除投影文件（data/cache/library_index.json），并断言确实不存在
+        index_path = _get_index_path()
+        assert index_path.exists(), f"投影文件应存在于 {index_path}"
+        index_path.unlink()
+        assert not index_path.exists(), "投影文件应已被删除"
 
-        for candidate in (
-            get_data_dir() / "library" / "library_index.json",
-            get_data_dir() / "library_index.json",
-        ):
-            if candidate.exists():
-                candidate.unlink()
+        # 炸掉全部 legacy 事实源：latest JSON plan / JSON scrape map / 旧发布链路
+        def _bomb(*args, **kwargs):
+            raise AssertionError("V3 rebuild 不得依赖 legacy JSON 事实源")
+
+        monkeypatch.setattr("app.import_plan.store.load_latest_confirmed_import_plan", _bomb)
+        monkeypatch.setattr("app.scrape.store.load_scrape_map", _bomb)
+        monkeypatch.setattr("app.library.service.load_scrape_map", _bomb)
+
         self._rebuild()
         second = load_library_index()
         assert len(second.works) == 1
@@ -585,3 +588,418 @@ class TestLibraryRebuildCoalescing:
         assert created is True
         assert second.job_id != first.job_id
         assert self._count_queued() == 1
+
+
+class TestReviewFixGates:
+    """Module 5 Review Fix 1 确定性回归（规划员 A-I）。"""
+
+
+    def _ensure_source_root(self, root_id="root-x", remote_locator="/动画", import_family="anime", import_scope="seasonal"):
+        from app.catalog import store as catalog_store
+
+        conn = get_connection()
+        catalog_store.create_source(source_id="ol", source_type="openlist", provider_id="quark")
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO source_roots (
+                root_id, source_id, remote_locator, normalized_locator, local_locator,
+                import_family, import_scope, scan_policy, active_generation, created_at, updated_at
+            ) VALUES (?, 'ol', ?, ?, '', ?, ?, 'standard', 1, '', '')
+            """,
+            (root_id, remote_locator, remote_locator, import_family, import_scope),
+        )
+        conn.commit()
+
+    def _make_current_unit(self, unit_id, root_id, items, gen=1, status="confirmed"):
+        conn = get_connection()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO media_units (
+                unit_id, batch_id, root_id, discovery_scope, boundary, work_key,
+                status, closure_generation, current_revision_id, created_at, updated_at
+            ) VALUES (?, '', ?, '', '/动画', 'w', 'discovered', 0, '', ?, ?)
+            """,
+            (unit_id, root_id, revision_store.now_iso(), revision_store.now_iso()),
+        )
+        conn.commit()
+        revision = revision_store.create_revision(
+            unit_id=unit_id, source_generation=gen, items=items, status=status,
+        )
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = ?",
+            (revision["revision_id"], unit_id),
+        )
+        conn.commit()
+        return revision
+
+    def _make_strm_item(self, item_id, episode_number, strm_path):
+        from pathlib import Path
+
+        item = _items(["ep.mkv"])[0]
+        item.update(
+            id=item_id,
+            episode_number=episode_number,
+            target_dir=str(Path(strm_path).parent),
+            target_strm_path=str(strm_path),
+        )
+        return item
+
+    def _rebuild(self):
+        from app.pipeline.library_handler import handle_library_rebuild
+
+        return handle_library_rebuild({}, progress_callback=lambda *a, **k: None)
+
+    def test_a_superseded_scrape_job_is_noop_without_network(self, monkeypatch):
+        """A：rev1 已 superseded → 执行 rev1 scrape handler：0 网络、0 执行、0 binding。"""
+        from app.pipeline.handlers import handle_scrape_revision
+
+        _ensure_unit("u-stale-scrape")
+        rev1 = revision_store.create_revision(
+            unit_id="u-stale-scrape", source_generation=1, items=_items(["a.mkv"]),
+            status="confirmed",
+        )
+        rev2 = revision_store.create_revision(
+            unit_id="u-stale-scrape", source_generation=2, items=_items(["a.mkv", "b.mkv"]),
+            parent_revision_id=rev1["revision_id"], status="confirmed",
+        )
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = 'u-stale-scrape'",
+            (rev2["revision_id"],),
+        )
+        conn.commit()
+
+        def _bomb(*args, **kwargs):
+            raise AssertionError("stale scrape 不得执行 run_auto_scrape")
+
+        monkeypatch.setattr("app.scrape.auto.run_auto_scrape", _bomb)
+        result = handle_scrape_revision(
+            {"revision_id": rev1["revision_id"], "source": "openlist"},
+            progress_callback=lambda *a, **k: None,
+        )
+        assert result["status"] == "obsolete"
+        assert get_connection().execute(
+            "SELECT COUNT(*) FROM scrape_bindings"
+        ).fetchone()[0] == 0
+
+    def test_a2_superseded_mirror_job_is_noop(self, monkeypatch):
+        """A 补充：stale mirror job 在任何副作用前 no-op（generate_mirror 不被调用）。"""
+        from unittest.mock import patch
+
+        from app.pipeline.handlers import handle_mirror_revision
+
+        _ensure_unit("u-stale-mirror")
+        rev1 = revision_store.create_revision(
+            unit_id="u-stale-mirror", source_generation=1, items=_items(["a.mkv"]),
+            status="confirmed",
+        )
+        rev2 = revision_store.create_revision(
+            unit_id="u-stale-mirror", source_generation=2, items=_items(["a.mkv", "b.mkv"]),
+            parent_revision_id=rev1["revision_id"], status="confirmed",
+        )
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = 'u-stale-mirror'",
+            (rev2["revision_id"],),
+        )
+        conn.commit()
+
+        def _bomb(*args, **kwargs):
+            raise AssertionError("stale mirror 不得执行 generate_mirror")
+
+        with patch("app.mirror.generator.generate_mirror", side_effect=_bomb):
+            result = handle_mirror_revision(
+                {"revision_id": rev1["revision_id"], "unit_id": "u-stale-mirror"},
+                progress_callback=lambda *a, **k: None,
+            )
+        assert result["status"] == "obsolete"
+        assert get_connection().execute(
+            "SELECT COUNT(*) FROM artifact_records"
+        ).fetchone()[0] == 0
+
+    def test_b_mirror_rerun_restores_missing_artifact(self, tmp_path, monkeypatch):
+        """B：磁盘已有正确 STRM、artifact 丢失 → 重跑（skipped existing）自动补回。"""
+        from unittest.mock import patch
+
+        from app.mirror.result import MirrorGenerateResult, MirrorItemResult
+        from app.pipeline.handlers import handle_mirror_revision
+
+        self._ensure_source_root(root_id="root-x")
+        strm = tmp_path / "ep1.strm"
+        strm.write_text("ep.mkv", encoding="utf-8")
+        revision = self._make_current_unit(
+            "u-crash", "root-x", [self._make_strm_item("i-0", 1, strm)],
+        )
+
+        class FakeOrch:
+            @staticmethod
+            def unit_is_closed(unit_id):
+                return False
+
+        monkeypatch.setattr("app.pipeline.orchestrator.unit_is_closed", FakeOrch.unit_is_closed)
+        fake_result = MirrorGenerateResult(
+            plan_id=revision["revision_id"], source="openlist",
+            mirror_root=str(tmp_path), status="success",
+            generated_count=0, skipped_count=1,
+            items=[
+                MirrorItemResult(
+                    item_id="i-0", source="openlist", status="skipped",
+                    strm_path=str(strm), real_path="ep.mkv", message="内容相同，跳过",
+                )
+            ],
+        )
+        with patch("app.mirror.generator.generate_mirror", return_value=fake_result):
+            result = handle_mirror_revision(
+                {"revision_id": revision["revision_id"], "unit_id": "u-crash"},
+                progress_callback=lambda *a, **k: None,
+            )
+        assert result["status"] == "succeeded"
+        rows = get_connection().execute(
+            "SELECT * FROM artifact_records WHERE kind = 'strm' AND path = ?",
+            (str(strm),),
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["revision_id"] == revision["revision_id"]
+
+    def test_c_v3_cross_revision_reuse_without_network(self, tmp_path, monkeypatch):
+        """C：rev1 已完整刮削 target-A → rev2 同 target：0 网络、0 重刮，
+        binding 仍 1 行且归属 rev2。"""
+        from app.scrape.auto import run_auto_scrape
+        from app.scrape.effective_store import upsert_effective_scrape_map_item
+        from app.scrape.models import ScrapeMapItem, ScrapeTarget
+
+        _ensure_unit("u-reuse")
+        rev1 = revision_store.create_revision(
+            unit_id="u-reuse", source_generation=1, items=_items(["a.mkv"]),
+            status="confirmed",
+        )
+        rev2 = revision_store.create_revision(
+            unit_id="u-reuse", source_generation=2, items=_items(["a.mkv", "b.mkv"]),
+            parent_revision_id=rev1["revision_id"], status="confirmed",
+        )
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = 'u-reuse'",
+            (rev2["revision_id"],),
+        )
+        conn.commit()
+
+        nfo = tmp_path / "tvshow.nfo"
+        nfo.write_text("<tvshow />", encoding="utf-8")
+        poster = tmp_path / "poster.jpg"
+        poster.write_bytes(b"poster")
+        fanart = tmp_path / "fanart.jpg"
+        fanart.write_bytes(b"fanart")
+        upsert_effective_scrape_map_item(
+            ScrapeMapItem(
+                scrape_target_id="target-A", work_id="w1", source="openlist",
+                import_plan_id=rev1["revision_id"], tmdb_id=1, tmdb_type="tv",
+                local_season_number=1,
+                nfo_path=str(nfo), poster_path=str(poster), fanart_path=str(fanart),
+                scrape_title="作品", selected_by="auto", confidence="high",
+            )
+        )
+
+        target = ScrapeTarget(
+            scrape_target_id="target-A", source="openlist",
+            import_plan_id=rev2["revision_id"],
+            work_id="w1", card_type="main_series", media_type="tv", group_type="season",
+            series_group="作品", local_title="作品", scrape_title="作品", scrape_year=2024,
+            scrape_type="tv", local_season_number=1, needs_review=False, warnings=[],
+        )
+        monkeypatch.setattr(
+            "app.scrape.service.get_targets",
+            lambda source, plan_id=None: ([target], None),
+        )
+
+        def _bomb(*args, **kwargs):
+            raise AssertionError("跨 revision 复用时不得联网/重刮")
+
+        monkeypatch.setattr("app.scrape.auto.search_candidates", _bomb)
+        monkeypatch.setattr("app.scrape.auto.execute_scrape", _bomb)
+
+        result = run_auto_scrape("openlist", plan_id=rev2["revision_id"])
+        assert result.get("auto_scraped", 0) == 0
+        assert result.get("skipped_existing") == 1
+        rows = get_connection().execute("SELECT * FROM scrape_bindings").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["binding_id"] == "target-A"
+        assert rows[0]["revision_id"] == rev2["revision_id"]
+
+
+    def test_d_v3_learned_search_queries_never_reads_json(self, monkeypatch):
+        """D：V3 learned-query 学习只读 SQLite bindings，JSON loader 被炸不触发。"""
+        from types import SimpleNamespace
+
+        from app.scrape.effective_store import upsert_effective_scrape_map_item
+        from app.scrape.models import ScrapeMapItem
+        from app.scrape.service import _learned_search_queries
+
+        _ensure_unit("u-learn")
+        revision = revision_store.create_revision(
+            unit_id="u-learn", source_generation=1, items=_items(["a.mkv"]),
+            status="confirmed",
+        )
+        upsert_effective_scrape_map_item(
+            ScrapeMapItem(
+                scrape_target_id="t-learn", work_id="w1", source="openlist",
+                import_plan_id=revision["revision_id"], tmdb_id=1, tmdb_type="tv",
+                selected_by="manual", search_query="[S01] 学learned作品",
+            )
+        )
+
+        def _bomb(*args, **kwargs):
+            raise AssertionError("V3 learned query 不得读取 JSON ScrapeMap")
+
+        monkeypatch.setattr("app.scrape.store.load_scrape_map", _bomb)
+        target = SimpleNamespace(
+            import_plan_id=revision["revision_id"], scrape_type="tv",
+            scrape_target_id="t-learn", source="openlist", source_subwork_dir="",
+            local_title="学learned作品",
+        )
+        queries = _learned_search_queries(target)
+        assert queries, "应从 SQLite binding 学习到手动查询词"
+
+    def test_e_openlist_target_not_restored_from_legacy_json(self, monkeypatch):
+        """E：旧 JSON 有 openlist target、SQLite/current 无 → 恢复为 None。"""
+        from app.api.scrape import _restore_target_from_scrape_map
+        from app.scrape.models import ScrapeMap, ScrapeMapItem
+
+        monkeypatch.setattr(
+            "app.scrape.store.load_scrape_map",
+            lambda: ScrapeMap(
+                items=[
+                    ScrapeMapItem(
+                        scrape_target_id="t-openlist-legacy", source="openlist",
+                        import_plan_id="legacy-openlist-plan", tmdb_type="tv",
+                    )
+                ]
+            ),
+        )
+        assert _restore_target_from_scrape_map("t-openlist-legacy") is None
+
+    def test_e2_openlist_current_missing_no_latest_fallback(self, tmp_path, monkeypatch):
+        """E 补充：openlist current 缺失时 _library_scrape_target_refs 不回退 legacy latest。"""
+        from app.api.scrape import _library_scrape_target_refs
+        from app.library.models import LibraryIndex, SeasonIndex, WorkIndex
+        from app.library.store import save_library_index
+
+        index = LibraryIndex(
+            works=[
+                WorkIndex(
+                    work_id="w-e2e-target",
+                    source="openlist",
+                    title="作品E",
+                    seasons=[
+                        SeasonIndex(
+                            season_number=1, group_type="season",
+                            scrape_target_id="t-e2e",
+                        )
+                    ],
+                )
+            ]
+        )
+        save_library_index(index)
+
+        def _bomb(*args, **kwargs):
+            raise AssertionError("openlist current 缺失不得回退 legacy latest")
+
+        monkeypatch.setattr("app.import_plan.store.load_latest_confirmed_import_plan", _bomb)
+        # 空 current（本测试无 unit/revision）→ openlist 分支不得调用 bomb
+        target_ids, _raw = _library_scrape_target_refs("w-e2e-target")
+        assert "t-e2e" in target_ids
+
+    def test_f_two_current_units_same_source_keep_related_works(self, tmp_path):
+        """F：同 source 两个 current unit 的关系投影都保留（不被第一个 plan 覆盖）。"""
+        from app.library.store import load_library_index
+
+        self._ensure_source_root()
+
+        def _unit_items(strm_prefix, series, movie_name):
+            items = []
+            for idx, (card, name, belongs) in enumerate(
+                [
+                    ("main_series", series, ""),
+                    ("standalone", movie_name, series),
+                ]
+            ):
+                # 主系列与剧场版各自独立镜像目录（dir_path 唯一，避免
+                # work_id_by_dir 按目录覆盖导致关系键丢失）
+                subdir = "main" if card == "main_series" else "movie"
+                strm = tmp_path / strm_prefix / subdir / "episode.strm"
+                strm.parent.mkdir(parents=True, exist_ok=True)
+                strm.write_text(name, encoding="utf-8")
+                base = self._make_strm_item(f"{strm_prefix}-{idx}", idx + 1, strm)
+                base.update(
+                    work_id=f"w-{strm_prefix}-{idx}",
+                    work_title=name,
+                    series_group=name,
+                    card_type=card,
+                    belongs_to_series=belongs,
+                    relation_type="main" if card == "main_series" else "related",
+                    group_type="season" if card == "main_series" else "movie",
+                )
+                items.append(base)
+            return items
+
+        rev_a = self._make_current_unit("u-rel-a", "root-x", _unit_items("a", "系列A", "系列A 剧场版"))
+        rev_b = self._make_current_unit("u-rel-b", "root-x", _unit_items("b", "系列B", "系列B 剧场版"))
+        from app.pipeline.artifacts import upsert_artifact
+
+        for rev, prefix in ((rev_a, "a"), (rev_b, "b")):
+            for idx, subdir in ((0, "main"), (1, "movie")):
+                strm = tmp_path / prefix / subdir / "episode.strm"
+                upsert_artifact(
+                    kind="strm", path=str(strm), revision_id=rev["revision_id"],
+                    work_id=f"w-{prefix}-{idx}",
+                )
+
+        self._rebuild()
+        index = load_library_index()
+        works_by_title = {w.title: w for w in index.works}
+        assert "系列A" in works_by_title and "系列B" in works_by_title
+        # 两个 unit 的关系都保留（修复前 B 会被第一个 plan 覆盖重写为空）
+        assert len(works_by_title["系列A"].related_works) > 0
+        assert len(works_by_title["系列B"].related_works) > 0
+
+    def test_h_v3_binding_rejects_empty_target_id(self):
+        """H：binding_id 严格 = scrape_target_id，空 target id 直接 ValueError。"""
+        import pytest
+
+        from app.scrape.effective_store import upsert_effective_scrape_map_item
+        from app.scrape.models import ScrapeMapItem
+
+        _ensure_unit("u-h")
+        revision = revision_store.create_revision(
+            unit_id="u-h", source_generation=1, items=_items(["a.mkv"]),
+            status="confirmed",
+        )
+        with pytest.raises(ValueError):
+            upsert_effective_scrape_map_item(
+                ScrapeMapItem(
+                    scrape_target_id="", work_id="w1", source="openlist",
+                    import_plan_id=revision["revision_id"], tmdb_id=1, tmdb_type="tv",
+                )
+            )
+
+    def test_i_v3_binding_provider_id_from_revision(self):
+        """I：scrape_bindings.provider_id 从 import_revisions.provider_id 填入（quark）。"""
+        from app.scrape.effective_store import upsert_effective_scrape_map_item
+        from app.scrape.models import ScrapeMapItem
+
+        _ensure_unit("u-provider")
+        revision = revision_store.create_revision(
+            unit_id="u-provider", source_generation=1, items=_items(["a.mkv"]),
+            status="confirmed",
+        )
+        upsert_effective_scrape_map_item(
+            ScrapeMapItem(
+                scrape_target_id="t-provider", work_id="w1", source="openlist",
+                import_plan_id=revision["revision_id"], tmdb_id=1, tmdb_type="tv",
+            )
+        )
+        row = get_connection().execute(
+            "SELECT provider_id FROM scrape_bindings WHERE binding_id = 't-provider'"
+        ).fetchone()
+        assert row is not None
+        assert row["provider_id"] == "quark"

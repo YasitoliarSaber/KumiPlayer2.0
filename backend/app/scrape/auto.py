@@ -895,6 +895,8 @@ def run_auto_scrape(
                 include_episode=include_episode,
                 plan=completeness_plans.get(target.import_plan_id),
             ):
+                # V3：命中旧 revision 的 stable binding 时 adopt 到当前 revision
+                _adopt_existing_binding_if_needed(target, plan_id, existing_scrape_index)
                 skipped_existing += 1
                 consecutive_external_failures = 0
                 push_log(f"已有完整资料，跳过重复刮削：{current_label}", "done", progress, {
@@ -1606,18 +1608,40 @@ def _restore_review_candidates(target: ScrapeTarget, pending_item) -> List[Scrap
 
 
 def _load_scrape_map_for_plan(plan_id: str = ""):
-    """按 plan 代次加载刮削映射：V3 → SQLite bindings 投影；legacy → JSON。
+    """按 plan 代次加载刮削映射。
 
-    legacy 分支调用本模块的 load_scrape_map 属性，保持外部 monkeypatch
-    （legacy 测试注入假 ScrapeMap）继续有效。
+    - V3：全部 SQLite stable bindings（跨 revision 复用判定用——同语义
+      target 在旧 revision 已完整刮削时无需联网重刮，命中后 adopt 到当前
+      revision；Library projection 的严格按 revision 读取不受影响）；
+    - legacy：JSON ScrapeMap（调用本模块的 load_scrape_map 属性，保持
+      外部 monkeypatch 继续有效）。
     """
     from app.scrape.effective_store import is_v3_revision
 
     if is_v3_revision(plan_id):
-        from app.scrape.effective_store import load_effective_scrape_map
+        from app.scrape.effective_store import load_all_bindings_scrape_map
 
-        return load_effective_scrape_map(plan_id)
+        return load_all_bindings_scrape_map()
     return load_scrape_map()
+
+
+def _adopt_existing_binding_if_needed(
+    target,
+    plan_id: str,
+    scrape_index: Dict[str, object],
+) -> None:
+    """V3 跨 revision 复用：命中旧 revision 的 binding 且完整性通过时，
+    把该 binding adopt/upsert 到当前 revision（不重刮、不联网）。"""
+    if not plan_id:
+        return
+    from app.scrape.effective_store import adopt_binding_to_revision, is_v3_revision
+
+    if not is_v3_revision(plan_id):
+        return
+    item = scrape_index.get(target.scrape_target_id)
+    if item is None or getattr(item, "import_plan_id", "") == plan_id:
+        return
+    adopt_binding_to_revision(item, plan_id)
 
 
 def _build_existing_scrape_index(plan_id: str = "") -> Dict[str, object]:

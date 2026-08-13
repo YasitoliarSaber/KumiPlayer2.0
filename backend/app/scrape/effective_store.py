@@ -10,7 +10,7 @@ Module 5 规划员拍板：
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from app.db.database import get_connection
 from app.import_plan import revision_store
@@ -85,17 +85,24 @@ def load_effective_scrape_map(plan_id: str = "") -> ScrapeMap:
 
 
 def _upsert_binding(item: ScrapeMapItem) -> None:
-    """V3 稳定 binding 写入：binding_id = scrape_target_id，同 target 幂等更新。
+    """V3 稳定 binding 写入：binding_id 严格等于 scrape_target_id，同 target 幂等更新。
 
-    完整 ScrapeMapItem 序列化进 metadata_json（供 LibraryIndex 投影还原）；
-    结构化字段单独落列供诊断/过滤；bangumi_id 不属于 ScrapeMapItem 语义，
-    不在刮削写入时触碰（Bangumi 同步另行维护）。
+    - scrape_target_id 为空 → ValueError（绝不 fallback work_id，多季 target 可能碰撞）；
+    - provider_id 从当前 import_revisions.provider_id 事实填入（ScrapeMapItem
+      无该字段，不得默认空）；
+    - 完整 ScrapeMapItem 序列化进 metadata_json（供 LibraryIndex 投影还原）；
+    - bangumi_id 不属于 ScrapeMapItem 语义，不在刮削写入时触碰。
     """
-    binding_id = item.scrape_target_id or item.work_id
+    binding_id = item.scrape_target_id
     if not binding_id:
-        raise ValueError("V3 scrape binding 缺少稳定 target id")
+        raise ValueError("V3 scrape binding 缺少稳定 scrape_target_id")
     conn = get_connection()
     timestamp = revision_store.now_iso()
+    provider_row = conn.execute(
+        "SELECT provider_id FROM import_revisions WHERE revision_id = ?",
+        (item.import_plan_id,),
+    ).fetchone()
+    provider_id = str(provider_row["provider_id"] or "") if provider_row else ""
     metadata = json.dumps(asdict(item), ensure_ascii=False)
     conn.execute(
         """
@@ -122,13 +129,23 @@ def _upsert_binding(item: ScrapeMapItem) -> None:
         """,
         (
             binding_id, item.import_plan_id, item.work_id, item.source,
-            str(getattr(item, "provider_id", "") or ""),
+            provider_id,
             item.tmdb_id, item.tmdb_type,
             item.nfo_path, item.poster_path, item.fanart_path, item.clearlogo_path,
             metadata, timestamp, timestamp,
         ),
     )
     conn.commit()
+
+
+def adopt_binding_to_revision(item: ScrapeMapItem, new_plan_id: str) -> None:
+    """跨 revision 复用：把旧 binding 重新归属到当前 revision（不重刮）。
+
+    同一 scrape_target_id 的绑定行保持唯一，仅 revision_id 与
+    metadata_json.import_plan_id 更新为当前 revision。
+    """
+    adopted = replace(item, import_plan_id=new_plan_id)
+    _upsert_binding(adopted)
 
 
 def _scrape_map_from_bindings(plan_id: str) -> ScrapeMap:
