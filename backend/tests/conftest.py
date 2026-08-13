@@ -64,6 +64,17 @@ def isolate_runtime_data(tmp_path, monkeypatch, request):
 
     monkeypatch.setenv("KUMIPLAYER_DATA_DIR", str(test_data_dir))
 
+    # Preflight 0：每测试独立 SQLite。
+    # 之前只有 env 隔离，database._db_path 首次解析后缓存 + thread-local 连接
+    # 复用，导致所有测试共享集合级 kumiplayer.db（roots/tracking_bindings/jobs
+    # 残留 → 计数类测试顺序敏感）。这里关闭连接、清空路径缓存并按当前测试
+    # 数据目录重新 init_db：每个测试拿到独立 tmp 数据库。
+    from app.db import database as db_module
+
+    db_module.close_connection()
+    db_module._db_path = None
+    db_module.init_db()
+
     for attr in ("_DATA_DIR", "_TEST_DATA_DIR"):
         if hasattr(request.module, attr):
             monkeypatch.setattr(request.module, attr, test_data_dir, raising=False)
@@ -76,7 +87,24 @@ def isolate_runtime_data(tmp_path, monkeypatch, request):
         target = Path(path)
         if _is_real_data_path(target):
             raise AssertionError(f"测试禁止删除真实运行数据目录: {target}")
-        return original_rmtree(path, *args, **kwargs)
+        # Preflight 0 兼容：老测试在测试体内清理「测试数据目录」
+        # （_TEST_DATA_DIR 被隔离到 tmp/data，独立 db 也在此目录下）。
+        # 先关闭持有 db 文件的连接（Windows 文件占用锁），删除成功后
+        # 按当前 data 目录重建干净独立数据库，避免 no such table。
+        from app.db import database as db_module
+
+        db_path = db_module._db_path
+        db_inside = bool(
+            db_path is not None
+            and str(db_path.resolve()).startswith(str(target.resolve()) + os.sep)
+        )
+        if db_inside:
+            db_module.close_connection()
+        result = original_rmtree(path, *args, **kwargs)
+        if db_inside:
+            db_module._db_path = None
+            db_module.init_db()
+        return result
 
     monkeypatch.setattr(shutil, "rmtree", guarded_rmtree)
 
@@ -92,6 +120,12 @@ def isolate_runtime_data(tmp_path, monkeypatch, request):
     try:
         yield
     finally:
+        try:
+            from app.db import database as db_module
+
+            db_module.close_connection()
+        except Exception:
+            pass
         try:
             from app.core import config as core_config
 

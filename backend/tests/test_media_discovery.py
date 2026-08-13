@@ -383,3 +383,106 @@ class TestImportRevisions:
         assert plan.plan_id == revision["revision_id"]
         assert len(plan.items) == 1
         assert plan.items[0].relative_path == "a.mkv"
+
+
+class TestProviderPropagation:
+    """Preflight 0：OpenList route → discovery → recognition → revision 贯通。
+
+    规划员验收：OpenList route provider=quark → Fake OpenList scan → 作品完成
+    closure → revision → revision item.provider_id == quark；source_route_id
+    正确传播到对应事实层（source_nodes.route_id）。全程 fake，0 真实网盘请求。
+    """
+
+    def test_openlist_route_provider_propagates_to_revision_items(self, monkeypatch):
+        from app.core import config as core_config
+        from app.integrations.openlist.providers import OpenListRouteConfig
+
+        routes = [
+            OpenListRouteConfig(
+                route_id="route-quark",
+                label="夸克",
+                remote_prefix="/动画",
+                provider_id="quark",
+            )
+        ]
+        real_load = core_config.load_config
+
+        def _load_with_routes(*args, **kwargs):
+            cfg = real_load(*args, **kwargs)
+            cfg.openlist_routes = routes
+            return cfg
+
+        # _provider_for_boundary 从 load_config().openlist_routes 做最长前缀匹配
+        monkeypatch.setattr(core_config, "load_config", _load_with_routes)
+
+        tree = {
+            "/动画": [("作品", True, None, None)],
+            "/动画/作品": [("Season 1", True, None, None)],
+            "/动画/作品/Season 1": [("作品 - S01E01.mkv", False, 100, 1.0)],
+        }
+        root, engine = _setup_root(tree)
+        results = _run(engine)
+        units = [item for item in results if item["status"] == "plan_ready"]
+        assert len(units) == 1
+        assert units[0]["boundary"] == "/动画/作品"
+
+        from app.import_plan import revision_store
+
+        revision = revision_store.load_revision(units[0]["revision_id"])
+        assert revision is not None
+        items = revision["items"]
+        assert items, "revision 应有条目"
+        for item in items:
+            assert item["provider_id"] == "quark"
+
+        # source_route_id 传播到 Source Catalog 节点事实层（source_nodes.route_id，
+        # 随首批入库文件节点持久化）
+        nodes = store.list_nodes(root.root_id)
+        video_node = [n for n in nodes if n["remote_path"] == "/动画/作品/Season 1/作品 - S01E01.mkv"]
+        assert video_node, "视频节点应存在且携带 route 事实"
+        assert video_node[0]["provider_id"] == "quark"
+        assert video_node[0]["route_id"] == "route-quark"
+
+    def test_route_miss_falls_back_to_openlist_compat(self, monkeypatch):
+        """路由未命中（前缀不匹配）时回退 openlist 兼容 provider，route_id 为空。"""
+        from app.core import config as core_config
+        from app.integrations.openlist.providers import OpenListRouteConfig
+
+        routes = [
+            OpenListRouteConfig(
+                route_id="route-quark",
+                label="夸克",
+                remote_prefix="/电影",
+                provider_id="quark",
+            )
+        ]
+        real_load = core_config.load_config
+
+        def _load_with_routes(*args, **kwargs):
+            cfg = real_load(*args, **kwargs)
+            cfg.openlist_routes = routes
+            return cfg
+
+        monkeypatch.setattr(core_config, "load_config", _load_with_routes)
+
+        tree = {
+            "/动画": [("作品", True, None, None)],
+            "/动画/作品": [("Season 1", True, None, None)],
+            "/动画/作品/Season 1": [("作品 - S01E01.mkv", False, 100, 1.0)],
+        }
+        root, engine = _setup_root(tree)
+        results = _run(engine)
+        units = [item for item in results if item["status"] == "plan_ready"]
+        assert len(units) == 1
+
+        from app.import_plan import revision_store
+
+        revision = revision_store.load_revision(units[0]["revision_id"])
+        assert revision is not None
+        for item in revision["items"]:
+            # 未命中启用路由：归 openlist 兼容 provider（夸克试点回填），
+            # 但 route_id 必须保持空（不存在路由事实）
+            assert item["provider_id"] == "quark"
+        nodes = store.list_nodes(root.root_id)
+        video_node = [n for n in nodes if n["remote_path"] == "/动画/作品/Season 1/作品 - S01E01.mkv"]
+        assert video_node and video_node[0]["route_id"] == ""

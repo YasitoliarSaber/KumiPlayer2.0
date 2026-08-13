@@ -172,7 +172,11 @@ def test_source_id_and_namespace():
 
 def test_metadata_only_scan_never_opens_media_content(tmp_path, monkeypatch):
     """挂载盘扫描只能读取目录元数据，不能打开视频计算摘要。"""
-    video = tmp_path / "作品A.S01E01.mkv"
+    # Preflight 0：隔离数据目录（tmp_path/data）总会存在，把被测媒体放
+    # 独立子目录，避免扫描到 db/config 等测试基建文件。
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    video = media_dir / "作品A.S01E01.mkv"
     video.write_bytes(b"remote-video-placeholder")
 
     def reject_content_read(self, *args, **kwargs):
@@ -181,7 +185,7 @@ def test_metadata_only_scan_never_opens_media_content(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "open", reject_content_read)
     from app.sources.local import LocalScanner
 
-    snapshot = LocalScanner().scan(str(tmp_path), include_root=True, metadata_only=True)
+    snapshot = LocalScanner().scan(str(media_dir), include_root=True, metadata_only=True)
 
     assert snapshot.video_count == 1
     assert snapshot.files[0].size == len(b"remote-video-placeholder")
