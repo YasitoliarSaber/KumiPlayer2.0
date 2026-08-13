@@ -645,6 +645,14 @@ def _run_selected_scrape_and_update_preset(
         should_cancel=should_cancel,
         **kwargs,
     )
+    # Review Fix 3：stale V3 target 返回 obsolete 时，人工确认工作流状态
+    # 不得被推进（不 resolve review、不 mark plan ready）。
+    if (result or {}).get("status") == "obsolete":
+        return {
+            "plan_id": target.import_plan_id,
+            "scrape_target_id": target.scrape_target_id,
+            **(result or {}),
+        }
     resolve_review_item(target.scrape_target_id, "resolved")
     _mark_plan_ready_when_review_complete(target.import_plan_id)
     return {"plan_id": target.import_plan_id, "scrape_target_id": target.scrape_target_id, **(result or {})}
@@ -693,6 +701,17 @@ def _run_selected_work_scrape(
         progress_callback=manual_progress,
         should_cancel=should_cancel,
     )
+    # Review Fix 3：stale V3 target 返回 obsolete 时，整部作品人工任务完整
+    # no-op——不 resolve review、不跑剩余 targets、不刷新 library、不推进
+    # 旧 plan lifecycle。
+    if (manual_result or {}).get("status") == "obsolete":
+        return {
+            "scope": "work",
+            "plan_id": target.import_plan_id,
+            "scrape_target_id": target.scrape_target_id,
+            "manual_result": manual_result,
+            "status": "obsolete",
+        }
     resolve_review_item(target.scrape_target_id, "resolved")
 
     remaining_targets = [

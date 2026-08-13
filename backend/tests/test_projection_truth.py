@@ -1266,3 +1266,63 @@ class TestReviewFixGates:
             )
         assert result["status"] == "obsolete"
         assert rebuild_jobs == []
+
+
+    # ---- Review Fix 3 回归（R/S） ----
+
+    def test_r_stale_single_target_does_not_advance_review_state(self, monkeypatch):
+        """R：execute_scrape 返回 obsolete → 单 target wrapper 直接返回，
+        resolve/mark-ready 全部 0 调用。"""
+        from app.api.scrape import _run_selected_scrape_and_update_preset
+        from app.scrape.models import ScrapeTarget
+
+        target = ScrapeTarget(
+            scrape_target_id="t-r", source="openlist", import_plan_id="rev-r",
+            work_id="w1", card_type="main_series", media_type="tv", group_type="season",
+            series_group="作品", local_title="作品", scrape_title="作品", scrape_year=2024,
+            scrape_type="tv", local_season_number=1, needs_review=False, warnings=[],
+        )
+
+        def _bomb(*args, **kwargs):
+            raise AssertionError("obsolete 后不得推进人工确认工作流状态")
+
+        monkeypatch.setattr(
+            "app.scrape.service.execute_scrape",
+            lambda **kwargs: {"status": "obsolete", "scrape_target_id": "t-r"},
+        )
+        monkeypatch.setattr("app.api.scrape.resolve_review_item", _bomb)
+        monkeypatch.setattr("app.api.scrape._mark_plan_ready_when_review_complete", _bomb)
+        result = _run_selected_scrape_and_update_preset(
+            target, progress_callback=lambda *a, **k: None,
+        )
+        assert result["status"] == "obsolete"
+
+    def test_s_stale_work_scrape_full_noop(self, monkeypatch):
+        """S：execute_scrape 返回 obsolete → 整部作品 wrapper 直接 obsolete 返回，
+        resolve/剩余 targets/refresh/mark-ready 全部 0 调用。"""
+        from app.api.scrape import _run_selected_work_scrape
+        from app.scrape.models import ScrapeTarget
+
+        target = ScrapeTarget(
+            scrape_target_id="t-s", source="openlist", import_plan_id="rev-s",
+            work_id="w1", card_type="main_series", media_type="tv", group_type="season",
+            series_group="作品", local_title="作品", scrape_title="作品", scrape_year=2024,
+            scrape_type="tv", local_season_number=1, needs_review=False, warnings=[],
+        )
+
+        def _bomb(*args, **kwargs):
+            raise AssertionError("obsolete 后不得继续整部作品刮削流程")
+
+        monkeypatch.setattr(
+            "app.scrape.service.execute_scrape",
+            lambda **kwargs: {"status": "obsolete", "scrape_target_id": "t-s"},
+        )
+        monkeypatch.setattr("app.api.scrape.resolve_review_item", _bomb)
+        monkeypatch.setattr("app.scrape.auto.run_auto_scrape", _bomb)
+        monkeypatch.setattr("app.library.service.refresh_library_for_scrape_targets", _bomb)
+        monkeypatch.setattr("app.api.scrape._mark_plan_ready_when_review_complete", _bomb)
+        result = _run_selected_work_scrape(
+            target, [target], tmdb_id=1, tmdb_type="tv",
+            progress_callback=lambda *a, **k: None,
+        )
+        assert result["status"] == "obsolete"
