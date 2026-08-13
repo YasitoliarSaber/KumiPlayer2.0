@@ -1337,6 +1337,7 @@ def test_admission_check_to_insert_window_barrier_waits_then_rejects():
     gate = maintenance_guard._gate
     acquired = threading.Event()
     proceed = threading.Event()
+    release_barrier = threading.Event()
     outcome: dict[str, bool] = {}
 
     def task_thread():
@@ -1349,6 +1350,8 @@ def test_admission_check_to_insert_window_barrier_waits_then_rejects():
     def deleter_thread():
         gate.enter_barrier()  # 删除：应等待在途 admission 完成；保持屏障（不退出）
         outcome["barrier_entered"] = True
+        release_barrier.wait(5)
+        gate.exit_barrier()
 
     t1 = threading.Thread(target=task_thread)
     t2 = threading.Thread(target=deleter_thread)
@@ -1361,13 +1364,14 @@ def test_admission_check_to_insert_window_barrier_waits_then_rejects():
     # 任务此时「提交」：放行 → 释放准入
     proceed.set()
     t1.join(5)
-    t2.join(5)
+    assert "barrier_entered" in outcome
     assert outcome["task_admitted"] is True
     assert outcome["barrier_entered"] is True
     # 屏障激活期间新 admission 被拒绝（不可进入）
     assert gate.acquire() is False
     # 退出屏障后恢复
-    gate.exit_barrier()
+    release_barrier.set()
+    t2.join(5)
     assert gate.acquire() is True
     gate.release()
 
@@ -1382,6 +1386,7 @@ def test_admission_claim_window_barrier_waits_then_claim_denied():
     gate = maintenance_guard._gate
     claimed = threading.Event()
     proceed = threading.Event()
+    release_barrier = threading.Event()
     outcome: dict[str, object] = {}
 
     def claim_thread():
@@ -1394,8 +1399,10 @@ def test_admission_claim_window_barrier_waits_then_claim_denied():
             gate.release()
 
     def deleter_thread():
-        gate.enter_barrier()  # 保持屏障（不退出），由主线程断言后退出
+        gate.enter_barrier()
         outcome["barrier_entered"] = True
+        release_barrier.wait(5)
+        gate.exit_barrier()
 
     t1 = threading.Thread(target=claim_thread)
     t2 = threading.Thread(target=deleter_thread)
@@ -1406,21 +1413,18 @@ def test_admission_claim_window_barrier_waits_then_claim_denied():
     assert "barrier_entered" not in outcome
     proceed.set()
     t1.join(5)
-    t2.join(5)
+    assert "barrier_entered" in outcome
     assert outcome["claim_admitted"] is True
     assert outcome["barrier_entered"] is True
     # 屏障激活：新 claim（admission）被拒 → 返回空（claim_jobs 语义）
     from app.catalog import maintenance_guard as mg
     from app.jobs import store as job_store
 
-    with mg.hold():
-        assert job_store.claim_jobs(worker_id="w") == []
-        try:
-            job_store.create_job(job_type="x", payload={})
-            raise AssertionError("屏障激活时 create_job 应被拒绝")
-        except mg.MaintenanceAdmissionDenied:
-            pass
-    gate.exit_barrier()
+    assert job_store.claim_jobs(worker_id="w") == []
+    with pytest.raises(mg.MaintenanceAdmissionDenied):
+        job_store.create_job(job_type="x", payload={})
+    release_barrier.set()
+    t2.join(5)
 
 
 def test_import_batch_admission_covers_create_to_enqueue_window():
@@ -1512,6 +1516,74 @@ def test_deletion_either_sees_committed_tasks_or_gets_barrier_first():
     gate.release()
 
 
+def test_waiting_barrier_stops_new_admission_before_becoming_active():
+    """删除已经开始等待时，后续 admission 不能持续插队令删除饥饿。"""
+    import threading
+    import time
+
+    from app.catalog import maintenance_guard
+
+    gate = maintenance_guard._gate
+    assert gate.acquire() is True  # 既有导入/领取正在提交
+    entered = threading.Event()
+    release_barrier = threading.Event()
+
+    def _enter_barrier():
+        gate.enter_barrier()
+        entered.set()
+        release_barrier.wait(5)
+        gate.exit_barrier()
+
+    deleter = threading.Thread(target=_enter_barrier)
+    deleter.start()
+    for _ in range(50):
+        if getattr(gate, "_waiting_barriers", 0) == 1:
+            break
+        time.sleep(0.01)
+    assert getattr(gate, "_waiting_barriers", 0) == 1
+    # 屏障尚未真正激活，但另一请求不得越过等待中的删除继续进入。
+    late_admission: dict[str, bool] = {}
+
+    def _late_request():
+        late_admission["accepted"] = gate.acquire()
+
+    late = threading.Thread(target=_late_request)
+    late.start()
+    late.join(5)
+    assert late_admission["accepted"] is False
+    gate.release()
+    assert entered.wait(5)
+    release_barrier.set()
+    deleter.join(5)
+
+
+def test_barrier_is_exclusive_across_threads_but_reentrant_for_owner():
+    """两个删除不能并行；同一删除调用栈仍可安全嵌套 hold。"""
+    import threading
+    import time
+
+    from app.catalog import maintenance_guard
+
+    gate = maintenance_guard._gate
+    gate.enter_barrier()
+    gate.enter_barrier()  # 同一线程嵌套
+    second_entered = threading.Event()
+
+    def _second_deleter():
+        gate.enter_barrier()
+        second_entered.set()
+        gate.exit_barrier()
+
+    second = threading.Thread(target=_second_deleter)
+    second.start()
+    time.sleep(0.1)
+    assert second_entered.is_set() is False
+    gate.exit_barrier()
+    gate.exit_barrier()
+    assert second_entered.wait(5)
+    second.join(5)
+
+
 def test_import_batch_api_rejected_during_barrier_no_partial(tmp_path, monkeypatch):
     """删除屏障激活时 OpenList 导入批次被拒（409），无批次/root/job 半成品。"""
     from fastapi.testclient import TestClient
@@ -1565,3 +1637,78 @@ def test_import_batch_api_rejected_during_barrier_no_partial(tmp_path, monkeypat
     assert conn.execute("SELECT COUNT(*) FROM import_batches").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM source_roots").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
+
+def test_full_validate_api_rejected_during_barrier_keeps_existing_batch_state():
+    """屏障期完整校验不得先取消旧任务或推进 generation。"""
+    from fastapi.testclient import TestClient
+
+    from app.catalog import maintenance_guard
+    from app.main import app
+
+    store.create_source(source_id="ol-full-guard", source_type="openlist", provider_id="quark")
+    batch = store.create_import_batch(
+        source_id="ol-full-guard",
+        roots=[{"remote_locator": "/动画", "local_locator": "K:/动画"}],
+    )
+    root_id = batch["roots"][0]["root_id"]
+    existing = job_store.create_job(
+        job_type="discovery_scan",
+        resource_key="scan:conn:ol-full-guard",
+        payload={"root_id": root_id, "generation": 0},
+    )
+    get_connection().execute(
+        "UPDATE jobs SET status = 'succeeded', progress = 100 WHERE job_id = ?",
+        (existing.job_id,),
+    )
+    get_connection().commit()
+    with TestClient(app) as client:
+        with maintenance_guard.hold():
+            response = client.post(f"/api/openlist/import-batches/{batch['batch_id']}/full-validate")
+    assert response.status_code == 409
+    assert job_store.get_job(existing.job_id).status == "succeeded"
+    root = store.get_source_root(root_id)
+    assert root is not None and root.active_generation == 0
+
+
+def test_admitted_endpoint_allows_its_own_nested_job_enqueue_while_delete_waits():
+    """同一导入请求获准后，删除开始等待也不能打断其内部入队。"""
+    import threading
+    import time
+
+    from app.api.openlist import _admitted_import_endpoint
+    from app.catalog import maintenance_guard
+
+    entered = threading.Event()
+    proceed = threading.Event()
+    outcome: dict[str, object] = {}
+
+    @_admitted_import_endpoint
+    def _import_endpoint():
+        entered.set()
+        proceed.wait(5)
+        return job_store.create_job(job_type="discovery_scan", payload={"root_id": "nested"})
+
+    def _run_import():
+        try:
+            outcome["job"] = _import_endpoint()
+        except Exception as exc:  # pragma: no cover
+            outcome["error"] = repr(exc)
+
+    def _run_delete():
+        with maintenance_guard.hold():
+            outcome["delete_entered"] = True
+
+    importer = threading.Thread(target=_run_import)
+    deleter = threading.Thread(target=_run_delete)
+    importer.start()
+    assert entered.wait(5)
+    deleter.start()
+    time.sleep(0.1)
+    assert "delete_entered" not in outcome
+    proceed.set()
+    importer.join(5)
+    deleter.join(5)
+    assert "error" not in outcome
+    assert outcome["job"].job_type == "discovery_scan"
+    assert outcome["delete_entered"] is True

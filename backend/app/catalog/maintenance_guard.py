@@ -35,36 +35,64 @@ class _AdmissionGate:
 
     def __init__(self) -> None:
         self._cond = threading.Condition(threading.Lock())
+        self._local = threading.local()
         self._active = 0  # 在途 admission 操作数
         self._barrier = 0  # 屏障层数（支持嵌套）
+        self._barrier_owner: int | None = None
+        self._waiting_barriers = 0  # 已请求独占、正在等待在途 admission 的删除数
 
     def acquire(self) -> bool:
         """尝试进入共享段；屏障激活时返回 False（不进入）。"""
+        if getattr(self._local, "admission_depth", 0) > 0:
+            self._local.admission_depth += 1
+            return True
         with self._cond:
-            if self._barrier > 0:
+            # 删除一旦开始等待，后续 admission 不能插队，否则持续导入/领取会
+            # 令整库删除永久饥饿。已进入的 admission 仍由删除方等待其提交完成。
+            if self._barrier > 0 or self._waiting_barriers > 0:
                 return False
             self._active += 1
+            self._local.admission_depth = 1
             return True
 
     def release(self) -> None:
         """退出共享段；清零时唤醒等待的删除方。"""
+        depth = getattr(self._local, "admission_depth", 0)
+        if depth > 1:
+            self._local.admission_depth = depth - 1
+            return
+        if depth == 1:
+            self._local.admission_depth = 0
         with self._cond:
             self._active = max(0, self._active - 1)
             if self._active == 0:
                 self._cond.notify_all()
 
     def enter_barrier(self) -> None:
-        """删除进入：等待在途 admission 全部完成，然后置位屏障。"""
+        """删除进入：等待 admission 与其他删除完成，然后独占置位屏障。"""
         with self._cond:
-            while self._active > 0:
-                self._cond.wait()
-            self._barrier += 1
+            owner = threading.get_ident()
+            if self._barrier_owner == owner:
+                self._barrier += 1
+                return
+            self._waiting_barriers += 1
+            try:
+                while self._active > 0 or self._barrier_owner is not None:
+                    self._cond.wait()
+                self._barrier_owner = owner
+                self._barrier += 1
+            finally:
+                self._waiting_barriers = max(0, self._waiting_barriers - 1)
+                self._cond.notify_all()
 
     def exit_barrier(self) -> None:
         """删除退出：复位屏障并唤醒等待的 admission 操作。"""
         with self._cond:
-            self._barrier = max(0, self._barrier - 1)
+            if self._barrier_owner != threading.get_ident():
+                raise RuntimeError("维护屏障只能由持有它的线程退出")
+            self._barrier -= 1
             if self._barrier == 0:
+                self._barrier_owner = None
                 self._cond.notify_all()
 
     def is_active(self) -> bool:
@@ -76,6 +104,9 @@ class _AdmissionGate:
         with self._cond:
             self._active = 0
             self._barrier = 0
+            self._barrier_owner = None
+            self._waiting_barriers = 0
+            self._local.admission_depth = 0
             self._cond.notify_all()
 
 

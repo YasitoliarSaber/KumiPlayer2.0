@@ -20,10 +20,11 @@ POST   /api/openlist/presets/{id}/rescan   按预设保存的远端定位增量�
 
 import ipaddress
 import threading
+from functools import wraps
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 from app.catalog import source_health
@@ -53,24 +54,23 @@ from app.integrations.openlist.providers import (
     provider_for_remote,
 )
 from app.media_presets.store import get_preset
-from app.tasks.registry import get_task_manager
 
 router = APIRouter(prefix="/api/openlist", tags=["openlist"])
 
 
-def _admission_guard_dep():
-    """整库维护准入：删除进行中拒绝导入/入队（409），请求结束释放。
+def _admitted_import_endpoint(fn):
+    """在实际同步路由线程内持有 admission，覆盖根/批次/入队完整链路。"""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        from app.catalog import maintenance_guard
 
-    覆盖「创建/复用根 → 创建批次 → prepare scan → 入队 → 更新批次状态」的
-    全部区间，保证删除屏障期间不会留下「批次已提交但入队被拒」的半成品。
-    """
-    from app.catalog import maintenance_guard
+        try:
+            with maintenance_guard.admission():
+                return fn(*args, **kwargs)
+        except maintenance_guard.MaintenanceAdmissionDenied as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
 
-    try:
-        with maintenance_guard.admission():
-            yield
-    except maintenance_guard.MaintenanceAdmissionDenied as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return wrapper
 
 # 单层浏览的安全上限（超出截断并标记，不阻塞导入扫描）
 _BROWSE_MAX_ENTRIES = 1000
@@ -898,7 +898,8 @@ def save_routes(req: SaveRoutesRequest):
 
 
 @router.post("/presets/{preset_id}/rescan")
-def rescan_openlist_preset(preset_id: str, _guard: None = Depends(_admission_guard_dep)):
+@_admitted_import_endpoint
+def rescan_openlist_preset(preset_id: str):
     """按预设保存的远端定位更新（Source Catalog 增量链路）（模块4：preset rescan → Source Catalog 增量链路）。
 
     预设远端定位 → 来源根覆盖解析（exact 复用 / 既有祖先覆盖复用 /
@@ -1084,7 +1085,8 @@ def _validate_batch_paths(config, remote_paths: list[str]) -> list[str]:
 
 
 @router.post("/import-batch")
-def create_openlist_import_batch(req: BatchImportRequest, _guard: None = Depends(_admission_guard_dep)):
+@_admitted_import_endpoint
+def create_openlist_import_batch(req: BatchImportRequest):
     """一次创建多个 OpenList source roots，并为每个 root 入队 durable discovery job。"""
     from app.catalog import store as catalog_store
     from app.db.database import init_db
@@ -1163,6 +1165,7 @@ def get_openlist_import_batch(batch_id: str):
 
 
 @router.post("/import-batches/{batch_id}/full-validate")
+@_admitted_import_endpoint
 def full_validate_openlist_import_batch(batch_id: str):
     from app.catalog import store as catalog_store
     from app.db.database import init_db

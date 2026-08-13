@@ -9,10 +9,11 @@ POST /api/sources/local/scan
 import hashlib
 import re
 from dataclasses import asdict
+from functools import wraps
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.core.config import load_config
@@ -27,19 +28,23 @@ router = APIRouter(prefix="/api/sources", tags=["sources"])
 _SEASONAL_ROOT_NAMES = {"新番", "追更", "新番追更"}
 
 
-def _admission_guard_dep():
-    """整库维护准入：删除进行中拒绝本地后台导入（409），请求结束释放。
+def _admitted_import_endpoint(fn):
+    """在实际同步路由线程内持有 admission，拒绝删除期本地后台导入。
 
     覆盖「创建来源 → 创建/复用根与批次 → prepare scan → 入队 → 更新批次状态」
     全部区间，保证删除屏障期间不会留下半成品导入。
     """
-    from app.catalog import maintenance_guard
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        from app.catalog import maintenance_guard
 
-    try:
-        with maintenance_guard.admission():
-            yield
-    except maintenance_guard.MaintenanceAdmissionDenied as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from None
+        try:
+            with maintenance_guard.admission():
+                return fn(*args, **kwargs)
+        except maintenance_guard.MaintenanceAdmissionDenied as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    return wrapper
 
 
 # ============================================================
@@ -340,7 +345,8 @@ def scan_local(req: LocalScanRequest):
 
 
 @router.post("/local/import-batch")
-def import_local_background(req: LocalBackgroundImportRequest, _guard: None = Depends(_admission_guard_dep)):
+@_admitted_import_endpoint
+def import_local_background(req: LocalBackgroundImportRequest):
     """本地路径直接进入 Source Catalog 的 durable 后台导入。"""
     from app.catalog import store as catalog_store
     from app.db.database import init_db
