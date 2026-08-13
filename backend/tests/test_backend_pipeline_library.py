@@ -210,7 +210,7 @@ class TestScrapeBindingAndLibraryRebuild:
         assert row is None
 
     def test_library_rebuild_handler_upserts_libraries(self):
-        """library_rebuild：从 confirmed revision 重建 media_libraries。"""
+        """library_rebuild：从 current revision 重建 media_libraries（Module 5 语义）。"""
         from app.pipeline.library_handler import handle_library_rebuild
 
         _ensure_unit("unit-5")
@@ -218,6 +218,13 @@ class TestScrapeBindingAndLibraryRebuild:
             unit_id="unit-5", source_generation=1, items=_make_items(["e.mkv"]),
             status="confirmed",
         )
+        # Module 5：rebuild 只消费 media_units.current_revision_id 指向的当前版本
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = 'unit-5'",
+            (revision["revision_id"],),
+        )
+        conn.commit()
         result = handle_library_rebuild(
             {"unit_id": "unit-5"},
             progress_callback=lambda *a, **k: None,

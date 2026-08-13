@@ -1,8 +1,10 @@
-"""library_rebuild durable handler：从 confirmed revision 重建媒体库索引。
+"""library_rebuild durable handler：从 current revision 重建媒体库索引投影。
 
-- 读取全部 confirmed/executed revision → 按 work 聚合 → upsert media_libraries；
-- scrape 结果写入 scrape_bindings / scrape_failures（SQLite 单写，不再依赖 JSON ScrapeMap）；
-- 一个 revision 一个 work（单元语义），library_id 稳定 = work_id 或 revision 派生值。
+Module 5 收口后的唯一语义输入：
+- ``media_units.current_revision_id`` → current revision（SQLite 事实）；
+- scrape_bindings（SQLite）→ ScrapeMap 兼容投影；
+- artifact_records（SQLite）→ MirrorScanResult 兼容投影；
+- library_index.json 只是可重建 Projection，一次 rebuild 内一次性发布最终 Index。
 """
 
 from __future__ import annotations
@@ -27,10 +29,10 @@ def record_scrape_outcome(
     succeeded: bool,
     error: str = "",
 ) -> None:
-    """刮削结果落 SQLite：成功 upsert scrape_bindings，失败写 scrape_failures。"""
+    """刮削失败记录走 scrape_failures（成功事实只来自真实 target 的 effective upsert）。"""
     conn = get_connection()
     timestamp = revision_store.now_iso()
-    if succeeded:
+    if succeeded:  # pragma: no cover - Module 5 后成功路径不再调用（保留兼容）
         conn.execute(
             """
             INSERT INTO scrape_bindings (
@@ -59,25 +61,56 @@ def record_scrape_outcome(
 
 
 def _upsert_library(revision: dict, items: list[dict], timestamp: str) -> str:
-    """按 work 聚合 revision items，写/更新 media_libraries 行。"""
+    """按 work 聚合 revision items，写/更新 media_libraries 行。
+
+    root 事实正确化（Module 5 十八.2）：``root_id`` 必须是真实 SourceRoot.root_id
+    （revision.unit_id → media_units.root_id → source_roots），不再把 unit_id 当
+    root_id、不再 hard-code import_family/remote_locator。
+    """
     conn = get_connection()
     work_ids = [item.get("work_id") or "" for item in items if item.get("work_id")]
     work_titles = [item.get("work_title") or "" for item in items if item.get("work_title")]
     library_id = work_ids[0] if work_ids else f"rev-{revision['revision_id']}"
     name = work_titles[0] if work_titles else (library_id if work_ids else revision["revision_id"])
+
+    unit = conn.execute(
+        "SELECT root_id FROM media_units WHERE unit_id = ?",
+        (str(revision.get("unit_id") or ""),),
+    ).fetchone()
+    root_id = str(unit["root_id"] or "") if unit else ""
+    remote_locator = ""
+    import_family = "anime"
+    import_scope = ""
+    if root_id:
+        root = conn.execute(
+            """
+            SELECT remote_locator, import_family, import_scope
+            FROM source_roots WHERE root_id = ?
+            """,
+            (root_id,),
+        ).fetchone()
+        if root is not None:
+            remote_locator = str(root["remote_locator"] or "")
+            import_family = str(root["import_family"] or "anime")
+            import_scope = str(root["import_scope"] or "")
+
     conn.execute(
         """
         INSERT INTO media_libraries (
             library_id, name, root_id, remote_locator, import_family, import_scope,
             current_revision_id, lifecycle_status, created_at, updated_at
-        ) VALUES (?, ?, ?, '', 'anime', '', ?, 'draft', ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
         ON CONFLICT (library_id) DO UPDATE SET
             name = excluded.name,
+            root_id = excluded.root_id,
+            remote_locator = excluded.remote_locator,
+            import_family = excluded.import_family,
+            import_scope = excluded.import_scope,
             current_revision_id = excluded.current_revision_id,
             updated_at = excluded.updated_at
         """,
         (
-            library_id, name, str(revision.get("unit_id") or ""),
+            library_id, name, root_id, remote_locator, import_family, import_scope,
             revision["revision_id"], timestamp, timestamp,
         ),
     )
@@ -85,43 +118,90 @@ def _upsert_library(revision: dict, items: list[dict], timestamp: str) -> str:
 
 
 def handle_library_rebuild(payload: dict, progress_callback=None, should_cancel=None) -> dict:
-    """重建媒体库索引：全部 confirmed/executed revision → 前端可见 JSON LibraryIndex。
+    """从 SQLite current state 一次性重建 LibraryIndex 投影。
 
-    - media_libraries 表（SQLite 事实）；
-    - publish_import_plan_to_library 发布到 library_index.json（前端/播放读取路径），
-      复用现有镜像发布链路，保证“镜像完成 → 前端可见”闭环。
+    - 语义输入唯一：``media_units.current_revision_id``（superseded/draft 不投影）；
+    - 逐 current plan 构建 fragment → merge → 一次 ``save_library_index()``
+      （不再逐 plan 多次 read-modify-write legacy publishing）；
+    - 清理 current 指针已失效的 stale ``media_libraries`` 行（projection registry，
+      不是语义历史）。
     """
-    from app.library.service import publish_import_plan_to_library
+    from app.library.index import build_library_index, rebuild_related_works_for_plan
+    from app.library.models import LibraryIndex
+    from app.library.projection import build_scan_result_projection, load_scrape_map_projection
+    from app.library.service import _deduplicate_library_works, _refresh_source_summary_from_works
+    from app.library.store import save_library_index
 
-    revisions = revision_store.list_revisions()
+    revisions = revision_store.list_current_revisions()
     conn = get_connection()
     timestamp = revision_store.now_iso()
     updated = 0
-    published = 0
+    fragments: list = []
+    current_revision_ids: set[str] = set()
+    source_plans: dict[str, object] = {}
+
     for revision in revisions:
-        if revision.get("status") not in ("confirmed", "executed"):
-            continue
-        items = conn.execute(
-            "SELECT * FROM import_revision_items WHERE revision_id = ?",
-            (revision["revision_id"],),
-        ).fetchall()
+        items = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM import_revision_items WHERE revision_id = ?",
+                (revision["revision_id"],),
+            ).fetchall()
+        ]
         if not items:
             continue
-        _upsert_library(revision, [dict(row) for row in items], timestamp)
+        current_revision_ids.add(revision["revision_id"])
+        _upsert_library(revision, items, timestamp)
         updated += 1
-        # 前端可见：复用现有 JSON LibraryIndex 发布链路
-        try:
-            plan = revision_store.load_plan(revision["revision_id"])
-            if plan is not None:
-                publish_import_plan_to_library(plan)
-                published += 1
-        except Exception:
-            # 局部发布失败不阻塞整体重建（保留 media_libraries 事实）
+        plan = revision_store.load_plan(revision["revision_id"])
+        if plan is None:
             continue
+        # 投影坏数据不 fallback 旧 revision：跳过该 fragment 并保留 media_libraries 事实
+        try:
+            scrape_map = load_scrape_map_projection(revision["revision_id"])
+            scan_result = build_scan_result_projection(plan, revision["revision_id"])
+            fragment = build_library_index(plan, scrape_map, scan_result)
+        except Exception:
+            continue
+        if fragment.works:
+            fragments.append((plan, fragment))
+            source_plans.setdefault(plan.source, plan)
+
+    # 合并 → 一次发布最终 Index
+    merged = LibraryIndex()
+    for _plan, fragment in fragments:
+        merged.works.extend(fragment.works)
+    merged.works = _deduplicate_library_works(merged.works)
+    for source, plan in source_plans.items():
+        rebuild_related_works_for_plan(
+            [work for work in merged.works if work.source == source],
+            plan,
+        )
+    for source in source_plans:
+        merged.source_summary = _refresh_source_summary_from_works(
+            merged.source_summary, source, merged.works
+        )
+    merged.generated_at = timestamp
+    save_library_index(merged)
+
+    # stale media_libraries 收敛：current 指针已不属于任何当前 unit 的行删除
+    stale_removed = 0
+    for row in conn.execute(
+        "SELECT library_id, current_revision_id FROM media_libraries"
+    ).fetchall():
+        if row["current_revision_id"] and row["current_revision_id"] not in current_revision_ids:
+            conn.execute(
+                "DELETE FROM media_libraries WHERE library_id = ?",
+                (row["library_id"],),
+            )
+            stale_removed += 1
+    conn.commit()
+
     return {
         "status": "succeeded",
         "libraries_updated": updated,
-        "library_index_published": published,
+        "library_index_works": len(merged.works),
+        "stale_libraries_removed": stale_removed,
     }
 
 

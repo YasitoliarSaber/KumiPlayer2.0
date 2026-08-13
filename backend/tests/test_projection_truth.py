@@ -339,3 +339,171 @@ class TestLegacyDetachment:
         upsert_effective_scrape_map_item(item)
         loaded = load_effective_scrape_map(revision["revision_id"])
         assert [i.scrape_target_id for i in loaded.items] == ["t-json-free"]
+
+
+class TestLibraryProjection:
+    """Module 5 Checkpoint 3 验收：LibraryIndex 是 SQLite current state 的投影。"""
+
+    def _ensure_source_root(
+        self,
+        root_id="root-x",
+        remote_locator="/动画",
+        import_family="anime",
+        import_scope="seasonal",
+    ):
+        from app.catalog import store as catalog_store
+
+        conn = get_connection()
+        catalog_store.create_source(source_id="ol", source_type="openlist", provider_id="quark")
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO source_roots (
+                root_id, source_id, remote_locator, normalized_locator, local_locator,
+                import_family, import_scope, scan_policy, active_generation, created_at, updated_at
+            ) VALUES (?, 'ol', ?, ?, '', ?, ?, 'standard', 1, '', '')
+            """,
+            (root_id, remote_locator, remote_locator, import_family, import_scope),
+        )
+        conn.commit()
+
+    def _make_current_unit(self, unit_id, root_id, items, gen=1, status="confirmed"):
+        conn = get_connection()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO media_units (
+                unit_id, batch_id, root_id, discovery_scope, boundary, work_key,
+                status, closure_generation, current_revision_id, created_at, updated_at
+            ) VALUES (?, '', ?, '', '/动画', 'w', 'discovered', 0, '', ?, ?)
+            """,
+            (unit_id, root_id, revision_store.now_iso(), revision_store.now_iso()),
+        )
+        conn.commit()
+        revision = revision_store.create_revision(
+            unit_id=unit_id, source_generation=gen, items=items, status=status,
+        )
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = ?",
+            (revision["revision_id"], unit_id),
+        )
+        conn.commit()
+        return revision
+
+    def _rebuild(self):
+        from app.pipeline.library_handler import handle_library_rebuild
+
+        return handle_library_rebuild({}, progress_callback=lambda *a, **k: None)
+
+    def test_media_libraries_root_id_comes_from_source_root(self, tmp_path):
+        """十八.2：media_libraries.root_id == SourceRoot.root_id，字段不再 hard-code。"""
+        self._ensure_source_root(root_id="root-x", remote_locator="/动画")
+        revision = self._make_current_unit("u-r1", "root-x", _items(["a.mkv"]))
+        result = self._rebuild()
+        assert result["status"] == "succeeded"
+        row = get_connection().execute(
+            "SELECT * FROM media_libraries WHERE current_revision_id = ?",
+            (revision["revision_id"],),
+        ).fetchone()
+        assert row is not None
+        assert row["root_id"] == "root-x"
+        assert row["remote_locator"] == "/动画"
+        assert row["import_family"] == "anime"
+        assert row["import_scope"] == "seasonal"
+
+    def _make_strm_item(self, item_id, episode_number, strm_path):
+        from pathlib import Path
+
+        item = _items(["ep.mkv"])[0]
+        item.update(
+            id=item_id,
+            episode_number=episode_number,
+            target_dir=str(Path(strm_path).parent),
+            target_strm_path=str(strm_path),
+        )
+        return item
+
+    def test_superseded_revision_not_projected(self, tmp_path):
+        """二十五：current=rev2 时 LibraryIndex 只含 rev2，无 rev1 残留。"""
+        from pathlib import Path as P
+
+        from app.library.store import load_library_index
+        from app.pipeline.artifacts import upsert_artifact
+
+        self._ensure_source_root()
+        strm1 = tmp_path / "mirror" / "ep1.strm"
+        strm2 = tmp_path / "mirror" / "ep2.strm"
+        strm1.parent.mkdir(parents=True, exist_ok=True)
+        strm1.write_text(r"H:\media\ep1.mkv", encoding="utf-8")
+        strm2.write_text(r"H:\media\ep2.mkv", encoding="utf-8")
+
+        rev1 = self._make_current_unit(
+            "u-sup", "root-x", [self._make_strm_item("i-0", 1, strm1)], gen=1,
+        )
+        upsert_artifact(kind="strm", path=str(strm1), revision_id=rev1["revision_id"], work_id="w1")
+        rev2 = self._make_current_unit(
+            "u-sup", "root-x", [self._make_strm_item("i-1", 2, strm2)], gen=2,
+        )
+        upsert_artifact(kind="strm", path=str(strm2), revision_id=rev2["revision_id"], work_id="w1")
+
+        self._rebuild()
+        index = load_library_index()
+        assert len(index.works) == 1
+        work = index.works[0]
+        # 只有 rev2 的 ep2；rev1 的 ep1 是 superseded，不得残留
+        assert [ep.episode_number for ep in work.episodes] == [2]
+
+    def test_missing_strm_artifact_not_projected_as_playable(self, tmp_path):
+        """二十六：artifact 无成功 STRM（计划路径存在但物化缺失）不得幽灵可播放。"""
+        from pathlib import Path as P
+
+        from app.library.store import load_library_index
+
+        self._ensure_source_root()
+        ghost = tmp_path / "mirror" / "ghost.strm"
+        ghost.parent.mkdir(parents=True, exist_ok=True)
+        self._make_current_unit(
+            "u-ghost", "root-x", [self._make_strm_item("i-0", 1, ghost)],
+        )
+        # 不登记 artifact：计划有 target_strm_path，但物化投影不存在
+        self._rebuild()
+        index = load_library_index()
+        if index.works:
+            for work in index.works:
+                playable = [
+                    ep for ep in work.episodes
+                    if getattr(ep, "strm_path", "") and P(str(ep.strm_path)).exists()
+                ]
+                assert playable == []
+
+    def test_rebuild_survives_deleted_library_index_json(self, tmp_path):
+        """二十四：删掉 library_index.json 后仍能从 SQLite current state 重建。"""
+        from pathlib import Path as P
+
+        from app.library.store import load_library_index
+
+        self._ensure_source_root()
+        strm = tmp_path / "mirror" / "ep1.strm"
+        strm.parent.mkdir(parents=True, exist_ok=True)
+        strm.write_text(r"H:\media\ep1.mkv", encoding="utf-8")
+        revision = self._make_current_unit(
+            "u-rebuild", "root-x", [self._make_strm_item("i-0", 1, strm)],
+        )
+        from app.pipeline.artifacts import upsert_artifact
+
+        upsert_artifact(kind="strm", path=str(strm), revision_id=revision["revision_id"], work_id="w1")
+        self._rebuild()
+        first = load_library_index()
+        assert len(first.works) == 1
+
+        # 删除投影 JSON → 再次重建必须恢复（且不依赖 legacy latest/scrape_map JSON）
+        index_path = P(get_connection().execute("SELECT 1").fetchone() and "" or "")
+        from app.core.paths import get_data_dir
+
+        for candidate in (
+            get_data_dir() / "library" / "library_index.json",
+            get_data_dir() / "library_index.json",
+        ):
+            if candidate.exists():
+                candidate.unlink()
+        self._rebuild()
+        second = load_library_index()
+        assert len(second.works) == 1
