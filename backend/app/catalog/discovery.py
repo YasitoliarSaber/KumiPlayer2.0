@@ -499,6 +499,7 @@ class DiscoveryEngine:
         return {
             "work_key": unit["work_key"],
             "boundary": boundary,
+            "work_title": unit["work_title"],
             "status": "plan_ready",
             "unit_id": unit_id,
             "revision_id": revision["revision_id"],

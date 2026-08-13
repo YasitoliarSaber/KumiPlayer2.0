@@ -83,13 +83,14 @@ def handle_mirror_revision(payload: dict, progress_callback=None, should_cancel=
     result_items = list(getattr(result, "items", []) or [])
     if result_items:
         _register_artifacts(revision_id, plan, result_items)
+    scrape_job_id = ""
     if result_status == "success":
         # mirror 成功后、单元 closure 时进入刮削（scrape 全局单通道由 resource_key 保证）
         unit_id = str(payload.get("unit_id") or "")
         from app.pipeline import orchestrator
 
         if unit_id and orchestrator.unit_is_closed(unit_id):
-            orchestrator.enqueue_scrape(
+            scrape_job_id = orchestrator.enqueue_scrape(
                 revision_id,
                 str(payload.get("source") or plan.source or "openlist"),
                 unit_id=unit_id,
@@ -99,8 +100,13 @@ def handle_mirror_revision(payload: dict, progress_callback=None, should_cancel=
         "revision_id": revision_id,
         "mirror_status": result_status,
         "strm_count": generated,
+        "generated_count": generated,
         "failed_count": int(getattr(result, "failed_count", 0) or 0),
         "skipped_count": int(getattr(result, "skipped_count", 0) or 0),
+        "items_count": generated
+        + int(getattr(result, "failed_count", 0) or 0)
+        + int(getattr(result, "skipped_count", 0) or 0),
+        "scrape_job_id": scrape_job_id,
     }
 
 

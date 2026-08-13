@@ -1013,63 +1013,9 @@ def _batch_jobs(batch: dict) -> dict[str, object]:
 
 
 def _refresh_batch_status(batch: dict, *, persist: bool = True) -> dict:
-    from app.catalog import store as catalog_store
+    from app.pipeline.batch_status import refresh_batch_status
 
-    jobs = _batch_jobs(batch)
-    root_payloads = []
-    statuses = []
-    for root in batch.get("roots", []):
-        job = jobs.get(root["root_id"])
-        item = dict(root)
-        if job is not None:
-            status = "queued" if job.status == "queued" else job.status
-            if persist and status in {"succeeded", "failed", "cancelled"}:
-                catalog_store.update_import_batch_root(
-                    batch["batch_id"], root["root_id"], status=status,
-                    error_kind=job.error or "",
-                )
-            item.update({
-                "job_id": job.job_id,
-                "job_status": status,
-                "progress": job.progress,
-                "message": job.message,
-                "error": job.error,
-            })
-            # V2：job 成功后暴露 plan_ready 的 revision（作为确认计划入口），
-            # 前端用 revision_id 调 /api/imports/openlist/preview 读取确认页。
-            if status == "succeeded" and getattr(job, "result", None):
-                units = (job.result or {}).get("units") or []
-                plan_ids = [
-                    u.get("revision_id") for u in units
-                    if u.get("status") == "plan_ready" and u.get("revision_id")
-                ]
-                if plan_ids:
-                    item["plan_ids"] = plan_ids
-            statuses.append(status)
-        else:
-            item.update({"job_id": "", "job_status": root["status"], "progress": 0})
-            statuses.append(root["status"])
-        root_payloads.append(item)
-
-    if statuses and all(status == "succeeded" for status in statuses):
-        batch_status = "succeeded"
-    elif any(status == "running" for status in statuses):
-        batch_status = "running"
-    elif any(status == "queued" for status in statuses):
-        batch_status = "pending"
-    elif any(status == "failed" for status in statuses):
-        batch_status = "partial_failed" if any(status == "succeeded" for status in statuses) else "failed"
-    elif any(status == "cancelled" for status in statuses):
-        batch_status = "cancelled"
-    else:
-        batch_status = batch["status"]
-    if persist and batch_status != batch["status"]:
-        catalog_store.update_import_batch(batch["batch_id"], status=batch_status)
-    result = dict(batch)
-    result["status"] = batch_status
-    result["roots"] = root_payloads
-    result["job_ids"] = [item["job_id"] for item in root_payloads if item.get("job_id")]
-    return result
+    return refresh_batch_status(batch, persist=persist)
 
 
 def _validate_batch_paths(config, remote_paths: list[str]) -> list[str]:

@@ -127,59 +127,6 @@ def scan_media_preset_folder(req: FolderScanRequest):
 
 
 
-def _catalog_source_id(source: str, tree_path: str) -> str:
-    """稳定 source_id：来源前缀 + TXT 路径 hash（同一文件重复导入复用同一 source）。"""
-    import hashlib
-
-    digest = hashlib.sha256((tree_path or "").encode("utf-8")).hexdigest()[:12]
-    return f"{source}-{digest}"
-
-
-def _enqueue_catalog_scan(
-    *,
-    source: str,
-    tree_path: str,
-    source_root: str,
-    import_family: str,
-    import_scope: str,
-    local_locator: str = "",
-) -> dict:
-    """为 115/百度目录树导入创建 Source Catalog root 并提交 discovery_scan 持久任务。
-
-    与旧 JSON 链路并行：Catalog root/job 是新链路入口，旧链路 preview 不受影响。
-    """
-    from app.catalog import store as catalog_store
-    from app.integrations.openlist.providers import compat_provider
-    from app.pipeline import orchestrator
-
-    source_id = _catalog_source_id(source, tree_path)
-    catalog_store.create_source(
-        source_id=source_id, source_type=source,
-        provider_id=compat_provider(source),
-        ingest_method="directory_tree",
-        connection_key=source_id, display_name=f"{source} 目录树",
-    )
-    existing = [
-        item for item in catalog_store.list_source_roots(source_id)
-        if item.normalized_locator == catalog_store.normalize_locator(source_root)
-    ]
-    if existing:
-        root = existing[0]
-    else:
-        root = catalog_store.create_source_root(
-            source_id=source_id,
-            remote_locator=source_root,
-            local_locator=local_locator or source_root,
-            import_family=import_family,
-            import_scope=import_scope,
-        )
-    generation = catalog_store.bump_generation(root.root_id)
-    task_id = orchestrator.enqueue_scan(
-        root.root_id, generation, source_id,
-        input_path=tree_path,
-    )
-    return {"root_id": root.root_id, "generation": generation, "task_id": task_id}
-
 @router.post("/import-local-tree")
 def import_local_tree(req: LocalTreeImportRequest):
     """从 Tauri 原生选择器 / 拖放提供的本机绝对 TXT 路径创建现有媒体库预设。
@@ -245,27 +192,12 @@ def import_local_tree(req: LocalTreeImportRequest):
         version,
         snapshot,
     )
-    # 新链路旁路：创建 Catalog root + discovery_scan 持久任务（115/百度统一接入）
-    catalog = {}
-    try:
-        catalog = _enqueue_catalog_scan(
-            source=source,
-            tree_path=req.tree_path,
-            source_root=source_root,
-            import_family=req.import_family,
-            import_scope=snapshot.import_scope or req.import_scope,
-            local_locator=temporary_preset.source_root or "",
-        )
-    except Exception:
-        # 旁路失败不阻塞旧链路结果（新链路任务可在后续手动触发）
-        catalog = {"error": "catalog 旁路创建失败，旧链路结果不受影响"}
     return {
         "preset": preset_to_dict(preset),
         "version": asdict(selected_version),
         "preview": _preview_to_dict(build_preview(plan)),
         "reused_preset": reused,
         "unchanged": unchanged,
-        "catalog_scan": catalog,
     }
 
 

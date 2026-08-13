@@ -102,9 +102,8 @@ export interface OpenListBatchImportPayload {
   import_scope?: string
 }
 
-// V2 durable batch：POST /api/openlist/import-batch 创建的持久批次。
-// root.job_status 为 succeeded 时，plan_ids 为可进入确认页的 revision_id 列表
-// （前端逐个调 /api/imports/openlist/preview?plan_id= 读取确认计划）。
+// 后台导入批次：POST /api/openlist/import-batch 创建的持久批次。
+// 每个 root 及其识别单元独立推进，不回流旧版确认计划工作台。
 export interface OpenListImportBatchRoot {
   batch_id: string
   root_id: string
@@ -121,6 +120,31 @@ export interface OpenListImportBatchRoot {
   message?: string
   error?: string
   plan_ids?: string[]
+  units?: BackgroundImportUnit[]
+}
+
+export interface BackgroundImportJob {
+  job_id: string
+  status: string
+  progress: number
+  message: string
+  error: string
+  result: Record<string, unknown>
+}
+
+export interface BackgroundImportUnit {
+  unit_id: string
+  revision_id: string
+  work_title: string
+  boundary: string
+  video_count: number
+  discovery_status: string
+  revision_status?: string
+  state: string
+  error?: string
+  mirror_job?: BackgroundImportJob
+  scrape_job?: BackgroundImportJob
+  library_rebuild_job?: BackgroundImportJob
 }
 
 export interface OpenListImportBatch {

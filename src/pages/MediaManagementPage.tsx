@@ -44,12 +44,13 @@ import MediaLogList, { type MediaLog } from '../components/media/MediaLogList';
 import MediaPlanSummary from '../components/media/MediaPlanSummary';
 import MediaStageHeader from '../components/media/MediaStageHeader';
 import MediaTaskWorkbench, { isMirrorTaskReady } from '../components/media/MediaTaskWorkbench';
+import MediaBackgroundImportStatus from '../components/media/MediaBackgroundImportStatus';
 import { pickFolder, pickDirectoryTreeFile } from '../platform/folderPicker';
 
-const flowSteps: Array<Exclude<WorkflowStep, 'maintenance'>> = ['import', 'confirm', 'workbench'];
+const flowSteps: Array<Exclude<WorkflowStep, 'maintenance' | 'background'>> = ['import', 'confirm', 'workbench'];
 
 const sourceOptions: Array<{ value: SourceKey; label: string }> = [
-  { value: 'local', label: '本地目录' },
+  { value: 'local', label: '本地路径' },
   { value: 'pan115', label: '115 目录树' },
   { value: 'baidu', label: '百度网盘' },
   { value: 'openlist', label: 'OpenList 连接' },
@@ -112,6 +113,13 @@ function formatOpenlistSize(bytes: number | null): string {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
+function batchHasActiveWork(batch: OpenListImportBatch): boolean {
+  return batch.roots.some((root) => {
+    if (['pending', 'queued', 'running'].includes(root.job_status || root.status)) return true;
+    return (root.units || []).some((unit) => ['queued', 'discovering', 'mirroring', 'scraping'].includes(unit.state));
+  });
+}
+
 
 
 export default function MediaManagementPage() {
@@ -123,6 +131,7 @@ export default function MediaManagementPage() {
   const activeEntryId = useMediaWorkflowStore((state) => state.activeEntryId);
   const task = useMediaWorkflowStore((state) => state.task);
   const taskKind = useMediaWorkflowStore((state) => state.taskKind);
+  const backgroundImport = useMediaWorkflowStore((state) => state.backgroundImport);
   const pendingDroppedTreePath = useMediaWorkflowStore((state) => state.pendingDroppedTreePath);
   const setStep = useMediaWorkflowStore((state) => state.setStep);
   const setSource = useMediaWorkflowStore((state) => state.setSource);
@@ -132,6 +141,7 @@ export default function MediaManagementPage() {
   const setActiveEntryId = useMediaWorkflowStore((state) => state.setActiveEntryId);
   const setTask = useMediaWorkflowStore((state) => state.setTask);
   const setTaskKind = useMediaWorkflowStore((state) => state.setTaskKind);
+  const setBackgroundImport = useMediaWorkflowStore((state) => state.setBackgroundImport);
   const consumeDroppedTreePath = useMediaWorkflowStore((state) => state.consumeDroppedTreePath);
   const loadLibrary = useLibraryStore((state) => state.loadLibrary);
   const goSettings = useUiStore((state) => state.goSettings);
@@ -173,13 +183,12 @@ export default function MediaManagementPage() {
   const [openlistCacheMeta, setOpenlistCacheMeta] = useState<OpenListCacheMeta | null>(null);
   const [openlistRoutes, setOpenlistRoutes] = useState<OpenListRoute[]>([]);
   const [openlistBatch, setOpenlistBatch] = useState<OpenListImportBatch | null>(null);
+  const [backgroundBatch, setBackgroundBatch] = useState<OpenListImportBatch | null>(null);
   const [openlistSelectionNotice, setOpenlistSelectionNotice] = useState('');
   const [openlistPrefetchLimit, setOpenlistPrefetchLimit] = useState(12);
   // 浏览竞争防护：只有最新请求可以提交 path/entries/cache 状态
   const openlistBrowseSeqRef = useRef(0);
   const openlistBatchIdRef = useRef('');
-  // 防重复处理：轮询与恢复逻辑不能同时触发两次“进入确认计划”
-  const completedOpenlistBatchIdRef = useRef('');
   const openlistPollTimerRef = useRef<number | null>(null);
   const [selectedCloudRoot, setSelectedCloudRoot] = useState('');
   const [repairingPresetId, setRepairingPresetId] = useState('');
@@ -312,6 +321,7 @@ export default function MediaManagementPage() {
   }, [task?.task_id, activeTask]);
 
   useEffect(() => {
+    if (source === 'local' || source === 'openlist') return;
     if (step !== 'confirm' || !activeEntry?.planId || !activeEntry.preview || activeTask) return;
     if (activeEntry.pathValidation?.ok === false) return;
     if (activeEntry.preview.issues.some((issue) => issue.level === 'error')) return;
@@ -588,31 +598,16 @@ export default function MediaManagementPage() {
     }
     setScanningFolder(true);
     setActionError('');
-    setUploadMessage('正在读取文件夹名称和剧集信息…');
+    setUploadMessage('已提交后台识别与媒体库创建…');
     try {
-      const result = await mediaPresetsApi.scanFolder({
-        source: 'baidu',
-        sourceRoot: root,
-        importFamily: 'anime',
-        importScope: 'seasonal',
-      });
-      const entry = makeEntry();
-      entry.path = result.version.original_name;
-      entry.note = result.preset.name;
-      entry.presetId = result.preset.preset_id;
-      entry.status = 'parsed';
-      entry.planId = result.preview.plan_id;
-      entry.preview = result.preview;
-      entry.resolvedRoot = result.preset.source_root;
-      entry.pathValidation = result.version.path_validation;
-      setEntries([entry]);
-      setActiveEntryId(entry.id);
-      setSource(result.preset.source);
-      setFamily(result.preset.import_family);
-      setImportScope(result.preset.import_scope);
-      setUploadMessage(`扫描完成：识别 ${result.preset.work_count} 部作品、${result.preset.video_count} 个视频`);
-      await loadPresets();
-      setStep('confirm');
+      const batch = await sourcesApi.createLocalImportBatch(root, 'anime', 'seasonal');
+      setBackgroundBatch(batch);
+      setSource('local');
+      setFamily('anime');
+      setImportScope('seasonal');
+      setBackgroundImport({ source: 'local', batchId: batch.batch_id });
+      setImportModeActive(false);
+      setStep('background');
     } catch (error) {
       setActionError(`扫描新番文件夹失败：${(error as Error).message}`);
       setUploadMessage('');
@@ -747,105 +742,68 @@ export default function MediaManagementPage() {
 
   useEffect(() => () => stopOpenlistPolling(), []);
 
-  // —— V2 durable batch：createImportBatch → 轮询 getImportBatch → plan_ids 进确认页 ——
-  const summarizeOpenlistBatch = (batch: OpenListImportBatch) => {
-    const succeeded = batch.roots.filter((root) => root.job_status === 'succeeded' || root.status === 'succeeded').length;
-    const failed = batch.roots.filter((root) => root.job_status === 'failed' || root.status === 'failed').length;
-    const cancelled = batch.roots.filter((root) => root.job_status === 'cancelled' || root.status === 'cancelled').length;
-    const active = batch.roots.find((root) => ['pending', 'queued', 'running'].includes(root.job_status || root.status));
-    setOpenlistNotice(
-      active
-        ? `正在扫描 ${active.remote_locator}`
-        : `批次${batch.status === 'succeeded' ? '完成' : '已停止'}：${succeeded} 个成功、${failed} 个失败、${cancelled} 个取消`,
-    );
-  };
-
-  // 批次终态恢复：succeeded root 的 plan_ids（可能多个 revision）逐个生成确认条目进入确认页
-  const collectOpenlistBatchEntries = async (batch: OpenListImportBatch) => {
-    const succeeded = batch.roots.filter((root) => root.job_status === 'succeeded' || root.status === 'succeeded');
-    const failed = batch.roots.filter((root) => root.job_status === 'failed' || root.status === 'failed');
-    const cancelled = batch.roots.filter((root) => root.job_status === 'cancelled' || root.status === 'cancelled');
-    const failureText = [
-      failed.length ? `${failed.length} 个失败` : '',
-      cancelled.length ? `${cancelled.length} 个取消` : '',
-    ].filter(Boolean).join('、');
-    if (!succeeded.length) {
-      setOpenlistNotice(`批量导入未产生可确认目录${failureText ? `：${failureText}` : '，任务已停止'}`);
-      return;
-    }
-    setOpenlistNotice(failureText
-      ? `批量扫描完成：${succeeded.length} 个成功、${failureText}（失败目录可在选择篮中重试）`
-      : `批量扫描完成：${succeeded.length} 个目录扫描成功`);
-    const newEntries: DirectoryEntry[] = [];
-    const previewFailures: string[] = [];
-    for (const root of succeeded) {
-      const planIds = root.plan_ids || [];
-      if (!planIds.length) {
-        previewFailures.push(root.remote_locator);
-        continue;
-      }
-      for (const planId of planIds) {
-        try {
-          const preview = await importsApi.getPreview('openlist', planId);
-          const entry = makeEntry();
-          entry.path = root.remote_locator;
-          entry.note = 'OpenList 目录';
-          entry.status = 'parsed';
-          entry.planId = planId;
-          entry.preview = preview;
-          newEntries.push(entry);
-        } catch {
-          // 单个预览失败：记录并可重试，不静默丢弃
-          previewFailures.push(root.remote_locator);
-          break;
-        }
-      }
-    }
-    if (previewFailures.length) {
-      setActionError(`部分成功目录的预览加载失败（可在媒体库预设中重新打开）：${previewFailures.join('、')}`);
-    }
-    if (newEntries.length) {
-      setEntries(newEntries);
-      setActiveEntryId(newEntries[0].id);
-      setImportModeActive(false);
-      await loadPresets();
-      setStep('confirm');
-    }
-  };
-
-  // 终态处理（带防重复保护）：批次终态只从 SQLite batch/root/job 状态恢复确认条目
-  const handleOpenlistBatchFinished = async (batch: OpenListImportBatch) => {
-    if (completedOpenlistBatchIdRef.current === batch.batch_id) return;
-    completedOpenlistBatchIdRef.current = batch.batch_id;
-    summarizeOpenlistBatch(batch);
-    await collectOpenlistBatchEntries(batch);
-  };
-
-  // 接管批次（创建或恢复共用）：记录 batch_id、开启轮询、镜像 active discovery job 进度
+  // 接管批次（创建或恢复共用）：后台观察页跟踪 durable 批次，不再转入旧确认页。
   const attachOpenlistBatch = (batch: OpenListImportBatch, reason = '') => {
     stopOpenlistPolling();
     setOpenlistBatch(batch);
+    setBackgroundBatch(batch);
     openlistBatchIdRef.current = batch.batch_id;
+    setBackgroundImport({ source: 'openlist', batchId: batch.batch_id });
+    setImportModeActive(false);
+    setStep('background');
     const activeRoot = batch.roots.find((root) => ['pending', 'queued', 'running'].includes(root.job_status || root.status));
     if (activeRoot?.job_id) {
       void tasksApi.get(activeRoot.job_id).then(setOpenlistScanTask).catch(() => undefined);
     }
-    setOpenlistImporting(Boolean(activeRoot));
+    setOpenlistImporting(batchHasActiveWork(batch));
     if (reason) setOpenlistNotice(reason);
     openlistPollTimerRef.current = window.setInterval(() => {
       void openlistApi.getImportBatch(batch.batch_id).then((updated) => {
         setOpenlistBatch(updated);
+        setBackgroundBatch(updated);
         const current = updated.roots.find((root) => ['pending', 'queued', 'running'].includes(root.job_status || root.status));
         if (current?.job_id) void tasksApi.get(current.job_id).then(setOpenlistScanTask).catch(() => undefined);
-        const active = Boolean(current);
+        const active = batchHasActiveWork(updated);
         setOpenlistImporting(active);
-        if (!active) {
-          stopOpenlistPolling();
-          void handleOpenlistBatchFinished(updated);
-        }
+        if (!active && updated.status !== 'pending') stopOpenlistPolling();
       }).catch(() => undefined);
     }, 1200);
   };
+
+  useEffect(() => {
+    if (backgroundImport?.source !== 'local' || !backgroundImport.batchId) return;
+    let cancelled = false;
+    const refresh = () => {
+      void sourcesApi.getLocalImportBatch(backgroundImport.batchId)
+        .then((batch) => {
+          if (cancelled) return;
+          setBackgroundBatch(batch);
+        })
+        .catch((error) => {
+          if (!cancelled) setActionError(`本地后台导入状态刷新失败：${(error as Error).message}`);
+        });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 1200);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [backgroundImport?.batchId, backgroundImport?.source]);
+
+  useEffect(() => {
+    if (backgroundImport?.source !== 'openlist' || !backgroundImport.batchId) return;
+    if (backgroundBatch?.batch_id === backgroundImport.batchId) return;
+    let cancelled = false;
+    void openlistApi.getImportBatch(backgroundImport.batchId)
+      .then((batch) => {
+        if (!cancelled) attachOpenlistBatch(batch);
+      })
+      .catch((error) => {
+        if (!cancelled) setActionError(`OpenList 网盘路径导入状态刷新失败：${(error as Error).message}`);
+      });
+    return () => { cancelled = true; };
+  }, [backgroundBatch?.batch_id, backgroundImport?.batchId, backgroundImport?.source]);
 
   const recoverOpenlistTask = async () => {
     try {
@@ -1030,15 +988,25 @@ export default function MediaManagementPage() {
     setActionError('');
     updateEntry(entry.id, { status: 'parsing', error: '' });
     try {
-      const result = source === 'local'
-        ? await sourcesApi.scanLocal(path, family, family === 'anime' ? importScope : '')
-        : await sourcesApi.parse(
+      if (source === 'local') {
+        const batch = await sourcesApi.createLocalImportBatch(
+          path,
+          family,
+          family === 'anime' ? importScope : '',
+        );
+        setBackgroundBatch(batch);
+        setBackgroundImport({ source: 'local', batchId: batch.batch_id });
+        setImportModeActive(false);
+        setStep('background');
+        return;
+      }
+      const result = await sourcesApi.parse(
           source,
           path,
           undefined,
           family,
           family === 'anime' ? importScope : '',
-        );
+      );
       const parsedPreview = await importsApi.getPreview(source, result.plan_id);
       const pathValidation: SourcePathValidation | undefined = 'path_validation' in result
         ? result.path_validation as SourcePathValidation | undefined
@@ -1052,7 +1020,6 @@ export default function MediaManagementPage() {
         error: '',
       });
       setActiveEntryId(entry.id);
-      if (source === 'local') await loadPresets();
       setStep('confirm');
     } catch (error) {
       updateEntry(entry.id, { status: 'failed', error: (error as Error).message });
@@ -1154,28 +1121,20 @@ export default function MediaManagementPage() {
     if (scanningFolder) return;
     setScanningFolder(true);
     setActionError('');
-    setUploadMessage(`正在重新扫描“${preset.source_root}”并计算增量变化…`);
+    setUploadMessage(`已提交“${preset.source_root}”的后台更新…`);
     try {
-      const result = await mediaPresetsApi.rescanLocal(preset.preset_id);
-      const entry = makeEntry();
-      entry.path = result.preset.source_root;
-      entry.note = result.preset.name;
-      entry.presetId = result.preset.preset_id;
-      entry.status = 'parsed';
-      entry.planId = result.preview.plan_id;
-      entry.preview = result.preview;
-      entry.resolvedRoot = result.preset.source_root;
-      entry.pathValidation = result.version.path_validation;
-      setEntries([entry]);
-      setActiveEntryId(entry.id);
+      const batch = await sourcesApi.createLocalImportBatch(
+        preset.source_root,
+        preset.import_family,
+        preset.import_scope,
+      );
+      setBackgroundBatch(batch);
       setSource('local');
-      setFamily(result.preset.import_family);
-      setImportScope(result.preset.import_scope);
-      setUploadMessage(result.unchanged
-        ? '扫描完成，本地文件没有变化。'
-        : `增量扫描完成：新增 ${result.diff?.added_count || 0}，缺失 ${result.diff?.missing_count || 0}，未变化 ${result.diff?.unchanged_count || 0}`);
-      await loadPresets();
-      setStep('confirm');
+      setFamily(preset.import_family);
+      setImportScope(preset.import_scope);
+      setBackgroundImport({ source: 'local', batchId: batch.batch_id });
+      setImportModeActive(false);
+      setStep('background');
     } catch (error) {
       setActionError(`重新扫描本地目录失败：${(error as Error).message}`);
       setUploadMessage('');
@@ -1525,6 +1484,8 @@ export default function MediaManagementPage() {
     setActiveEntryId(entry.id);
     setTask(null);
     setTaskKind(null);
+    setBackgroundImport(null);
+    setBackgroundBatch(null);
     setPendingSeasonalImport(null);
     setSelectedCloudRoot('');
     setUploadMessage('');
@@ -1535,6 +1496,7 @@ export default function MediaManagementPage() {
 
   const canEnterStep = (target: WorkflowStep) => {
     if (target === 'maintenance') return true;
+    if (target === 'background') return Boolean(backgroundImport);
     const targetIndex = flowSteps.findIndex((item) => item === target);
     if (targetIndex === 0) return true;
     if (target === 'workbench' && isScrapeTask(task)) return true;
@@ -1564,7 +1526,7 @@ export default function MediaManagementPage() {
           </div>
           <MediaFlowProgress
             step={step}
-            completedThrough={stepIndex + (task?.status === 'succeeded' ? 1 : 0)}
+            completedThrough={step === 'background' ? 1 : Math.max(0, stepIndex) + (task?.status === 'succeeded' ? 1 : 0)}
             canEnter={canEnterStep}
             onStepChange={(target) => { if (target === 'import') setImportModeActive(false); setStep(target); }}
           />
@@ -1914,6 +1876,10 @@ export default function MediaManagementPage() {
         disabled={isScrapeTask(task) && taskKind === 'scrape'
           ? !preview || isDurablePipelineTask(task)
           : isDurablePipelineTask(task) || !preview || preview.status !== 'confirmed' || activeEntry?.pathValidation?.ok === false}
+      />}
+      {step === 'background' && <MediaBackgroundImportStatus
+        batch={backgroundBatch}
+        source={backgroundImport?.source || 'local'}
       />}
       {step === 'maintenance' && <LibraryMaintenancePanel onCleared={() => loadPresets(true)} />}
 

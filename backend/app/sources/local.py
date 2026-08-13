@@ -247,7 +247,10 @@ class LocalScanner(SourceAdapter):
         """分页枚举本地目录的直接成员（不递归）。"""
         from app.catalog.models import DirectoryPage
 
-        root = Path(remote_path).expanduser()
+        # Catalog 为了和 OpenList 共用路径层级，Windows 驱动器根使用
+        # ``/C:/...`` 的虚拟 POSIX 定位；这里只在真正访问磁盘前还原。
+        disk_path = remote_path[1:] if len(remote_path) > 3 and remote_path[0] == "/" and remote_path[2] == ":" else remote_path
+        root = Path(disk_path).expanduser()
         try:
             entries = [item for item in os.scandir(root)]
         except OSError:
@@ -257,8 +260,8 @@ class LocalScanner(SourceAdapter):
         nodes = [
             SourceNodeInput(
                 name=item.name,
-                remote_path=str(Path(remote_path) / item.name),
-                parent_path=remote_path,
+                remote_path=(Path(remote_path) / item.name).as_posix(),
+                parent_path=Path(remote_path).as_posix(),
                 kind="dir" if item.is_dir() else "file",
                 size=item.stat().st_size if item.is_file() else None,
                 mtime=item.stat().st_mtime if item.is_file() else None,

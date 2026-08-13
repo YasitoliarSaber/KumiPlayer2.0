@@ -35,8 +35,8 @@ def normalize_locator(locator: str) -> str:
     value = (locator or "").strip()
     if not value:
         return ""
-    if "\\" in value and ":" in value:
-        return value.rstrip("\\/").lower()
+    if ":" in value and ("\\" in value or "/" in value):
+        return value.replace("\\", "/").rstrip("/").lower()
     return value.rstrip("/") or "/"
 
 

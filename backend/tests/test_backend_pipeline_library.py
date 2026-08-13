@@ -66,6 +66,37 @@ def _set_current(unit_id: str, revision_id: str) -> None:
     conn.commit()
 
 class TestMirrorFailure:
+    def test_mirror_success_returns_complete_terminal_metrics(self, monkeypatch):
+        """终态结果必须保留 UI/恢复所需的完整计数与下游 job 身份。"""
+        _ensure_unit("unit-terminal")
+        revision = revision_store.create_revision(
+            unit_id="unit-terminal", source_generation=1, items=_make_items(["done.mkv"]),
+            status="confirmed",
+        )
+        revision_id = revision["revision_id"]
+        _set_current("unit-terminal", revision_id)
+
+        monkeypatch.setattr("app.pipeline.orchestrator.unit_is_closed", lambda unit_id: True)
+        monkeypatch.setattr(
+            "app.pipeline.orchestrator.enqueue_scrape",
+            lambda revision_id, source, *, unit_id="": "scrape-job-terminal",
+        )
+        complete = MirrorGenerateResult(
+            plan_id=revision_id, source="openlist", mirror_root="K:/mirror", status="success",
+            generated_count=0, failed_count=0, skipped_count=1,
+        )
+
+        with patch("app.mirror.generator.generate_mirror", return_value=complete):
+            result = handle_mirror_revision(
+                {"revision_id": revision_id, "unit_id": "unit-terminal"},
+                progress_callback=lambda *args, **kwargs: None,
+            )
+
+        assert result["generated_count"] == 0
+        assert result["items_count"] == 1
+        assert result["skipped_count"] == 1
+        assert result["scrape_job_id"] == "scrape-job-terminal"
+
     def test_mirror_failed_does_not_register_artifacts_or_scrape(self, monkeypatch):
         """mirror failed：不登记 artifact、不创建 scrape job。"""
         _ensure_unit("unit-1")

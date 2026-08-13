@@ -2,6 +2,7 @@
 
 import { api } from './client'
 import type { SourceInfo, SourcePathValidation } from './types'
+import type { OpenListImportBatch } from './openlist'
 
 export type ImportFamily = 'anime' | 'live'
 
@@ -70,4 +71,14 @@ export const sourcesApi = {
       auto_pipeline: autoPipeline,
       auto_scrape: autoScrape,
     }),
+
+  createLocalImportBatch: (rootPath: string, importFamily?: ImportFamily, importScope?: '' | 'seasonal') =>
+    api.post<OpenListImportBatch>('/api/sources/local/import-batch', {
+      root_path: rootPath,
+      import_family: importFamily,
+      import_scope: importScope,
+    }),
+
+  getLocalImportBatch: (batchId: string) =>
+    api.get<OpenListImportBatch>(`/api/sources/local/import-batches/${batchId}`),
 }

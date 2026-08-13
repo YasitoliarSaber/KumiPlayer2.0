@@ -57,7 +57,8 @@ test('媒体管理细节遵循 Fluent 分层并保持窄屏清爽', () => {
   const styles = readFileSync(new URL('../src/index.css', import.meta.url), 'utf8');
 
   assert.match(media, /const stepIndex = flowSteps\.findIndex/);
-  assert.match(media, /completedThrough=\{stepIndex/);
+  assert.match(media, /completedThrough=\{step === 'background' \? 1 : Math\.max\(0, stepIndex\)/);
+  assert.match(media, /MediaBackgroundImportStatus/);
   assert.match(maintenance, /ListVideo/);
   assert.doesNotMatch(maintenance, /maintenance-stat-icon">集</);
   assert.match(styles, /\.media-workflow-progress ol\s*\{[^}]*display:\s*flex;/s);

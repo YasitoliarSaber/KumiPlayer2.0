@@ -6,6 +6,7 @@ const mediaPage = readFileSync(new URL('../src/pages/MediaManagementPage.tsx', i
 const settingsPage = readFileSync(new URL('../src/pages/SettingsPage.tsx', import.meta.url), 'utf8');
 const openlistApi = readFileSync(new URL('../src/api/openlist.ts', import.meta.url), 'utf8');
 const mediaWorkflow = readFileSync(new URL('../src/stores/mediaWorkflow.ts', import.meta.url), 'utf8');
+const backgroundImportStatus = readFileSync(new URL('../src/components/media/MediaBackgroundImportStatus.tsx', import.meta.url), 'utf8');
 const types = readFileSync(new URL('../src/api/types.ts', import.meta.url), 'utf8');
 const backendOpenlistApi = readFileSync(new URL('../backend/app/api/openlist.py', import.meta.url), 'utf8');
 const backendClient = readFileSync(new URL('../backend/app/integrations/openlist/client.py', import.meta.url), 'utf8');
@@ -64,9 +65,9 @@ test('批量导入入口、进度汇总与恢复兼容', () => {
   // 批量导入的持久化任务由 discovery_scan 类型承载（旧 openlist_batch_import 已移除）
   assert.match(mediaPage, /task_type: 'discovery_scan'/);
   assert.match(mediaPage, /batch_summary/);
-  // 批次终态后成功目录进入确认计划（新文案：批量扫描完成）
-  assert.match(mediaPage, /批量扫描完成/);
-  assert.match(mediaPage, /setStep\('confirm'\)/);
+  // OpenList 批次直接进入后台观察页，绝不回流旧确认工作台。
+  assert.match(mediaPage, /setBackgroundImport\(\{ source: 'openlist', batchId: batch\.batch_id \}\)/);
+  assert.match(mediaPage, /setStep\('background'\)/);
 });
 
 test('选中后进入后台扫描并显示进度与取消', () => {
@@ -76,9 +77,10 @@ test('选中后进入后台扫描并显示进度与取消', () => {
   assert.match(mediaPage, /个目录<\/dd>/);
   assert.match(mediaPage, /cancelOpenlistScan/);
   assert.match(mediaPage, />取消</);
-  // 批次终态后 plan_ids 逐个读预览进入确认页
-  assert.match(mediaPage, /importsApi\.getPreview\('openlist', planId\)/);
-  assert.match(mediaPage, /setStep\('confirm'\)/);
+  // 状态持续关联至下游 mirror/scrape，不逐项读取旧确认预览。
+  assert.match(mediaPage, /batchHasActiveWork/);
+  assert.match(mediaPage, /MediaBackgroundImportStatus/);
+  assert.doesNotMatch(mediaPage, /importsApi\.getPreview\('openlist', planId\)/);
 });
 
 test('OpenList 导入层不使用 WebDAV 或直链播放文案', () => {
@@ -191,9 +193,9 @@ test('重复提交按连接互斥直接创建持久批次接管，不展示内�
   // 创建与恢复共用 attachOpenlistBatch 接管批次：记录 batch_id、轮询批次状态
   assert.match(mediaPage, /attachOpenlistBatch/);
   assert.match(mediaPage, /openlistBatchIdRef\.current = batch\.batch_id/);
-  // 终态处理有防重复保护（按 batch_id，不展示内部任务 ID）
-  assert.match(mediaPage, /completedOpenlistBatchIdRef/);
-  assert.match(mediaPage, /completedOpenlistBatchIdRef\.current === batch\.batch_id/);
+  // 后台页直接保留 batch 身份，并持续轮询下游状态。
+  assert.match(mediaPage, /setBackgroundImport\(\{ source: 'openlist', batchId: batch\.batch_id \}\)/);
+  assert.match(mediaPage, /batchHasActiveWork\(updated\)/);
 });
 
 test('扫描进度卡展示目录、计数与真实总量语义', () => {
@@ -224,10 +226,9 @@ test('失败、取消、完成三种终态都有独立可读 UI', () => {
   assert.match(mediaPage, /扫描已停止<\/strong>/);
   assert.match(mediaPage, /已保留原有媒体库，不会生成半成品/);
   assert.match(mediaPage, />重新扫描</);
-  // v2 批次完成态：持久批次成功卡（旧“扫描完成</strong>”文案已由批次终态卡替代）
-  assert.match(mediaPage, /持久批次\{openlistBatch\.status === 'succeeded' \? '完成' : '已停止'\}<\/strong>/);
-  // 完成态汇总：成功目录进入确认计划
-  assert.match(mediaPage, /批量扫描完成：\$\{succeeded\.length\} 个目录扫描成功/);
+  // 终态与待处理项都在后台观察页展示。
+  assert.match(mediaPage, /MediaBackgroundImportStatus/);
+  assert.match(backgroundImportStatus, /后台处理中/);
 });
 
 test('顶部来源筛选与详情页来源标签使用统一 OpenList 名称', () => {
@@ -255,17 +256,14 @@ test('详情页来源标签优先显示真实 provider，OpenList 仅作辅助�
   assert.match(types, /source_route_id\?: string/);
 });
 
-test('批量任务取消/失败后按 plan_ids 恢复已成功目录', () => {
-  assert.match(mediaPage, /plan_ids/);
-  assert.match(mediaPage, /collectOpenlistBatchEntries/);
-  assert.match(mediaPage, /handleOpenlistBatchFinished/);
-  assert.match(mediaPage, /job_status === 'succeeded'/);
+test('批量任务取消/失败后保持 durable 批次观察而不回退确认页', () => {
+  assert.match(openlistApi, /units\?: BackgroundImportUnit\[\]/);
+  assert.match(mediaPage, /MediaBackgroundImportStatus/);
+  assert.match(mediaPage, /batchHasActiveWork/);
+  assert.match(backgroundImportStatus, /待处理识别结果/);
   // 取消走 durable batch 取消端点（API 层定义），页面通过 cancelImportBatch 调用
   assert.match(openlistApi, /import-batches\/\$\{batchId\}\/cancel/);
   assert.match(mediaPage, /openlistApi\.cancelImportBatch/);
-  assert.match(mediaPage, /部分成功目录的预览加载失败/);
-  // 失败目录可回到选择篮重试
-  assert.match(mediaPage, /可在选择篮中重试/);
 });
 
 test('Library API 序列化输出 provider 字段（数据能到达前端）', () => {

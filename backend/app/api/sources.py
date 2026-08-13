@@ -6,6 +6,7 @@ POST /api/sources/{source}/parse
 POST /api/sources/local/scan
 """
 
+import hashlib
 import re
 from dataclasses import asdict
 from pathlib import Path
@@ -45,6 +46,12 @@ class LocalScanRequest(BaseModel):
     import_scope: Optional[str] = None
     auto_pipeline: bool = False
     auto_scrape: bool = False
+
+
+class LocalBackgroundImportRequest(BaseModel):
+    root_path: str
+    import_family: Optional[str] = None
+    import_scope: Optional[str] = None
 
 
 def _normalize_import_family(value: Optional[str]) -> str:
@@ -315,6 +322,72 @@ def scan_local(req: LocalScanRequest):
         response["task_id"] = task.task_id
         response["task_status"] = task.status
     return response
+
+
+@router.post("/local/import-batch")
+def import_local_background(req: LocalBackgroundImportRequest):
+    """本地路径直接进入 Source Catalog 的 durable 后台导入。"""
+    from app.catalog import store as catalog_store
+    from app.db.database import init_db
+    from app.pipeline import orchestrator
+    from app.pipeline.batch_status import refresh_batch_status
+
+    root = Path(req.root_path).expanduser()
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(status_code=400, detail="请选择存在的本地媒体目录")
+    family = _normalize_import_family(req.import_family) or "anime"
+    scope = _normalize_import_scope(req.import_scope, family)
+    disk_locator = str(root.resolve())
+    catalog_locator = "/" + root.resolve().as_posix()
+    source_id = "local-" + hashlib.sha256(disk_locator.casefold().encode("utf-8")).hexdigest()[:16]
+
+    init_db()
+    catalog_store.create_source(
+        source_id=source_id,
+        source_type="local",
+        provider_id="local",
+        ingest_method="local_scan",
+        connection_key=source_id,
+        display_name="本地目录",
+    )
+    try:
+        batch = catalog_store.create_import_batch(
+            source_id=source_id,
+            roots=[{
+                "remote_locator": catalog_locator,
+                "local_locator": disk_locator,
+                "import_family": family,
+                "import_scope": scope,
+            }],
+            import_family=family,
+        )
+        for source_root in batch["roots"]:
+            generation = catalog_store.bump_generation(source_root["root_id"])
+            job_id = orchestrator.enqueue_scan(
+                source_root["root_id"], generation, source_id, scan_mode="incremental",
+            )
+            catalog_store.update_import_batch_root(
+                batch["batch_id"], source_root["root_id"], status="queued", generation=generation,
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    stored = catalog_store.get_import_batch(batch["batch_id"]) or batch
+    return refresh_batch_status(stored)
+
+
+@router.get("/local/import-batches/{batch_id}")
+def get_local_background_import(batch_id: str):
+    from app.catalog import store as catalog_store
+    from app.db.database import init_db
+    from app.pipeline.batch_status import refresh_batch_status
+
+    init_db()
+    batch = catalog_store.get_import_batch(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail="导入批次不存在")
+    if any(str(root.get("source_id") or "").startswith("local-") for root in batch["roots"]):
+        return refresh_batch_status(batch, persist=False)
+    raise HTTPException(status_code=404, detail="本地导入批次不存在")
 
 
 def _build_and_recognize_plan(snapshot) -> ImportPlan:

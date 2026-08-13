@@ -16,7 +16,7 @@ test('importsApi.confirm 响应类型包含 durable 分流字段', () => {
 });
 
 test('自动流水线：confirm 调用不再限定 draft（confirmed preview 恢复同样走幂等 confirm）', () => {
-  // Blocker 3：preview 已 confirmed 的恢复场景（OpenList batch 恢复/刷新页面）
+  // Blocker 3：旧目录树 preview 已 confirmed 的恢复场景（刷新页面）
   // 也必须调用 confirm，由后端幂等/ensure 语义返回 durable job_id。
   assert.match(page, /const confirmed = await importsApi\.confirm\(source, planId\);/);
   assert.doesNotMatch(page, /previewStatus === 'draft'/);
