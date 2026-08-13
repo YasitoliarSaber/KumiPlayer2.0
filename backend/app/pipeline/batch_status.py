@@ -46,6 +46,7 @@ def _revision_jobs() -> dict[str, dict[str, Any]]:
 def _pipeline_state(revision: dict[str, Any], jobs: dict[str, Any]) -> str:
     mirror = jobs.get("mirror")
     scrape = jobs.get("scrape")
+    library = jobs.get("library")
     if revision.get("status") == "draft":
         return "needs_review"
     if not mirror:
@@ -63,6 +64,15 @@ def _pipeline_state(revision: dict[str, Any], jobs: dict[str, Any]) -> str:
     if scrape["status"] in {"queued", "running"}:
         return "scraping"
     if scrape["status"] == "succeeded":
+        # 刮削成功不代表可观察流程已经结束：资料写入后仍可能在重建媒体库。
+        # 仅当 scrape result 中确实回传了 library job 时才等待它，兼容旧任务记录。
+        if library:
+            if library["status"] in {"failed", "cancelled"}:
+                return library["status"]
+            if library["status"] in {"queued", "running"}:
+                return "updating_library"
+            if library["status"] != "succeeded":
+                return library["status"]
         return "completed"
     return scrape["status"]
 
@@ -85,19 +95,21 @@ def _unit_payload(raw: dict[str, Any], jobs_by_revision: dict[str, dict[str, Any
         result["state"] = "failed"
         result["error"] = "识别版本已不可用"
         return result
-    jobs = jobs_by_revision.get(revision_id, {})
+    jobs = dict(jobs_by_revision.get(revision_id, {}))
+    scrape_result = (jobs.get("scrape") or {}).get("result") or {}
+    library_job_id = str(scrape_result.get("library_rebuild_job") or "")
+    if library_job_id:
+        library_job = job_store.get_job(library_job_id)
+        if library_job is not None:
+            jobs["library"] = _job_summary(library_job)
     result.update({
         "revision_status": revision.get("status") or "",
         "state": _pipeline_state(revision, jobs),
         "mirror_job": jobs.get("mirror"),
         "scrape_job": jobs.get("scrape"),
     })
-    scrape_result = (jobs.get("scrape") or {}).get("result") or {}
-    library_job_id = str(scrape_result.get("library_rebuild_job") or "")
-    if library_job_id:
-        library_job = job_store.get_job(library_job_id)
-        if library_job is not None:
-            result["library_rebuild_job"] = _job_summary(library_job)
+    if jobs.get("library"):
+        result["library_rebuild_job"] = jobs["library"]
     return result
 
 

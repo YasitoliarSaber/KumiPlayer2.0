@@ -228,7 +228,8 @@ test('失败、取消、完成三种终态都有独立可读 UI', () => {
   assert.match(mediaPage, />重新扫描</);
   // 终态与待处理项都在后台观察页展示。
   assert.match(mediaPage, /MediaBackgroundImportStatus/);
-  assert.match(backgroundImportStatus, /后台处理中/);
+  assert.match(backgroundImportStatus, /媒体库已更新/);
+  assert.match(backgroundImportStatus, /media-workbench-substages media-background-stages/);
 });
 
 test('顶部来源筛选与详情页来源标签使用统一 OpenList 名称', () => {

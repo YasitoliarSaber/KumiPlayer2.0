@@ -24,10 +24,14 @@ const batch: OpenListImportBatch = {
 };
 
 describe('后台媒体导入观察页', () => {
-  test('展示后台处理阶段、作品级状态与不阻塞的异常', () => {
+  test('复用执行窗口的阶段层级，并按真实下游 job 标示最终阶段', () => {
     render(<FluentProvider theme={webDarkTheme}><MediaBackgroundImportStatus batch={batch} source="openlist" /></FluentProvider>);
 
-    expect(screen.getByRole('heading', { name: '后台处理中' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: '媒体库已更新' })).toBeVisible();
+    const stages = screen.getByRole('list', { name: '执行阶段' });
+    expect(stages).toBeVisible();
+    expect(screen.getByRole('listitem', { current: 'step' })).toHaveTextContent('更新媒体库');
+    expect(stages.querySelectorAll('.complete')).toHaveLength(4);
     expect(screen.getByText('作品 A')).toBeVisible();
     expect(screen.getByText('已完成')).toBeVisible();
     expect(screen.getByText('待处理识别结果')).toBeVisible();

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Button, ProgressBar, Spinner } from '@fluentui/react-components';
 import {
   CheckCircle2,
+  Download,
   FolderOpen,
   Layers3,
   Play,
@@ -130,6 +131,19 @@ export default function MediaTaskWorkbench({
     ? mode === 'mirror' ? '重新创建' : task?.status === 'cancelled' ? '继续补充资料' : '重新补充资料'
     : startLabel;
   const autoAdvancing = mode === 'mirror' && mirrorReady && !active;
+  const errorLogs = logs.filter((log) => log.kind === 'warn' || log.kind === 'error');
+  const hasDiagnostics = errorLogs.length > 0 || Boolean(task?.error);
+
+  const exportErrorLogs = () => {
+    const content = buildErrorLogExport(title, errorLogs, task?.error);
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `KumiPlayer-错误日志-${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <section className="media-task-workbench">
@@ -222,16 +236,38 @@ export default function MediaTaskWorkbench({
       <section className="media-log-panel" aria-label="执行记录">
         <header>
           <h3>执行记录</h3>
-          {mode === 'scrape' && totalTargets > 0 && <small>已处理 {completedTargets} / {totalTargets} · 剩余 {remainingTargets}</small>}
+          <div className="media-log-panel-actions">
+            {mode === 'scrape' && totalTargets > 0 && <small>已处理 {completedTargets} / {totalTargets} · 剩余 {remainingTargets}</small>}
+            <Button appearance="subtle" size="small" icon={<Download size={14} />} disabled={!hasDiagnostics} onClick={exportErrorLogs}>
+              导出错误日志{hasDiagnostics ? ` (${errorLogs.length + (task?.error ? 1 : 0)})` : ''}
+            </Button>
+          </div>
         </header>
         {logs.length
-          ? <MediaLogList logs={logs} ariaLabel="执行记录" limit={30} />
+          ? <MediaLogList logs={logs} ariaLabel="执行记录" limit={30} variant={mode === 'scrape' ? 'work-summary' : 'timeline'} />
           : active
             ? <p className="media-log-running"><Spinner size="tiny" />任务正在运行，最新状态会显示在上方。</p>
             : <p className="media-log-empty">当前没有执行记录。</p>}
       </section>
     </section>
   );
+}
+
+export function buildErrorLogExport(title: string, logs: MediaLog[], taskError = ''): string {
+  const lines = [
+    'KumiPlayer 导入错误日志',
+    `任务：${title}`,
+    `导出时间：${new Date().toLocaleString('zh-CN')}`,
+    '',
+  ];
+  for (const log of logs.filter((item) => item.kind === 'warn' || item.kind === 'error')) {
+    const level = log.kind === 'error' ? '错误' : '警告';
+    lines.push(`[${log.time || '无时间'}] [${level}] ${log.message || '无详细信息'}`);
+  }
+  if (taskError.trim() && !logs.some((log) => log.kind === 'error' && log.message === taskError)) {
+    lines.push(`[无时间] [错误] ${taskError}`);
+  }
+  return `${lines.join('\n')}\n`;
 }
 
 function taskResultRecord(task: TaskRecord | null): Record<string, unknown> {

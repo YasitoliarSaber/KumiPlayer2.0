@@ -116,7 +116,7 @@ function formatOpenlistSize(bytes: number | null): string {
 function batchHasActiveWork(batch: OpenListImportBatch): boolean {
   return batch.roots.some((root) => {
     if (['pending', 'queued', 'running'].includes(root.job_status || root.status)) return true;
-    return (root.units || []).some((unit) => ['queued', 'discovering', 'mirroring', 'scraping'].includes(unit.state));
+    return (root.units || []).some((unit) => ['queued', 'discovering', 'mirroring', 'scraping', 'updating_library'].includes(unit.state));
   });
 }
 
@@ -189,6 +189,7 @@ export default function MediaManagementPage() {
   // 浏览竞争防护：只有最新请求可以提交 path/entries/cache 状态
   const openlistBrowseSeqRef = useRef(0);
   const openlistBatchIdRef = useRef('');
+  const refreshedBackgroundBatchRef = useRef('');
   const openlistPollTimerRef = useRef<number | null>(null);
   const [selectedCloudRoot, setSelectedCloudRoot] = useState('');
   const [repairingPresetId, setRepairingPresetId] = useState('');
@@ -765,7 +766,12 @@ export default function MediaManagementPage() {
         if (current?.job_id) void tasksApi.get(current.job_id).then(setOpenlistScanTask).catch(() => undefined);
         const active = batchHasActiveWork(updated);
         setOpenlistImporting(active);
-        if (!active && updated.status !== 'pending') stopOpenlistPolling();
+        if (!active && updated.status !== 'pending') {
+          stopOpenlistPolling();
+          void loadLibrary({ force: true }).catch((error: Error) => {
+            setActionError(`后台导入已完成，但媒体库刷新失败：${error.message}`);
+          });
+        }
       }).catch(() => undefined);
     }, 1200);
   };
@@ -778,6 +784,12 @@ export default function MediaManagementPage() {
         .then((batch) => {
           if (cancelled) return;
           setBackgroundBatch(batch);
+          if (!batchHasActiveWork(batch) && refreshedBackgroundBatchRef.current !== batch.batch_id) {
+            refreshedBackgroundBatchRef.current = batch.batch_id;
+            void loadLibrary({ force: true }).catch((error: Error) => {
+              if (!cancelled) setActionError(`后台导入已完成，但媒体库刷新失败：${error.message}`);
+            });
+          }
         })
         .catch((error) => {
           if (!cancelled) setActionError(`本地后台导入状态刷新失败：${(error as Error).message}`);
