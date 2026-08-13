@@ -968,6 +968,14 @@ def _work_plan_strm_paths(work) -> set[str]:
 
 
 def _execute_library_clear(preview: DeletePreview) -> DeleteResult:
+    """整库清晰：全程持有维护屏障（阻止新任务入队/领取），随后门控、删除。"""
+    from app.catalog import maintenance_guard
+
+    with maintenance_guard.hold():
+        return _execute_library_clear_guarded(preview)
+
+
+def _execute_library_clear_guarded(preview: DeletePreview) -> DeleteResult:
     """Clear only the generated files captured by the approved preview.
 
     User-facing "delete library" means removing generated mirror files and
@@ -975,6 +983,10 @@ def _execute_library_clear(preview: DeletePreview) -> DeleteResult:
     facts (source roots and derived data) for the same scope.  It never
     touches configured source roots on disk or the ``sources`` connection
     records (OpenList server config / routes / credentials stay intact).
+
+    ``maintenance_guard.hold`` 已由外层 _execute_library_clear 持有：屏障生效
+    期间新的 durable job 不能入队也不能被领取，从而消除初次门控到正式删除之间
+    的任务竞争。
     """
     deleted: List[str] = []
     failed: List[DeleteFailure] = []

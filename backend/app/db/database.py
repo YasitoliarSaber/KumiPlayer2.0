@@ -134,6 +134,24 @@ def init_db() -> None:
 
     ensure_source_health_table(conn)
 
+    # 旧 v3 库升级：source_stage_runs（run→root 归属）补建后，历史遗留的
+    # source_stage_entries 没有归属，无法按来源根清理。分页暂存属于可重建数据，
+    # 因此升级时安全清除这类无归属的暂存条目；同时清理 root 已不存在的孤儿映射。
+    # 旧库可能缺少这些表（尚未建对应 schema），因此逐条容错。
+    try:
+        conn.execute(
+            "DELETE FROM source_stage_entries WHERE run_id NOT IN (SELECT run_id FROM source_stage_runs)"
+        )
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute(
+            "DELETE FROM source_stage_runs WHERE root_id NOT IN (SELECT root_id FROM source_roots)"
+        )
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
+
     # 幂等轻量扩展（不 bump user_version）：scrape_bindings 的完整语义载荷。
     # ScrapeMapItem 全量字段存入 metadata_json，供 LibraryIndex 投影还原；
     # 已有 v3 库逐个 ALTER 补齐，不要求用户重置数据库。

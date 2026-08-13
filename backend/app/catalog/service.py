@@ -162,8 +162,11 @@ def scan_directory_paginated(
     for _attempt in range(MAX_PAGE_RETRIES + 1):
         _check_cancel(should_cancel)
         run_id = store.new_stage_run()
-        store.register_stage_run(run_id, root_id)
+        # 先清旧的暂存残留（对新 run_id 为 no-op），再登记归属：保证从第一页
+        # 写入到提交/取消/失败清理之前，source_stage_runs 中该 run 的归属始终存在，
+        # 供删除来源根/父根归并时精确清理。
         store.clear_stage(run_id)
+        store.register_stage_run(run_id, root_id)
         page = 1
         collected = 0
         total: int | None = None

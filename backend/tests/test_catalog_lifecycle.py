@@ -283,6 +283,8 @@ def test_library_clear_cleans_catalog_when_mirror_is_already_empty(tmp_path, mon
             "pan115_root": "", "baidu_root": "", "local_root": "",
             "openlist_mount_root": str(tmp_path / "quark"),
             "mirror_dir": str(mirror),
+            "heartbeat_enabled": False,
+            "auto_shutdown_on_heartbeat_timeout": False,
         })(),
     )
     graph = _build_graph()
@@ -330,6 +332,8 @@ def test_library_clear_keeps_catalog_when_mirror_delete_fails(tmp_path, monkeypa
             "pan115_root": "", "baidu_root": "", "local_root": "",
             "openlist_mount_root": str(tmp_path / "quark"),
             "mirror_dir": str(mirror),
+            "heartbeat_enabled": False,
+            "auto_shutdown_on_heartbeat_timeout": False,
         })(),
     )
     graph = _build_graph()
@@ -377,6 +381,8 @@ def test_library_clear_requests_job_cancel_before_catalog_cleanup(tmp_path, monk
             "pan115_root": "", "baidu_root": "", "local_root": "",
             "openlist_mount_root": str(tmp_path / "quark"),
             "mirror_dir": str(mirror),
+            "heartbeat_enabled": False,
+            "auto_shutdown_on_heartbeat_timeout": False,
         })(),
     )
     graph = _build_graph(with_job=True)
@@ -416,6 +422,8 @@ def test_library_clear_api_returns_409_when_job_running(tmp_path, monkeypatch):
             "pan115_root": "", "baidu_root": "", "local_root": "",
             "openlist_mount_root": str(tmp_path / "quark"),
             "mirror_dir": str(mirror),
+            "heartbeat_enabled": False,
+            "auto_shutdown_on_heartbeat_timeout": False,
         })(),
     )
     graph = _build_graph()
@@ -929,6 +937,8 @@ def test_library_clear_running_job_keeps_tracking_state(tmp_path, monkeypatch):
             "pan115_root": "", "baidu_root": "", "local_root": "",
             "openlist_mount_root": str(tmp_path / "quark"),
             "mirror_dir": str(mirror),
+            "heartbeat_enabled": False,
+            "auto_shutdown_on_heartbeat_timeout": False,
         })(),
     )
     graph = _build_graph(with_job=True)
@@ -1051,3 +1061,259 @@ def test_batch_promote_failure_rolls_back_merge(monkeypatch):
             "SELECT unit_id FROM media_units WHERE root_id = ?", (child.root_id,)
         ).fetchall()
     }
+
+
+# ============================================================
+# 复核第三轮：扫描暂存归属生命周期（真实扫描调用链）
+# ============================================================
+
+def _first_page_then_cancel_scanner():
+    """第一页正常返回（写入暂存），拉第二页时抛取消。"""
+
+    class _Scanner:
+        def __init__(self):
+            self.page_calls = 0
+
+        def enumerate_directory(self, remote_path, page=1, per_page=100):
+            from app.catalog.models import SourceNodeInput
+            from app.catalog.service import ScanCancelled
+
+            self.page_calls += 1
+            if page > 1:
+                raise ScanCancelled()
+            # 第一页返回满页（per_page=100,total=101），service 会拉第二页；
+            # 第一页已写入暂存，第二页取消 → 验证取消后无 stage 孤儿。
+            entries = [
+                SourceNodeInput(
+                    name=f"f{i}.mkv", remote_path=f"{remote_path}/f{i}.mkv",
+                    parent_path=remote_path, kind="file", size=100, mtime=1.0,
+                )
+                for i in range(100)
+            ]
+            return type("Page", (), {"entries": entries, "total": 101})()
+
+    return _Scanner()
+
+
+def test_cancel_after_first_page_writes_stage_leaves_no_orphan():
+    """第一页已写入暂存后取消：归属与暂存都被清理，无孤儿。"""
+    from app.catalog.service import ScanCancelled, scan_directory_paginated
+
+    root = _setup_openlist_root("/动画")
+    scanner = _first_page_then_cancel_scanner()
+    with pytest.raises(ScanCancelled):
+        scan_directory_paginated(
+            scanner, root.root_id, "/动画", 1, per_page=100,
+        )
+    assert get_connection().execute("SELECT COUNT(*) FROM source_stage_runs").fetchone()[0] == 0
+    assert get_connection().execute("SELECT COUNT(*) FROM source_stage_entries").fetchone()[0] == 0
+
+
+def test_stage_ownership_persists_while_scanning_then_cleared():
+    """扫描写入期间 source_stage_runs 归属持续存在；删除来源根时精确清理。"""
+    root = _setup_openlist_root("/动画")
+    # 直接验证：register 后归属存在
+    run_id = store.new_stage_run()
+    store.register_stage_run(run_id, root.root_id)
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO source_stage_entries (run_id, directory_path, remote_path, page, name, kind) "
+        "VALUES (?, '/动画', '/动画/a.mkv', 1, 'a.mkv', 'file')",
+        (run_id,),
+    )
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM source_stage_runs WHERE run_id = ?", (run_id,)).fetchone()[0] == 1
+
+    # 在途删除该来源根：归属与暂存一并精确清理
+    store.delete_stage_for_roots([root.root_id])
+    assert conn.execute("SELECT COUNT(*) FROM source_stage_runs WHERE run_id = ?", (run_id,)).fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM source_stage_entries WHERE run_id = ?", (run_id,)).fetchone()[0] == 0
+
+
+def test_scan_in_progress_source_root_delete_clears_stage():
+    """扫描进行中删除该来源根：按 run→root 归属精确清理其 in-flight 暂存。"""
+    root = _setup_openlist_root("/本地根")
+    run_id = store.new_stage_run()
+    store.register_stage_run(run_id, root.root_id)
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO source_stage_entries (run_id, directory_path, remote_path, page, name, kind) "
+        "VALUES (?, '/本地根', '/本地根/a.mkv', 1, 'a.mkv', 'file')",
+        (run_id,),
+    )
+    conn.commit()
+
+    # 按来源根精确清理（本地来源）
+    lifecycle.delete_catalog_for_clear("all")
+    assert conn.execute("SELECT COUNT(*) FROM source_stage_runs").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM source_stage_entries").fetchone()[0] == 0
+
+
+def test_promotion_clears_child_inflight_stage():
+    """父根归并时精确清理子根的 in-flight 扫描暂存。"""
+    store.create_source(source_id="ol-prom", source_type="openlist", provider_id="quark")
+    child = store.create_source_root(
+        source_id="ol-prom", remote_locator="/动画/冰菓", local_locator="K:/动画/冰菓",
+    )
+    run_id = store.new_stage_run()
+    store.register_stage_run(run_id, child.root_id)
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO source_stage_entries (run_id, directory_path, remote_path, page, name, kind) "
+        "VALUES (?, '/动画/冰菓', '/动画/冰菓/a.mkv', 1, 'a.mkv', 'file')",
+        (run_id,),
+    )
+    conn.commit()
+
+    lifecycle.promote_parent_root(
+        "ol-prom", "/动画", local_locator="K:/动画", child_root_ids=[child.root_id],
+    )
+    # 子根归属与暂存被清；父根无旧子根物理事实
+    assert conn.execute("SELECT COUNT(*) FROM source_stage_runs WHERE root_id = ?", (child.root_id,)).fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM source_stage_entries").fetchone()[0] == 0
+
+
+# ============================================================
+# 复核第三轮：维护屏障（整库删除全程无任务竞争）
+# ============================================================
+
+def test_maintenance_barrier_blocks_enqueue_and_claim():
+    """屏障生效期间：新的任务不能入队、也不能被领取。"""
+    from app.catalog import maintenance_guard
+    from app.jobs import store as job_store
+
+    assert maintenance_guard.is_active() is False
+    with maintenance_guard.hold():
+        assert maintenance_guard.is_active() is True
+        # 入队被拒
+        with pytest.raises(RuntimeError, match="维护进行中"):
+            job_store.create_job(job_type="discovery_scan", payload={"root_id": "x"})
+        # 领取返回空
+        assert job_store.claim_jobs(worker_id="w") == []
+    assert maintenance_guard.is_active() is False
+
+
+def test_library_clear_running_job_preserves_mirror_and_presets(tmp_path, monkeypatch):
+    """409（running 任务）时镜像、预设、追更、LibraryIndex、Source Catalog 全部保留。"""
+    mirror = tmp_path / "mirror"
+    openlist_dir = mirror / "openlist" / "冰菓" / "Season 1"
+    openlist_dir.mkdir(parents=True)
+    strm = openlist_dir / "S01E01.strm"
+    strm.write_text("K:\\夸克\\动画\\冰菓\\S01E01.mkv", encoding="utf-8")
+    monkeypatch.setenv("KUMIPLAYER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("KUMIPLAYER_MIRROR_DIR", str(mirror))
+    monkeypatch.setattr("app.core.paths.get_data_dir", lambda: tmp_path / "data")
+    monkeypatch.setattr("app.core.paths.get_mirror_root", lambda: mirror)
+    monkeypatch.setattr("app.library.delete.get_data_dir", lambda: tmp_path / "data")
+    monkeypatch.setattr("app.library.delete.get_mirror_root", lambda: mirror)
+    monkeypatch.setattr(
+        "app.core.config.load_config",
+        lambda: type("Config", (), {
+            "pan115_root": "", "baidu_root": "", "local_root": "",
+            "openlist_mount_root": str(tmp_path / "quark"),
+            "mirror_dir": str(mirror),
+            "heartbeat_enabled": False,
+            "auto_shutdown_on_heartbeat_timeout": False,
+        })(),
+    )
+    graph = _build_graph(with_job=True)
+    job_id = job_store.list_jobs(job_type="discovery_scan")[0].job_id
+    _set_job_status(job_id, "running")
+    # 媒体库索引 + 预设
+    from app.library.models import LibraryIndex
+    from app.library.store import save_library_index
+    from app.media_presets.models import MediaLibraryPreset
+    from app.media_presets.store import save_preset
+
+    save_library_index(LibraryIndex(works=[]))
+    save_preset(MediaLibraryPreset(preset_id="ol-preset", source="openlist"))
+
+    from app.library.delete import CatalogCleanupBusyError, build_library_clear_preview, execute_delete
+
+    preview = build_library_clear_preview("openlist")
+    with pytest.raises(CatalogCleanupBusyError):
+        execute_delete(preview)
+
+    # 全部保留（门控在一切修改之前，屏障阻止新任务覆盖窗口）
+    assert strm.exists()
+    from app.media_presets.store import get_preset
+    assert get_preset("ol-preset") is not None
+    assert _count("source_roots", "root_id", [graph["root_id"]]) == 1
+    assert _count("media_units", "root_id", [graph["root_id"]]) == 1
+
+
+def test_execute_library_clear_full_consistency(tmp_path, monkeypatch):
+    """屏障下完整 execute_delete：镜像、预设、追更、LibraryIndex、Source Catalog 一致删除。"""
+    mirror = tmp_path / "mirror"
+    openlist_dir = mirror / "openlist" / "冰菓" / "Season 1"
+    openlist_dir.mkdir(parents=True)
+    strm = openlist_dir / "S01E01.strm"
+    strm.write_text("K:\\夸克\\动画\\冰菓\\S01E01.mkv", encoding="utf-8")
+    monkeypatch.setenv("KUMIPLAYER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("KUMIPLAYER_MIRROR_DIR", str(mirror))
+    monkeypatch.setattr("app.core.paths.get_data_dir", lambda: tmp_path / "data")
+    monkeypatch.setattr("app.core.paths.get_mirror_root", lambda: mirror)
+    monkeypatch.setattr("app.library.delete.get_data_dir", lambda: tmp_path / "data")
+    monkeypatch.setattr("app.library.delete.get_mirror_root", lambda: mirror)
+    monkeypatch.setattr(
+        "app.core.config.load_config",
+        lambda: type("Config", (), {
+            "pan115_root": "", "baidu_root": "", "local_root": "",
+            "openlist_mount_root": str(tmp_path / "quark"),
+            "mirror_dir": str(mirror),
+            "heartbeat_enabled": False,
+            "auto_shutdown_on_heartbeat_timeout": False,
+        })(),
+    )
+    graph = _build_graph(with_batch=True, with_job=True)
+    from app.media_presets.models import MediaLibraryPreset
+    from app.media_presets.store import save_preset
+    save_preset(MediaLibraryPreset(preset_id="ol-preset", source="openlist"))
+
+    from app.library.delete import build_library_clear_preview, execute_delete
+
+    preview = build_library_clear_preview("openlist")
+    result = execute_delete(preview)
+    assert result.status == "succeeded"
+    # 镜像、预设、追更、Source Catalog 一致删除
+    assert not strm.exists()
+    from app.media_presets.store import get_preset
+    assert get_preset("ol-preset") is None
+    assert _count("source_roots", "root_id", [graph["root_id"]]) == 0
+    assert _count("media_units", "root_id", [graph["root_id"]]) == 0
+    assert get_connection().execute("SELECT COUNT(*) FROM source_stage_runs").fetchone()[0] == 0
+
+
+# ============================================================
+# 复核第三轮：旧 v3 库 stage 迁移
+# ============================================================
+
+def test_legacy_db_migration_clears_orphan_stage_entries(tmp_path, monkeypatch):
+    """旧 v3 库：补建 source_stage_runs 后无归属的旧暂存被安全清除。"""
+    import app.db.database as db_mod
+
+    db_path = tmp_path / "legacy.db"
+    monkeypatch.setattr(db_mod, "_db_path", db_path)
+    if hasattr(db_mod._local, "connection"):
+        db_mod._local.connection = None
+    # 先手动构造一个旧库（有 source_stage_entries，无 source_stage_runs）
+    import sqlite3
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA user_version = 3")
+    conn.execute(
+        "CREATE TABLE source_stage_entries (run_id TEXT, directory_path TEXT, remote_path TEXT, page INTEGER, name TEXT, kind TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO source_stage_entries VALUES ('legacy-run', '/动画', '/动画/a.mkv', 1, 'a.mkv', 'file')"
+    )
+    conn.commit()
+    conn.close()
+
+    # init_db 会补建 stage_runs 表并清除无归属暂存
+    db_mod.init_db()
+    leftover = db_mod.get_connection().execute(
+        "SELECT COUNT(*) FROM source_stage_entries"
+    ).fetchone()[0]
+    assert leftover == 0
+    db_mod.close_connection()

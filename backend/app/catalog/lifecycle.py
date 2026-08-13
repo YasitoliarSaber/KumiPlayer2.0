@@ -288,24 +288,11 @@ def delete_catalog_for_clear(source: str) -> CatalogCleanupResult:
         return CatalogCleanupResult()
     root_ids = [root.root_id for root in roots]
     conn = get_connection()
-    unit_ids, revision_ids = _unit_revision_ids(root_ids)
-    binding_ids: list[str] = []
-    if revision_ids:
-        rev_marks = ",".join("?" for _ in revision_ids)
-        binding_rows = conn.execute(
-            f"SELECT binding_id FROM scrape_bindings WHERE revision_id IN ({rev_marks})",
-            revision_ids,
-        ).fetchall()
-        binding_ids = [str(row[0]) for row in binding_rows]
-    jobs = _related_jobs(root_ids, unit_ids, revision_ids)
-    job_ids = [str(job["job_id"]) for job in jobs]
-    # 扫描暂存按 run→root 归属精确清理：单来源删除也会清掉该 root 的暂存，
-    # 不再依赖“覆盖全部 root 才清空”的特判，避免孤儿 stage 记录。
 
     def _marks(items: list[str]) -> str:
         return ",".join("?" for _ in items)
 
-    # 删除前计数（用于提交后计算实际删除量）
+    # 删除前计数（仅用于提交后计算实际删除量；屏障内无并发写，事务外统计即可）
     def _count(sql: str, params: list[str]) -> int:
         return int(conn.execute(sql, params).fetchone()[0])
 
@@ -337,9 +324,28 @@ def delete_catalog_for_clear(source: str) -> CatalogCleanupResult:
     }
 
     with transaction(conn) as tx:
-        # 0. 事务内复查持久任务（BEGIN IMMEDIATE，关闭 prepare 与正式删除之间的
-        #    竞态窗口）：running → 抛忙异常（整体回滚 → API 转 409）；queued →
-        #    在事务内直接取消（终态 cancelled），绝不让可能写库的任务与删除竞争。
+        # 0. 在 BEGIN IMMEDIATE 内重新获取删除范围（root/unit/revision/binding/job），
+        #    避免使用初次门控到正式删除之间的过期快照；事务已串行化，读到的即最新。
+        tx_unit_rows = tx.execute(
+            f"SELECT unit_id FROM media_units WHERE root_id IN ({_marks(root_ids)})", root_ids
+        ).fetchall()
+        unit_ids = [str(row[0]) for row in tx_unit_rows]
+        revision_ids: list[str] = []
+        if unit_ids:
+            unit_marks = ",".join("?" for _ in unit_ids)
+            revision_ids = [str(row[0]) for row in tx.execute(
+                f"SELECT revision_id FROM import_revisions WHERE unit_id IN ({unit_marks})",
+                unit_ids,
+            ).fetchall()]
+        binding_ids: list[str] = []
+        if revision_ids:
+            rev_marks = ",".join("?" for _ in revision_ids)
+            binding_ids = [str(row[0]) for row in tx.execute(
+                f"SELECT binding_id FROM scrape_bindings WHERE revision_id IN ({rev_marks})",
+                revision_ids,
+            ).fetchall()]
+        # 事务内复查持久任务（BEGIN IMMEDIATE 内重查）：running → 抛忙异常（整体
+        # 回滚 → API 转 409）；queued → 在事务内直接取消（终态 cancelled）。
         recheck = _related_jobs(root_ids, unit_ids, revision_ids)
         recheck_by_status: dict[str, list[str]] = {}
         for job in recheck:
@@ -350,7 +356,10 @@ def delete_catalog_for_clear(source: str) -> CatalogCleanupResult:
             raise CatalogCleanupBusyError(
                 "相关后台任务正在停止，请稍后再次确认删除"
             )
+        # 本次删除会移除与之关联的全部持久任务（含历史终态与被取消的 queued）。
+        job_ids = [str(job["job_id"]) for job in recheck]
         if queued_ids:
+            # queued 任务在删除前先置为 cancelled 终态（审计留痕），随后随删除一并清除
             tx.execute(
                 f"""
                 UPDATE jobs SET status = 'cancelled', version = version + 1, updated_at = ?
@@ -358,7 +367,6 @@ def delete_catalog_for_clear(source: str) -> CatalogCleanupResult:
                 """,
                 [now_iso(), *queued_ids],
             )
-            job_ids = [job_id for job_id in job_ids if job_id not in queued_ids]
         # 1. 刮削关联（binding 维度）
         if binding_ids:
             tx.execute(

@@ -75,6 +75,10 @@ def _job_params(job: Job) -> tuple[Any, ...]:
 
 def _insert_job(conn, job: Job) -> None:
     """插入 job 行（调用方负责事务边界与提交）。"""
+    from app.catalog import maintenance_guard
+
+    if maintenance_guard.is_active():
+        raise RuntimeError("媒体库维护进行中，暂不接受新的任务")
     conn.execute(
         """
         INSERT INTO jobs (
@@ -275,6 +279,11 @@ def claim_jobs(
     job_types 用于独立 worker 分流（scan/mirror/scrape 各自专用线程）；
     为空表示可领取任意类型。
     """
+    from app.catalog import maintenance_guard
+
+    # 整库维护屏障：删除进行中不领取任何任务，保证删除窗口内无新的 running 任务
+    if maintenance_guard.is_active():
+        return []
     conn = get_connection()
     now = now or now_iso()
     lease_until = (
