@@ -88,17 +88,29 @@ def _prune_stale_review_items(source: Optional[str]) -> None:
         prune_pending_review_items(valid_ids, src)
 
 
+def _is_stale_v3_target(target) -> bool:
+    """target 是否属于已被取代的 V3 revision（Review Fix 2 缓存/恢复屏障）。"""
+    from app.import_plan import revision_store
+    from app.scrape.effective_store import is_v3_revision
+
+    plan_id = str(getattr(target, "import_plan_id", "") or "")
+    return bool(plan_id) and is_v3_revision(plan_id) and not revision_store.is_current_revision(plan_id)
+
+
 def _get_target_or_restore(target_id: str) -> Optional[ScrapeTarget]:
     """获取 target，缓存未命中时尝试恢复
 
     恢复顺序：
-    1. 从内存缓存恢复
+    1. 从内存缓存恢复（V3 target 必须先验证仍为 current，stale 移除不返回）
     2. 从最新 confirmed plan 重建 targets
-    3. 从 scrape_map.json 持久化记录恢复
+    3. 从 SQLite current bindings / scrape_map.json 持久化记录恢复
     """
     target = _targets_cache.get(target_id)
     if target:
-        return target
+        if _is_stale_v3_target(target):
+            _targets_cache.pop(target_id, None)
+        else:
+            return target
 
     for source in ("pan115", "baidu", "local", "openlist"):
         if _try_restore_targets(source):
@@ -106,7 +118,7 @@ def _get_target_or_restore(target_id: str) -> Optional[ScrapeTarget]:
             if target:
                 return target
 
-    # 从 scrape_map 恢复
+    # 从持久化记录恢复
     target = _restore_target_from_scrape_map(target_id)
     if target:
         _targets_cache[target_id] = target
@@ -122,11 +134,15 @@ def _restore_target_from_scrape_map(target_id: str) -> Optional[ScrapeTarget]:
     JSON ScrapeMap 恢复 openlist target（fail closed），legacy 来源不受限。
     """
     try:
-        from app.scrape.effective_store import load_all_bindings_scrape_map
+        from app.scrape.effective_store import load_current_bindings_scrape_map
         from app.scrape.store import load_scrape_map
 
         item = next(
-            (i for i in load_all_bindings_scrape_map().items if i.scrape_target_id == target_id),
+            (
+                i
+                for i in load_current_bindings_scrape_map().items
+                if i.scrape_target_id == target_id
+            ),
             None,
         )
         if item is None:

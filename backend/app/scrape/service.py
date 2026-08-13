@@ -40,6 +40,13 @@ def get_targets(source: str, plan_id: Optional[str] = None) -> Tuple[list, Optio
     返回: (targets, error_message)
     """
     if plan_id:
+        # Review Fix 2：V3 revision 必须是 current 才能作为刮削目标
+        # （stale/superseded 拒绝，不 build targets）；legacy plan_id 行为不变。
+        from app.import_plan import revision_store
+        from app.scrape.effective_store import is_v3_revision
+
+        if is_v3_revision(plan_id) and not revision_store.is_current_revision(plan_id):
+            return [], "该 V3 计划已被新版本取代（stale revision），不能执行刮削"
         plan = load_import_plan(plan_id=plan_id)
         if plan and plan.source != source:
             return [], f"plan.source={plan.source} 与 source={source} 不匹配"
@@ -1515,6 +1522,19 @@ def execute_scrape(
 
     返回 result dict。任何异常都记录到 failed_cases.json 并抛出。
     """
+    # Review Fix 2 defense-in-depth：V3 stale target 在创建 TMDB client /
+    # 请求网络 / 写文件之前直接拒绝（0 网络 0 NFO 0 binding 0 artifact）。
+    from app.import_plan import revision_store
+    from app.scrape.effective_store import is_v3_revision
+
+    if is_v3_revision(target.import_plan_id) and not revision_store.is_current_revision(
+        target.import_plan_id
+    ):
+        return {
+            "status": "obsolete",
+            "error": "该 V3 计划已被新版本取代（stale revision），不能执行刮削",
+            "scrape_target_id": target.scrape_target_id,
+        }
     owns_client = tmdb_client is None
     client = tmdb_client or TMDBClient()
     warnings = []

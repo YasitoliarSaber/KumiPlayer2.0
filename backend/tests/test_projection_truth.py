@@ -140,6 +140,13 @@ class TestScrapeBindingTruth:
             scrape_title="作品",
             nfo_path="/mirror/作品/tvshow.nfo",
         )
+        # Review Fix 2：binding 写入要求 revision current；先让 rev1 为 current
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = 'ub1'",
+            (rev1["revision_id"],),
+        )
+        conn.commit()
         return rev1, rev2, item
 
     def test_same_target_upsert_twice_keeps_single_row(self):
@@ -166,6 +173,13 @@ class TestScrapeBindingTruth:
 
         rev1, rev2, item = self._make_revisions()
         upsert_effective_scrape_map_item(item)
+        # Review Fix 2：adopt 到 rev2 前 rev2 必须已 current
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = 'ub1'",
+            (rev2["revision_id"],),
+        )
+        conn.commit()
         upsert_effective_scrape_map_item(replace(item, import_plan_id=rev2["revision_id"]))
         rows = get_connection().execute("SELECT * FROM scrape_bindings").fetchall()
         assert len(rows) == 1
@@ -326,6 +340,12 @@ class TestLegacyDetachment:
             unit_id="u-json-free", source_generation=1, items=_items(["x.mkv"]),
             status="confirmed",
         )
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = 'u-json-free'",
+            (revision["revision_id"],),
+        )
+        conn.commit()
 
         def _bomb(*args, **kwargs):
             raise AssertionError("V3 路径不得触碰 JSON ScrapeMap")
@@ -778,9 +798,10 @@ class TestReviewFixGates:
             parent_revision_id=rev1["revision_id"], status="confirmed",
         )
         conn = get_connection()
+        # 先让 rev1 current：rev1 的 binding 才能合法写入（历史已刮削事实）
         conn.execute(
             "UPDATE media_units SET current_revision_id = ? WHERE unit_id = 'u-reuse'",
-            (rev2["revision_id"],),
+            (rev1["revision_id"],),
         )
         conn.commit()
 
@@ -799,6 +820,12 @@ class TestReviewFixGates:
                 scrape_title="作品", selected_by="auto", confidence="high",
             )
         )
+        # rev2 成为 current（rev1 superseded），随后跑 rev2 的 auto scrape
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = 'u-reuse'",
+            (rev2["revision_id"],),
+        )
+        conn.commit()
 
         target = ScrapeTarget(
             scrape_target_id="target-A", source="openlist",
@@ -840,6 +867,12 @@ class TestReviewFixGates:
             unit_id="u-learn", source_generation=1, items=_items(["a.mkv"]),
             status="confirmed",
         )
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = 'u-learn'",
+            (revision["revision_id"],),
+        )
+        conn.commit()
         upsert_effective_scrape_map_item(
             ScrapeMapItem(
                 scrape_target_id="t-learn", work_id="w1", source="openlist",
@@ -974,6 +1007,12 @@ class TestReviewFixGates:
             unit_id="u-h", source_generation=1, items=_items(["a.mkv"]),
             status="confirmed",
         )
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = 'u-h'",
+            (revision["revision_id"],),
+        )
+        conn.commit()
         with pytest.raises(ValueError):
             upsert_effective_scrape_map_item(
                 ScrapeMapItem(
@@ -992,6 +1031,12 @@ class TestReviewFixGates:
             unit_id="u-provider", source_generation=1, items=_items(["a.mkv"]),
             status="confirmed",
         )
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = 'u-provider'",
+            (revision["revision_id"],),
+        )
+        conn.commit()
         upsert_effective_scrape_map_item(
             ScrapeMapItem(
                 scrape_target_id="t-provider", work_id="w1", source="openlist",
@@ -1003,3 +1048,221 @@ class TestReviewFixGates:
         ).fetchone()
         assert row is not None
         assert row["provider_id"] == "quark"
+
+
+    # ---- Review Fix 2 回归（J-Q） ----
+
+    def _make_two_revisions(self, unit_id, *, current="rev2"):
+        """rev1（a.mkv）+ rev2（a+b）confirmed；按需设置 current 指针。"""
+        rev1 = revision_store.create_revision(
+            unit_id=unit_id, source_generation=1, items=_items(["a.mkv"]),
+            status="confirmed",
+        )
+        rev2 = revision_store.create_revision(
+            unit_id=unit_id, source_generation=2, items=_items(["a.mkv", "b.mkv"]),
+            parent_revision_id=rev1["revision_id"], status="confirmed",
+        )
+        if current:
+            conn = get_connection()
+            target = rev2 if current == "rev2" else rev1
+            conn.execute(
+                "UPDATE media_units SET current_revision_id = ? WHERE unit_id = ?",
+                (target["revision_id"], unit_id),
+            )
+            conn.commit()
+        return rev1, rev2
+
+    def test_j_get_targets_rejects_stale_v3_plan(self):
+        """J：显式 get_targets(openlist, stale_rev1) → 拒绝，不返回 targets。"""
+        from app.scrape.service import get_targets
+
+        _ensure_unit("u-j")
+        rev1, _rev2 = self._make_two_revisions("u-j")
+        targets, error = get_targets("openlist", plan_id=rev1["revision_id"])
+        assert targets == []
+        assert error and "取代" in error
+
+    def test_k_stale_cached_target_not_returned(self, monkeypatch):
+        """K：缓存里 rev1 target、rev2 已 current → _get_target_or_restore 不返回 stale。"""
+        from app.api.scrape import _get_target_or_restore, _targets_cache
+        from app.scrape.models import ScrapeTarget
+
+        _ensure_unit("u-k")
+        rev1, _rev2 = self._make_two_revisions("u-k")
+        stale_target = ScrapeTarget(
+            scrape_target_id="t-k", source="openlist", import_plan_id=rev1["revision_id"],
+            work_id="w1", card_type="main_series", media_type="tv", group_type="season",
+            series_group="作品", local_title="作品", scrape_title="作品", scrape_year=2024,
+            scrape_type="tv", local_season_number=1, needs_review=False, warnings=[],
+        )
+        _targets_cache["t-k"] = stale_target
+        monkeypatch.setattr("app.api.scrape._try_restore_targets", lambda source: False)
+        monkeypatch.setattr("app.api.scrape._restore_target_from_scrape_map", lambda target_id: None)
+        try:
+            assert _get_target_or_restore("t-k") is None
+            assert "t-k" not in _targets_cache
+        finally:
+            _targets_cache.clear()
+
+    def test_l_superseded_binding_not_restored(self, monkeypatch):
+        """L：SQLite 只有 superseded rev1 的 binding → 不得恢复成可执行 target。"""
+        from app.api.scrape import _restore_target_from_scrape_map
+        from app.scrape.models import ScrapeMap
+
+        _ensure_unit("u-l")
+        rev1, _rev2 = self._make_two_revisions("u-l")
+        # 历史数据：直接 SQL 造 rev1 的 binding（绕过写入 fence，模拟旧存量）
+        conn = get_connection()
+        conn.execute(
+            """
+            INSERT INTO scrape_bindings (
+                binding_id, revision_id, work_id, source, status, metadata_json,
+                created_at, updated_at
+            ) VALUES ('t-l', ?, 'w1', 'openlist', 'success', '{}', '', '')
+            """,
+            (rev1["revision_id"],),
+        )
+        conn.commit()
+        monkeypatch.setattr("app.scrape.store.load_scrape_map", lambda: ScrapeMap(items=[]))
+        assert _restore_target_from_scrape_map("t-l") is None
+
+    def test_m_execute_scrape_rejects_stale_v3_target(self, monkeypatch):
+        """M：stale V3 target 人工执行 → TMDB client 不构造、0 binding 0 artifact。"""
+        from app.scrape.models import ScrapeTarget
+        from app.scrape.service import execute_scrape
+
+        _ensure_unit("u-m")
+        rev1, _rev2 = self._make_two_revisions("u-m")
+
+        class _BombClient:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("stale target 不得构造 TMDB client")
+
+        monkeypatch.setattr("app.scrape.service.TMDBClient", _BombClient)
+        target = ScrapeTarget(
+            scrape_target_id="t-m", source="openlist", import_plan_id=rev1["revision_id"],
+            work_id="w1", card_type="main_series", media_type="tv", group_type="season",
+            series_group="作品", local_title="作品", scrape_title="作品", scrape_year=2024,
+            scrape_type="tv", local_season_number=1, needs_review=False, warnings=[],
+        )
+        result = execute_scrape(target, tmdb_id=1, tmdb_type="tv")
+        assert result["status"] == "obsolete"
+        assert get_connection().execute("SELECT COUNT(*) FROM scrape_bindings").fetchone()[0] == 0
+        assert get_connection().execute("SELECT COUNT(*) FROM artifact_records").fetchone()[0] == 0
+
+    def test_n_stale_binding_upsert_rejected(self):
+        """N：rev2 已 current → _upsert_binding(rev1) 被拒，rev2 attribution 不被抢回。"""
+        import pytest
+        from dataclasses import replace
+
+        from app.pipeline.artifacts import StaleRevisionError
+        from app.scrape.effective_store import upsert_effective_scrape_map_item
+        from app.scrape.models import ScrapeMapItem
+
+        _ensure_unit("u-n")
+        _rev1, rev2 = self._make_two_revisions("u-n")
+        current_item = ScrapeMapItem(
+            scrape_target_id="t-n", work_id="w1", source="openlist",
+            import_plan_id=rev2["revision_id"], tmdb_id=2, tmdb_type="tv",
+        )
+        upsert_effective_scrape_map_item(current_item)
+        with pytest.raises(StaleRevisionError):
+            upsert_effective_scrape_map_item(
+                replace(current_item, import_plan_id=_rev1["revision_id"])
+            )
+        row = get_connection().execute(
+            "SELECT revision_id FROM scrape_bindings WHERE binding_id = 't-n'"
+        ).fetchone()
+        assert row is not None and row["revision_id"] == rev2["revision_id"]
+
+    def test_o_stale_artifact_upsert_rejected(self):
+        """O：rev2 已 current → stale rev1 artifact upsert 不得覆盖 rev2 attribution。"""
+        import pytest
+
+        from app.pipeline.artifacts import StaleRevisionError, upsert_artifact
+
+        _ensure_unit("u-o")
+        rev1, rev2 = self._make_two_revisions("u-o")
+        upsert_artifact(
+            kind="strm", path="/mirror/X.strm", revision_id=rev2["revision_id"],
+            work_id="w1", require_current=True,
+        )
+        with pytest.raises(StaleRevisionError):
+            upsert_artifact(
+                kind="strm", path="/mirror/X.strm", revision_id=rev1["revision_id"],
+                work_id="w1", require_current=True,
+            )
+        row = get_connection().execute(
+            "SELECT revision_id FROM artifact_records WHERE path = '/mirror/X.strm'"
+        ).fetchone()
+        assert row is not None and row["revision_id"] == rev2["revision_id"]
+
+    def test_p_mirror_second_fence_after_run(self, tmp_path, monkeypatch):
+        """P：mirror 执行途中 current 切到 rev2 → obsolete、0 artifact、0 enqueue_scrape。"""
+        from unittest.mock import patch
+
+        from app.mirror.result import MirrorGenerateResult
+        from app.pipeline.handlers import handle_mirror_revision
+
+        _ensure_unit("u-p")
+        rev1, rev2 = self._make_two_revisions("u-p", current="rev1")
+
+        def _flip(*args, **kwargs):
+            conn = get_connection()
+            conn.execute(
+                "UPDATE media_units SET current_revision_id = ? WHERE unit_id = 'u-p'",
+                (rev2["revision_id"],),
+            )
+            conn.commit()
+            return MirrorGenerateResult(
+                plan_id=rev1["revision_id"], source="openlist",
+                mirror_root=str(tmp_path), status="success",
+                generated_count=1, items=[],
+            )
+
+        enqueued = []
+        monkeypatch.setattr("app.pipeline.orchestrator.unit_is_closed", lambda unit_id: True)
+        monkeypatch.setattr(
+            "app.pipeline.orchestrator.enqueue_scrape",
+            lambda *a, **k: enqueued.append(1),
+        )
+        with patch("app.mirror.generator.generate_mirror", side_effect=_flip):
+            result = handle_mirror_revision(
+                {"revision_id": rev1["revision_id"], "unit_id": "u-p"},
+                progress_callback=lambda *a, **k: None,
+            )
+        assert result["status"] == "obsolete"
+        assert result["mirror_status"] == "stale_during_run"
+        assert enqueued == []
+        assert get_connection().execute("SELECT COUNT(*) FROM artifact_records").fetchone()[0] == 0
+
+    def test_q_scrape_second_fence_after_run(self, monkeypatch):
+        """Q：scrape 执行途中 current 切到 rev2 → obsolete、不 enqueue rebuild。"""
+        from unittest.mock import patch
+
+        from app.pipeline.handlers import handle_scrape_revision
+
+        _ensure_unit("u-q")
+        rev1, rev2 = self._make_two_revisions("u-q", current="rev1")
+
+        def _flip(source, plan_id=None, **kwargs):
+            conn = get_connection()
+            conn.execute(
+                "UPDATE media_units SET current_revision_id = ? WHERE unit_id = 'u-q'",
+                (rev2["revision_id"],),
+            )
+            conn.commit()
+            return {"status": "success", "scraped": 1}
+
+        rebuild_jobs = []
+        monkeypatch.setattr(
+            "app.pipeline.orchestrator.enqueue_library_rebuild",
+            lambda **k: rebuild_jobs.append(k) or "job",
+        )
+        with patch("app.scrape.auto.run_auto_scrape", side_effect=_flip):
+            result = handle_scrape_revision(
+                {"revision_id": rev1["revision_id"], "source": "openlist"},
+                progress_callback=lambda *a, **k: None,
+            )
+        assert result["status"] == "obsolete"
+        assert rebuild_jobs == []

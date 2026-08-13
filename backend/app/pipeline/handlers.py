@@ -37,11 +37,14 @@ def _register_artifacts(revision_id: str, plan: Any, result_items: list) -> int:
             continue
         if not Path(path_value).is_file():
             continue
+        # Review Fix 2：V3 事务级 current fence（执行中途切 current 的 stale
+        # worker 不能把 attribution 抢回旧 revision）
         upsert_artifact(
             kind="strm",
             path=path_value,
             revision_id=revision_id,
             work_id=work_by_item.get(str(getattr(result_item, "item_id", "") or ""), ""),
+            require_current=True,
         )
         registered += 1
     return registered
@@ -71,6 +74,10 @@ def handle_mirror_revision(payload: dict, progress_callback=None, should_cancel=
         raise ValueError(
             "镜像生成失败: " + "；".join(getattr(result, "errors", []) or ["未知原因"])
         )
+    # Review Fix 2 二次 fence：长任务执行途中 current 已切换 → 不写执行字段、
+    # 不登记 artifact、不 enqueue 下游（深层写入另有事务级 fence）。
+    if not revision_store.is_current_revision(revision_id):
+        return {"status": "obsolete", "revision_id": revision_id, "mirror_status": "stale_during_run"}
     revision_store.persist_execution_fields(plan)
     generated = int(getattr(result, "generated_count", 0) or 0)
     result_items = list(getattr(result, "items", []) or [])
@@ -135,6 +142,10 @@ def handle_scrape_revision(payload: dict, progress_callback=None, should_cancel=
     # Module 5：成功事实只来自真实 scrape target 的 effective upsert
     # （execute_scrape → scrape_bindings 稳定行），不再插入「整 revision
     # 粗粒度 binding」（record_scrape_outcome 只保留失败路径）。
+    # Review Fix 2 二次 fence：长任务执行途中 current 已切换 → 不 enqueue 下游
+    # （深层 binding/artifact 写入另有事务级 current fence）。
+    if not revision_store.is_current_revision(revision_id):
+        return {"status": "obsolete", "revision_id": revision_id, "scrape": {"status": "stale_during_run"}}
     # 刮削完成 → 媒体库索引重建（单通道）
     from app.pipeline import orchestrator as _orch
 

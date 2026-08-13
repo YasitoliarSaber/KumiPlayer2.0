@@ -55,18 +55,44 @@ def register_scrape_artifacts(item: ScrapeMapItem, episode_nfo_paths: list[str] 
             continue
         if not Path(value).exists():
             continue
-        upsert_artifact(kind=kind, path=value, revision_id=revision_id, work_id=work_id)
+        # Review Fix 2：V3 事务级 current fence
+        upsert_artifact(
+            kind=kind, path=value, revision_id=revision_id, work_id=work_id,
+            require_current=True,
+        )
     for path_value in episode_nfo_paths or []:
         value = str(path_value or "").strip()
         if value and Path(value).exists():
-            upsert_artifact(kind="nfo", path=value, revision_id=revision_id, work_id=work_id)
+            upsert_artifact(
+                kind="nfo", path=value, revision_id=revision_id, work_id=work_id,
+                require_current=True,
+            )
 
 
 def load_all_bindings_scrape_map() -> ScrapeMap:
-    """全部 V3 SQLite bindings 的 ScrapeMap 兼容投影（target 恢复等跨 plan 查询用）。"""
+    """全部 V3 SQLite bindings 的 ScrapeMap 兼容投影（跨 plan 复用判定用）。"""
     return _scrape_map_from_rows(
         get_connection().execute("SELECT * FROM scrape_bindings ORDER BY updated_at").fetchall()
     )
+
+
+def load_current_bindings_scrape_map() -> ScrapeMap:
+    """只含所属 revision 仍为 current 的 bindings（V3 可执行 target 恢复用）。
+
+    superseded/悬空 revision 的历史 binding 不得恢复成当前可执行 target
+    （Review Fix 2 Blocker 1.3）。
+    """
+    rows = get_connection().execute(
+        """
+        SELECT b.* FROM scrape_bindings b
+        JOIN media_units u ON u.current_revision_id = b.revision_id
+        JOIN import_revisions r
+          ON r.revision_id = b.revision_id AND r.unit_id = u.unit_id
+        WHERE r.status IN ('confirmed', 'executed')
+        ORDER BY b.updated_at
+        """
+    ).fetchall()
+    return _scrape_map_from_rows(rows)
 
 
 def upsert_effective_scrape_map_item(item: ScrapeMapItem) -> None:
@@ -96,46 +122,56 @@ def _upsert_binding(item: ScrapeMapItem) -> None:
     binding_id = item.scrape_target_id
     if not binding_id:
         raise ValueError("V3 scrape binding 缺少稳定 scrape_target_id")
+    from app.db.transactions import transaction
+    from app.pipeline.artifacts import StaleRevisionError
+
     conn = get_connection()
     timestamp = revision_store.now_iso()
-    provider_row = conn.execute(
-        "SELECT provider_id FROM import_revisions WHERE revision_id = ?",
-        (item.import_plan_id,),
-    ).fetchone()
-    provider_id = str(provider_row["provider_id"] or "") if provider_row else ""
-    metadata = json.dumps(asdict(item), ensure_ascii=False)
-    conn.execute(
-        """
-        INSERT INTO scrape_bindings (
-            binding_id, revision_id, work_id, source, provider_id,
-            tmdb_id, tmdb_type, bangumi_id, status,
-            nfo_path, poster_path, fanart_path, clearlogo_path,
-            metadata_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'success', ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (binding_id) DO UPDATE SET
-            revision_id = excluded.revision_id,
-            work_id = excluded.work_id,
-            source = excluded.source,
-            provider_id = excluded.provider_id,
-            tmdb_id = excluded.tmdb_id,
-            tmdb_type = excluded.tmdb_type,
-            status = excluded.status,
-            nfo_path = excluded.nfo_path,
-            poster_path = excluded.poster_path,
-            fanart_path = excluded.fanart_path,
-            clearlogo_path = excluded.clearlogo_path,
-            metadata_json = excluded.metadata_json,
-            updated_at = excluded.updated_at
-        """,
-        (
-            binding_id, item.import_plan_id, item.work_id, item.source,
-            provider_id,
-            item.tmdb_id, item.tmdb_type,
-            item.nfo_path, item.poster_path, item.fanart_path, item.clearlogo_path,
-            metadata, timestamp, timestamp,
-        ),
-    )
-    conn.commit()
+    with transaction(conn) as tx:
+        # Review Fix 2：current 检查与 binding upsert 在同一 BEGIN IMMEDIATE
+        # 写事务内——执行中途 current 已切换到新 revision 的 stale worker
+        # 必须被拒，不能把同一 stable binding 抢回旧 revision。
+        if not revision_store.is_current_revision(item.import_plan_id):
+            raise StaleRevisionError(
+                f"binding 写入被拒：revision {item.import_plan_id} 已不再是 current"
+            )
+        provider_row = tx.execute(
+            "SELECT provider_id FROM import_revisions WHERE revision_id = ?",
+            (item.import_plan_id,),
+        ).fetchone()
+        provider_id = str(provider_row["provider_id"] or "") if provider_row else ""
+        metadata = json.dumps(asdict(item), ensure_ascii=False)
+        tx.execute(
+            """
+            INSERT INTO scrape_bindings (
+                binding_id, revision_id, work_id, source, provider_id,
+                tmdb_id, tmdb_type, bangumi_id, status,
+                nfo_path, poster_path, fanart_path, clearlogo_path,
+                metadata_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'success', ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (binding_id) DO UPDATE SET
+                revision_id = excluded.revision_id,
+                work_id = excluded.work_id,
+                source = excluded.source,
+                provider_id = excluded.provider_id,
+                tmdb_id = excluded.tmdb_id,
+                tmdb_type = excluded.tmdb_type,
+                status = excluded.status,
+                nfo_path = excluded.nfo_path,
+                poster_path = excluded.poster_path,
+                fanart_path = excluded.fanart_path,
+                clearlogo_path = excluded.clearlogo_path,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                binding_id, item.import_plan_id, item.work_id, item.source,
+                provider_id,
+                item.tmdb_id, item.tmdb_type,
+                item.nfo_path, item.poster_path, item.fanart_path, item.clearlogo_path,
+                metadata, timestamp, timestamp,
+            ),
+        )
 
 
 def adopt_binding_to_revision(item: ScrapeMapItem, new_plan_id: str) -> None:
