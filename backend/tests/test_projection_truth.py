@@ -507,3 +507,81 @@ class TestLibraryProjection:
         self._rebuild()
         second = load_library_index()
         assert len(second.works) == 1
+
+
+class TestLibraryRebuildCoalescing:
+    """Module 5 Checkpoint 4 验收：library:global 合并入队语义。"""
+
+    def _count_queued(self):
+        return get_connection().execute(
+            "SELECT COUNT(*) FROM jobs WHERE job_type = 'library_rebuild' "
+            "AND resource_key = 'library:global' AND status = 'queued'"
+        ).fetchone()[0]
+
+    def _count_running(self):
+        return get_connection().execute(
+            "SELECT COUNT(*) FROM jobs WHERE job_type = 'library_rebuild' "
+            "AND resource_key = 'library:global' AND status = 'running'"
+        ).fetchone()[0]
+
+    def test_consecutive_enqueues_share_one_queued_job(self):
+        """连续 enqueue ×3、无 running → 同 job_id，queued == 1。"""
+        from app.jobs.store import enqueue_coalesced_job
+
+        first, created_first = enqueue_coalesced_job(
+            job_type="library_rebuild", resource_key="library:global",
+        )
+        second, created_second = enqueue_coalesced_job(
+            job_type="library_rebuild", resource_key="library:global",
+        )
+        third, created_third = enqueue_coalesced_job(
+            job_type="library_rebuild", resource_key="library:global",
+        )
+        assert created_first is True
+        assert created_second is False
+        assert created_third is False
+        assert first.job_id == second.job_id == third.job_id
+        assert self._count_queued() == 1
+
+    def test_running_job_gets_single_trailing_queued(self):
+        """running A + 连续 enqueue ×10 → 新建 trailing B，之后全部复用 B。"""
+        from app.jobs.store import enqueue_coalesced_job
+
+        first, _ = enqueue_coalesced_job(
+            job_type="library_rebuild", resource_key="library:global",
+        )
+        conn = get_connection()
+        conn.execute("UPDATE jobs SET status = 'running' WHERE job_id = ?", (first.job_id,))
+        conn.commit()
+
+        created_flags = []
+        last_job = None
+        for _ in range(10):
+            job, created = enqueue_coalesced_job(
+                job_type="library_rebuild", resource_key="library:global",
+            )
+            created_flags.append(created)
+            last_job = job
+        assert created_flags[0] is True  # 第一次创建 trailing B
+        assert all(flag is False for flag in created_flags[1:])  # 后续全部复用 B
+        assert last_job.job_id != first.job_id
+        assert self._count_running() == 1
+        assert self._count_queued() == 1
+
+    def test_terminal_history_job_yields_new_job(self):
+        """A succeeded 之后新变化 → 新 job C（C != A），不复用终态 job。"""
+        from app.jobs.store import enqueue_coalesced_job
+
+        first, _ = enqueue_coalesced_job(
+            job_type="library_rebuild", resource_key="library:global",
+        )
+        conn = get_connection()
+        conn.execute("UPDATE jobs SET status = 'succeeded' WHERE job_id = ?", (first.job_id,))
+        conn.commit()
+
+        second, created = enqueue_coalesced_job(
+            job_type="library_rebuild", resource_key="library:global",
+        )
+        assert created is True
+        assert second.job_id != first.job_id
+        assert self._count_queued() == 1

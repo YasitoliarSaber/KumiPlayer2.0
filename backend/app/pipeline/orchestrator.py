@@ -144,9 +144,14 @@ def enqueue_scrape(revision_id: str, source: str, *, unit_id: str = "") -> str:
 
 
 def enqueue_library_rebuild(*, unit_id: str = "") -> str:
-    """刮削完成后重建媒体库索引（全局单通道）。"""
+    """刮削完成后重建媒体库索引（全局单通道，合并入队）。
+
+    Module 5：library:global 最多 1 running + 1 trailing queued——
+    大量刮削连续完成不积累几十个全局 rebuild；一个 pending rebuild
+    即可覆盖最新 SQLite 状态。
+    """
     _ensure_handlers()
-    job = job_store.create_job(
+    job, _created = job_store.enqueue_coalesced_job(
         job_type="library_rebuild",
         resource_key="library:global",
         payload={"unit_id": unit_id},

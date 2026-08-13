@@ -171,6 +171,61 @@ def get_job(job_id: str) -> Job | None:
     return _row_to_job(row)
 
 
+def enqueue_coalesced_job(
+    *,
+    job_type: str,
+    resource_key: str,
+    payload: dict | None = None,
+    parent_job_id: str = "",
+    priority: int = 0,
+    max_attempts: int = 3,
+    not_before: str = "",
+) -> tuple[Job, bool]:
+    """事务安全的合并入队：同一 (job_type, resource_key) 最多
+    1 running + 1 trailing queued，既不任务风暴也不丢变化。
+
+    - 已有 queued → 复用（created=False）；
+    - 已有 running、无 queued → 创建 trailing queued（running 的 snapshot
+      可能早于新变化，必须补一个）；
+    - 已有 running + queued → 复用 queued；
+    - 只有终态历史 job（succeeded/failed/cancelled）→ 创建新 job。
+
+    与 get_or_create_job 的区别：绝不复用终态 job（否则"一个月前 succeeded
+    的 job"会让新变化永远不被重建）。
+    """
+    conn = get_connection()
+    timestamp = now_iso()
+    with transaction(conn) as tx:
+        queued = tx.execute(
+            """
+            SELECT * FROM jobs
+            WHERE job_type = ? AND resource_key = ? AND status = 'queued'
+            LIMIT 1
+            """,
+            (job_type, resource_key),
+        ).fetchone()
+        if queued is not None:
+            job = _row_to_job(queued)
+            if job is None:  # pragma: no cover - 行存在即可解析
+                raise ValueError(f"无法解析已存在 job: {job_type}/{resource_key}")
+            return job, False
+        job = Job(
+            job_id=uuid.uuid4().hex,
+            job_type=job_type,
+            resource_key=resource_key,
+            payload=payload or {},
+            status=QUEUED,
+            priority=priority,
+            parent_job_id=parent_job_id,
+            max_attempts=max_attempts,
+            not_before=not_before,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        _insert_job(tx, job)
+    return job, True
+
+
 def list_jobs(
     job_type: str = "",
     status: str = "",

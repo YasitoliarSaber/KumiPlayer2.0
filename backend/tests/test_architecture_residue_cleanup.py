@@ -228,3 +228,34 @@ def test_openlist_shared_scanner_and_raw_snapshot_stay():
     # RawSnapshot / raw store 是 115/百度/local 兼容路径的共用件，不允许删除
     assert (ROOT / "backend/app/raw/models.py").exists()
     assert (ROOT / "backend/app/raw/store.py").exists()
+
+
+def test_v3_projection_dataflow_gate():
+    """Module 5 数据流门禁：durable 执行不得回接 legacy JSON 事实源。"""
+    handlers = (ROOT / "backend/app/pipeline/handlers.py").read_text(encoding="utf-8")
+    library_handler = (ROOT / "backend/app/pipeline/library_handler.py").read_text(encoding="utf-8")
+    generator = (ROOT / "backend/app/mirror/generator.py").read_text(encoding="utf-8")
+    revision_store_src = (ROOT / "backend/app/import_plan/revision_store.py").read_text(encoding="utf-8")
+    effective_store = (ROOT / "backend/app/scrape/effective_store.py").read_text(encoding="utf-8")
+    library_store = (ROOT / "backend/app/library/store.py").read_text(encoding="utf-8")
+    projection = (ROOT / "backend/app/library/projection.py").read_text(encoding="utf-8")
+
+    # durable mirror handler：V3 不回写 legacy ImportPlan JSON
+    assert "persist_plan=False" in handlers
+    assert "persist_plan: bool = True" in generator
+    assert "save_import_plan" not in handlers
+    # durable library handler：不调用 load_latest_confirmed_import_plan、不读 JSON scrape_map
+    assert "load_latest_confirmed_import_plan" not in library_handler
+    assert "load_scrape_map(" not in library_handler  # 只读 JSON 的旧入口不得出现在 projection handler
+    assert "list_current_revisions" in library_handler
+    # current revision 权威查询基于 media_units.current_revision_id
+    assert "u.current_revision_id" in revision_store_src
+    # V3 scrape binding 稳定 identity（binding_id = scrape_target_id）
+    assert "binding_id = item.scrape_target_id or item.work_id" in effective_store
+    assert "ON CONFLICT (binding_id) DO UPDATE" in effective_store
+    # artifact upsert 同 path 重写时 attribution 切到当前 revision
+    artifacts_store = (ROOT / "backend/app/pipeline/artifacts.py").read_text(encoding="utf-8")
+    assert "ON CONFLICT (kind, path) DO UPDATE" in artifacts_store
+    # LibraryIndex 保留为 projection（store 读写仍在）
+    assert "def save_library_index" in library_store
+    assert "def load_library_index" in library_store
