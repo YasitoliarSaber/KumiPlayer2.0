@@ -280,8 +280,10 @@ class TestOpenListCapabilities:
 # overlap 冲突：409 安全失败（不放宽 overlap 规则、不扩大扫描范围）
 # ============================================================
 
-class TestOverlapSafeFailure:
-    def test_ancestor_root_conflict_returns_409(self, client, tmp_path):
+class TestOverlapResolution:
+    def test_ancestor_root_conflict_reuses_existing_root(self, client, tmp_path):
+        """已有祖先 root（/夸克网盘/动画）时 rescan 子定位（/夸克网盘/动画/冰菓）：
+        不再 409，复用祖先 root，incremental 扫描，不创建新 root。"""
         from app.catalog import store as catalog_store
         from app.jobs import store as job_store
 
@@ -293,24 +295,32 @@ class TestOverlapSafeFailure:
             source_id=source_id, source_type="openlist", provider_id="quark",
             ingest_method="openlist_api",
         )
-        # 已有祖先 root（/夸克网盘/动画 覆盖 preset 定位 /夸克网盘/动画/冰菓）
-        catalog_store.create_source_root(
+        ancestor = catalog_store.create_source_root(
             source_id=source_id,
             remote_locator="/夸克网盘/动画",
             local_locator=str(tmp_path / "quark" / "动画"),
         )
         resp = client.post("/api/openlist/presets/preset-ol-1/rescan")
-        assert resp.status_code == 409
-        assert "重叠" in resp.json()["detail"]
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["resolution"] == "covered_by_existing_root"
+        assert body["canonical_locator"] == "/夸克网盘/动画"
+        assert body["root_id"] == ancestor.root_id
+        assert body["scan_mode"] == "incremental"
 
-        # 未创建第二个 root、未入队任何 job
+        # 未创建第二个 root；入队了一个 incremental discovery job
         roots = catalog_store.list_source_roots(source_id=source_id)
         assert len(roots) == 1
         assert roots[0].remote_locator == "/夸克网盘/动画"
-        assert job_store.list_jobs(job_type="discovery_scan") == []
+        jobs = job_store.list_jobs(job_type="discovery_scan")
+        assert len(jobs) == 1
+        assert jobs[0].payload.get("scan_mode") == "incremental"
 
-    def test_descendant_root_conflict_returns_409(self, client, tmp_path):
+    def test_descendant_root_conflict_promotes_parent(self, client, tmp_path):
+        """已有后代 root（/夸克网盘/动画/冰菓/第1季）时 rescan 祖先定位：
+        事务化归并到新父 root（promoted_to_parent），full 扫描，后代 root 移除。"""
         from app.catalog import store as catalog_store
+        from app.jobs import store as job_store
 
         _save_config(client, tmp_path)
         _save_routes(client)
@@ -320,16 +330,44 @@ class TestOverlapSafeFailure:
             source_id=source_id, source_type="openlist", provider_id="quark",
             ingest_method="openlist_api",
         )
-        # 已有后代 root（/夸克网盘/动画/冰菓/第1季 与 preset 定位互为祖先）
-        catalog_store.create_source_root(
+        descendant = catalog_store.create_source_root(
             source_id=source_id,
             remote_locator="/夸克网盘/动画/冰菓/第1季",
             local_locator=str(tmp_path / "quark" / "动画" / "冰菓" / "第1季"),
         )
+        # 给后代 root 建一个 media_unit（归并后应保留并归属父 root）
+        conn = catalog_store.get_connection()
+        conn.execute(
+            """
+            INSERT INTO media_units (
+                unit_id, batch_id, root_id, discovery_scope, boundary, work_key,
+                status, created_at, updated_at
+            ) VALUES (?, '', ?, 'anime', ?, '冰菓', 'plan_ready', '2026-08-01T00:00:00+08:00', '2026-08-01T00:00:00+08:00')
+            """,
+            ("unit-desc", descendant.root_id, "/夸克网盘/动画/冰菓/第1季"),
+        )
+        conn.commit()
+
         resp = client.post("/api/openlist/presets/preset-ol-1/rescan")
-        assert resp.status_code == 409
-        assert "重叠" in resp.json()["detail"]
-        assert len(catalog_store.list_source_roots(source_id=source_id)) == 1
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["resolution"] == "promoted_to_parent"
+        assert body["scan_mode"] == "full"
+        assert body["covered_root_ids"] == [descendant.root_id]
+
+        # 最终只存在一个父 root；unit 保留并归属父 root；后代 root 不存在
+        roots = catalog_store.list_source_roots(source_id=source_id)
+        assert len(roots) == 1
+        assert roots[0].remote_locator == "/夸克网盘/动画/冰菓"
+        assert roots[0].root_id == body["root_id"]
+        assert catalog_store.get_source_root(descendant.root_id) is None
+        unit_row = conn.execute(
+            "SELECT root_id FROM media_units WHERE unit_id = 'unit-desc'"
+        ).fetchone()
+        assert unit_row is not None and unit_row["root_id"] == body["root_id"]
+        jobs = job_store.list_jobs(job_type="discovery_scan")
+        assert len(jobs) == 1
+        assert jobs[0].payload.get("scan_mode") == "full"
 
 
 # ============================================================

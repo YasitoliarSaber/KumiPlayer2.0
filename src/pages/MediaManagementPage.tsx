@@ -842,6 +842,21 @@ export default function MediaManagementPage() {
     if (source === 'openlist' && importScope === 'seasonal') setImportScope('');
   }, [source, importScope]);
 
+  // 重叠导入解析提示：exact 复用 / 父根覆盖 / 归并为新父根
+  const openlistResolutionNotices = (batch: OpenListImportBatch): string[] => {
+    const notices: string[] = [];
+    for (const root of batch.roots || []) {
+      if (root.resolution === 'covered_by_existing_root' && root.canonical_locator && root.canonical_locator !== root.requested_locator) {
+        notices.push(`该目录已由“${root.canonical_locator}”管理，本次执行增量更新`);
+      } else if (root.resolution === 'promoted_to_parent') {
+        notices.push(`已将 ${root.covered_root_ids?.length ?? 0} 个既有来源目录并入“${root.canonical_locator || root.requested_locator}”，本次执行完整扫描`);
+      } else if (root.resolution === 'exact_reused') {
+        notices.push('该目录已导入过，本次执行增量更新');
+      }
+    }
+    return notices;
+  };
+
   const startOpenlistImport = async () => {
     const path = openlistPathRef.current;
     if (!path || openlistImporting) return;
@@ -856,6 +871,8 @@ export default function MediaManagementPage() {
       });
       setOpenlistScanTask(null);
       attachOpenlistBatch(batch, `已创建持久批次，正在扫描 ${batch.roots.length} 个目录…`);
+      const notices = openlistResolutionNotices(batch);
+      if (notices.length) setOpenlistSelectionNotice(notices.join('；'));
     } catch (error) {
       setActionError(`OpenList 导入失败：${(error as Error).message}`);
       setOpenlistImporting(false);
@@ -881,6 +898,8 @@ export default function MediaManagementPage() {
       });
       setOpenlistScanTask(null);
       attachOpenlistBatch(batch, `已创建持久批次，正在扫描 ${batch.roots.length} 个目录…`);
+      const notices = openlistResolutionNotices(batch);
+      if (notices.length) setOpenlistSelectionNotice(notices.join('；'));
     } catch (error) {
       setActionError(`批量导入失败：${(error as Error).message}`);
       setOpenlistImporting(false);

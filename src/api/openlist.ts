@@ -121,6 +121,12 @@ export interface OpenListImportBatchRoot {
   error?: string
   plan_ids?: string[]
   units?: BackgroundImportUnit[]
+  // 重叠导入解析结果（import-batch 创建响应一次性提示）：
+  // created | exact_reused | covered_by_existing_root | promoted_to_parent
+  resolution?: string
+  requested_locator?: string
+  canonical_locator?: string
+  covered_root_ids?: string[]
 }
 
 export interface BackgroundImportJob {

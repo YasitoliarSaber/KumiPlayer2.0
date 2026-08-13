@@ -884,13 +884,15 @@ def save_routes(req: SaveRoutesRequest):
 
 @router.post("/presets/{preset_id}/rescan")
 def rescan_openlist_preset(preset_id: str):
-    """按预设保存的远端定位增量更新（Source Catalog 增量链路）（模块4：preset rescan → Source Catalog 增量链路）。
+    """按预设保存的远端定位更新（Source Catalog 增量链路）（模块4：preset rescan → Source Catalog 增量链路）。
 
-    预设远端定位 → exact SourceRoot（缺失则一次性注册；与既有 root 祖先/后代
-    重叠且无 exact match 时 409 安全失败，不放宽 overlap 规则）→
-    bump generation → enqueue durable incremental discovery scan。
-    返回 durable job_id，前端既有 /api/tasks polling 继续可用。
+    预设远端定位 → 来源根覆盖解析（exact 复用 / 既有祖先覆盖复用 /
+    新父覆盖既有后代时事务化归并 / 缺失时一次性注册）→
+    bump generation → enqueue durable discovery scan
+    （reuse 系列 incremental；promote_parent 后 full）。
+    返回 durable job_id 与 resolution，前端既有 /api/tasks polling 继续可用。
     """
+    from app.catalog import lifecycle
     from app.catalog import store as catalog_store
     from app.db.database import init_db
     from app.pipeline import orchestrator
@@ -911,17 +913,12 @@ def rescan_openlist_preset(preset_id: str):
     normalized = normalize_remote_path(preset.remote_locator)
     _ensure_within_remote_root(remote_root, normalized)
     _ensure_openlist_source(catalog_store, source_id)
+    _require_route_for_import(config, normalized)
 
-    exact = next(
-        (
-            root for root in catalog_store.list_source_roots(source_id=source_id)
-            if root.normalized_locator == catalog_store.normalize_locator(normalized)
-        ),
-        None,
-    )
-    if exact is None:
+    resolution = lifecycle.resolve_root_for_import(source_id, normalized)
+    scan_mode = "incremental"
+    if resolution.action == "create":
         # 一次性注册（参考 import-batch：路由归属校验 + overlap 安全失败）
-        _require_route_for_import(config, normalized)
         try:
             root = catalog_store.create_source_root(
                 source_id=source_id,
@@ -936,17 +933,46 @@ def rescan_openlist_preset(preset_id: str):
                 status_code=409,
                 detail=f"预设远端定位与既有来源根重叠，拒绝扩大扫描范围：{exc}",
             ) from None
+    elif resolution.action == "promote_parent":
+        # 新父目录覆盖既有后代：事务化归并（unit/revision 保留），随后 full 扫描
+        resolution = lifecycle.promote_parent_root(
+            source_id,
+            normalized,
+            local_locator=derive_local_path(config.openlist_mount_root, remote_root, normalized),
+            import_family=(preset.import_family or "anime").strip(),
+            import_scope=(preset.import_scope or "").strip(),
+            child_root_ids=resolution.covered_root_ids,
+        )
+        root = catalog_store.get_source_root(resolution.canonical_root_id)
+        if root is None:
+            raise HTTPException(status_code=409, detail="来源根归并失败，请重试")
+        scan_mode = "full"
     else:
-        root = exact
+        # reuse_exact / reuse_ancestor：复用既有 root，不创建新 root
+        root = catalog_store.get_source_root(resolution.canonical_root_id)
+        if root is None:
+            raise HTTPException(status_code=409, detail="来源根解析失败，请重新导入")
+        if resolution.action == "reuse_ancestor":
+            # 更新既有祖先根的 family/scope 为本次预设语义（不改变 locator）
+            catalog_store.update_root_metadata(
+                root.root_id,
+                import_family=(preset.import_family or "anime").strip(),
+                import_scope=(preset.import_scope or "").strip(),
+            )
 
     root_id = root.root_id
     generation = catalog_store.bump_generation(root_id)
-    job_id = orchestrator.enqueue_scan(root_id, generation, source_id, scan_mode="incremental")
+    job_id = orchestrator.enqueue_scan(root_id, generation, source_id, scan_mode=scan_mode)
     return {
         "task_id": job_id,
         "root_id": root_id,
         "generation": generation,
         "execution_mode": "durable",
+        "resolution": lifecycle.resolution_api_label(resolution.action),
+        "requested_locator": normalized,
+        "canonical_locator": resolution.canonical_locator,
+        "scan_mode": scan_mode,
+        "covered_root_ids": list(resolution.covered_root_ids),
     }
 
 
@@ -1080,9 +1106,14 @@ def create_openlist_import_batch(req: BatchImportRequest):
         )
         for root in batch["roots"]:
             generation = catalog_store.bump_generation(root["root_id"])
+            # promote_parent 归并后必须 full 扫描（重新验证整棵已知目录树）
+            scan_mode = (
+                "full"
+                if root.get("resolution") == "promoted_to_parent"
+                else "incremental"
+            )
             job_id = orchestrator.enqueue_scan(
-                root["root_id"], generation, source_id,
-                scan_mode="incremental",
+                root["root_id"], generation, source_id, scan_mode=scan_mode,
             )
             created_job_ids.append(job_id)
             catalog_store.update_import_batch_root(
@@ -1101,7 +1132,7 @@ def create_openlist_import_batch(req: BatchImportRequest):
             conn.execute("DELETE FROM import_batches WHERE batch_id = ?", (batch["batch_id"],))
             conn.commit()
         raise HTTPException(status_code=409, detail=str(exc)) from None
-    return _refresh_batch_status(catalog_store.get_import_batch(batch["batch_id"]) or batch)
+    return _refresh_batch_status(batch)
 
 
 @router.get("/import-batches/{batch_id}")

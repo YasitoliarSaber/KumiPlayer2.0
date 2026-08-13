@@ -363,8 +363,14 @@ def import_local_background(req: LocalBackgroundImportRequest):
         )
         for source_root in batch["roots"]:
             generation = catalog_store.bump_generation(source_root["root_id"])
+            # promote_parent 归并后必须 full 扫描（重新验证整棵已知目录树）
+            scan_mode = (
+                "full"
+                if source_root.get("resolution") == "promoted_to_parent"
+                else "incremental"
+            )
             job_id = orchestrator.enqueue_scan(
-                source_root["root_id"], generation, source_id, scan_mode="incremental",
+                source_root["root_id"], generation, source_id, scan_mode=scan_mode,
             )
             catalog_store.update_import_batch_root(
                 batch["batch_id"], source_root["root_id"], status="queued", generation=generation,
