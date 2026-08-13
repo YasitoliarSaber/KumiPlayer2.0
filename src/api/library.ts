@@ -28,6 +28,14 @@ export interface DeletePreviewResponse {
   history_count: number
   progress_count: number
   related_reference_count: number
+  catalog_root_count: number
+  catalog_batch_count: number
+  catalog_directory_count: number
+  catalog_node_count: number
+  catalog_unit_count: number
+  catalog_revision_count: number
+  catalog_job_count: number
+  catalog_active_job_count: number
 }
 
 export interface DeleteConfirmResponse {
@@ -43,6 +51,11 @@ export interface DeleteConfirmResponse {
   deleted_tracking_binding_count: number
   deleted_tracking_scan_run_count: number
   cancelled_tracking_task_count: number
+  deleted_catalog_root_count: number
+  deleted_catalog_batch_count: number
+  deleted_catalog_unit_count: number
+  deleted_catalog_revision_count: number
+  deleted_catalog_job_count: number
 }
 
 export type LibraryDeleteSource = 'all' | 'pan115' | 'baidu' | 'local' | 'openlist'

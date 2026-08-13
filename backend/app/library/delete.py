@@ -24,6 +24,10 @@ _SOURCE_NAMESPACES = {
 }
 
 
+class CatalogCleanupBusyError(RuntimeError):
+    """相关持久后台任务正在停止，整库删除必须中止（API 层转 409）。"""
+
+
 # ============================================================
 # 数据结构
 # ============================================================
@@ -57,6 +61,14 @@ class DeletePreview:
     history_count: int = 0
     progress_count: int = 0
     related_reference_count: int = 0
+    catalog_root_count: int = 0
+    catalog_batch_count: int = 0
+    catalog_directory_count: int = 0
+    catalog_node_count: int = 0
+    catalog_unit_count: int = 0
+    catalog_revision_count: int = 0
+    catalog_job_count: int = 0
+    catalog_active_job_count: int = 0
 
 
 @dataclass
@@ -81,6 +93,11 @@ class DeleteResult:
     deleted_tracking_binding_count: int = 0
     deleted_tracking_scan_run_count: int = 0
     cancelled_tracking_task_count: int = 0
+    deleted_catalog_root_count: int = 0
+    deleted_catalog_batch_count: int = 0
+    deleted_catalog_unit_count: int = 0
+    deleted_catalog_revision_count: int = 0
+    deleted_catalog_job_count: int = 0
 
 
 # ============================================================
@@ -367,6 +384,31 @@ def build_library_clear_preview(source: Optional[str] = None) -> DeletePreview:
     library_work_count = _count_library_works_for_clear(clear_source)
     media_preset_count = _count_media_presets_for_clear(clear_source)
     tracking_counts = _count_tracking_state_for_clear(clear_source)
+    # Source Catalog 统计独立于镜像目录：即使镜像不存在/为空，
+    # 数据库中的来源根与派生事实也必须预告并清理。
+    try:
+        from app.catalog import lifecycle
+        catalog_preview = lifecycle.preview_catalog_cleanup(clear_source)
+    except Exception:
+        catalog_preview = lifecycle.CatalogCleanupPreview()
+    # DeletePreview.catalog_* ← CatalogCleanupPreview 短字段名映射
+    _catalog_preview_fields = {
+        "catalog_root_count": "root_count",
+        "catalog_batch_count": "batch_count",
+        "catalog_directory_count": "directory_count",
+        "catalog_node_count": "node_count",
+        "catalog_unit_count": "unit_count",
+        "catalog_revision_count": "revision_count",
+        "catalog_job_count": "job_count",
+        "catalog_active_job_count": "active_job_count",
+    }
+
+    def _catalog_kwargs() -> dict:
+        return {
+            target: getattr(catalog_preview, source)
+            for target, source in _catalog_preview_fields.items()
+        }
+
     preview_id = _make_preview_id(f"__library__:{clear_source}", "library")
     mirror_root = get_mirror_root().resolve()
     target_root = _clear_target_root(mirror_root, clear_source)
@@ -387,6 +429,7 @@ def build_library_clear_preview(source: Optional[str] = None) -> DeletePreview:
             media_preset_count=media_preset_count,
             tracking_binding_count=tracking_counts["binding_count"],
             tracking_scan_run_count=tracking_counts["scan_run_count"],
+            **_catalog_kwargs(),
         )
 
     if not target_root.is_dir():
@@ -401,6 +444,7 @@ def build_library_clear_preview(source: Optional[str] = None) -> DeletePreview:
             media_preset_count=media_preset_count,
             tracking_binding_count=tracking_counts["binding_count"],
             tracking_scan_run_count=tracking_counts["scan_run_count"],
+            **_catalog_kwargs(),
         )
 
     for path in sorted((p for p in target_root.rglob("*") if p.is_file()), key=lambda p: str(p)):
@@ -437,6 +481,7 @@ def build_library_clear_preview(source: Optional[str] = None) -> DeletePreview:
         media_preset_count=media_preset_count,
         tracking_binding_count=tracking_counts["binding_count"],
         tracking_scan_run_count=tracking_counts["scan_run_count"],
+        **_catalog_kwargs(),
     )
 
 
@@ -929,7 +974,10 @@ def _execute_library_clear(preview: DeletePreview) -> DeleteResult:
     """Clear only the generated files captured by the approved preview.
 
     User-facing "delete library" means removing generated mirror files and
-    rebuildable metadata.  It never touches configured source roots.
+    rebuildable metadata, then transactionally removing the Source Catalog
+    facts (source roots and derived data) for the same scope.  It never
+    touches configured source roots on disk or the ``sources`` connection
+    records (OpenList server config / routes / credentials stay intact).
     """
     deleted: List[str] = []
     failed: List[DeleteFailure] = []
@@ -940,6 +988,11 @@ def _execute_library_clear(preview: DeletePreview) -> DeleteResult:
     deleted_tracking_binding_count = 0
     deleted_tracking_scan_run_count = 0
     cancelled_tracking_task_count = 0
+    deleted_catalog_root_count = 0
+    deleted_catalog_batch_count = 0
+    deleted_catalog_unit_count = 0
+    deleted_catalog_revision_count = 0
+    deleted_catalog_job_count = 0
 
     source = _normalize_clear_source(preview.source)
     before_work_ids = _current_library_work_ids()
@@ -979,6 +1032,21 @@ def _execute_library_clear(preview: DeletePreview) -> DeleteResult:
             failed=[DeleteFailure(path="tracking_state", reason=str(exc))],
             library_rescanned=False,
         )
+
+    # 步骤 B：相关持久化任务门控。queued 直接取消；running 置协作式取消后
+    # 必须中止本次删除（409），不能在持久任务仍可能写库时删除来源根。
+    try:
+        from app.catalog import lifecycle
+        job_gate = lifecycle.prepare_catalog_cleanup(source)
+    except Exception as exc:
+        return DeleteResult(
+            preview_id=preview.preview_id,
+            status="failed",
+            failed=[DeleteFailure(path="catalog_jobs", reason=str(exc))],
+            library_rescanned=False,
+        )
+    if job_gate["running_job_ids"]:
+        raise CatalogCleanupBusyError("相关后台任务正在停止，请稍后再次确认删除")
 
     for item in preview.files:
         path = Path(item.path)
@@ -1043,11 +1111,32 @@ def _execute_library_clear(preview: DeletePreview) -> DeleteResult:
             clear_all=source == "all",
         ))
 
+    # 步骤 D：镜像删除成功（无失败）后，事务化清理 Source Catalog 事实。
+    # 镜像文件出现删除失败时暂不清除 catalog，保留数据库事实供用户重试。
+    if not failed:
+        try:
+            catalog_result = lifecycle.delete_catalog_for_clear(source)
+            deleted_catalog_root_count = catalog_result.deleted_root_count
+            deleted_catalog_batch_count = catalog_result.deleted_batch_count
+            deleted_catalog_unit_count = catalog_result.deleted_unit_count
+            deleted_catalog_revision_count = catalog_result.deleted_revision_count
+            deleted_catalog_job_count = catalog_result.deleted_job_count
+        except Exception as exc:
+            failed.append(DeleteFailure(path="catalog_cleanup", reason=str(exc)))
+    elif deleted or preview.library_work_count or preview.catalog_root_count:
+        # 部分/全部删除失败：保留 Source Catalog，避免删除语义不完整。
+        failed.append(DeleteFailure(
+            path="catalog_cleanup",
+            reason="镜像文件删除未完全成功，已保留来源目录与导入记录供重试",
+        ))
+
     made_progress = bool(
         deleted
         or deleted_preset_ids
         or deleted_tracking_binding_count
         or deleted_tracking_scan_run_count
+        or deleted_catalog_root_count
+        or deleted_catalog_unit_count
     )
     if failed and made_progress:
         status = "partial_failed"
@@ -1069,6 +1158,11 @@ def _execute_library_clear(preview: DeletePreview) -> DeleteResult:
         deleted_tracking_binding_count=deleted_tracking_binding_count,
         deleted_tracking_scan_run_count=deleted_tracking_scan_run_count,
         cancelled_tracking_task_count=cancelled_tracking_task_count,
+        deleted_catalog_root_count=deleted_catalog_root_count,
+        deleted_catalog_batch_count=deleted_catalog_batch_count,
+        deleted_catalog_unit_count=deleted_catalog_unit_count,
+        deleted_catalog_revision_count=deleted_catalog_revision_count,
+        deleted_catalog_job_count=deleted_catalog_job_count,
     )
 
 

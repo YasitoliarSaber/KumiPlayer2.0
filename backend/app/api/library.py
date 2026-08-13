@@ -18,7 +18,13 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
 
-from app.library.delete import DeletePreview, build_delete_preview, build_library_clear_preview, execute_delete
+from app.library.delete import (
+    CatalogCleanupBusyError,
+    DeletePreview,
+    build_delete_preview,
+    build_library_clear_preview,
+    execute_delete,
+)
 from app.library.delete_store import load_delete_preview, save_delete_log, save_delete_preview
 from app.library.diagnostics import diagnose_library_consistency
 from app.library import service as library_service
@@ -332,6 +338,8 @@ def delete_library_confirm(req: DeleteConfirmRequest):
     try:
         with manager.maintenance("删除全部媒体库"):
             result = execute_delete(preview)
+    except CatalogCleanupBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=f"{exc}，请等待任务完成后重试") from exc
     save_delete_log(result, source=preview.source, scope=preview.scope)

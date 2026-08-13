@@ -119,7 +119,7 @@ export default function LibraryMaintenancePanel({ onCleared }: { onCleared?: () 
     setOperation({
       phase: result.failed.length ? 'failed' : 'succeeded',
       title: result.failed.length ? '清理完成，但有未完成项' : '清理完成',
-      detail: `已从索引移除 ${result.deleted_library_work_count} 部媒体库作品，删除 ${result.deleted.length} 项生成内容、${result.deleted_preset_ids.length} 个目录树导入档案、${result.deleted_tracking_binding_count} 条追更记录及 ${result.deleted_tracking_scan_run_count} 条扫描历史${result.cancelled_tracking_task_count ? `，停止 ${result.cancelled_tracking_task_count} 个相关扫描任务` : ''}${result.failed.length ? `，${result.failed.length} 项失败` : ''}。`,
+      detail: `已删除媒体库${result.deleted_catalog_root_count ? `，并清理相关来源目录与导入记录（${result.deleted_catalog_root_count} 个来源目录、${result.deleted_catalog_batch_count} 次导入记录、${result.deleted_catalog_unit_count} 个后台识别单元）` : ''}：从索引移除 ${result.deleted_library_work_count} 部媒体库作品，删除 ${result.deleted.length} 项生成内容、${result.deleted_preset_ids.length} 个目录树导入档案、${result.deleted_tracking_binding_count} 条追更记录及 ${result.deleted_tracking_scan_run_count} 条扫描历史${result.cancelled_tracking_task_count ? `，停止 ${result.cancelled_tracking_task_count} 个相关扫描任务` : ''}${result.failed.length ? `，${result.failed.length} 项失败` : ''}。`,
     });
   });
 
@@ -194,7 +194,20 @@ export default function LibraryMaintenancePanel({ onCleared }: { onCleared?: () 
         </div>
         {preview && (
           <div className={`maintenance-delete-preview${preview.blocked ? ' blocked' : ''}`}>
-            <div><span>即将彻底删除</span><strong>{deleteScopeLabel}</strong><small>删除 {preview.library_work_count} 部媒体库作品、处理 {previewFileCount} 个生成文件、{preview.media_preset_count} 个目录树导入档案、{preview.tracking_binding_count} 条追更记录及 {preview.tracking_scan_run_count} 条扫描历史</small>{preview.warnings.map((warning) => <small key={warning}>{warning}</small>)}</div>
+            <div><span>即将彻底删除</span><strong>{deleteScopeLabel}</strong><small>删除 {preview.library_work_count} 部媒体库作品、处理 {previewFileCount} 个生成文件、{preview.media_preset_count} 个目录树导入档案、{preview.tracking_binding_count} 条追更记录及 {preview.tracking_scan_run_count} 条扫描历史</small>{preview.catalog_root_count > 0 && <small className="maintenance-catalog-summary">同时清理 {preview.catalog_root_count} 个来源目录、{preview.catalog_batch_count} 次导入记录和 {preview.catalog_unit_count} 个后台识别单元</small>}{preview.warnings.map((warning) => <small key={warning}>{warning}</small>)}
+              {preview.catalog_root_count > 0 && (
+                <details className="maintenance-catalog-details">
+                  <summary>展开来源目录与导入记录详情</summary>
+                  <dl>
+                    <div><dt>来源目录</dt><dd>{preview.catalog_root_count}</dd></div>
+                    <div><dt>导入记录</dt><dd>{preview.catalog_batch_count}</dd></div>
+                    <div><dt>扫描缓存</dt><dd>{preview.catalog_directory_count} 个目录 / {preview.catalog_node_count} 个条目</dd></div>
+                    <div><dt>识别记录</dt><dd>{preview.catalog_unit_count} 个单元 / {preview.catalog_revision_count} 个版本</dd></div>
+                    <div><dt>后台任务</dt><dd>{preview.catalog_job_count}{preview.catalog_active_job_count ? `（其中 ${preview.catalog_active_job_count} 个运行中，需先停止）` : ''}</dd></div>
+                  </dl>
+                </details>
+              )}
+            </div>
             <Button className="maintenance-command danger" icon={<Trash2 size={16} />} disabled={preview.blocked || Boolean(busy)} onClick={() => void confirmClear()}>确认删除{deleteScopeLabel}</Button>
           </div>
         )}

@@ -1296,6 +1296,62 @@ def test_scrape_path_cleanup_does_not_remove_unrelated_same_directory_map(tmp_pa
     assert [item.scrape_target_id for item in load_scrape_map().items] == ["target-b"]
 
 
+def test_library_clear_cleans_catalog_when_mirror_already_empty(tmp_path, monkeypatch):
+    """镜像已空/不存在但 Source Catalog 来源根仍存在时，整库删除必须清理残留（回归）。"""
+    from types import SimpleNamespace
+
+    data_dir = tmp_path / "data"
+    mirror = data_dir / "mirror"
+    mirror.mkdir(parents=True)
+    monkeypatch.setenv("KUMIPLAYER_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("KUMIPLAYER_MIRROR_DIR", str(mirror))
+    monkeypatch.setattr("app.library.delete.get_data_dir", lambda: data_dir)
+    monkeypatch.setattr("app.library.delete.get_mirror_root", lambda: mirror)
+    monkeypatch.setattr("app.core.paths.get_data_dir", lambda: data_dir)
+    monkeypatch.setattr("app.core.paths.get_mirror_root", lambda: mirror)
+    monkeypatch.setattr(
+        "app.core.config.load_config",
+        lambda: SimpleNamespace(
+            pan115_root="", baidu_root="", local_root="",
+            openlist_mount_root=str(tmp_path / "quark"),
+            mirror_dir=str(mirror),
+        ),
+    )
+
+    import app.db.database as db_mod
+
+    db_mod.close_connection()
+    monkeypatch.setattr(db_mod, "_db_path", data_dir / "state.db")
+    if hasattr(db_mod._local, "connection"):
+        db_mod._local.connection = None
+    db_mod.init_db()
+
+    from app.catalog import store as catalog_store
+    from app.library.delete import build_library_clear_preview, execute_delete
+
+    catalog_store.create_source(
+        source_id="ol-conn", source_type="openlist", provider_id="quark",
+        ingest_method="openlist_api",
+    )
+    catalog_store.create_source_root(
+        source_id="ol-conn",
+        remote_locator="/夸克网盘/动画",
+        local_locator=str(tmp_path / "quark" / "动画"),
+    )
+
+    preview = build_library_clear_preview("openlist")
+    # 镜像目录为空也必须预告来源目录统计
+    assert preview.catalog_root_count == 1
+
+    result = execute_delete(preview)
+    assert result.status == "succeeded"
+    assert result.deleted_catalog_root_count == 1
+    assert catalog_store.list_source_roots("ol-conn") == []
+    # 连接配置记录保留
+    assert catalog_store.get_source("ol-conn") is not None
+    db_mod.close_connection()
+
+
 if __name__ == "__main__":
     tests = [
         test_preview_by_episode_id,

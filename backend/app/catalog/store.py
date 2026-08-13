@@ -190,11 +190,42 @@ def create_import_batch(
 
     批次、root 与关系表必须作为单个事实写入：任一个 locator 非法、来源不存在
     或与同来源既有/本批 root 重叠时，事务整体回滚，不留下半成品批次。
+
+    重叠导入语义（由 ``app.catalog.lifecycle.resolve_root_for_import`` 解析）：
+    - ``reuse_exact``：完全相同路径 → 复用既有 root（幂等增量）；
+    - ``reuse_ancestor``：已有父目录覆盖新子目录 → 复用父 root，不创建子 root；
+    - ``promote_parent``：新父目录覆盖已有子目录 → 先事务化归并子根到新父根，
+      再复用父 root（unit/revision 保留）；
+    - ``create``：全新路径 → 创建新 root。
+
+    返回的 batch ``roots`` 每项附加 ``resolution`` / ``canonical_locator`` /
+    ``requested_locator`` / ``covered_root_ids``，供 API 层向用户展示解析结果。
     """
     if not source_id:
         raise ValueError("source_id 不能为空")
     if not roots:
         raise ValueError("导入批次至少需要一个来源根")
+
+    # 1. 先解析每个请求（只读）；promote_parent 需要独立事务先执行归并。
+    from app.catalog.lifecycle import promote_parent_root, resolve_root_for_import
+
+    resolutions: list[Any] = []
+    for raw_root in roots:
+        remote_locator = str(raw_root.get("remote_locator") or "").strip()
+        normalized = normalize_locator(remote_locator)
+        if not normalized:
+            raise ValueError("来源根定位不能为空")
+        resolution = resolve_root_for_import(source_id, remote_locator)
+        if resolution.action == "promote_parent":
+            resolution = promote_parent_root(
+                source_id,
+                remote_locator,
+                local_locator=str(raw_root.get("local_locator") or "").strip(),
+                import_family=str(raw_root.get("import_family") or import_family or "anime").strip(),
+                import_scope=str(raw_root.get("import_scope") or "").strip(),
+                child_root_ids=resolution.covered_root_ids,
+            )
+        resolutions.append(resolution)
 
     conn = get_connection()
     timestamp = now_iso()
@@ -213,53 +244,59 @@ def create_import_batch(
                 "SELECT * FROM source_roots WHERE source_id = ?", (source_id,)
             ).fetchall()
         ]
-        for raw_root in roots:
+        for index, raw_root in enumerate(roots):
             remote_locator = str(raw_root.get("remote_locator") or "").strip()
             normalized = normalize_locator(remote_locator)
-            if not normalized:
-                raise ValueError("来源根定位不能为空")
-            # 同一目录重复导入：复用既有 root（幂等增量），不重复创建；
-            # 仅“重叠但不同”的 locator 才拒绝。
-            reused = next(
-                (p for p in existing if p.normalized_locator == normalized), None
-            )
-            if reused is not None:
+            resolution = resolutions[index]
+
+            if resolution.action == "create":
+                # 全新路径：防御性复查重叠（resolver 已排除，双保险）
+                for prior in [*existing, *prepared]:
+                    prior_locator = (
+                        prior.normalized_locator
+                        if isinstance(prior, SourceRootRecord)
+                        else prior["normalized_locator"]
+                    )
+                    if _locators_overlap(normalized, prior_locator):
+                        raise ValueError(
+                            f"来源根与既有根重叠: {normalized} 与 {prior_locator}"
+                        )
                 prepared.append(
                     {
-                        "root_id": reused.root_id,
-                        "remote_locator": reused.remote_locator,
-                        "normalized_locator": reused.normalized_locator,
-                        "local_locator": reused.local_locator
-                        or str(raw_root.get("local_locator") or "").strip(),
-                        "import_family": reused.import_family
-                        or str(raw_root.get("import_family") or import_family or "anime").strip(),
-                        "import_scope": reused.import_scope
-                        or str(raw_root.get("import_scope") or "").strip(),
-                        "scan_policy": reused.scan_policy or "standard",
-                        "reused": True,
+                        "root_id": uuid.uuid4().hex,
+                        "remote_locator": remote_locator,
+                        "normalized_locator": normalized,
+                        "local_locator": str(raw_root.get("local_locator") or "").strip(),
+                        "import_family": str(raw_root.get("import_family") or import_family or "anime").strip(),
+                        "import_scope": str(raw_root.get("import_scope") or "").strip(),
+                        "scan_policy": str(raw_root.get("scan_policy") or "standard").strip(),
+                        "reused": False,
                     }
                 )
                 continue
-            for prior in [*existing, *prepared]:
-                prior_locator = (
-                    prior.normalized_locator
-                    if isinstance(prior, SourceRootRecord)
-                    else prior["normalized_locator"]
+
+            # reuse_exact / reuse_ancestor / promote_parent：复用解析出的规范 root
+            canonical = next(
+                (p for p in existing if p.root_id == resolution.canonical_root_id),
+                None,
+            )
+            if canonical is None:
+                raise ValueError(
+                    f"来源根解析失败: {remote_locator} 未找到规范来源根"
                 )
-                if _locators_overlap(normalized, prior_locator):
-                    raise ValueError(
-                        f"来源根与既有根重叠: {normalized} 与 {prior_locator}"
-                    )
             prepared.append(
                 {
-                    "root_id": uuid.uuid4().hex,
-                    "remote_locator": remote_locator,
-                    "normalized_locator": normalized,
-                    "local_locator": str(raw_root.get("local_locator") or "").strip(),
-                    "import_family": str(raw_root.get("import_family") or import_family or "anime").strip(),
-                    "import_scope": str(raw_root.get("import_scope") or "").strip(),
-                    "scan_policy": str(raw_root.get("scan_policy") or "standard").strip(),
-                    "reused": False,
+                    "root_id": canonical.root_id,
+                    "remote_locator": canonical.remote_locator,
+                    "normalized_locator": canonical.normalized_locator,
+                    "local_locator": canonical.local_locator
+                    or str(raw_root.get("local_locator") or "").strip(),
+                    "import_family": canonical.import_family
+                    or str(raw_root.get("import_family") or import_family or "anime").strip(),
+                    "import_scope": canonical.import_scope
+                    or str(raw_root.get("import_scope") or "").strip(),
+                    "scan_policy": canonical.scan_policy or "standard",
+                    "reused": True,
                 }
             )
 
@@ -297,7 +334,15 @@ def create_import_batch(
                 (batch_id, root["root_id"], sort_order),
             )
 
-    return get_import_batch(batch_id) or {}
+    batch = get_import_batch(batch_id) or {}
+    from app.catalog.lifecycle import resolution_api_label
+
+    for root_item, resolution in zip(batch.get("roots", []), resolutions, strict=False):
+        root_item["resolution"] = resolution_api_label(resolution.action)
+        root_item["requested_locator"] = resolution.requested_locator
+        root_item["canonical_locator"] = resolution.canonical_locator
+        root_item["covered_root_ids"] = list(resolution.covered_root_ids)
+    return batch
 
 
 def get_import_batch(batch_id: str) -> dict | None:
@@ -372,6 +417,23 @@ def bump_generation(root_id: str) -> int:
     conn.commit()
     row = conn.execute("SELECT active_generation FROM source_roots WHERE root_id = ?", (root_id,)).fetchone()
     return int(row[0]) if row else 0
+
+
+def update_root_metadata(root_id: str, *, import_family: str = "", import_scope: str = "") -> None:
+    """更新来源根的 family/scope 元数据（不改变 locator，供复用既有根时对齐语义）。"""
+    if not root_id:
+        return
+    get_connection().execute(
+        """
+        UPDATE source_roots
+        SET import_family = CASE WHEN ? != '' THEN ? ELSE import_family END,
+            import_scope = CASE WHEN ? IS NOT NULL THEN ? ELSE import_scope END,
+            updated_at = ?
+        WHERE root_id = ?
+        """,
+        (import_family, import_family, import_scope, import_scope, now_iso(), root_id),
+    )
+    get_connection().commit()
 
 
 def touch_successful_scan(root_id: str) -> None:
