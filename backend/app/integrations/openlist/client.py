@@ -24,6 +24,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import re
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -79,6 +80,13 @@ _RISK_CONTROL_HTML_MARKERS = ("errors.aliyun.com", "访问被阻断")
 _RISK_CONTROL_BODY_LIMIT = 8192
 
 _logger = logging.getLogger(__name__)
+
+
+# 同一 OpenList 连接的客户端复用池。目录浏览、预取和后台扫描都会在同一
+# 进程内运行；如果每处各建一个 client，未携带 Token 的目录请求会先收到 401，
+# 随后各自登录再重试，既慢又会放大账号风控风险。池只保存内存会话，不落盘。
+_CLIENT_POOL: dict[str, OpenListClient] = {}
+_CLIENT_POOL_LOCK = threading.Lock()
 
 
 # ============================================================
@@ -240,6 +248,13 @@ class OpenListClient:
         self._sleep = sleep
         self._transport = transport  # 测试注入 MockTransport 用
         self._token: str | None = None
+        # 首次并发目录读取都可能收到 401；认证锁内二次检查 Token，确保只
+        # 发起一次登录请求，其余请求复用该会话并重试原目录请求。
+        self._auth_lock = threading.Lock()
+        # 仅由进程共享池打开：可复用会话的浏览/预取/扫描在首次目录请求前
+        # 单飞认证，避免把 401 当作日常认证握手；直接构造的客户端保持原有
+        # 按需 401 重登语义，便于测试与一次性诊断请求。
+        self._preauthenticate_list_requests = False
         # 连接级限速与健康上报：默认接入进程内共享单例
         self._governor = governor if governor is not None else get_governor()
         #: 连接匿名键（sha256(server_url|username)），用于限速与 source_health 记录
@@ -400,6 +415,8 @@ class OpenListClient:
                 self._token = None
                 self._report_failure("auth")
                 self.login()
+                # 同一客户端的首次并发目录请求可能都已拿到旧的空 token。
+                # login() 内部会单飞；等待者返回后不应再各自发送一次 401。
                 return self._post(path, payload, retry_on_auth=False)
 
             if code == 401 or status == 401:
@@ -446,31 +463,36 @@ class OpenListClient:
         准入顺序与 :meth:`_post` 一致（peek 预检 → governor → 最终准入），
         governor 等待期间新建立的冷却在最终准入处拦截。
         """
-        # 快速预检（只读、不消费探针）：明确未到期冷却 → 直接拒绝
-        peek_allowed, _ = source_health.peek_request_allowed(self._conn_key)
-        if not peek_allowed:
-            raise OpenListSourceCoolingDownError()
-        # 连接级限速
-        self._governor.acquire(self._conn_key)
-        # 真正最终准入（消费探针；governor 等待期间新冷却在此拦截）
-        allowed, _ = source_health.can_request(self._conn_key)
-        if not allowed:
-            raise OpenListSourceCoolingDownError()
-        try:
-            token = self._login_request()
-        except OpenListSourceCoolingDownError:
-            # 第一保险：本地准入拒绝（冷却拦截）不是上游失败，直接 re-raise，
-            # 不调用 _report_failure（record_failure 对 source_cooling_down
-            # 已 NO-OP 兜底，双保险防止冷却期被反复刷新）。
-            raise
-        except OpenListError as exc:
-            self._report_failure(exc.kind)
-            raise
-        except Exception:
-            self._report_failure("unknown")
-            raise
-        self._report_success()
-        return token
+        with self._auth_lock:
+            # 常规读取不必每次重新登录；失效 401 会先清空 _token，再走下面的
+            # 安全登录路径。锁内检查使并发 401 只产生一个物理登录请求。
+            if self._token:
+                return self._token
+            # 快速预检（只读、不消费探针）：明确未到期冷却 → 直接拒绝
+            peek_allowed, _ = source_health.peek_request_allowed(self._conn_key)
+            if not peek_allowed:
+                raise OpenListSourceCoolingDownError()
+            # 连接级限速
+            self._governor.acquire(self._conn_key)
+            # 真正最终准入（消费探针；governor 等待期间新冷却在此拦截）
+            allowed, _ = source_health.can_request(self._conn_key)
+            if not allowed:
+                raise OpenListSourceCoolingDownError()
+            try:
+                token = self._login_request()
+            except OpenListSourceCoolingDownError:
+                # 第一保险：本地准入拒绝（冷却拦截）不是上游失败，直接 re-raise，
+                # 不调用 _report_failure（record_failure 对 source_cooling_down
+                # 已 NO-OP 兜底，双保险防止冷却期被反复刷新）。
+                raise
+            except OpenListError as exc:
+                self._report_failure(exc.kind)
+                raise
+            except Exception:
+                self._report_failure("unknown")
+                raise
+            self._report_success()
+            return token
 
     def _login_request(self) -> str:
         """登录实际请求（不限速、不上报，供 login 包装）。"""
@@ -518,6 +540,10 @@ class OpenListClient:
         ``refresh=False`` 使用 OpenList 上游缓存（普通浏览/后台更新）；
         ``refresh=True`` 仅显式强制刷新当前层时使用，不递归刷新后代。
         """
+        # 共享会话的常规路径主动单飞登录，避免目录读取以 401 作为认证握手；
+        # 认证失败已由 login() 上报，不在下面的目录请求失败分支重复计数。
+        if self._preauthenticate_list_requests and not self._token:
+            self.login()
         try:
             page = self._list_dir_request(remote_path, page, per_page, refresh=refresh)
         except OpenListSourceCoolingDownError:
@@ -545,6 +571,7 @@ class OpenListClient:
         """单目录分页读取实际请求（不限速、不上报，供 list_dir 包装）。"""
         path = normalize_remote_path(remote_path)
         per_page = max(1, min(int(per_page), MAX_PER_PAGE))
+        # _post 仍保留 401 后的单次重登逻辑，处理服务端主动失效的会话。
         status, body = self._post(
             _LIST_PATH,
             {
@@ -573,6 +600,43 @@ class OpenListClient:
             )
         total = _safe_int(data.get("total")) or 0
         return OpenListDirPage(entries=entries, total=total)
+
+
+def _client_pool_key(server_url: str, username: str) -> str:
+    """返回不含密码的内存会话键（与 governor/health 的连接身份一致）。"""
+    return governor_connection_key(normalize_openlist_server_url(server_url), username)
+
+
+def get_openlist_client(
+    server_url: str,
+    username: str,
+    password: str,
+    *,
+    client_factory=None,
+    **kwargs,
+) -> OpenListClient:
+    """取得同一连接的进程内共享客户端。
+
+    密码不参与键值，也绝不存入池的索引或日志。可选参数主要供测试注入；测试
+    通过 :func:`clear_openlist_client_pool` 隔离，生产调用不会传入它们。
+    """
+    key = _client_pool_key(server_url, username)
+    with _CLIENT_POOL_LOCK:
+        existing = _CLIENT_POOL.get(key)
+        if existing is not None:
+            return existing
+        factory = client_factory or OpenListClient
+        client = factory(server_url, username, password, **kwargs)
+        if isinstance(client, OpenListClient):
+            client._preauthenticate_list_requests = True
+        _CLIENT_POOL[key] = client
+        return client
+
+
+def clear_openlist_client_pool() -> None:
+    """清除进程内会话（测试与连接配置切换使用；不会写入或删除远端数据）。"""
+    with _CLIENT_POOL_LOCK:
+        _CLIENT_POOL.clear()
 
 
 def _safe_int(value: Any) -> int | None:

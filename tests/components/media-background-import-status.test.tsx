@@ -37,4 +37,25 @@ describe('后台媒体导入观察页', () => {
     expect(screen.getByText('待处理识别结果')).toBeVisible();
     expect(screen.getByText(/不会阻塞其他作品/)).toBeVisible();
   });
+
+  test('来源保护冷却时明确显示已暂停并保留自动恢复语义', () => {
+    const deferred: OpenListImportBatch = {
+      ...batch,
+      status: 'pending',
+      roots: [{
+        ...batch.roots[0],
+        status: 'queued',
+        job_status: 'queued',
+        progress: 35,
+        message: '远端网盘疑似触发访问保护，KumiPlayer 已暂停该来源的自动请求，冷却结束后自动重试',
+        units: [],
+      }],
+    };
+
+    render(<FluentProvider theme={webDarkTheme}><MediaBackgroundImportStatus batch={deferred} source="openlist" /></FluentProvider>);
+
+    expect(screen.getByRole('heading', { name: '已保护性暂停' })).toBeVisible();
+    expect(screen.getAllByText('等待网盘冷却')).toHaveLength(2);
+    expect(screen.getByText(/冷却结束后自动重试/)).toBeVisible();
+  });
 });

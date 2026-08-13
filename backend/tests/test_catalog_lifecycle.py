@@ -1338,6 +1338,7 @@ def test_admission_check_to_insert_window_barrier_waits_then_rejects():
     acquired = threading.Event()
     proceed = threading.Event()
     release_barrier = threading.Event()
+    barrier_entered = threading.Event()
     outcome: dict[str, bool] = {}
 
     def task_thread():
@@ -1350,6 +1351,7 @@ def test_admission_check_to_insert_window_barrier_waits_then_rejects():
     def deleter_thread():
         gate.enter_barrier()  # 删除：应等待在途 admission 完成；保持屏障（不退出）
         outcome["barrier_entered"] = True
+        barrier_entered.set()
         release_barrier.wait(5)
         gate.exit_barrier()
 
@@ -1364,7 +1366,7 @@ def test_admission_check_to_insert_window_barrier_waits_then_rejects():
     # 任务此时「提交」：放行 → 释放准入
     proceed.set()
     t1.join(5)
-    assert "barrier_entered" in outcome
+    assert barrier_entered.wait(5)
     assert outcome["task_admitted"] is True
     assert outcome["barrier_entered"] is True
     # 屏障激活期间新 admission 被拒绝（不可进入）
@@ -1387,6 +1389,7 @@ def test_admission_claim_window_barrier_waits_then_claim_denied():
     claimed = threading.Event()
     proceed = threading.Event()
     release_barrier = threading.Event()
+    barrier_entered = threading.Event()
     outcome: dict[str, object] = {}
 
     def claim_thread():
@@ -1401,6 +1404,7 @@ def test_admission_claim_window_barrier_waits_then_claim_denied():
     def deleter_thread():
         gate.enter_barrier()
         outcome["barrier_entered"] = True
+        barrier_entered.set()
         release_barrier.wait(5)
         gate.exit_barrier()
 
@@ -1413,7 +1417,7 @@ def test_admission_claim_window_barrier_waits_then_claim_denied():
     assert "barrier_entered" not in outcome
     proceed.set()
     t1.join(5)
-    assert "barrier_entered" in outcome
+    assert barrier_entered.wait(5)
     assert outcome["claim_admitted"] is True
     assert outcome["barrier_entered"] is True
     # 屏障激活：新 claim（admission）被拒 → 返回空（claim_jobs 语义）

@@ -7,6 +7,7 @@
 """
 
 import json
+import threading
 
 import httpx
 import pytest
@@ -14,6 +15,7 @@ import pytest
 from app.catalog import source_health as _source_health_module
 from app.integrations.openlist.client import (
     OpenListClient,
+    get_openlist_client,
     join_remote_path,
     normalize_remote_path,
     validate_entry_name,
@@ -72,6 +74,120 @@ def make_client(handler, **kwargs) -> OpenListClient:
     )
 
 
+class TestProcessClientPool:
+    def test_same_connection_reuses_authenticated_client(self):
+        """后台扫描与浏览复用同一会话，避免每次目录读取先触发 401 再登录。"""
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.url.path)
+            if request.url.path == "/api/auth/login":
+                return _json_response(200, {"code": 200, "data": {"token": "shared-token"}})
+            if request.headers.get("authorization") != "shared-token":
+                return _json_response(401, {"code": 401})
+            return _json_response(200, _fs_list_payload("/动画", []))
+
+        first = get_openlist_client(
+            "https://ol.example.com", "user", "secret-pass",
+            transport=httpx.MockTransport(handler),
+            governor=OpenListRequestGovernor(rate_per_second=1000),
+        )
+        second = get_openlist_client("https://ol.example.com", "user", "secret-pass")
+
+        assert first is second
+        first.login()
+        second.list_dir("/动画")
+        assert calls == ["/api/auth/login", "/api/fs/list"]
+
+    def test_concurrent_first_reads_share_one_login(self):
+        """同一连接首次并发读取只允许一个登录请求，其他请求等待会话结果。"""
+        login_started = threading.Event()
+        allow_login = threading.Event()
+        errors: list[Exception] = []
+        calls: list[str] = []
+        calls_lock = threading.Lock()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            with calls_lock:
+                calls.append(request.url.path)
+            if request.url.path == "/api/auth/login":
+                login_started.set()
+                assert allow_login.wait(5)
+                return _json_response(200, {"code": 200, "data": {"token": "shared-token"}})
+            if request.headers.get("authorization") != "shared-token":
+                return _json_response(401, {"code": 401})
+            return _json_response(200, _fs_list_payload("/动画", []))
+
+        client = get_openlist_client(
+            "https://ol.example.com", "user", "secret-pass",
+            transport=httpx.MockTransport(handler),
+            governor=OpenListRequestGovernor(rate_per_second=1000),
+        )
+
+        def read_directory():
+            try:
+                client.list_dir("/动画")
+            except Exception as exc:  # pragma: no cover - assertion below carries detail
+                errors.append(exc)
+
+        first = threading.Thread(target=read_directory)
+        second = threading.Thread(target=read_directory)
+        first.start()
+        assert login_started.wait(5)
+        second.start()
+        allow_login.set()
+        first.join(5)
+        second.join(5)
+
+        assert errors == []
+        assert calls.count("/api/auth/login") == 1
+        assert calls.count("/api/fs/list") == 2
+
+    def test_concurrent_expired_session_reauthenticates_once(self):
+        """服务端会话失效时，并发目录读取也只能触发一次重新登录。"""
+        login_started = threading.Event()
+        allow_login = threading.Event()
+        calls: list[str] = []
+        calls_lock = threading.Lock()
+        errors: list[Exception] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            with calls_lock:
+                calls.append(request.url.path)
+            if request.url.path == "/api/auth/login":
+                login_started.set()
+                assert allow_login.wait(5)
+                return _json_response(200, {"code": 200, "data": {"token": "fresh-token"}})
+            if request.headers.get("authorization") != "fresh-token":
+                return _json_response(401, {"code": 401})
+            return _json_response(200, _fs_list_payload("/动画", []))
+
+        client = get_openlist_client(
+            "https://ol.example.com", "user", "secret-pass",
+            transport=httpx.MockTransport(handler),
+            governor=OpenListRequestGovernor(rate_per_second=1000),
+        )
+        client._token = "expired-token"
+
+        def read_directory():
+            try:
+                client.list_dir("/动画")
+            except Exception as exc:  # pragma: no cover - assertion below carries detail
+                errors.append(exc)
+
+        first = threading.Thread(target=read_directory)
+        second = threading.Thread(target=read_directory)
+        first.start()
+        assert login_started.wait(5)
+        second.start()
+        allow_login.set()
+        first.join(5)
+        second.join(5)
+
+        assert errors == []
+        assert calls.count("/api/auth/login") == 1
+
+
 @pytest.fixture(autouse=True)
 def isolated_db(tmp_path, monkeypatch):
     """文件级 DB 隔离：客户端每次物理请求前都会查 source_health。
@@ -80,7 +196,9 @@ def isolated_db(tmp_path, monkeypatch):
     （含历史冷却记录），导致 can_request 误判 cooling_down。
     """
     from app.db.database import close_connection, init_db
+    from app.integrations.openlist.client import clear_openlist_client_pool
 
+    clear_openlist_client_pool()
     db_path = tmp_path / "openlist_client.db"
     monkeypatch.setattr("app.db.database._db_path", db_path)
     import app.db.database as db_mod
@@ -89,6 +207,9 @@ def isolated_db(tmp_path, monkeypatch):
         db_mod._local.connection = None
     init_db()
     yield
+    from app.integrations.openlist.client import clear_openlist_client_pool
+
+    clear_openlist_client_pool()
     close_connection()
 
 
@@ -1056,8 +1177,6 @@ class TestFinalAdmissionGovernorOrder:
 
     def test_peek_deny_does_not_enter_governor(self):
         """明确未到期冷却：peek 直接拒绝，不进入限速队列、零请求。"""
-        import threading
-
         from app.catalog import source_health
 
         calls: list = []

@@ -36,6 +36,8 @@ from app.integrations.openlist.cache import (
 )
 from app.integrations.openlist.client import (
     OpenListClient,
+    clear_openlist_client_pool,
+    get_openlist_client,
     normalize_openlist_server_url,
     normalize_remote_path,
     validate_server_url,
@@ -187,7 +189,7 @@ def _client_from_config(
     if not url or not user or not pwd:
         raise HTTPException(status_code=400, detail=_NOT_CONFIGURED_MESSAGE)
     try:
-        return OpenListClient(url, user, pwd)
+        return get_openlist_client(url, user, pwd, client_factory=OpenListClient)
     except OpenListError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
@@ -376,7 +378,9 @@ def _schedule_background_refresh(
             )
             if not allowed:
                 return
-            client = OpenListClient(server_url, username, password)
+            client = get_openlist_client(
+                server_url, username, password, client_factory=OpenListClient,
+            )
             page_payload = _fetch_dir_page(
                 client, remote_path, int(page), int(per_page), refresh=False
             )
@@ -441,7 +445,9 @@ def test_connection(req: TestConnectionRequest):
             "message": "远端网盘疑似触发访问保护，KumiPlayer 已暂停该来源的自动请求，请稍后再试",
         }
 
-    client = OpenListClient(server_url, username, password)
+    client = get_openlist_client(
+        server_url, username, password, client_factory=OpenListClient,
+    )
     try:
         client.login()
     except OpenListError as exc:
@@ -508,6 +514,10 @@ def save_connection_config(req: SaveConfigRequest):
     connection_changed = old_identity != new_identity
     if connection_changed and config.openlist_routes:
         config.openlist_routes = []
+    # 密码不参与匿名会话键；用户重新填写密码时也必须丢弃旧内存 Token，避免
+    # 新配置仍携带旧会话继续请求。
+    if connection_changed or req.password:
+        clear_openlist_client_pool()
 
     config.openlist_server_url = new_server
     config.openlist_remote_root = remote_root
@@ -763,10 +773,11 @@ def prefetch(req: PrefetchRequest):
                 continue
             try:
                 if client is None:
-                    client = OpenListClient(
+                    client = get_openlist_client(
                         config.openlist_server_url,
                         config.openlist_username,
                         config.openlist_password,
+                        client_factory=OpenListClient,
                     )
                 # 预取只拉当前层 page 1（有上限、不递归）；继续走 OpenListClient
                 #（Module 1 governor + circuit breaker 自动覆盖），不得绕过。

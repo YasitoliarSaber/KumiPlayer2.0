@@ -52,10 +52,10 @@ _DEFER_MESSAGE = "远端网盘疑似触发访问保护，KumiPlayer 已暂停该
 def _build_openlist_client(source_id: str):
     """按 source 记录构造 OpenList 客户端（凭据只存内存，不进 payload）。"""
     from app.core.config import load_config
-    from app.integrations.openlist.client import OpenListClient
+    from app.integrations.openlist.client import get_openlist_client
 
     config = load_config()
-    return OpenListClient(
+    return get_openlist_client(
         config.openlist_server_url,
         config.openlist_username,
         config.openlist_password,
@@ -71,13 +71,13 @@ def _build_scanner(root: dict):
     """
     from app.catalog.scanner import SourceCatalogScanner
     from app.core.config import load_config
-    from app.integrations.openlist.client import OpenListClient
+    from app.integrations.openlist.client import get_openlist_client
     from app.sources.registry import get_source_adapter
 
     source = str(root.get("source_id") or "")
     if source.startswith("openlist") or source == "openlist":
         config = load_config()
-        client = OpenListClient(
+        client = get_openlist_client(
             config.openlist_server_url,
             config.openlist_username,
             config.openlist_password,

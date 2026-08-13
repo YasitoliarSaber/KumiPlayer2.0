@@ -128,10 +128,7 @@ class DiscoveryEngine:
             dirname = path.rstrip("/").rsplit("/", 1)[-1]
             if self.is_structure(dirname):
                 return False
-            children = [
-                item for item in catalog_store.list_nodes(self.root_id)
-                if item["parent_path"] == path and item["tombstone"] == ""
-            ]
+            children = catalog_store.list_current_children(self.root_id, path)
             return any(
                 item["kind"] == "file" and _is_video_name(item["name"]) for item in children
             ) or any(
@@ -217,9 +214,8 @@ class DiscoveryEngine:
         # 阻塞同一 root 下其他已闭合作品的自动识别。
         # （root 已作为作品容器被 settle 处理时不再重复建单元）
         root_files = [
-            node for node in catalog_store.list_nodes(self.root_id)
-            if node["parent_path"] == root_path and node["kind"] == "file"
-            and node["tombstone"] == ""
+            node for node in catalog_store.list_current_children(self.root_id, root_path)
+            if node["kind"] == "file"
             and node["name"].rsplit(".", 1)[-1].lower() in _video_exts()
         ]
         if root_files and root_path not in processed:
@@ -250,9 +246,8 @@ class DiscoveryEngine:
         _check_cancel(should_cancel)
         prefix = boundary.rstrip("/") + "/"
         video_rows = [
-            row for row in catalog_store.list_nodes(self.root_id)
+            row for row in catalog_store.list_current_nodes_in_boundary(self.root_id, boundary)
             if row["remote_path"].startswith(prefix) and row["kind"] == "file"
-            and row["tombstone"] == ""
             and _is_video_name(row["name"])
         ]
         unit: dict = {"boundary": boundary, "work_key": boundary, "work_title": ""}
@@ -381,9 +376,8 @@ class DiscoveryEngine:
         boundary = unit["boundary"]
         prefix = boundary.rstrip("/") + "/"
         rows = [
-            row for row in catalog_store.list_nodes(self.root_id)
+            row for row in catalog_store.list_current_nodes_in_boundary(self.root_id, boundary)
             if row["remote_path"].startswith(prefix) and row["kind"] == "file"
-            and row["tombstone"] == ""
         ]
 
         if not rows:

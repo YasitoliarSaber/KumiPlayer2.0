@@ -969,3 +969,45 @@ def list_nodes(root_id: str, *, include_tombstone: bool = False) -> list[dict]:
             (root_id,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def list_current_children(root_id: str, parent_path: str) -> list[dict]:
+    """读取一个目录的当前直接子项，供发现器做候选判断。
+
+    这是 ``source_nodes(root_id, parent_path)`` 索引查询，避免发现器在每个
+    frontier 目录上把整棵来源树加载到 Python 后再过滤。
+    """
+    rows = get_connection().execute(
+        """
+        SELECT * FROM source_nodes
+        WHERE root_id = ? AND parent_path = ? AND tombstone = ''
+        ORDER BY remote_path
+        """,
+        (root_id, parent_path),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_current_nodes_in_boundary(root_id: str, boundary_path: str) -> list[dict]:
+    """读取一个作品边界下的当前节点，供识别/修订生成使用。"""
+    prefix = boundary_path.rstrip("/") or "/"
+    if prefix == "/":
+        rows = get_connection().execute(
+            """
+            SELECT * FROM source_nodes
+            WHERE root_id = ? AND tombstone = ''
+            ORDER BY remote_path
+            """,
+            (root_id,),
+        ).fetchall()
+    else:
+        rows = get_connection().execute(
+            """
+            SELECT * FROM source_nodes
+            WHERE root_id = ? AND tombstone = ''
+              AND (remote_path = ? OR substr(remote_path, 1, length(?)) = ?)
+            ORDER BY remote_path
+            """,
+            (root_id, prefix, prefix + "/", prefix + "/"),
+        ).fetchall()
+    return [dict(row) for row in rows]

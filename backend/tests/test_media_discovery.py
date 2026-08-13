@@ -65,6 +65,37 @@ def _run(engine, client=None, on_unit=None):
 
 
 class TestDiscoveryUnits:
+    def test_directory_queries_scope_candidate_and_boundary_reads_to_the_target_root(self):
+        """大目录扫描不能为每个候选目录反复加载整棵 source_nodes 到 Python。"""
+        tree = {
+            "/动画": [("作品", True, None, None)],
+            "/动画/作品": [("作品 - 01.mkv", False, 100, 1.0)],
+        }
+        root, engine = _setup_root(tree)
+        calls: list[tuple[str, str]] = []
+        original_children = store.list_current_children
+        original_boundary = store.list_current_nodes_in_boundary
+
+        def children(root_id, parent_path):
+            calls.append(("children", parent_path))
+            return original_children(root_id, parent_path)
+
+        def boundary(root_id, boundary_path):
+            calls.append(("boundary", boundary_path))
+            return original_boundary(root_id, boundary_path)
+
+        store.list_current_children = children
+        store.list_current_nodes_in_boundary = boundary
+        try:
+            results = _run(engine)
+        finally:
+            store.list_current_children = original_children
+            store.list_current_nodes_in_boundary = original_boundary
+
+        assert any(item["status"] == "plan_ready" for item in results)
+        assert ("children", "/动画/作品") in calls
+        assert ("boundary", "/动画/作品") in calls
+
     def test_seasons_and_ova_merge_into_one_unit(self):
         tree = {
             "/动画": [("分类", True, None, None)],

@@ -85,9 +85,15 @@ function stageTitle(index: number, state: StageState): string {
   return stageLabels[index];
 }
 
+function rootIsCoolingDown(root: OpenListImportBatch['roots'][number]): boolean {
+  const detail = `${root.message || ''} ${root.error || ''}`;
+  return /访问保护|冷却/.test(detail) && root.job_status === 'queued';
+}
+
 export default function MediaBackgroundImportStatus({ batch, source }: Props) {
   const roots = batch?.roots || [];
   const units = roots.flatMap((root) => root.units || []);
+  const coolingDown = source === 'openlist' && roots.some(rootIsCoolingDown);
   const active = units.filter(isActive).length + roots.filter((root) => ['queued', 'running', 'pending'].includes(root.job_status || root.status)).length;
   const completed = units.filter((unit) => unit.state === 'completed').length;
   const attention = units.filter((unit) => ['needs_review', 'failed', 'cancelled'].includes(unit.state)).length;
@@ -97,10 +103,12 @@ export default function MediaBackgroundImportStatus({ batch, source }: Props) {
   const stages = stageLabels.map((_, index) => stageState(index, roots, units));
   const current = currentStage(stages);
   const overallStage = stages[current];
-  const overallTitle = stageTitle(current, overallStage);
+  const overallTitle = coolingDown ? '已保护性暂停' : stageTitle(current, overallStage);
   const activeJob = units.flatMap((unit) => [unit.library_rebuild_job, unit.scrape_job, unit.mirror_job])
     .find((job) => job && ['queued', 'running'].includes(job.status));
-  const summary = activeJob?.message
+  const summary = coolingDown
+    ? '检测到网盘访问保护，已停止继续请求；冷却结束后会自动从当前进度恢复。'
+    : activeJob?.message
     || (overallStage === 'complete' ? '所有已确认作品均已处理完毕。' : attention ? `${attention} 个项目需要处理，其他作品继续执行。` : '正在读取后台任务状态。');
 
   return (
@@ -112,9 +120,9 @@ export default function MediaBackgroundImportStatus({ batch, source }: Props) {
           <h2>{overallTitle}</h2>
           <p>{sourceLabel}已提交 · {summary}</p>
         </div>
-        <div className={`media-background-state ${active ? 'active' : attention ? 'attention' : 'complete'}`}>
-          {active ? <Spinner size="tiny" /> : attention ? <CircleAlert size={16} /> : <CheckCircle2 size={16} />}
-          <span>{active ? '正在处理' : attention ? '部分项目需要处理' : '处理完成'}</span>
+        <div className={`media-background-state ${coolingDown ? 'attention' : active ? 'active' : attention ? 'attention' : 'complete'}`}>
+          {coolingDown || attention ? <CircleAlert size={16} /> : active ? <Spinner size="tiny" /> : <CheckCircle2 size={16} />}
+          <span>{coolingDown ? '等待网盘冷却' : active ? '正在处理' : attention ? '部分项目需要处理' : '处理完成'}</span>
         </div>
       </header>
       <div className="media-background-progress" aria-label="后台处理进度">
@@ -141,13 +149,14 @@ export default function MediaBackgroundImportStatus({ batch, source }: Props) {
             <div><strong>{unit.work_title}</strong><span>{unitDetail(unit)}</span></div>
             <span className="media-background-unit-state">{stateLabel[unit.state] || '正在处理'}</span>
           </article>
-        )) : roots.map((root) => (
-          <article key={root.root_id} className="media-background-unit discovering">
-            <div className="media-background-unit-icon"><Spinner size="tiny" /></div>
+        )) : roots.map((root) => {
+          const rootCoolingDown = source === 'openlist' && rootIsCoolingDown(root);
+          return <article key={root.root_id} className={`media-background-unit ${rootCoolingDown ? 'attention' : 'discovering'}`}>
+            <div className="media-background-unit-icon">{rootCoolingDown ? <CircleAlert size={17} /> : <Spinner size="tiny" />}</div>
             <div><strong>{root.remote_locator}</strong><span>{root.message || '正在读取目录并识别其中的作品。'}</span></div>
-            <span className="media-background-unit-state">正在识别</span>
-          </article>
-        ))}
+            <span className="media-background-unit-state">{rootCoolingDown ? '等待网盘冷却' : '正在识别'}</span>
+          </article>;
+        })}
       </section>
     </section>
   );
