@@ -206,8 +206,11 @@ def create_import_batch(
     if not roots:
         raise ValueError("导入批次至少需要一个来源根")
 
-    # 1. 先解析每个请求（只读）；promote_parent 需要独立事务先执行归并。
-    from app.catalog.lifecycle import promote_parent_root, resolve_root_for_import
+    # 1. 只读解析每个请求（不执行任何写操作）：重叠语义由
+    #    app.catalog.lifecycle.resolve_root_for_import 决策。promote_parent 的
+    #    归并在下面同一个事务内执行，保证归并与批次创建原子（失败整体回滚，
+    #    不会留下已替换子根却无批次的半成品）。
+    from app.catalog.lifecycle import _promote_in_tx, resolve_root_for_import
 
     resolutions: list[Any] = []
     for raw_root in roots:
@@ -216,21 +219,13 @@ def create_import_batch(
         if not normalized:
             raise ValueError("来源根定位不能为空")
         resolution = resolve_root_for_import(source_id, remote_locator)
-        if resolution.action == "promote_parent":
-            resolution = promote_parent_root(
-                source_id,
-                remote_locator,
-                local_locator=str(raw_root.get("local_locator") or "").strip(),
-                import_family=str(raw_root.get("import_family") or import_family or "anime").strip(),
-                import_scope=str(raw_root.get("import_scope") or "").strip(),
-                child_root_ids=resolution.covered_root_ids,
-            )
         resolutions.append(resolution)
 
     conn = get_connection()
     timestamp = now_iso()
     batch_id = uuid.uuid4().hex
     prepared: list[dict[str, str]] = []
+    prepared_resolutions: list[Any] = []
 
     with transaction(conn) as tx:
         if tx.execute(
@@ -238,16 +233,47 @@ def create_import_batch(
         ).fetchone() is None:
             raise ValueError("source 不存在")
 
+        # 2. 在事务内执行 promote_parent 归并（建/复用父 root、重绑 unit/revision、
+        #    删子根物理事实，回调前已在事务内复查 durable jobs）。
+        #    同一批次 roots 互不为父子（_validate_batch_paths 已剔除），因此
+        #    promote 至多触发一次；防御性按归一化 locator 去重。
+        promote_seen: set[str] = set()
+        for index, resolution in enumerate(resolutions):
+            if resolution.action != "promote_parent":
+                continue
+            raw_root = roots[index]
+            requested = normalize_locator(resolution.requested_locator)
+            if requested in promote_seen:
+                continue
+            promote_seen.add(requested)
+            parent_root_id = _promote_in_tx(
+                tx,
+                source_id,
+                resolution.requested_locator,
+                normalized_parent=requested,
+                local_locator=str(raw_root.get("local_locator") or "").strip(),
+                import_family=str(raw_root.get("import_family") or import_family or "anime").strip(),
+                import_scope=str(raw_root.get("import_scope") or "").strip(),
+                child_root_ids=resolution.covered_root_ids,
+                now_iso=now_iso,
+            )
+            resolution.canonical_root_id = parent_root_id
+            resolution.canonical_locator = resolution.requested_locator
+
         existing = [
             SourceRootRecord.from_row(row)
             for row in tx.execute(
                 "SELECT * FROM source_roots WHERE source_id = ?", (source_id,)
             ).fetchall()
         ]
-        for index, raw_root in enumerate(roots):
+
+        # 3. 构建 prepared（按 canonical root 去重）：两个请求映射到同一个既有
+        #    父根时只保留一个规范 root，避免 import_batch_roots 主键重复。
+        seen_canonical: set[str] = set()
+        for index, resolution in enumerate(resolutions):
+            raw_root = roots[index]
             remote_locator = str(raw_root.get("remote_locator") or "").strip()
             normalized = normalize_locator(remote_locator)
-            resolution = resolutions[index]
 
             if resolution.action == "create":
                 # 全新路径：防御性复查重叠（resolver 已排除，双保险）
@@ -261,9 +287,10 @@ def create_import_batch(
                         raise ValueError(
                             f"来源根与既有根重叠: {normalized} 与 {prior_locator}"
                         )
+                root_id = uuid.uuid4().hex
                 prepared.append(
                     {
-                        "root_id": uuid.uuid4().hex,
+                        "root_id": root_id,
                         "remote_locator": remote_locator,
                         "normalized_locator": normalized,
                         "local_locator": str(raw_root.get("local_locator") or "").strip(),
@@ -273,17 +300,22 @@ def create_import_batch(
                         "reused": False,
                     }
                 )
+                prepared_resolutions.append(resolution)
                 continue
 
             # reuse_exact / reuse_ancestor / promote_parent：复用解析出的规范 root
+            canonical_id = resolution.canonical_root_id
+            if canonical_id in seen_canonical:
+                # 同一规范 root 已被本批次入表：去重，不再重复写 import_batch_roots
+                continue
             canonical = next(
-                (p for p in existing if p.root_id == resolution.canonical_root_id),
-                None,
+                (p for p in existing if p.root_id == canonical_id), None
             )
             if canonical is None:
                 raise ValueError(
                     f"来源根解析失败: {remote_locator} 未找到规范来源根"
                 )
+            seen_canonical.add(canonical_id)
             prepared.append(
                 {
                     "root_id": canonical.root_id,
@@ -299,7 +331,9 @@ def create_import_batch(
                     "reused": True,
                 }
             )
+            prepared_resolutions.append(resolution)
 
+        # 4. 建批次 + 落 root/batch_roots
         tx.execute(
             """
             INSERT INTO import_batches (
@@ -337,7 +371,9 @@ def create_import_batch(
     batch = get_import_batch(batch_id) or {}
     from app.catalog.lifecycle import resolution_api_label
 
-    for root_item, resolution in zip(batch.get("roots", []), resolutions, strict=False):
+    for root_item, resolution in zip(
+        batch.get("roots", []), prepared_resolutions, strict=False
+    ):
         root_item["resolution"] = resolution_api_label(resolution.action)
         root_item["requested_locator"] = resolution.requested_locator
         root_item["canonical_locator"] = resolution.canonical_locator
@@ -623,10 +659,52 @@ def new_stage_run() -> str:
     return uuid.uuid4().hex
 
 
-def clear_stage(run_id: str) -> None:
+def register_stage_run(run_id: str, root_id: str) -> None:
+    """记录一次分页扫描 run 的来源根归属（用于删除/归并时精确清理暂存）。"""
     conn = get_connection()
-    conn.execute("DELETE FROM source_stage_entries WHERE run_id = ?", (run_id,))
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO source_stage_runs (run_id, root_id, created_at)
+        VALUES (?, ?, ?)
+        """,
+        (run_id, root_id, now_iso()),
+    )
     conn.commit()
+
+
+def clear_stage(run_id: str) -> None:
+    """清空一次 run 的分页暂存及其归属记录（完成/重试/取消均调用，避免孤儿）。"""
+    conn = get_connection()
+    with transaction(conn) as tx:
+        tx.execute("DELETE FROM source_stage_entries WHERE run_id = ?", (run_id,))
+        tx.execute("DELETE FROM source_stage_runs WHERE run_id = ?", (run_id,))
+
+
+def stage_run_ids_for_roots(root_ids: list[str]) -> list[str]:
+    """查出一组来源根此前登记的所有分页 run_id（用于精确清理）."""
+    if not root_ids:
+        return []
+    marks = ",".join("?" for _ in root_ids)
+    rows = get_connection().execute(
+        f"SELECT run_id FROM source_stage_runs WHERE root_id IN ({marks})", root_ids
+    ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+def delete_stage_for_roots(root_ids: list[str]) -> None:
+    """按来源根精确清理其分页暂存（run 归属 + 暂存条目），无孤儿残留。"""
+    if not root_ids:
+        return
+    marks = ",".join("?" for _ in root_ids)
+    conn = get_connection()
+    with transaction(conn) as tx:
+        tx.execute(
+            f"DELETE FROM source_stage_entries WHERE run_id IN (SELECT run_id FROM source_stage_runs WHERE root_id IN ({marks}))",
+            root_ids,
+        )
+        tx.execute(
+            f"DELETE FROM source_stage_runs WHERE root_id IN ({marks})", root_ids
+        )
 
 
 def add_stage_page(run_id: str, directory_path: str, page: int, entries: list[SourceNodeInput]) -> None:
@@ -707,6 +785,7 @@ def commit_directory(
         ).fetchone()
         if root_row is not None and int(root_row["active_generation"]) > generation:
             tx.execute("DELETE FROM source_stage_entries WHERE run_id = ?", (run_id,))
+            tx.execute("DELETE FROM source_stage_runs WHERE run_id = ?", (run_id,))
             return stats  # 丢弃旧代提交（不抛错，调用方按正常返回处理）
 
         # 只读取本目录的直属成员（parent_path 精确匹配）：
@@ -852,6 +931,7 @@ def commit_directory(
                     )
 
         tx.execute("DELETE FROM source_stage_entries WHERE run_id = ?", (run_id,))
+        tx.execute("DELETE FROM source_stage_runs WHERE run_id = ?", (run_id,))
         next_verify_at = (datetime.now(timezone(timedelta(hours=8))) + VERIFY_INTERVAL).isoformat()
         tx.execute(
             """

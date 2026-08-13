@@ -82,6 +82,10 @@ class RootResolution:
     covered_root_ids: list[str] = field(default_factory=list)
 
 
+class CatalogCleanupBusyError(RuntimeError):
+    """相关持久后台任务正在停止/运行，删除或归并必须中止（API 层转 409）。"""
+
+
 #: 内部 action → API 对外展示值（方案第五节 JSON 规范）
 RESOLUTION_API_LABELS = {
     "create": "created",
@@ -277,6 +281,8 @@ def delete_catalog_for_clear(source: str) -> CatalogCleanupResult:
 
     删除顺序按依赖排列；``sources`` 连接配置记录永不删除。
     """
+    from app.catalog.store import now_iso
+
     roots = list_roots_for_library_clear(source)
     if not roots:
         return CatalogCleanupResult()
@@ -293,10 +299,8 @@ def delete_catalog_for_clear(source: str) -> CatalogCleanupResult:
         binding_ids = [str(row[0]) for row in binding_rows]
     jobs = _related_jobs(root_ids, unit_ids, revision_ids)
     job_ids = [str(job["job_id"]) for job in jobs]
-    all_roots = conn.execute("SELECT COUNT(*) FROM source_roots").fetchone()[0]
-    # source_stage_entries 没有 root 列，只有删除范围覆盖全部来源根时才允许清空，
-    # 避免误删其他仍在扫描的 root 的暂存数据。
-    clear_all_stage = int(all_roots) == len(root_ids)
+    # 扫描暂存按 run→root 归属精确清理：单来源删除也会清掉该 root 的暂存，
+    # 不再依赖“覆盖全部 root 才清空”的特判，避免孤儿 stage 记录。
 
     def _marks(items: list[str]) -> str:
         return ",".join("?" for _ in items)
@@ -333,6 +337,28 @@ def delete_catalog_for_clear(source: str) -> CatalogCleanupResult:
     }
 
     with transaction(conn) as tx:
+        # 0. 事务内复查持久任务（BEGIN IMMEDIATE，关闭 prepare 与正式删除之间的
+        #    竞态窗口）：running → 抛忙异常（整体回滚 → API 转 409）；queued →
+        #    在事务内直接取消（终态 cancelled），绝不让可能写库的任务与删除竞争。
+        recheck = _related_jobs(root_ids, unit_ids, revision_ids)
+        recheck_by_status: dict[str, list[str]] = {}
+        for job in recheck:
+            recheck_by_status.setdefault(job["status"], []).append(str(job["job_id"]))
+        running_ids = recheck_by_status.get("running", [])
+        queued_ids = recheck_by_status.get("queued", [])
+        if running_ids:
+            raise CatalogCleanupBusyError(
+                "相关后台任务正在停止，请稍后再次确认删除"
+            )
+        if queued_ids:
+            tx.execute(
+                f"""
+                UPDATE jobs SET status = 'cancelled', version = version + 1, updated_at = ?
+                WHERE job_id IN ({_marks(queued_ids)})
+                """,
+                [now_iso(), *queued_ids],
+            )
+            job_ids = [job_id for job_id in job_ids if job_id not in queued_ids]
         # 1. 刮削关联（binding 维度）
         if binding_ids:
             tx.execute(
@@ -370,9 +396,21 @@ def delete_catalog_for_clear(source: str) -> CatalogCleanupResult:
         tx.execute(
             f"DELETE FROM media_units WHERE root_id IN ({_marks(root_ids)})", root_ids
         )
-        # 5. 扫描暂存与扫描运行
-        if clear_all_stage:
-            tx.execute("DELETE FROM source_stage_entries")
+        # 5. 扫描暂存（按 run→root 归属精确清理）与扫描运行
+        stage_run_ids = [
+            str(row[0]) for row in tx.execute(
+                f"SELECT run_id FROM source_stage_runs WHERE root_id IN ({_marks(root_ids)})",
+                root_ids,
+            ).fetchall()
+        ]
+        if stage_run_ids:
+            tx.execute(
+                f"DELETE FROM source_stage_entries WHERE run_id IN ({_marks(stage_run_ids)})",
+                stage_run_ids,
+            )
+        tx.execute(
+            f"DELETE FROM source_stage_runs WHERE root_id IN ({_marks(root_ids)})", root_ids
+        )
         tx.execute(
             f"DELETE FROM scan_runs WHERE root_id IN ({_marks(root_ids)})", root_ids
         )
@@ -583,138 +621,39 @@ def promote_parent_root(
     归并步骤（单事务）：
     1. 确认所有涉及的 durable jobs 均不处于 queued/running（事务内复查）；
     2. 创建新的父 SourceRoot；
-    3. 子根 ``source_nodes`` / ``source_directories`` 合并到父根
-       （remote_path 保持原值，以 (root_id, remote_path) 去重）；
-    4. ``media_units`` / ``media_libraries`` 的 root_id 更新到父根，
-       保留原 unit_id / revision_id（作品与识别历史不失效）；
-    5. 清除子根历史扫描任务与批次关系，删除子根；
-    6. 删除不再有任何 root 的孤儿批次；
-    7. 提交。
+    3. 只保留并重绑 ``media_units`` / ``media_libraries`` 到父根
+       （保留原 unit_id / revision_id，作品与识别历史不失效）；
+    4. **不迁移**子根的物理扫描事实（``source_nodes`` / ``source_directories``）：
+       旧子根层级数据（parent_path/depth）在新父根下是错的，且迁移后父根
+       frontier 没有父目录本身，会导致父目录下其他作品不被发现；
+    5. 精确清理子根的扫描暂存与历史扫描任务；
+    6. 删除子根的物理扫描事实、批次关系与来源根；
+    7. 删除不再有任何 root 的孤儿批次；
+    8. 提交。
 
-    归并后由调用方对新父根执行一次 ``full`` 扫描。归并本身不修改
-    ``real_path`` / ``logical_locator`` / 已生成镜像与播放状态。
+    归并后由调用方对新父根执行一次 ``full`` 扫描：父根 frontier 从父目录
+    本身重新开始（depth=0），新扫描通过相同 boundary 复用旧 unit，从而
+    ``/父`` 下的兄弟作品也能被发现。归并本身不修改 ``real_path`` /
+    ``logical_locator`` / 已生成镜像与播放状态。
     """
-    import uuid
-
     from app.catalog.store import now_iso
 
     child_ids = list(dict.fromkeys(child_root_ids))
     if not child_ids:
         raise ValueError("父来源根归并缺少子来源根")
     conn = get_connection()
-    marks = ",".join("?" for _ in child_ids)
-
-    def _assert_no_active_jobs(tx) -> None:
-        child_units = [str(row[0]) for row in tx.execute(
-            f"SELECT unit_id FROM media_units WHERE root_id IN ({marks})", child_ids
-        ).fetchall()]
-        child_revisions: list[str] = []
-        if child_units:
-            unit_marks = ",".join("?" for _ in child_units)
-            child_revisions = [str(row[0]) for row in tx.execute(
-                f"SELECT revision_id FROM import_revisions WHERE unit_id IN ({unit_marks})",
-                child_units,
-            ).fetchall()]
-        active = [
-            str(row[0]) for row in tx.execute(
-                """
-                SELECT job_id FROM jobs
-                WHERE status IN ('queued', 'running')
-                """
-            ).fetchall()
-        ]
-        if active:
-            related = _related_jobs(child_ids, child_units, child_revisions)
-            if any(str(job["job_id"]) in active for job in related):
-                raise ValueError("相关后台任务正在运行，无法归并来源根，请稍后重试")
-
-    _assert_no_active_jobs(conn)
-
     normalized_parent = _normalized(requested_locator)
     with transaction(conn) as tx:
-        # 事务内复查（防竞态：另一个请求刚入队任务）
-        _assert_no_active_jobs(tx)
-
-        existing_parent = tx.execute(
-            "SELECT * FROM source_roots WHERE source_id = ? AND normalized_locator = ?",
-            (source_id, normalized_parent),
-        ).fetchone()
-        if existing_parent is not None:
-            parent_root_id = str(existing_parent["root_id"])
-        else:
-            parent_root_id = uuid.uuid4().hex
-            timestamp = now_iso()
-            tx.execute(
-                """
-                INSERT INTO source_roots (
-                    root_id, source_id, remote_locator, normalized_locator, local_locator,
-                    import_family, import_scope, scan_policy, active_generation,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'standard', 0, ?, ?)
-                """,
-                (
-                    parent_root_id, source_id, requested_locator, normalized_parent,
-                    local_locator or "", import_family or "anime", import_scope or "",
-                    timestamp, timestamp,
-                ),
-            )
-
-        # 子根物理事实合并到父根（remote_path 保持原值）
-        tx.execute(
-            f"""
-            INSERT OR REPLACE INTO source_nodes (
-                root_id, remote_path, parent_path, name, kind, size, mtime,
-                etag, content_hash, remote_id, logical_locator, provider_id, route_id,
-                first_seen_generation, last_seen_generation, tombstone
-            )
-            SELECT ?, remote_path, parent_path, name, kind, size, mtime,
-                etag, content_hash, remote_id, logical_locator, provider_id, route_id,
-                first_seen_generation, last_seen_generation, tombstone
-            FROM source_nodes WHERE root_id IN ({marks})
-            """,
-            [parent_root_id, *child_ids],
-        )
-        tx.execute(
-            f"""
-            INSERT OR REPLACE INTO source_directories (
-                root_id, remote_path, parent_path, depth, state, accepted_generation,
-                entry_count, member_hash, last_verified_at, next_verify_at,
-                retry_count, last_error_kind
-            )
-            SELECT ?, remote_path, parent_path, depth, state, accepted_generation,
-                entry_count, member_hash, last_verified_at, next_verify_at,
-                retry_count, last_error_kind
-            FROM source_directories WHERE root_id IN ({marks})
-            """,
-            [parent_root_id, *child_ids],
-        )
-        # 单元与媒体库投影归属父根（保留 unit_id / revision_id）
-        tx.execute(
-            f"UPDATE media_units SET root_id = ? WHERE root_id IN ({marks})",
-            [parent_root_id, *child_ids],
-        )
-        tx.execute(
-            f"UPDATE media_libraries SET root_id = ? WHERE root_id IN ({marks})",
-            [parent_root_id, *child_ids],
-        )
-        # 清除子根历史扫描任务与批次关系
-        tx.execute(
-            f"DELETE FROM scan_runs WHERE root_id IN ({marks})", child_ids
-        )
-        tx.execute(
-            f"DELETE FROM import_batch_roots WHERE root_id IN ({marks})", child_ids
-        )
-        tx.execute(
-            f"DELETE FROM source_roots WHERE root_id IN ({marks})", child_ids
-        )
-        # 孤儿批次：不再关联任何 root 的批次
-        tx.execute(
-            """
-            DELETE FROM import_batches
-            WHERE NOT EXISTS (
-                SELECT 1 FROM import_batch_roots AS r WHERE r.batch_id = import_batches.batch_id
-            )
-            """
+        parent_root_id = _promote_in_tx(
+            tx,
+            source_id,
+            requested_locator,
+            normalized_parent=normalized_parent,
+            local_locator=local_locator,
+            import_family=import_family,
+            import_scope=import_scope,
+            child_root_ids=child_ids,
+            now_iso=now_iso,
         )
 
     return RootResolution(
@@ -724,3 +663,121 @@ def promote_parent_root(
         canonical_locator=requested_locator,
         covered_root_ids=child_ids,
     )
+
+
+def _promote_in_tx(
+    tx,
+    source_id: str,
+    requested_locator: str,
+    *,
+    normalized_parent: str,
+    local_locator: str,
+    import_family: str,
+    import_scope: str,
+    child_root_ids: list[str],
+    now_iso,
+) -> str:
+    """在已开启事务内执行归并（供 promote_parent_root 与 create_import_batch 共用）。
+
+    - 事务内复查 durable jobs（running/queued 均拒绝归并）；
+    - 创建/复用父 root，只重绑 media_units/media_libraries（保留 unit/revision）；
+    - 不迁移子根物理扫描事实，精确清理子根暂存/任务后删除子根。
+    调用方负责事务提交/回滚；返回父 root_id。
+    """
+    import uuid
+
+    child_ids = list(dict.fromkeys(child_root_ids))
+    marks = ",".join("?" for _ in child_ids)
+
+    child_units = [str(row[0]) for row in tx.execute(
+        f"SELECT unit_id FROM media_units WHERE root_id IN ({marks})", child_ids
+    ).fetchall()]
+    child_revisions: list[str] = []
+    if child_units:
+        unit_marks = ",".join("?" for _ in child_units)
+        child_revisions = [str(row[0]) for row in tx.execute(
+            f"SELECT revision_id FROM import_revisions WHERE unit_id IN ({unit_marks})",
+            child_units,
+        ).fetchall()]
+    active = [
+        str(row[0]) for row in tx.execute(
+            "SELECT job_id FROM jobs WHERE status IN ('queued', 'running')"
+        ).fetchall()
+    ]
+    if active:
+        related = _related_jobs(child_ids, child_units, child_revisions)
+        if any(str(job["job_id"]) in active for job in related):
+            raise ValueError("相关后台任务正在运行，无法归并来源根，请稍后重试")
+
+    existing_parent = tx.execute(
+        "SELECT * FROM source_roots WHERE source_id = ? AND normalized_locator = ?",
+        (source_id, normalized_parent),
+    ).fetchone()
+    if existing_parent is not None:
+        parent_root_id = str(existing_parent["root_id"])
+    else:
+        parent_root_id = uuid.uuid4().hex
+        timestamp = now_iso()
+        tx.execute(
+            """
+            INSERT INTO source_roots (
+                root_id, source_id, remote_locator, normalized_locator, local_locator,
+                import_family, import_scope, scan_policy, active_generation,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'standard', 0, ?, ?)
+            """,
+            (
+                parent_root_id, source_id, requested_locator, normalized_parent,
+                local_locator or "", import_family or "anime", import_scope or "",
+                timestamp, timestamp,
+            ),
+        )
+
+    # 单元与媒体库投影归属父根（保留 unit_id / revision_id）
+    tx.execute(
+        f"UPDATE media_units SET root_id = ? WHERE root_id IN ({marks})",
+        [parent_root_id, *child_ids],
+    )
+    tx.execute(
+        f"UPDATE media_libraries SET root_id = ? WHERE root_id IN ({marks})",
+        [parent_root_id, *child_ids],
+    )
+    # 精确清理子根扫描暂存与历史扫描任务
+    run_ids = [str(row[0]) for row in tx.execute(
+        f"SELECT run_id FROM source_stage_runs WHERE root_id IN ({marks})", child_ids
+    ).fetchall()]
+    if run_ids:
+        run_marks = ",".join("?" for _ in run_ids)
+        tx.execute(
+            f"DELETE FROM source_stage_entries WHERE run_id IN ({run_marks})", run_ids
+        )
+    tx.execute(
+        f"DELETE FROM source_stage_runs WHERE root_id IN ({marks})", child_ids
+    )
+    tx.execute(
+        f"DELETE FROM scan_runs WHERE root_id IN ({marks})", child_ids
+    )
+    # 删除子根物理扫描事实（不迁移，由父根全扫后经相同 boundary 复用 unit）
+    tx.execute(
+        f"DELETE FROM source_directories WHERE root_id IN ({marks})", child_ids
+    )
+    tx.execute(
+        f"DELETE FROM source_nodes WHERE root_id IN ({marks})", child_ids
+    )
+    # 清除子根批次关系与来源根
+    tx.execute(
+        f"DELETE FROM import_batch_roots WHERE root_id IN ({marks})", child_ids
+    )
+    tx.execute(
+        f"DELETE FROM source_roots WHERE root_id IN ({marks})", child_ids
+    )
+    # 孤儿批次：不再关联任何 root 的批次
+    tx.execute(
+        """
+        DELETE FROM import_batches
+        WHERE NOT EXISTS (
+            SELECT 1 FROM import_batch_roots AS r WHERE r.batch_id = import_batches.batch_id
+        )
+        """
+    )
+    return parent_root_id

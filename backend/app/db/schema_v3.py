@@ -503,10 +503,20 @@ _EXTRA_TABLES: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_source_health_state ON source_health(state)",
+    # 分页暂存（source_stage_entries）的 run → root 归属映射，用于单来源删除/
+    # 归并时精确清理扫描暂存，避免孤儿 stage 记录。
+    """
+    CREATE TABLE IF NOT EXISTS source_stage_runs (
+        run_id TEXT PRIMARY KEY,
+        root_id TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_stage_runs_root ON source_stage_runs(root_id)",
 )
 
 
 def ensure_source_health_table(conn) -> None:
-    """幂等补齐 source_health 表（已有 v3 库的轻量迁移，不重置数据库）。"""
+    """幂等补齐 source_health 及轻量扩展表（已有 v3 库的轻量迁移，不重置数据库）。"""
     for ddl in _EXTRA_TABLES:
         conn.execute(ddl)

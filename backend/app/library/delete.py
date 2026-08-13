@@ -13,6 +13,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional
 
+from app.catalog.lifecycle import CatalogCleanupBusyError  # noqa: F401
 from app.core.paths import get_cache_dir, get_data_dir, get_mirror_root
 
 
@@ -22,10 +23,6 @@ _SOURCE_NAMESPACES = {
     "local": "local",
     "openlist": "openlist",
 }
-
-
-class CatalogCleanupBusyError(RuntimeError):
-    """相关持久后台任务正在停止，整库删除必须中止（API 层转 409）。"""
 
 
 # ============================================================
@@ -1020,21 +1017,10 @@ def _execute_library_clear(preview: DeletePreview) -> DeleteResult:
             library_rescanned=False,
         )
 
-    try:
-        tracking_result = _clear_tracking_state_for_clear(source)
-        deleted_tracking_binding_count = tracking_result["binding_count"]
-        deleted_tracking_scan_run_count = tracking_result["scan_run_count"]
-        cancelled_tracking_task_count = tracking_result["cancelled_task_count"]
-    except Exception as exc:
-        return DeleteResult(
-            preview_id=preview.preview_id,
-            status="failed",
-            failed=[DeleteFailure(path="tracking_state", reason=str(exc))],
-            library_rescanned=False,
-        )
-
-    # 步骤 B：相关持久化任务门控。queued 直接取消；running 置协作式取消后
-    # 必须中止本次删除（409），不能在持久任务仍可能写库时删除来源根。
+    # 步骤 B（前置）：相关持久化任务门控必须在任何状态修改（追更、镜像、
+    # 数据库）之前完成。queued 直接取消；running 置协作式取消后必须中止本次
+    # 删除（409），不能在持久任务仍可能写库时删除来源根，也不能在 409 返回
+    # 前误清追更/镜像/数据库状态。
     try:
         from app.catalog import lifecycle
         job_gate = lifecycle.prepare_catalog_cleanup(source)
@@ -1047,6 +1033,19 @@ def _execute_library_clear(preview: DeletePreview) -> DeleteResult:
         )
     if job_gate["running_job_ids"]:
         raise CatalogCleanupBusyError("相关后台任务正在停止，请稍后再次确认删除")
+
+    try:
+        tracking_result = _clear_tracking_state_for_clear(source)
+        deleted_tracking_binding_count = tracking_result["binding_count"]
+        deleted_tracking_scan_run_count = tracking_result["scan_run_count"]
+        cancelled_tracking_task_count = tracking_result["cancelled_task_count"]
+    except Exception as exc:
+        return DeleteResult(
+            preview_id=preview.preview_id,
+            status="failed",
+            failed=[DeleteFailure(path="tracking_state", reason=str(exc))],
+            library_rescanned=False,
+        )
 
     for item in preview.files:
         path = Path(item.path)
@@ -1121,6 +1120,9 @@ def _execute_library_clear(preview: DeletePreview) -> DeleteResult:
             deleted_catalog_unit_count = catalog_result.deleted_unit_count
             deleted_catalog_revision_count = catalog_result.deleted_revision_count
             deleted_catalog_job_count = catalog_result.deleted_job_count
+        except CatalogCleanupBusyError:
+            # 事务内复查发现新的 running 任务：整体回滚并传播为 409
+            raise
         except Exception as exc:
             failed.append(DeleteFailure(path="catalog_cleanup", reason=str(exc)))
     elif deleted or preview.library_work_count or preview.catalog_root_count:

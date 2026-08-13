@@ -162,6 +162,7 @@ def scan_directory_paginated(
     for _attempt in range(MAX_PAGE_RETRIES + 1):
         _check_cancel(should_cancel)
         run_id = store.new_stage_run()
+        store.register_stage_run(run_id, root_id)
         store.clear_stage(run_id)
         page = 1
         collected = 0
@@ -220,6 +221,7 @@ def scan_directory_paginated(
             store.update_directory(
                 root_id, remote_path, state="queued", last_error_kind="cancelled",
             )
+            store.clear_stage(run_id)
             raise
         except PageConsistencyError as exc:
             last_error = exc
