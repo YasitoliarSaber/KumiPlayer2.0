@@ -1,0 +1,261 @@
+"""Module 5 Checkpoint 1 验收：SQLite Projection Facts。
+
+规划员必测：
+- current pointer：rev1/rev2 均 confirmed，unit.current_revision_id=rev2 →
+  list_current_revisions 只能得到 rev2（fail closed，不猜最新、不 fallback）；
+- scrape binding：同 target 连续 upsert 2 次 → DB 只有 1 行（binding_id = scrape_target_id）；
+- cross revision：rev1 已绑定 TMDB，rev2 相同语义 target → 复用同一 binding，
+  revision_id 更新到 rev2；
+- artifact：rev1 写 kind=strm,path=X，rev2 重写 X → 仍 1 行，revision_id == rev2；
+- migration：旧 v3 scrape_bindings 无 metadata_json → init_db 自动补列，user_version 仍 3。
+"""
+
+import json
+
+from app.db.database import get_connection
+from app.import_plan import revision_store
+
+
+def _ensure_unit(unit_id: str) -> None:
+    conn = get_connection()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO media_units (
+            unit_id, batch_id, root_id, discovery_scope, boundary, work_key,
+            status, closure_generation, current_revision_id, created_at, updated_at
+        ) VALUES (?, '', 'root-x', '', '/动画', 'w', 'discovered', 0, '', ?, ?)
+        """,
+        (unit_id, revision_store.now_iso(), revision_store.now_iso()),
+    )
+    conn.commit()
+
+
+def _items(paths):
+    return [
+        {
+            "id": f"i-{index}",
+            "source": "openlist",
+            "provider_id": "quark",
+            "relative_path": path,
+            "real_path": path,
+            "resource_type": "video",
+            "action": "generate_strm",
+            "work_id": "w1",
+            "work_title": "作品",
+            "series_group": "作品",
+            "group_type": "season",
+            "season_number": 1,
+            "episode_number": index + 1,
+            "title": "",
+            "target_dir": "",
+            "target_strm_path": "",
+            "confidence": "high",
+            "needs_review": False,
+            "availability": "available",
+        }
+        for index, path in enumerate(paths)
+    ]
+
+
+class TestCurrentRevisionTruth:
+    def test_list_current_revisions_only_returns_current_pointer(self):
+        """rev1/rev2 均 confirmed 且 current=rev2 → 只投影 rev2。"""
+        _ensure_unit("u1")
+        rev1 = revision_store.create_revision(
+            unit_id="u1", source_generation=1, items=_items(["a.mkv"]), status="confirmed",
+        )
+        rev2 = revision_store.create_revision(
+            unit_id="u1", source_generation=2, items=_items(["a.mkv", "b.mkv"]),
+            parent_revision_id=rev1["revision_id"], status="confirmed",
+        )
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = 'u1'",
+            (rev2["revision_id"],),
+        )
+        conn.commit()
+
+        current = revision_store.list_current_revisions()
+        assert [r["revision_id"] for r in current] == [rev2["revision_id"]]
+
+        # source 过滤
+        assert [r["revision_id"] for r in revision_store.list_current_revisions(source="openlist")] == [
+            rev2["revision_id"]
+        ]
+        assert revision_store.list_current_revisions(source="baidu") == []
+
+        # plan 视图
+        plans = revision_store.list_current_plans()
+        assert [p.plan_id for p in plans] == [rev2["revision_id"]]
+
+    def test_current_pointer_fails_closed(self):
+        """current 指针悬空 / 指向 draft / 为空 → 跳过，绝不 fallback 其他 revision。"""
+        _ensure_unit("u2")
+        rev1 = revision_store.create_revision(
+            unit_id="u2", source_generation=1, items=_items(["a.mkv"]), status="confirmed",
+        )
+        conn = get_connection()
+        # 悬空指针
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = 'ghost-revision' WHERE unit_id = 'u2'"
+        )
+        conn.commit()
+        assert revision_store.list_current_revisions() == []
+        # 指向 draft（新建一个 draft，不把 rev1 顶上）
+        draft = revision_store.create_revision(
+            unit_id="u2", source_generation=2, items=_items(["a.mkv", "c.mkv"]),
+            parent_revision_id=rev1["revision_id"], status="draft",
+        )
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = 'u2'",
+            (draft["revision_id"],),
+        )
+        conn.commit()
+        assert revision_store.list_current_revisions() == []
+        # current 为空
+        conn.execute("UPDATE media_units SET current_revision_id = '' WHERE unit_id = 'u2'")
+        conn.commit()
+        assert revision_store.list_current_revisions() == []
+
+
+class TestScrapeBindingTruth:
+    def _make_revisions(self):
+        from app.scrape.models import ScrapeMapItem
+
+        _ensure_unit("ub1")
+        rev1 = revision_store.create_revision(
+            unit_id="ub1", source_generation=1, items=_items(["a.mkv"]), status="confirmed",
+        )
+        rev2 = revision_store.create_revision(
+            unit_id="ub1", source_generation=2, items=_items(["a.mkv", "b.mkv"]),
+            parent_revision_id=rev1["revision_id"], status="confirmed",
+        )
+        item = ScrapeMapItem(
+            scrape_target_id="target-A",
+            work_id="w1",
+            source="openlist",
+            import_plan_id=rev1["revision_id"],
+            tmdb_id=123,
+            tmdb_type="tv",
+            scrape_title="作品",
+            nfo_path="/mirror/作品/tvshow.nfo",
+        )
+        return rev1, rev2, item
+
+    def test_same_target_upsert_twice_keeps_single_row(self):
+        """binding_id = scrape_target_id：同 target 连续 upsert → 只有 1 行。"""
+        from app.scrape.effective_store import upsert_effective_scrape_map_item
+
+        _rev1, _rev2, item = self._make_revisions()
+        upsert_effective_scrape_map_item(item)
+        upsert_effective_scrape_map_item(item)
+        rows = get_connection().execute("SELECT * FROM scrape_bindings").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["binding_id"] == "target-A"
+        assert rows[0]["tmdb_id"] == 123
+        # metadata_json 完整还原 ScrapeMapItem
+        raw = json.loads(rows[0]["metadata_json"])
+        assert raw["scrape_title"] == "作品"
+        assert raw["nfo_path"] == "/mirror/作品/tvshow.nfo"
+
+    def test_cross_revision_reuses_same_binding(self):
+        """rev2 相同语义 target → 复用同一 binding，revision_id 更新到 rev2。"""
+        from dataclasses import replace
+
+        from app.scrape.effective_store import upsert_effective_scrape_map_item
+
+        rev1, rev2, item = self._make_revisions()
+        upsert_effective_scrape_map_item(item)
+        upsert_effective_scrape_map_item(replace(item, import_plan_id=rev2["revision_id"]))
+        rows = get_connection().execute("SELECT * FROM scrape_bindings").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["binding_id"] == "target-A"
+        assert rows[0]["revision_id"] == rev2["revision_id"]
+        assert rows[0]["tmdb_id"] == 123
+
+    def test_legacy_plan_still_routes_to_json_scrape_map(self, tmp_path, monkeypatch):
+        """legacy（非 V3 revision）仍走 scrape_map.json 兼容路径。"""
+        from app.scrape.effective_store import (
+            load_effective_scrape_map,
+            upsert_effective_scrape_map_item,
+        )
+        from app.scrape.models import ScrapeMapItem
+
+        item = ScrapeMapItem(
+            scrape_target_id="legacy-A", work_id="w1", source="baidu",
+            import_plan_id="legacy-plan-1", tmdb_id=1, tmdb_type="tv",
+        )
+        upsert_effective_scrape_map_item(item)
+        loaded = load_effective_scrape_map("legacy-plan-1")
+        ids = [i.scrape_target_id for i in loaded.items]
+        assert "legacy-A" in ids
+
+
+class TestArtifactTruth:
+    def test_artifact_rewrite_updates_attribution(self):
+        """同 (kind, path) 被新 revision 重写 → 仍 1 行且归属切到新 revision。"""
+        from app.pipeline.artifacts import upsert_artifact
+
+        upsert_artifact(kind="strm", path="/mirror/X.strm", revision_id="rev1", work_id="w1")
+        upsert_artifact(kind="strm", path="/mirror/X.strm", revision_id="rev2", work_id="w1")
+        rows = get_connection().execute(
+            "SELECT * FROM artifact_records WHERE kind = 'strm' AND path = '/mirror/X.strm'"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["revision_id"] == "rev2"
+
+    def test_different_kind_same_path_are_distinct(self):
+        from app.pipeline.artifacts import upsert_artifact
+
+        upsert_artifact(kind="strm", path="/mirror/X", revision_id="rev1", work_id="w1")
+        upsert_artifact(kind="nfo", path="/mirror/X", revision_id="rev1", work_id="w1")
+        rows = get_connection().execute("SELECT * FROM artifact_records WHERE path = '/mirror/X'").fetchall()
+        assert len(rows) == 2
+
+
+class TestScrapeBindingsMigration:
+    def test_old_v3_db_gets_metadata_json_column_without_bump(self, tmp_path, monkeypatch):
+        """旧 v3 scrape_bindings（无 metadata_json）→ init_db 自动补列，user_version 仍 3。"""
+        import sqlite3 as sqlite
+
+        old_db = tmp_path / "old_v3.db"
+        conn = sqlite.connect(str(old_db))
+        conn.execute("PRAGMA user_version = 3")
+        conn.execute(
+            """
+            CREATE TABLE scrape_bindings (
+                binding_id TEXT PRIMARY KEY,
+                revision_id TEXT NOT NULL,
+                work_id TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT '',
+                provider_id TEXT NOT NULL DEFAULT '',
+                tmdb_id INTEGER,
+                tmdb_type TEXT DEFAULT '',
+                bangumi_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending',
+                nfo_path TEXT DEFAULT '',
+                poster_path TEXT DEFAULT '',
+                fanart_path TEXT DEFAULT '',
+                clearlogo_path TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE TABLE import_revision_items (revision_id TEXT NOT NULL)")
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr("app.db.database._db_path", old_db)
+        import app.db.database as db_mod
+
+        if hasattr(db_mod._local, "connection"):
+            db_mod._local.connection = None
+        db_mod.init_db()
+
+        check = db_mod.get_connection()
+        cols = [row[1] for row in check.execute("PRAGMA table_info(scrape_bindings)").fetchall()]
+        assert "metadata_json" in cols
+        version = check.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 3
+        db_mod.close_connection()

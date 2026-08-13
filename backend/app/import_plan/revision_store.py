@@ -644,6 +644,42 @@ def latest_confirmed_revision(unit_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def list_current_revisions(source: str = "") -> list[dict]:
+    """当前语义事实：``media_units.current_revision_id`` 指向的 confirmed/executed revision。
+
+    - 绝不按 ``created_at DESC`` 猜最新，绝不用其他 confirmed revision 顶上；
+    - fail closed：current 指针为空 / 指向不存在 revision / ``revision.unit_id``
+      与 unit 不一致 / revision 仍是 draft —— 都直接跳过（JOIN 与状态过滤天然排除），
+      不修复事实、不 fallback。
+    """
+    conn = get_connection()
+    sql = """
+        SELECT r.* FROM media_units u
+        JOIN import_revisions r
+          ON r.revision_id = u.current_revision_id
+         AND r.unit_id = u.unit_id
+        WHERE u.current_revision_id != ''
+          AND r.status IN ('confirmed', 'executed')
+    """
+    params: list = []
+    if source:
+        sql += " AND r.source = ?"
+        params.append(source)
+    sql += " ORDER BY u.root_id, u.boundary"
+    rows = conn.execute(sql, params).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_current_plans(source: str = "") -> list[Any]:
+    """当前语义事实的 ImportPlan 视图（镜像/刮削/媒体库投影统一入口）。"""
+    plans: list[Any] = []
+    for revision in list_current_revisions(source):
+        plan = load_plan(revision["revision_id"])
+        if plan is not None:
+            plans.append(plan)
+    return plans
+
+
 def mark_missing_items(revision_id: str, missing_relative_paths: set[str]) -> None:
     """新 revision 相对 parent：缺失条目标记 unavailable（保留身份）。"""
     conn = get_connection()

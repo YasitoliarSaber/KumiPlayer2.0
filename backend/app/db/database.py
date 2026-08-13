@@ -134,6 +134,16 @@ def init_db() -> None:
 
     ensure_source_health_table(conn)
 
+    # 幂等轻量扩展（不 bump user_version）：scrape_bindings 的完整语义载荷。
+    # ScrapeMapItem 全量字段存入 metadata_json，供 LibraryIndex 投影还原；
+    # 已有 v3 库逐个 ALTER 补齐，不要求用户重置数据库。
+    binding_cols = [row[1] for row in conn.execute("PRAGMA table_info(scrape_bindings)").fetchall()]
+    if binding_cols and "metadata_json" not in binding_cols:
+        conn.execute(
+            "ALTER TABLE scrape_bindings ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
+        )
+        conn.commit()
+
     conn.commit()
     close_connection()
 
