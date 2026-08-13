@@ -271,7 +271,7 @@ class TestLibraryIndexVisible:
         )
         conn.commit()
         strm_abs = str(strm_file).replace("\\", "/")
-        revision_store.create_revision(
+        revision = revision_store.create_revision(
             unit_id="unit-e2e", source_generation=1,
             items=[
                 {
@@ -288,7 +288,19 @@ class TestLibraryIndexVisible:
             ],
             status="confirmed",
         )
+        # Module 5：rebuild 只消费 media_units.current_revision_id 指向的当前版本
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = 'unit-e2e'",
+            (revision["revision_id"],),
+        )
         conn.commit()
+        # Module 5：可播放事实来自 artifact_records（真实镜像 handler 在
+        # MirrorItemResult.status==generated 时登记），计划路径本身不算可播放
+        from app.pipeline.artifacts import upsert_artifact
+
+        upsert_artifact(
+            kind="strm", path=strm_abs, revision_id=revision["revision_id"], work_id="w-e2e",
+        )
 
         # mock scrape_map 与发布链路所需（load_scrape_map 返回空即可）
         monkeypatch.setattr(
