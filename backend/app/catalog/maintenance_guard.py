@@ -1,48 +1,119 @@
 # -*- coding: utf-8 -*-
-"""整库维护屏障（进程内）。
+"""整库维护屏障（进程内 admission gate）。
 
-整库删除会在「初次任务门控 → 删除镜像/状态 → 事务化清理 Source Catalog」
-之间有一段窗口：若持久任务恰好在此刻入队或被领取为 running，第二次事务复查
-会抛 409，但此前已删除的文件/状态无法被 SQLite 回滚，造成"接口失败但部分已删"。
+删除全程需要与任务入队/领取、导入批次创建互斥，且「检查屏障 → 写 SQLite」
+必须原子：
 
-本屏障在删除全程置位，供任务入队（``app.pipeline.orchestrator.enqueue_*``）与
-任务领取（``app.jobs.store.claim_jobs``）共同遵守：屏障期间拒绝产生新的相关
-任务，从而保证删除全程不存在新的任务竞争，配合 DB 的 ``BEGIN IMMEDIATE``
-复查形成双重保险。
+- 普通操作（任务创建/领取、导入批次）先获取 admission（共享读）：
+  屏障未激活时进入，**持有直到其 SQLite 事务提交**才释放；
+- 删除（屏障）获取独占写：进入时**等待所有已进入的 admission 操作完成**，
+  然后置位屏障；屏障激活期间新的 admission 操作被拒绝（入队抛异常、
+  领取返回空、导入返回 409）。
 
-屏障是进程内的：本项目后端为单进程 Tauri 子进程，worker 线程与删除调用共享
-同一解释器，因此进程内标志足以覆盖所有入队/领取路径。
+由此保证不存在「检查通过后、事务提交前被删除插入」的窗口，也不存在
+「批次已提交但入队被拒」的半成品导入。本项目后端为单进程 Tauri 子进程，
+worker 线程与删除调用共享同一解释器，进程内锁即可覆盖全部路径。
 """
 
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 
-_lock = threading.RLock()
-_active = 0  # 进入层数（支持嵌套）
+
+class MaintenanceAdmissionDenied(RuntimeError):
+    """媒体库维护进行中，admission 操作被拒绝。"""
 
 
-class MaintenanceBarrier:
-    """上下文管理器：进入时置位屏障，退出时复位。"""
+class _AdmissionGate:
+    """读写互斥门：admission(共享) 与 barrier(独占) 互斥。
 
-    def __enter__(self) -> MaintenanceBarrier:
-        global _active
-        with _lock:
-            _active += 1
-        return self
+    - ``acquire``：barrier 未激活时进入共享段并计数；激活时返回 False。
+    - ``enter_barrier``：等待共享段清零后置位独占屏障（删除全程）。
+    """
 
-    def __exit__(self, exc_type, exc, tb) -> None:
-        global _active
-        with _lock:
-            _active = max(0, _active - 1)
+    def __init__(self) -> None:
+        self._cond = threading.Condition(threading.Lock())
+        self._active = 0  # 在途 admission 操作数
+        self._barrier = 0  # 屏障层数（支持嵌套）
+
+    def acquire(self) -> bool:
+        """尝试进入共享段；屏障激活时返回 False（不进入）。"""
+        with self._cond:
+            if self._barrier > 0:
+                return False
+            self._active += 1
+            return True
+
+    def release(self) -> None:
+        """退出共享段；清零时唤醒等待的删除方。"""
+        with self._cond:
+            self._active = max(0, self._active - 1)
+            if self._active == 0:
+                self._cond.notify_all()
+
+    def enter_barrier(self) -> None:
+        """删除进入：等待在途 admission 全部完成，然后置位屏障。"""
+        with self._cond:
+            while self._active > 0:
+                self._cond.wait()
+            self._barrier += 1
+
+    def exit_barrier(self) -> None:
+        """删除退出：复位屏障并唤醒等待的 admission 操作。"""
+        with self._cond:
+            self._barrier = max(0, self._barrier - 1)
+            if self._barrier == 0:
+                self._cond.notify_all()
+
+    def is_active(self) -> bool:
+        with self._cond:
+            return self._barrier > 0
+
+    def reset_for_tests(self) -> None:
+        """测试专用：清空计数，避免失败用例泄漏状态阻塞后续用例。"""
+        with self._cond:
+            self._active = 0
+            self._barrier = 0
+            self._cond.notify_all()
+
+
+_gate = _AdmissionGate()
 
 
 def is_active() -> bool:
-    """屏障是否处于活跃（删除进行中）。"""
-    with _lock:
-        return _active > 0
+    """屏障是否激活（删除进行中）。"""
+    return _gate.is_active()
+
+
+@contextmanager
+def admission() -> Iterator[None]:
+    """任务/导入准入临界区。
+
+    屏障激活时抛 :class:`MaintenanceAdmissionDenied`（调用方决定 409/空结果）；
+    否则持有准入直到上下文结束——调用方必须把「检查 → SQLite 事务提交」全部
+    放在上下文内，删除方会等待本操作完成才置位屏障。
+    """
+    if not _gate.acquire():
+        raise MaintenanceAdmissionDenied("媒体库维护进行中，暂不接受新的任务")
+    try:
+        yield
+    finally:
+        _gate.release()
+
+
+class MaintenanceBarrier:
+    """删除屏障：进入时等待在途 admission 完成并置位，退出时复位。"""
+
+    def __enter__(self) -> MaintenanceBarrier:
+        _gate.enter_barrier()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        _gate.exit_barrier()
 
 
 def hold() -> MaintenanceBarrier:
-    """进入维护屏障（建议 ``with maintenance_guard.hold():`` 使用）。"""
+    """进入删除屏障（建议 ``with maintenance_guard.hold():`` 使用）。"""
     return MaintenanceBarrier()

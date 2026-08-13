@@ -29,12 +29,15 @@ from app.jobs import store as job_store
 @pytest.fixture(autouse=True)
 def db(tmp_path, monkeypatch):
     import app.db.database as db_mod
+    from app.catalog import maintenance_guard
 
+    maintenance_guard._gate.reset_for_tests()
     monkeypatch.setattr(db_mod, "_db_path", tmp_path / "lifecycle.db")
     if hasattr(db_mod._local, "connection"):
         db_mod._local.connection = None
     init_db()
     yield
+    maintenance_guard._gate.reset_for_tests()
     close_connection()
 
 
@@ -1317,3 +1320,248 @@ def test_legacy_db_migration_clears_orphan_stage_entries(tmp_path, monkeypatch):
     ).fetchone()[0]
     assert leftover == 0
     db_mod.close_connection()
+
+
+# ============================================================
+# 复核第四轮：admission gate 确定性并发（检查与写入之间开启屏障）
+# ============================================================
+
+def test_admission_check_to_insert_window_barrier_waits_then_rejects():
+    """admission 检查后、INSERT 提交前开启屏障：删除等待在途操作完成，
+    完成后新 admission 被可靠拒绝（检查与写入原子）。"""
+    import threading
+    import time
+
+    from app.catalog import maintenance_guard
+
+    gate = maintenance_guard._gate
+    acquired = threading.Event()
+    proceed = threading.Event()
+    outcome: dict[str, bool] = {}
+
+    def task_thread():
+        ok = gate.acquire()  # 模拟「检查屏障通过」→ 进入准入
+        outcome["task_admitted"] = ok
+        acquired.set()
+        proceed.wait(10)  # 模拟 INSERT 前暂停
+        gate.release()
+
+    def deleter_thread():
+        gate.enter_barrier()  # 删除：应等待在途 admission 完成；保持屏障（不退出）
+        outcome["barrier_entered"] = True
+
+    t1 = threading.Thread(target=task_thread)
+    t2 = threading.Thread(target=deleter_thread)
+    t1.start()
+    assert acquired.wait(5), "任务线程未进入准入"
+    t2.start()
+    time.sleep(0.2)
+    # 删除在等待任务完成，尚未置位屏障
+    assert "barrier_entered" not in outcome
+    # 任务此时「提交」：放行 → 释放准入
+    proceed.set()
+    t1.join(5)
+    t2.join(5)
+    assert outcome["task_admitted"] is True
+    assert outcome["barrier_entered"] is True
+    # 屏障激活期间新 admission 被拒绝（不可进入）
+    assert gate.acquire() is False
+    # 退出屏障后恢复
+    gate.exit_barrier()
+    assert gate.acquire() is True
+    gate.release()
+
+
+def test_admission_claim_window_barrier_waits_then_claim_denied():
+    """claim 的 admission 持有整个领取事务：屏障等待其完成；激活后领取返回空。"""
+    import threading
+    import time
+
+    from app.catalog import maintenance_guard
+
+    gate = maintenance_guard._gate
+    claimed = threading.Event()
+    proceed = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def claim_thread():
+        # 模拟 worker 领取：admission 内执行 claim（同 gate 语义）
+        ok = gate.acquire()
+        outcome["claim_admitted"] = ok
+        claimed.set()
+        proceed.wait(10)
+        if ok:
+            gate.release()
+
+    def deleter_thread():
+        gate.enter_barrier()  # 保持屏障（不退出），由主线程断言后退出
+        outcome["barrier_entered"] = True
+
+    t1 = threading.Thread(target=claim_thread)
+    t2 = threading.Thread(target=deleter_thread)
+    t1.start()
+    assert claimed.wait(5)
+    t2.start()
+    time.sleep(0.2)
+    assert "barrier_entered" not in outcome
+    proceed.set()
+    t1.join(5)
+    t2.join(5)
+    assert outcome["claim_admitted"] is True
+    assert outcome["barrier_entered"] is True
+    # 屏障激活：新 claim（admission）被拒 → 返回空（claim_jobs 语义）
+    from app.catalog import maintenance_guard as mg
+    from app.jobs import store as job_store
+
+    with mg.hold():
+        assert job_store.claim_jobs(worker_id="w") == []
+        try:
+            job_store.create_job(job_type="x", payload={})
+            raise AssertionError("屏障激活时 create_job 应被拒绝")
+        except mg.MaintenanceAdmissionDenied:
+            pass
+    gate.exit_barrier()
+
+
+def test_import_batch_admission_covers_create_to_enqueue_window():
+    """批次创建后、任务入队前开启屏障：删除等待导入整体完成，
+    批次/root/job 全部一致存在（无半成品），随后屏障才进入。"""
+    import threading
+    import time
+
+    from app.catalog import maintenance_guard
+
+    store.create_source(source_id="ol-adm", source_type="openlist", provider_id="quark")
+    batch_created = threading.Event()
+    proceed = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def import_thread():
+        try:
+            with maintenance_guard.admission():
+                # 创建/复用根 + 批次（事务已提交）
+                batch = store.create_import_batch(
+                    source_id="ol-adm",
+                    roots=[{"remote_locator": "/动画", "local_locator": "K:/动画"}],
+                )
+                outcome["batch_id"] = batch["batch_id"]
+                outcome["root_id"] = batch["roots"][0]["root_id"]
+                batch_created.set()
+                # 任务入队前暂停：此时删除若尝试进入屏障必须等待
+                proceed.wait(10)
+                # 入队（admission 内必然成功，屏障无法进入）
+                generation = store.bump_generation(batch["roots"][0]["root_id"])
+                job = job_store.create_job(
+                    job_type="discovery_scan", resource_key="scan:conn:ol-adm",
+                    payload={"root_id": batch["roots"][0]["root_id"], "generation": generation},
+                )
+                outcome["job_id"] = job.job_id
+        except Exception as exc:  # pragma: no cover
+            outcome["error"] = repr(exc)
+
+    def deleter_thread():
+        maintenance_guard._gate.enter_barrier()
+        outcome["barrier_entered"] = True
+        maintenance_guard._gate.exit_barrier()
+
+    t1 = threading.Thread(target=import_thread)
+    t2 = threading.Thread(target=deleter_thread)
+    t1.start()
+    assert batch_created.wait(5), "导入未完成批次创建"
+    t2.start()
+    time.sleep(0.2)
+    # 批次已提交但入队未完成：删除必须等待
+    assert "barrier_entered" not in outcome
+    proceed.set()
+    t1.join(5)
+    t2.join(5)
+    assert "error" not in outcome
+    assert outcome["barrier_entered"] is True
+    # 无半成品：批次/root/job 全部一致存在
+    conn = get_connection()
+    assert conn.execute(
+        "SELECT COUNT(*) FROM import_batches WHERE batch_id = ?", (outcome["batch_id"],)
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM source_roots WHERE root_id = ?", (outcome["root_id"],)
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE job_id = ?", (outcome["job_id"],)
+    ).fetchone()[0] == 1
+
+
+def test_deletion_either_sees_committed_tasks_or_gets_barrier_first():
+    """两种结局之一（无第三态）：admission 先 → 任务提交后删除才进入；
+    屏障先 → 任务被可靠拒绝，删除完整。"""
+    from app.catalog import maintenance_guard
+
+    gate = maintenance_guard._gate
+    # 结局 A：任务先获得 admission 并提交（acquire→release）→ 删除随后进入屏障，
+    # 屏障激活期间新任务被拒 → 不存在「任务提交中途被删除打断」的部分状态。
+    assert gate.acquire() is True
+    gate.release()  # 任务完成提交
+    gate.enter_barrier()
+    assert gate.is_active() is True
+    assert gate.acquire() is False  # 删除先到 → 任务被拒
+    gate.exit_barrier()
+    # 结局 B：删除先进入 → 后续 admission 全部拒绝；退出后恢复
+    gate.enter_barrier()
+    assert gate.acquire() is False
+    gate.exit_barrier()
+    assert gate.acquire() is True
+    gate.release()
+
+
+def test_import_batch_api_rejected_during_barrier_no_partial(tmp_path, monkeypatch):
+    """删除屏障激活时 OpenList 导入批次被拒（409），无批次/root/job 半成品。"""
+    from fastapi.testclient import TestClient
+
+    from app.api import openlist as openlist_api
+    from app.core import config as core_config
+    from app.main import app
+
+    # 显式提供 OpenList 配置（不依赖 load_config 的跨测试状态）
+    saved_routes: list = []
+
+    def _fresh_config():
+        cfg = core_config.load_config(force_reload=True)
+        cfg.openlist_server_url = "https://ol.example.com:5244"
+        cfg.openlist_remote_root = "/夸克网盘"
+        cfg.openlist_mount_root = str(tmp_path / "quark")
+        cfg.openlist_username = "quark-user"
+        cfg.openlist_password = "p@ssw0rd"
+        cfg.openlist_routes = saved_routes
+        return cfg
+
+    monkeypatch.setattr(openlist_api, "load_config", _fresh_config)
+
+    def _save_config(config) -> None:
+        saved_routes[:] = list(config.openlist_routes or [])
+
+    monkeypatch.setattr(openlist_api, "save_config", _save_config)
+
+    with TestClient(app) as client:
+        resp = client.put(
+            "/api/openlist/routes",
+            json={"routes": [{
+                "route_id": "r1", "label": "动画",
+                "remote_prefix": "/夸克网盘/动画", "provider_id": "quark", "enabled": True,
+            }]},
+        )
+        assert resp.status_code == 200, resp.text
+
+        from app.catalog import maintenance_guard
+
+        with maintenance_guard.hold():
+            resp = client.post(
+                "/api/openlist/import-batch",
+                json={"remote_paths": ["/夸克网盘/动画"], "import_family": "anime"},
+            )
+        assert resp.status_code == 409
+        assert "维护进行中" in resp.json()["detail"]
+
+    # 无半成品：无批次、无 source root、无 job
+    conn = get_connection()
+    assert conn.execute("SELECT COUNT(*) FROM import_batches").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM source_roots").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0

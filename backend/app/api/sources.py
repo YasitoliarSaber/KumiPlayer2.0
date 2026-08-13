@@ -12,7 +12,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.core.config import load_config
@@ -25,6 +25,21 @@ from app.sources.registry import get_source_adapter, get_source_root, list_sourc
 router = APIRouter(prefix="/api/sources", tags=["sources"])
 
 _SEASONAL_ROOT_NAMES = {"新番", "追更", "新番追更"}
+
+
+def _admission_guard_dep():
+    """整库维护准入：删除进行中拒绝本地后台导入（409），请求结束释放。
+
+    覆盖「创建来源 → 创建/复用根与批次 → prepare scan → 入队 → 更新批次状态」
+    全部区间，保证删除屏障期间不会留下半成品导入。
+    """
+    from app.catalog import maintenance_guard
+
+    try:
+        with maintenance_guard.admission():
+            yield
+    except maintenance_guard.MaintenanceAdmissionDenied as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
 
 
 # ============================================================
@@ -325,7 +340,7 @@ def scan_local(req: LocalScanRequest):
 
 
 @router.post("/local/import-batch")
-def import_local_background(req: LocalBackgroundImportRequest):
+def import_local_background(req: LocalBackgroundImportRequest, _guard: None = Depends(_admission_guard_dep)):
     """本地路径直接进入 Source Catalog 的 durable 后台导入。"""
     from app.catalog import store as catalog_store
     from app.db.database import init_db
@@ -369,7 +384,7 @@ def import_local_background(req: LocalBackgroundImportRequest):
                 if source_root.get("resolution") == "promoted_to_parent"
                 else "incremental"
             )
-            job_id = orchestrator.enqueue_scan(
+            orchestrator.enqueue_scan(
                 source_root["root_id"], generation, source_id, scan_mode=scan_mode,
             )
             catalog_store.update_import_batch_root(

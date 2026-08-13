@@ -73,12 +73,31 @@ def _job_params(job: Job) -> tuple[Any, ...]:
     )
 
 
-def _insert_job(conn, job: Job) -> None:
-    """插入 job 行（调用方负责事务边界与提交）。"""
+def _admission_write(fn):
+    """任务写入准入：检查维护屏障到 SQLite 事务提交全程持有 admission。
+
+    屏障激活时 :class:`app.catalog.maintenance_guard.MaintenanceAdmissionDenied`
+    自然冒泡（调用方按 409/拒绝处理）；屏障等待在途 admission 完成前不会置位，
+    因此不存在「检查通过后、事务提交前被删除插入」的窗口。
+    """
+    import functools
+
     from app.catalog import maintenance_guard
 
-    if maintenance_guard.is_active():
-        raise RuntimeError("媒体库维护进行中，暂不接受新的任务")
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with maintenance_guard.admission():
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def _insert_job(conn, job: Job) -> None:
+    """插入 job 行（调用方负责事务边界与提交）。
+
+    维护屏障由外层 create_job / get_or_create_job / enqueue_coalesced_job 的
+    admission 临界区统一保证（检查屏障到事务提交全程持锁），此处不再单独检查。
+    """
     conn.execute(
         """
         INSERT INTO jobs (
@@ -92,6 +111,7 @@ def _insert_job(conn, job: Job) -> None:
     )
 
 
+@_admission_write
 def create_job(
     *,
     job_type: str,
@@ -122,6 +142,7 @@ def create_job(
     return job
 
 
+@_admission_write
 def get_or_create_job(
     *,
     job_type: str,
@@ -175,6 +196,7 @@ def get_job(job_id: str) -> Job | None:
     return _row_to_job(row)
 
 
+@_admission_write
 def enqueue_coalesced_job(
     *,
     job_type: str,
@@ -278,12 +300,24 @@ def claim_jobs(
 
     job_types 用于独立 worker 分流（scan/mirror/scrape 各自专用线程）；
     为空表示可领取任意类型。
+
+    整库维护屏障：admission 从检查屏障到领取事务提交全程持有；屏障激活时
+    领取被拒绝（返回空），保证删除窗口内无新的 running 任务。
     """
     from app.catalog import maintenance_guard
 
-    # 整库维护屏障：删除进行中不领取任何任务，保证删除窗口内无新的 running 任务
-    if maintenance_guard.is_active():
+    try:
+        with maintenance_guard.admission():
+            return _claim_jobs_impl(worker_id, limit, now=now, job_types=job_types)
+    except maintenance_guard.MaintenanceAdmissionDenied:
         return []
+
+
+def _claim_jobs_impl(
+    worker_id: str, limit: int = 1, *, now: str | None = None,
+    job_types: list[str] | None = None,
+) -> list[Job]:
+    """领取实现（admission 已由 claim_jobs 持有）。"""
     conn = get_connection()
     now = now or now_iso()
     lease_until = (
