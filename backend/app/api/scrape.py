@@ -116,39 +116,49 @@ def _get_target_or_restore(target_id: str) -> Optional[ScrapeTarget]:
 
 
 def _restore_target_from_scrape_map(target_id: str) -> Optional[ScrapeTarget]:
-    """从 scrape_map.json 恢复 target 信息"""
+    """恢复 target 信息：V3 SQLite binding 优先（metadata_json），legacy JSON 兜底。"""
     try:
+        from app.scrape.effective_store import load_all_bindings_scrape_map
         from app.scrape.store import load_scrape_map
-        sm = load_scrape_map()
-        for item in sm.items:
-            if item.scrape_target_id == target_id:
-                return ScrapeTarget(
-                    scrape_target_id=item.scrape_target_id,
-                    source=item.source,
-                    import_plan_id=item.import_plan_id,
-                    work_id=item.work_id,
-                    card_type=item.card_type,
-                    media_type=item.media_type,
-                    show_type="",
-                    group_type="season" if item.media_type == "tv" else "movie",
-                    series_group=item.series_group,
-                    local_title=item.local_title,
-                    original_title=item.original_title,
-                    source_subwork_dir=item.source_subwork_dir,
-                    local_year=item.local_year,
-                    local_season_number=item.local_season_number,
-                    scrape_title=item.scrape_title,
-                    scrape_year=item.scrape_year,
-                    scrape_type=item.tmdb_type or "tv",
-                    target_dir="",
-                    target_nfo_path=item.nfo_path,
-                    target_poster_path=item.poster_path,
-                    target_fanart_path=item.fanart_path,
-                    target_clearlogo_path=item.clearlogo_path,
-                    tmdb_hint_id=item.tmdb_id,
-                    tmdb_hint_type=item.tmdb_type,
-                    needs_review=False,
-                )
+
+        item = next(
+            (i for i in load_all_bindings_scrape_map().items if i.scrape_target_id == target_id),
+            None,
+        )
+        if item is None:
+            item = next(
+                (i for i in load_scrape_map().items if i.scrape_target_id == target_id),
+                None,
+            )
+        if item is None:
+            return None
+        return ScrapeTarget(
+            scrape_target_id=item.scrape_target_id,
+            source=item.source,
+            import_plan_id=item.import_plan_id,
+            work_id=item.work_id,
+            card_type=item.card_type,
+            media_type=item.media_type,
+            show_type="",
+            group_type="season" if item.media_type == "tv" else "movie",
+            series_group=item.series_group,
+            local_title=item.local_title,
+            original_title=item.original_title,
+            source_subwork_dir=item.source_subwork_dir,
+            local_year=item.local_year,
+            local_season_number=item.local_season_number,
+            scrape_title=item.scrape_title,
+            scrape_year=item.scrape_year,
+            scrape_type=item.tmdb_type or "tv",
+            target_dir="",
+            target_nfo_path=item.nfo_path,
+            target_poster_path=item.poster_path,
+            target_fanart_path=item.fanart_path,
+            target_clearlogo_path=item.clearlogo_path,
+            tmdb_hint_id=item.tmdb_id,
+            tmdb_hint_type=item.tmdb_type,
+            needs_review=False,
+        )
     except Exception:
         pass
     return None
@@ -207,39 +217,44 @@ def _library_scrape_target_refs(
 
     if matched:
         try:
+            from app.import_plan import revision_store
             from app.import_plan.store import load_latest_confirmed_import_plan
             from app.library.index import _library_work_id
 
             sources = [source for source in ("pan115", "baidu", "local", "openlist")]
             for src in sources:
-                plan = load_latest_confirmed_import_plan(src)
-                if plan is None:
-                    continue
-                matched_series_groups = {
-                    item.series_group
-                    for item in plan.items
-                    if item.series_group
-                    and item.card_type == "main_series"
-                    and _library_work_id(item) == work_id
-                }
-                for item in plan.items:
-                    if item.resource_type != "video" or item.action != "generate_strm":
-                        continue
-                    if item.group_type in {"ignored", "op_ed"}:
-                        continue
-                    same_card = _library_work_id(item) == work_id
-                    same_series = (
-                        item.card_type == "main_series"
-                        and item.series_group in matched_series_groups
-                    )
-                    if not same_card and not same_series:
-                        continue
-                    if season_number is not None and item.season_number != season_number:
-                        continue
-                    if group_type and item.group_type != group_type:
-                        continue
-                    if item.work_id:
-                        raw_work_ids.add(item.work_id)
+                # Module 5：V3 current revisions 优先；无 V3 state 才回退 legacy latest
+                plans = revision_store.list_current_plans(src)
+                if not plans:
+                    legacy_plan = load_latest_confirmed_import_plan(src)
+                    if legacy_plan is not None:
+                        plans = [legacy_plan]
+                for plan in plans:
+                    matched_series_groups = {
+                        item.series_group
+                        for item in plan.items
+                        if item.series_group
+                        and item.card_type == "main_series"
+                        and _library_work_id(item) == work_id
+                    }
+                    for item in plan.items:
+                        if item.resource_type != "video" or item.action != "generate_strm":
+                            continue
+                        if item.group_type in {"ignored", "op_ed"}:
+                            continue
+                        same_card = _library_work_id(item) == work_id
+                        same_series = (
+                            item.card_type == "main_series"
+                            and item.series_group in matched_series_groups
+                        )
+                        if not same_card and not same_series:
+                            continue
+                        if season_number is not None and item.season_number != season_number:
+                            continue
+                        if group_type and item.group_type != group_type:
+                            continue
+                        if item.work_id:
+                            raw_work_ids.add(item.work_id)
         except Exception:
             pass
 

@@ -17,7 +17,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from app.scrape.models import ScrapeCandidate, ScrapeTarget
 from app.scrape.completeness import target_already_scraped
 from app.scrape.service import execute_scrape, resolve_tmdb_season_number, search_candidates
-from app.scrape.store import build_failed_case, load_scrape_map, save_failed_case
+from app.scrape.store import build_failed_case, load_scrape_map, save_failed_case  # noqa: F401  # load_scrape_map 保留为外部 monkeypatch/兼容目标
 from app.scrape.tmdb_client import TMDBClient
 from app.scrape.validator import blocking_issues, issue_messages, validate_scrape_metadata
 from app.tasks.logs import append_task_log
@@ -648,10 +648,14 @@ def run_auto_scrape(
     should_cancel: Optional[Callable[[], bool]] = None,
     target_ids: Optional[set[str]] = None,
     library_work_id: str = "",
+    publish_library: bool = True,
 ) -> dict:
     """执行自动刮削
 
-    返回统计结果。
+    - publish_library=True（legacy 默认）：每完成一个作品局部刷新 legacy
+      LibraryIndex（即时反馈）；
+    - publish_library=False（V3 durable）：不直接更新 legacy LibraryIndex，
+      由 durable handler 写 SQLite binding/artifact 后统一 enqueue_library_rebuild。
     """
     from app.scrape.service import get_targets
     from app.import_plan.store import load_import_plan, load_latest_confirmed_import_plan
@@ -773,8 +777,14 @@ def run_auto_scrape(
     retry_counts: dict[str, int] = {}
     results = []
     total = len(scrape_targets)
-    existing_scrape_index = _build_existing_scrape_index()
-    scrape_map = load_scrape_map()
+    from app.scrape.effective_store import is_v3_revision
+
+    if is_v3_revision(plan_id):
+        existing_scrape_index = _build_existing_scrape_index(plan_id)
+    else:
+        # legacy：0 参数调用，保持外部 monkeypatch（lambda: {}）兼容
+        existing_scrape_index = _build_existing_scrape_index()
+    scrape_map = _load_scrape_map_for_plan(plan_id)
     work_key_by_target, targets_by_work_key = _group_targets_by_library_work(
         scrape_targets,
         completeness_plans,
@@ -795,6 +805,11 @@ def run_auto_scrape(
     ) -> None:
         """局部发布所有产物已完整的作品，包括本轮直接跳过的已有目标。"""
         nonlocal library_refreshed_count, library_refresh_revision, library_refresh_result
+        # Module 5：V3 durable path（publish_library=False）不直接更新
+        # legacy LibraryIndex——SQLite binding/artifact 写完后由 durable
+        # library_rebuild 统一重建投影。
+        if not publish_library:
+            return
 
         work_key = work_key_by_target[target.scrape_target_id]
         work_targets = targets_by_work_key[work_key]
@@ -1043,7 +1058,7 @@ def run_auto_scrape(
                     # execute_scrape persists the newly accepted target. Refresh the
                     # in-memory map immediately so later seasons in the same batch can
                     # reuse the first season's TMDB id instead of running a full search.
-                    scrape_map = load_scrape_map()
+                    scrape_map = _load_scrape_map_for_plan(plan_id)
                     existing_scrape_index = {
                         item.scrape_target_id: item for item in scrape_map.items
                     }
@@ -1590,15 +1605,30 @@ def _restore_review_candidates(target: ScrapeTarget, pending_item) -> List[Scrap
     return restored
 
 
-def _build_existing_scrape_index() -> Dict[str, object]:
+def _load_scrape_map_for_plan(plan_id: str = ""):
+    """按 plan 代次加载刮削映射：V3 → SQLite bindings 投影；legacy → JSON。
+
+    legacy 分支调用本模块的 load_scrape_map 属性，保持外部 monkeypatch
+    （legacy 测试注入假 ScrapeMap）继续有效。
+    """
+    from app.scrape.effective_store import is_v3_revision
+
+    if is_v3_revision(plan_id):
+        from app.scrape.effective_store import load_effective_scrape_map
+
+        return load_effective_scrape_map(plan_id)
+    return load_scrape_map()
+
+
+def _build_existing_scrape_index(plan_id: str = "") -> Dict[str, object]:
     """Build scrape_target_id -> ScrapeMapItem index.
 
     Auto scrape is an incremental filler.  A target with a persisted scrape map
     and an existing NFO is considered completed and should not be searched or
-    downloaded again.
+    downloaded again. V3 读 SQLite bindings 投影，legacy 读 JSON ScrapeMap。
     """
     try:
-        return {item.scrape_target_id: item for item in load_scrape_map().items}
+        return {item.scrape_target_id: item for item in _load_scrape_map_for_plan(plan_id).items}
     except Exception:
         logger.debug("load scrape map failed", exc_info=True)
         return {}

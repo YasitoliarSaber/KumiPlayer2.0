@@ -28,6 +28,47 @@ def is_v3_revision(plan_id: str) -> bool:
     return row is not None
 
 
+def register_scrape_artifacts(item: ScrapeMapItem, episode_nfo_paths: list[str] | None = None) -> None:
+    """V3 刮削成功后登记实际产生的本地产物（nfo/poster/fanart/clearlogo/episode nfo）。
+
+    - 远程 artwork URL（http/https）不是本地 materialized artifact，不登记
+      （仍保留在 scrape_bindings 的 path 字段供 LibraryIndex 展示）；
+    - 本地文件以 Path.exists() 为"实际物化"证据。
+    legacy（非 V3 revision）不进入 artifact_records。
+    """
+    if not is_v3_revision(item.import_plan_id):
+        return
+    from pathlib import Path
+
+    from app.pipeline.artifacts import upsert_artifact
+
+    revision_id = item.import_plan_id
+    work_id = item.work_id
+    for kind, path_value in (
+        ("nfo", item.nfo_path),
+        ("poster", item.poster_path),
+        ("fanart", item.fanart_path),
+        ("clearlogo", item.clearlogo_path),
+    ):
+        value = str(path_value or "").strip()
+        if not value or value.startswith(("http://", "https://")):
+            continue
+        if not Path(value).exists():
+            continue
+        upsert_artifact(kind=kind, path=value, revision_id=revision_id, work_id=work_id)
+    for path_value in episode_nfo_paths or []:
+        value = str(path_value or "").strip()
+        if value and Path(value).exists():
+            upsert_artifact(kind="nfo", path=value, revision_id=revision_id, work_id=work_id)
+
+
+def load_all_bindings_scrape_map() -> ScrapeMap:
+    """全部 V3 SQLite bindings 的 ScrapeMap 兼容投影（target 恢复等跨 plan 查询用）。"""
+    return _scrape_map_from_rows(
+        get_connection().execute("SELECT * FROM scrape_bindings ORDER BY updated_at").fetchall()
+    )
+
+
 def upsert_effective_scrape_map_item(item: ScrapeMapItem) -> None:
     """按 plan 代次分流写入：V3 → SQLite 稳定 binding；legacy → JSON ScrapeMap。"""
     if is_v3_revision(item.import_plan_id):
@@ -91,14 +132,19 @@ def _upsert_binding(item: ScrapeMapItem) -> None:
 
 
 def _scrape_map_from_bindings(plan_id: str) -> ScrapeMap:
-    """SQLite scrape_bindings → ScrapeMap 兼容投影。
+    """SQLite scrape_bindings → ScrapeMap 兼容投影。"""
+    rows = get_connection().execute(
+        "SELECT * FROM scrape_bindings WHERE revision_id = ?", (plan_id,)
+    ).fetchall()
+    return _scrape_map_from_rows(rows)
+
+
+def _scrape_map_from_rows(rows) -> ScrapeMap:
+    """binding 行 → ScrapeMap 兼容投影。
 
     metadata_json 存在时还原完整 ScrapeMapItem；否则（历史行）用结构化列
     还原最小兼容条目，保证 target_already_scraped 等兼容判断可用。
     """
-    rows = get_connection().execute(
-        "SELECT * FROM scrape_bindings WHERE revision_id = ?", (plan_id,)
-    ).fetchall()
     items: list[ScrapeMapItem] = []
     for row in rows:
         raw = json.loads(row["metadata_json"] or "{}")

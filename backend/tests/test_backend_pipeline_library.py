@@ -167,14 +167,17 @@ class TestScrapeErrorPropagation:
 
 
 class TestScrapeBindingAndLibraryRebuild:
-    def test_scrape_success_writes_binding_and_enqueues_rebuild(self, monkeypatch):
-        """scrape 成功：scrape_bindings 落库 + library rebuild job 入队。"""
+    def test_scrape_success_enqueues_rebuild_without_coarse_binding(self, monkeypatch):
+        """scrape 成功：只入队 library rebuild；成功事实必须来自真实 scrape target
+        的 effective upsert——handler 不再插入「整 revision 粗粒度 binding」
+        （Module 5 收口：record_scrape_outcome 只保留失败路径）。"""
         _ensure_unit("unit-4")
         revision = revision_store.create_revision(
             unit_id="unit-4", source_generation=1, items=_make_items(["d.mkv"]),
             status="confirmed",
         )
         rebuild_jobs = []
+        scrape_kwargs = {}
 
         class FakeOrch:
             @staticmethod
@@ -182,24 +185,29 @@ class TestScrapeBindingAndLibraryRebuild:
                 rebuild_jobs.append(unit_id)
                 return "lib-job-1"
 
+        def fake_run_auto_scrape(source, plan_id=None, **kwargs):
+            scrape_kwargs.update(kwargs)
+            return {"status": "success", "scraped": 1}
+
         monkeypatch.setattr("app.pipeline.orchestrator.enqueue_library_rebuild", FakeOrch.enqueue_library_rebuild)
         with patch(
             "app.scrape.auto.run_auto_scrape",
-            return_value={"status": "success", "scraped": 1},
+            side_effect=fake_run_auto_scrape,
         ):
             result = handle_scrape_revision(
                 {"revision_id": revision["revision_id"], "source": "openlist"},
                 progress_callback=lambda *a, **k: None,
             )
         assert result["library_rebuild_job"] == "lib-job-1"
+        # V3 durable：不直接更新 legacy LibraryIndex（由 rebuild 统一重建投影）
+        assert scrape_kwargs.get("publish_library") is False
+        # 成功路径不得有粗粒度 binding（真实 target binding 由 execute_scrape 写入）
         conn = get_connection()
         row = conn.execute(
             "SELECT * FROM scrape_bindings WHERE revision_id = ?",
             (revision["revision_id"],),
         ).fetchone()
-        assert row is not None
-        assert row["work_id"] == "w1"
-        assert row["status"] == "success"
+        assert row is None
 
     def test_library_rebuild_handler_upserts_libraries(self):
         """library_rebuild：从 confirmed revision 重建 media_libraries。"""

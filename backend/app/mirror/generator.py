@@ -392,6 +392,7 @@ def generate_mirror(
     mirror_root: Optional[str] = None,
     update_latest: bool = True,
     progress_callback: Optional[Callable[[int, str, Optional[dict]], None]] = None,
+    persist_plan: bool = True,
 ) -> MirrorGenerateResult:
     """生成镜像
 
@@ -708,7 +709,10 @@ def generate_mirror(
             "processed_count": total_items,
             "log_kind": "done",
         })
-    save_import_plan(plan, update_latest=update_latest and mirror_root is None)
+    # V3 durable mirror（persist_plan=False）不回写 legacy ImportPlan JSON：
+    # 执行投影字段由 revision_store.persist_execution_fields 写回 SQLite。
+    if persist_plan:
+        save_import_plan(plan, update_latest=update_latest and mirror_root is None)
 
     return MirrorGenerateResult(
         plan_id=plan.plan_id,

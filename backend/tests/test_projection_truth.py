@@ -259,3 +259,83 @@ class TestScrapeBindingsMigration:
         version = check.execute("PRAGMA user_version").fetchone()[0]
         assert version == 3
         db_mod.close_connection()
+
+
+class TestLegacyDetachment:
+    """Checkpoint 2 十七节：把 legacy 直接炸掉的回归。
+
+    V3 durable mirror 绝不写 legacy ImportPlan JSON；V3 binding 不依赖
+    JSON ScrapeMap；legacy 默认路径保持不变。
+    """
+
+    def _make_confirmed_plan(self, plan_id: str):
+        from app.import_plan.models import ImportPlan, ImportPlanItem
+
+        item = ImportPlanItem(
+            id="i-0", plan_id=plan_id, raw_file_id="raw-i-0", source="pan115",
+            relative_path="动画/作品.2024/i-0.mkv",
+            real_path=r"H:\media\动画\作品.2024\i-0.mkv",
+            resource_type="video", action="generate_strm",
+            work_title="作品", year=2024, media_type="tv", group_type="season",
+            card_type="main_series", season_number=1, episode_number=1,
+            title="", confidence="high",
+        )
+        return ImportPlan(
+            plan_id=plan_id, source="pan115", source_snapshot_id="snap",
+            status="confirmed", items=[item],
+        )
+
+    def test_v3_mirror_never_writes_legacy_json(self, tmp_path, monkeypatch):
+        """persist_plan=False：save_import_plan 被炸掉，durable mirror 仍成功。"""
+        from app.mirror.generator import generate_mirror
+
+        plan = self._make_confirmed_plan("v3-mirror-plan")
+
+        def _bomb(*args, **kwargs):
+            raise AssertionError("V3 durable mirror 不得写 legacy ImportPlan JSON")
+
+        monkeypatch.setattr("app.mirror.generator.save_import_plan", _bomb)
+        result = generate_mirror(plan, str(tmp_path / "mirror"), persist_plan=False)
+        assert result.status == "success"
+        assert (tmp_path / "mirror").exists()
+
+    def test_legacy_mirror_still_persists_json_by_default(self, tmp_path, monkeypatch):
+        """默认 persist_plan=True：legacy mirror 仍写 JSON（未被 V3 收口误杀）。"""
+        from app.mirror.generator import generate_mirror
+
+        plan = self._make_confirmed_plan("legacy-mirror-plan")
+        calls = []
+
+        def _spy(*args, **kwargs):
+            calls.append(args)
+
+        monkeypatch.setattr("app.mirror.generator.save_import_plan", _spy)
+        generate_mirror(plan, str(tmp_path / "mirror"))
+        assert len(calls) == 1
+
+    def test_v3_binding_works_without_json_scrape_map(self, monkeypatch):
+        """load/save_scrape_map 被炸掉，V3 effective upsert/读取仍走 SQLite。"""
+        from app.scrape.effective_store import (
+            load_effective_scrape_map,
+            upsert_effective_scrape_map_item,
+        )
+        from app.scrape.models import ScrapeMapItem
+
+        _ensure_unit("u-json-free")
+        revision = revision_store.create_revision(
+            unit_id="u-json-free", source_generation=1, items=_items(["x.mkv"]),
+            status="confirmed",
+        )
+
+        def _bomb(*args, **kwargs):
+            raise AssertionError("V3 路径不得触碰 JSON ScrapeMap")
+
+        monkeypatch.setattr("app.scrape.store.load_scrape_map", _bomb)
+        monkeypatch.setattr("app.scrape.store.save_scrape_map", _bomb)
+        item = ScrapeMapItem(
+            scrape_target_id="t-json-free", work_id="w1", source="openlist",
+            import_plan_id=revision["revision_id"], tmdb_id=1, tmdb_type="tv",
+        )
+        upsert_effective_scrape_map_item(item)
+        loaded = load_effective_scrape_map(revision["revision_id"])
+        assert [i.scrape_target_id for i in loaded.items] == ["t-json-free"]

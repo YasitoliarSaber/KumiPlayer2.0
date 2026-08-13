@@ -6,10 +6,8 @@
 
 from __future__ import annotations
 
-import uuid
 from typing import Any
 
-from app.db.database import get_connection
 from app.import_plan import revision_store
 from app.jobs.registry import register
 
@@ -18,9 +16,11 @@ def _register_artifacts(revision_id: str, plan: Any, succeeded_item_ids: set[str
     """只登记生成器已确认写入的 .strm 产物。
 
     revision 的 target 路径只是计划/执行投影，不能证明文件写入成功；必须以
-    ``MirrorItemResult.status == generated`` 为唯一事实来源。
+    ``MirrorItemResult.status == generated`` 为唯一事实来源。同 path 被新
+    revision 重写时 attribution 切到当前 revision（upsert，非 INSERT OR IGNORE）。
     """
-    conn = get_connection()
+    from app.pipeline.artifacts import upsert_artifact
+
     registered = 0
     for item in plan.items:
         if (
@@ -29,15 +29,13 @@ def _register_artifacts(revision_id: str, plan: Any, succeeded_item_ids: set[str
             or item.id not in succeeded_item_ids
         ):
             continue
-        cursor = conn.execute(
-            """
-            INSERT OR IGNORE INTO artifact_records (artifact_id, kind, path, revision_id, work_id, created_at)
-            VALUES (?, 'strm', ?, ?, ?, ?)
-            """,
-            (uuid.uuid4().hex, item.target_strm_path, revision_id, item.work_id or "", revision_store.now_iso()),
+        upsert_artifact(
+            kind="strm",
+            path=item.target_strm_path,
+            revision_id=revision_id,
+            work_id=item.work_id or "",
         )
-        registered += max(0, cursor.rowcount)
-    conn.commit()
+        registered += 1
     return registered
 
 
@@ -53,7 +51,7 @@ def handle_mirror_revision(payload: dict, progress_callback=None, should_cancel=
         raise ValueError(f"revision 不存在: {revision_id}")
     if plan.status not in ("confirmed", "executed"):
         raise ValueError(f"revision 未确认，不能生成镜像: {plan.status}")
-    result = generate_mirror(plan, progress_callback=progress_callback)
+    result = generate_mirror(plan, progress_callback=progress_callback, persist_plan=False)
     # 镜像结果状态检查：failed / partial_failed 不得登记 artifact、
     # 不得触发刮削（部分失败只登记成功项，单元不完整不进入刮削）。
     result_status = getattr(result, "status", "") or "failed"
@@ -107,6 +105,7 @@ def handle_scrape_revision(payload: dict, progress_callback=None, should_cancel=
         plan_id=revision_id,
         progress_callback=progress_callback,
         should_cancel=should_cancel,
+        publish_library=False,
     )
     result_status = str(result.get("status") or "succeeded")
     error = result.get("error") or ""
@@ -120,24 +119,12 @@ def handle_scrape_revision(payload: dict, progress_callback=None, should_cancel=
         raise RuntimeError(
             f"自动刮削失败: {error or result_status}"
         )
-    # SQLite 单写：刮削成功登记 scrape_bindings（替代 JSON ScrapeMap 新链路路径）
-    from app.import_plan import revision_store as _rev_store
-    from app.pipeline import orchestrator as _orch
-    from app.pipeline.library_handler import record_scrape_outcome
-
-    plan = _rev_store.load_plan(revision_id)
-    work_id = ""
-    work_title = ""
-    provider_id = ""
-    if plan is not None and plan.items:
-        work_id = str(plan.items[0].work_id or "")
-        work_title = str(plan.items[0].work_title or "")
-        provider_id = str(plan.items[0].provider_id or "")
-    record_scrape_outcome(
-        revision_id=revision_id, work_id=work_id, work_title=work_title,
-        source=source, provider_id=provider_id, succeeded=True,
-    )
+    # Module 5：成功事实只来自真实 scrape target 的 effective upsert
+    # （execute_scrape → scrape_bindings 稳定行），不再插入「整 revision
+    # 粗粒度 binding」（record_scrape_outcome 只保留失败路径）。
     # 刮削完成 → 媒体库索引重建（单通道）
+    from app.pipeline import orchestrator as _orch
+
     unit_id = str(payload.get("unit_id") or "")
     job = _orch.enqueue_library_rebuild(unit_id=unit_id)
     return {"status": result_status, "revision_id": revision_id, "scrape": result, "library_rebuild_job": job}

@@ -44,6 +44,19 @@ def get_targets(source: str, plan_id: Optional[str] = None) -> Tuple[list, Optio
         if plan and plan.source != source:
             return [], f"plan.source={plan.source} 与 source={source} 不匹配"
     else:
+        # Module 5：无 plan_id 时先取 V3 current revisions 聚合 targets；
+        # openlist 已进入 V3——current 缺失不得偷偷回退旧 JSON latest，
+        # legacy 来源（pan115/baidu/local）才允许回退。
+        from app.import_plan import revision_store
+
+        plans = revision_store.list_current_plans(source)
+        if plans:
+            targets: list = []
+            for current_plan in plans:
+                targets.extend(build_scrape_targets(current_plan))
+            return targets, None
+        if source == "openlist":
+            return [], "当前没有可刮削的 V3 目标（current revision 缺失）"
         plan = load_latest_confirmed_import_plan(source)
     if plan is None:
         return [], "ImportPlan 不存在"
@@ -1693,7 +1706,10 @@ def execute_scrape(
             fanart_path=fanart_path,
             clearlogo_path=clearlogo_path,
         )
-        upsert_scrape_map_item(map_item)
+        # Module 5：按 plan 代次分流写入（V3 → SQLite stable binding；legacy → JSON）
+        from app.scrape.effective_store import upsert_effective_scrape_map_item
+
+        upsert_effective_scrape_map_item(map_item)
         _emit_log(log_callback, f"刮削映射完成：{title}", "done")
 
         # Episode NFO 生成（TV 类型）
@@ -1718,6 +1734,15 @@ def execute_scrape(
             except Exception as e:
                 warnings.append(f"分集信息生成跳过: {e}")
                 _emit_log(log_callback, f"分集信息生成跳过：{title}，{e}", "warn")
+
+        # Module 5：V3 刮削成功后登记实际产生的本地产物（NFO/图片/episode NFO），
+        # 远程 artwork URL 不登记；legacy 路径不进入 artifact_records。
+        from app.scrape.effective_store import register_scrape_artifacts
+
+        register_scrape_artifacts(
+            map_item,
+            [str(entry.get("nfo_path") or "") for entry in episode_results if entry.get("nfo_path")],
+        )
 
         if rescan_after:
             try:
