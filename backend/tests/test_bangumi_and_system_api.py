@@ -300,7 +300,7 @@ def test_bangumi_me_normalizes_avatar_object(monkeypatch):
     from app.main import app
 
     class FakeBangumiClient:
-        def get_me(self):
+        def get_me(self, purpose: str = ""):
             return {
                 "id": 100,
                 "username": "kumi",
@@ -340,7 +340,7 @@ def test_bangumi_session_keeps_saved_credential_when_service_is_unavailable(monk
         def __init__(self, *args, **kwargs):
             raise AssertionError("/session 不得发起远程请求（Bangumi 服务不可用也不得调用）")
 
-        def get_me(self):
+        def get_me(self, purpose: str = ""):
             raise BangumiError("Bangumi 请求超时")
 
     monkeypatch.setattr(bangumi_api, "load_config", lambda: FakeConfig())

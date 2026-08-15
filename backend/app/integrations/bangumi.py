@@ -7,11 +7,12 @@ different seasons of the same series.
 """
 
 import json
+import logging
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
-
 import httpx
 
 from app.core.config import DEFAULT_BANGUMI_USER_AGENT, load_config
@@ -153,9 +154,8 @@ class BangumiClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
-    def get_me(self) -> dict[str, Any]:
-        return self._request("GET", "/v0/me", auth_required=True)
-
+    def get_me(self, purpose: str = "") -> dict[str, Any]:
+        return self._request("GET", "/v0/me", auth_required=True, purpose=purpose)
     def search_subjects(
         self,
         keyword: str,
@@ -250,6 +250,46 @@ class BangumiClient:
         params: Optional[dict[str, Any]] = None,
         json: Optional[dict[str, Any]] = None,
         auth_required: bool = False,
+        purpose: str = "",
+    ) -> dict[str, Any]:
+        """统一请求入口：执行 + 诊断日志（脱敏，绝不含 Token）。
+
+        ``purpose`` 是本地日志标记（不发给 Bangumi）：manual_verify /
+        session_verify / subject_search / collection_read / collection_write /
+        episode_sync / me_lookup 等；缺省时按 method+path 自动分类。
+        """
+        purpose = purpose or _classify_purpose(method, path)
+        start = time.monotonic()
+        try:
+            result = self._raw_request(
+                method, path, params=params, json=json, auth_required=auth_required
+            )
+        except BangumiError as error:
+            _log_bangumi_request(
+                method=method, path=path, purpose=purpose,
+                status=error.status_code or 0, error_code=error.error_code,
+                duration_ms=(time.monotonic() - start) * 1000,
+                retry_after=error.retry_after,
+                credential_present=bool(self.access_token),
+                proxy_enabled=bool(self.proxy_url),
+            )
+            raise
+        _log_bangumi_request(
+            method=method, path=path, purpose=purpose, status=200, error_code="",
+            duration_ms=(time.monotonic() - start) * 1000, retry_after="",
+            credential_present=bool(self.access_token),
+            proxy_enabled=bool(self.proxy_url),
+        )
+        return result
+
+    def _raw_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        auth_required: bool = False,
     ) -> dict[str, Any]:
         if auth_required and not self.access_token:
             raise BangumiError("未配置 Bangumi access token", status_code=401)
@@ -338,6 +378,74 @@ class BangumiClient:
                 error_code=BAD_RESPONSE,
             ) from e
 
+def _classify_purpose(method: str, path: str) -> str:
+    """按 method+path 推断请求用途（本地日志标记，不发给 Bangumi）。"""
+    if path == "/v0/me":
+        return "me_lookup"
+    if path.startswith("/v0/search"):
+        return "subject_search"
+    if path.startswith("/v0/episodes"):
+        return "episode_sync"
+    if "/collections/" in path:
+        if "/episodes" in path:
+            return "episode_sync"
+        return "collection_write" if method in ("POST", "PATCH", "PUT", "DELETE") else "collection_read"
+    return "unknown"
+
+
+def _get_request_logger() -> logging.Logger:
+    """Bangumi 请求诊断日志（data/logs/bangumi_requests.log，惰性初始化）。
+
+    handler 按当前数据目录绑定：数据目录切换（测试隔离/安装版换库）时重建，
+    避免日志写入已失效的旧目录。
+    """
+    logger = logging.getLogger("kumiplayer.bangumi")
+    log_path = (get_data_dir() / "logs" / "bangumi_requests.log").resolve()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = [
+        handler
+        for handler in logger.handlers
+        if isinstance(handler, logging.FileHandler)
+        and Path(getattr(handler, "baseFilename", "") or "").resolve() == log_path
+    ]
+    if not existing:
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+        handler = logging.FileHandler(log_path, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+    return logger
+
+
+def _log_bangumi_request(
+    *,
+    method: str,
+    path: str,
+    purpose: str,
+    status: int,
+    error_code: str,
+    duration_ms: float,
+    retry_after: str,
+    credential_present: bool,
+    proxy_enabled: bool,
+) -> None:
+    """请求诊断日志（脱敏红线：绝不含 Authorization / Token / 凭据前缀）。"""
+    _get_request_logger().info(
+        "%s %s purpose=%s status=%s error=%s duration_ms=%d retry_after=%s credential_present=%s proxy_enabled=%s",
+        method,
+        path,
+        purpose,
+        status,
+        error_code or "ok",
+        int(duration_ms),
+        retry_after or "-",
+        "true" if credential_present else "false",
+        "true" if proxy_enabled else "false",
+    )
+
+
 def _observe_auth(kind: str, status_code: int) -> None:
     """认证观察（低频，仅 auth_required 请求）：把成功/401 结果反馈到账户快照。
 
@@ -362,8 +470,6 @@ def _observe_auth(kind: str, status_code: int) -> None:
         snapshot.last_error_code = AUTH_INVALID
     snapshot.last_http_status = status_code
     save_account_snapshot(snapshot)
-
-
 def get_state_path() -> Path:
     return get_cache_dir() / "bangumi_state.json"
 def load_state() -> BangumiState:

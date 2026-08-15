@@ -160,7 +160,7 @@ def set_token(req: TokenRequest):
     config = load_config()
     user_agent = DEFAULT_BANGUMI_USER_AGENT
     try:
-        me = BangumiClient(access_token=req.access_token, user_agent=user_agent, timeout=12.0).get_me()
+        me = BangumiClient(access_token=req.access_token, user_agent=user_agent, timeout=12.0).get_me(purpose="manual_verify")
     except BangumiError as e:
         raise _http_error(e)
     config.bangumi_access_token = req.access_token
@@ -194,7 +194,7 @@ def clear_token():
 @router.get("/me")
 def get_me():
     try:
-        me = BangumiClient(timeout=4.0).get_me()
+        me = BangumiClient(timeout=4.0).get_me(purpose="manual_verify")
     except BangumiError as e:
         raise _http_error(e)
     return _public_me(me)
@@ -229,7 +229,7 @@ def verify_session():
 
     now = _now_iso()
     try:
-        me = BangumiClient(timeout=8.0).get_me()
+        me = BangumiClient(timeout=8.0).get_me(purpose="session_verify")
     except BangumiError as error:
         snapshot.last_failure_at = now
         snapshot.last_http_status = error.status_code or None
@@ -380,7 +380,7 @@ def get_subject_collection(work_id: str, season_number: Optional[int] = None):
         raise HTTPException(status_code=409, detail="请先确认 Bangumi 条目匹配")
     client = BangumiClient(timeout=6.0)
     try:
-        me = client.get_me()
+        me = client.get_me(purpose="me_lookup")
         username = me.get("username") or str(me.get("id") or "-")
         payload = client.get_collection(username, match.subject_id)
     except BangumiError as e:

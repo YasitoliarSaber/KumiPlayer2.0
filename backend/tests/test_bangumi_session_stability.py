@@ -112,7 +112,7 @@ def test_session_local_restore_zero_remote_requests(client, tmp_path, monkeypatc
         def __init__(self, *args, **kwargs):
             SpyBangumiClient.instances.append(self)
 
-        def get_me(self):
+        def get_me(self, purpose: str = ""):
             raise AssertionError("session 不得发起远程请求")
 
     monkeypatch.setattr(bangumi_api, "BangumiClient", SpyBangumiClient)
@@ -213,7 +213,7 @@ class _FakeBangumiClient:
     def __init__(self, *args, **kwargs):
         _FakeBangumiClient.instances.append(self)
 
-    def get_me(self):
+    def get_me(self, purpose: str = ""):
         if _FakeBangumiClient.raise_error is not None:
             raise _FakeBangumiClient.raise_error
         return _FakeBangumiClient.me_payload
@@ -388,3 +388,115 @@ def test_observe_auth_success_updates_snapshot():
     assert snapshot.last_success_at
     assert snapshot.last_error_code == ""
     assert snapshot.last_http_status == 200
+
+
+class TestRequestDiagnostics:
+    """CP4：Bangumi 请求诊断日志——脱敏红线（绝不含 Token）与字段完整性。"""
+
+    def _fake_httpx(self, monkeypatch, statuses: list[int]):
+        """按顺序返回给定 HTTP 状态的 Fake httpx.Client。"""
+        import httpx
+        from app.integrations import bangumi as bg
+
+        class FakeResponse:
+            def __init__(self, status_code: int):
+                self.status_code = status_code
+                self.headers = {"Retry-After": "60"} if status_code == 429 else {}
+                self.content = b'{"description": "boom"}' if status_code >= 400 else b'{"id": 1}'
+
+            @property
+            def text(self) -> str:
+                return self.content.decode("utf-8")
+
+            def json(self):
+                import json as _json
+                try:
+                    return _json.loads(self.content)
+                except ValueError:
+                    return {}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                self._statuses = statuses
+                self.headers_seen: dict = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def request(self, method, url, **kwargs):
+                self.headers_seen = kwargs.get("headers") or {}
+                return FakeResponse(self._statuses.pop(0))
+
+        monkeypatch.setattr(httpx, "Client", FakeClient)
+        return FakeClient
+
+    def _log_text(self) -> str:
+        from app.integrations import bangumi as bg
+
+        log_path = bg.get_data_dir() / "logs" / "bangumi_requests.log"
+        if not log_path.exists():
+            return ""
+        return log_path.read_text(encoding="utf-8")
+
+    def test_request_log_redacts_token_on_failure(self, monkeypatch):
+        """401 失败日志：含 status/error_code/retry_after/purpose，绝不含 Token。"""
+        import pytest
+        from app.integrations import bangumi as bg
+
+        fake = self._fake_httpx(monkeypatch, [401])
+        client = bg.BangumiClient(
+            access_token="SECRET-TOKEN-12345", base_url="https://api.bgm.tv"
+        )
+        with pytest.raises(bg.BangumiError) as exc:
+            client.get_me(purpose="session_verify")
+        assert exc.value.error_code == bg.AUTH_INVALID
+
+        content = self._log_text()
+        assert "SECRET-TOKEN-12345" not in content, "日志不得包含 Token"
+        assert "Authorization" not in content, "日志不得包含 Authorization 头"
+        assert "Bearer" not in content
+        assert "GET /v0/me purpose=session_verify" in content
+        assert "status=401" in content
+        assert "error=auth_invalid" in content
+        assert "credential_present=true" in content
+        assert "proxy_enabled=false" in content
+        assert "duration_ms=" in content
+
+    def test_request_log_redacts_token_on_success_and_429(self, monkeypatch):
+        """成功与 429 路径同样脱敏；429 记录 Retry-After。"""
+        from app.integrations import bangumi as bg
+
+        self._fake_httpx(monkeypatch, [200, 429])
+        client = bg.BangumiClient(
+            access_token="SECRET-TOKEN-12345", base_url="https://api.bgm.tv"
+        )
+        client.get_me(purpose="session_verify")  # 200
+        try:
+            client.get_collection("tester", 1)  # 429 → collection_read
+        except bg.BangumiError:
+            pass
+
+        content = self._log_text()
+        assert "SECRET-TOKEN-12345" not in content
+        assert "Bearer" not in content
+        assert "GET /v0/me purpose=session_verify status=200 error=ok" in content
+        assert "status=429" in content
+        assert "error=rate_limited" in content
+        assert "retry_after=60" in content
+        assert "purpose=collection_read" in content
+
+    def test_classify_purpose_covers_main_endpoints(self):
+        """purpose 自动分类覆盖方案十七列出的调用来源。"""
+        from app.integrations import bangumi as bg
+
+        assert bg._classify_purpose("GET", "/v0/me") == "me_lookup"
+        assert bg._classify_purpose("POST", "/v0/search/subjects") == "subject_search"
+        assert bg._classify_purpose("GET", "/v0/users/tester/collections/1") == "collection_read"
+        assert bg._classify_purpose("PATCH", "/v0/users/-/collections/1/episodes") == "episode_sync"
+        assert bg._classify_purpose("PUT", "/v0/users/-/collections/-/episodes/123") == "episode_sync"
+        assert bg._classify_purpose("GET", "/v0/episodes") == "episode_sync"
+        assert bg._classify_purpose("POST", "/v0/users/-/collections/1") == "collection_write"
+        assert bg._classify_purpose("GET", "/v0/unknown") == "unknown"
