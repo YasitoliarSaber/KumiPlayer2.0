@@ -63,12 +63,15 @@ def test_legacy_plaintext_credentials_are_migrated_on_read(monkeypatch, tmp_path
 
 
 def test_clearing_credential_removes_secure_copy(monkeypatch, tmp_path):
+    """REWORK P0-2：空值保存 ≠ 删除（KEEP）；只有显式 cleared_keys 才 CLEAR。"""
     store, _ = enable_fake_store(monkeypatch, tmp_path)
     save_config(AppConfig(bangumi_access_token="saved-token"))
+    # 空值未显式清除 → KEEP（凭据读取失败/未加载绝不能触发删除）
     save_config(AppConfig(bangumi_access_token=""))
-
+    assert store.values["bangumi_access_token"] == "saved-token"
+    # 用户显式清除（退出）→ CLEAR
+    save_config(AppConfig(bangumi_access_token=""), cleared_keys={"bangumi_access_token"})
     assert "bangumi_access_token" not in store.values
-
 
 def test_credential_manager_failure_keeps_legacy_value_available(monkeypatch, tmp_path):
     _, config_file = enable_fake_store(monkeypatch, tmp_path)

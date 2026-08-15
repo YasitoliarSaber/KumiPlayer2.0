@@ -43,11 +43,11 @@ def _install_real_config_guard() -> None:
 
     original_persist = core_config._persist_config_payload
 
-    def guarded_persist(config) -> None:
+    def guarded_persist(config, **kwargs) -> None:
         target = core_config.get_config_file()
         if _is_real_data_path(target):
             raise AssertionError(f"测试禁止写入真实配置文件: {target}")
-        return original_persist(config)
+        return original_persist(config, **kwargs)
 
     core_config._persist_config_payload = guarded_persist
 

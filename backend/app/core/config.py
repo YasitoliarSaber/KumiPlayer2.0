@@ -127,19 +127,29 @@ def _credential_storage_enabled() -> bool:
     return CONFIG_FILE is None and SECURE_CREDENTIAL_STORE.available
 
 
-def _persist_config_payload(config: AppConfig) -> None:
+def _persist_config_payload(config: AppConfig, *, cleared_keys: set[str] | None = None) -> None:
+    """落盘配置；安全凭据采用 SET / KEEP / CLEAR 三态语义：
+
+    - config 字段非空 → SET（写入安全存储）；
+    - 字段为空且字段在 ``cleared_keys``（用户显式清除/退出）→ CLEAR（删除）；
+    - 字段为空且未显式清除 → **KEEP**（不动安全存储）。凭据读取失败导致
+      字段为空时，保存任何无关配置都绝不能触发删除。
+
+    核心不变量：Credential Store 读取失败绝不能成为删除凭据的依据。
+    """
     with DATA_WRITE_LOCK:
         payload = asdict(config)
         if _credential_storage_enabled():
+            cleared = cleared_keys or set()
             for key in _CREDENTIAL_FIELDS:
                 value = str(payload.get(key, "") or "")
-                if value:
-                    SECURE_CREDENTIAL_STORE.write(key, value)
-                else:
+                if key in cleared:
                     SECURE_CREDENTIAL_STORE.delete(key)
+                elif value:
+                    SECURE_CREDENTIAL_STORE.write(key, value)
+                # else: 空值且未显式清除 → KEEP
                 payload[key] = ""
         write_json_atomic(get_config_file(), payload)
-
 
 def _hydrate_secure_credentials(config: AppConfig, file_data: dict) -> bool:
     if not _credential_storage_enabled():
@@ -223,12 +233,11 @@ def load_config(force_reload: bool = False) -> AppConfig:
     return config
 
 
-def save_config(config: AppConfig) -> None:
-    """保存配置文件"""
+def save_config(config: AppConfig, *, cleared_keys: set[str] | None = None) -> None:
+    """保存配置文件；``cleared_keys`` 显式声明需要从安全存储删除的凭据字段。"""
     global _cached_config
-    _persist_config_payload(config)
+    _persist_config_payload(config, cleared_keys=cleared_keys)
     _cached_config = config
-
 
 def invalidate_config_cache() -> None:
     """清除配置缓存"""

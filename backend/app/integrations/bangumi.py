@@ -261,7 +261,7 @@ class BangumiClient:
         purpose = purpose or _classify_purpose(method, path)
         start = time.monotonic()
         try:
-            result = self._raw_request(
+            result, status_code = self._raw_request(
                 method, path, params=params, json=json, auth_required=auth_required
             )
         except BangumiError as error:
@@ -275,7 +275,7 @@ class BangumiClient:
             )
             raise
         _log_bangumi_request(
-            method=method, path=path, purpose=purpose, status=200, error_code="",
+            method=method, path=path, purpose=purpose, status=status_code, error_code="",
             duration_ms=(time.monotonic() - start) * 1000, retry_after="",
             credential_present=bool(self.access_token),
             proxy_enabled=bool(self.proxy_url),
@@ -290,7 +290,7 @@ class BangumiClient:
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
         auth_required: bool = False,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], int]:
         if auth_required and not self.access_token:
             raise BangumiError("未配置 Bangumi access token", status_code=401)
 
@@ -368,9 +368,9 @@ class BangumiClient:
             _observe_auth("success", response.status_code)
 
         if response.status_code == 204 or not response.content:
-            return {}
+            return {}, response.status_code
         try:
-            return response.json()
+            return response.json(), response.status_code
         except ValueError as e:
             raise BangumiError(
                 "Bangumi 响应格式无法解析",

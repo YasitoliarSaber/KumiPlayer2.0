@@ -86,20 +86,29 @@ def _now_iso() -> str:
     return datetime.now(timezone(timedelta(hours=8))).isoformat()
 
 
-def _read_credential_state() -> tuple[str, str]:
-    """Bangumi token 三态：``found`` / ``not_found`` / ``unavailable``。
+def _read_bangumi_credential() -> tuple[str, str]:
+    """返回 ``(state, effective_token)``：``found`` 时 effective_token 一定是真实 token。
 
-    优先使用 ``load_config`` 已 hydrate 的 token（生产走 Credential Manager、
-    测试走 config.json）；token 为空且凭据存储启用时再查安全存储，区分
-    「凭据不存在」与「凭据存储不可读」——两者绝不能都表现为退出登录。
+    - config 已 hydrate 出 token → found + token（测试走 config.json）；
+    - config 为空但凭据存储启用 → **直接读安全存储拿真实 token**（不依赖
+      可能陈旧的 config cache）：读失败 → unavailable + ""；无值 → not_found；
+    - 否则 → not_found + ""。
+
+    这样 Credential Manager 暂时不可读后恢复时，verify 无需重启进程即可
+    重新使用真实凭据。
     """
     from app.core.config import _credential_storage_enabled
+    from app.core.credential_store import CredentialStoreError
 
     config = load_config()
     if config.bangumi_access_token:
         return "found", config.bangumi_access_token
     if _credential_storage_enabled():
-        return SECURE_CREDENTIAL_STORE.read_state("bangumi_access_token"), ""
+        try:
+            token = SECURE_CREDENTIAL_STORE.read("bangumi_access_token")
+        except CredentialStoreError:
+            return "unavailable", ""
+        return ("found", token) if token else ("not_found", "")
     return "not_found", ""
 
 
@@ -187,7 +196,8 @@ def clear_token():
     """用户主动退出：清除 token 与本地账户快照（唯一允许清理凭据的路径）。"""
     config = load_config()
     config.bangumi_access_token = ""
-    save_config(config)
+    # 显式 CLEAR：只有用户主动退出才允许删除安全存储中的凭据
+    save_config(config, cleared_keys={"bangumi_access_token"})
     clear_account_snapshot()
     return {"ok": True}
 
@@ -208,7 +218,7 @@ def get_session():
     （found / not_found / unavailable）、上次验证结果（快照）、最近一次连接
     状态；真正的远程验证走 POST /session/verify。
     """
-    credential_state, _token = _read_credential_state()
+    credential_state, _token = _read_bangumi_credential()
     snapshot = load_account_snapshot()
     return _session_payload(snapshot, credential_state=credential_state)
 
@@ -222,14 +232,14 @@ def verify_session():
     - 403 / 429 / 5xx / timeout / proxy / 网络 → 对应 connectivity 分类，
       一律保留凭据，绝不自动删除、绝不伪装成退出登录。
     """
-    credential_state, _token = _read_credential_state()
+    credential_state, effective_token = _read_bangumi_credential()
     snapshot = load_account_snapshot()
     if credential_state != "found":
         return _session_payload(snapshot, credential_state=credential_state)
 
     now = _now_iso()
     try:
-        me = BangumiClient(timeout=8.0).get_me(purpose="session_verify")
+        me = BangumiClient(access_token=effective_token, timeout=8.0).get_me(purpose="session_verify")
     except BangumiError as error:
         snapshot.last_failure_at = now
         snapshot.last_http_status = error.status_code or None

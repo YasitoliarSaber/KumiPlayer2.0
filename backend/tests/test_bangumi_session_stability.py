@@ -33,9 +33,17 @@ SESSION_URL = "/api/integrations/bangumi/session"
 class _FakeCredentialStore:
     """替代 SECURE_CREDENTIAL_STORE：绝不让测试触碰真实 Windows Credential Manager。"""
 
-    def __init__(self, *, available: bool, read_state_value: str):
+    def __init__(self, *, available: bool, read_state_value: str, token: str = "fake-token"):
         self.available = available
         self._read_state_value = read_state_value
+        self._token = token
+
+    def read(self, name: str) -> str:
+        if self._read_state_value == "unavailable":
+            raise CredentialStoreError("模拟凭据存储故障")
+        if self._read_state_value == "found":
+            return self._token
+        return ""
 
     def read_state(self, name: str) -> str:
         return self._read_state_value
@@ -500,3 +508,165 @@ class TestRequestDiagnostics:
         assert bg._classify_purpose("GET", "/v0/episodes") == "episode_sync"
         assert bg._classify_purpose("POST", "/v0/users/-/collections/1") == "collection_write"
         assert bg._classify_purpose("GET", "/v0/unknown") == "unknown"
+
+
+class TestCredentialRecoveryAndSafety:
+    """REWORK P0-1/P0-2：凭据恢复无需重启；读取失败绝不导致删除。"""
+
+    def test_verify_uses_recovered_token_without_restart(self, client, tmp_path, monkeypatch):
+        """CM 启动时不可读、之后恢复 → verify 直接使用恢复后的真实 token。"""
+        import app.core.config as core_config
+        from app.api import bangumi as bangumi_api
+        from app.core.credential_store import CredentialStoreError
+
+        class RecoveringStore:
+            available = True
+
+            def __init__(self):
+                self.read_attempts = 0
+
+            def read(self, name: str) -> str:
+                self.read_attempts += 1
+                if self.read_attempts == 1:
+                    raise CredentialStoreError("模拟 CM 暂时不可读")
+                return "recovered-token"
+
+            def read_state(self, name: str) -> str:
+                try:
+                    return "found" if self.read(name) else "not_found"
+                except CredentialStoreError:
+                    return "unavailable"
+
+        store = RecoveringStore()
+        monkeypatch.setattr(bangumi_api, "SECURE_CREDENTIAL_STORE", store)
+        monkeypatch.setattr(core_config, "_credential_storage_enabled", lambda: True)
+
+        # 启动期：config cache 空 token（hydration 失败），CM 不可读 → unavailable
+        assert not load_config().bangumi_access_token
+        r1 = client.get(SESSION_URL)
+        assert r1.status_code == 200
+        assert r1.json()["credential_state"] == "unavailable"
+
+        # CM 恢复后：verify 必须拿到真实 token（不依赖陈旧 config cache）
+        captured: dict = {}
+
+        class CapturingClient:
+            def __init__(self, **kwargs):
+                captured["token"] = kwargs.get("access_token", "")
+
+            def get_me(self, purpose: str = ""):
+                assert captured["token"] == "recovered-token", "verify 必须使用恢复后的真实 token"
+                return {"id": 7, "username": "hyakka", "nickname": "冰菓", "avatar": {}, "sign": "s"}
+
+        monkeypatch.setattr(bangumi_api, "BangumiClient", CapturingClient)
+        r2 = client.post(VERIFY_URL)
+        assert r2.status_code == 200
+        data = r2.json()
+        assert data["auth_status"] == "valid"
+        assert data["user"]["username"] == "hyakka"
+        assert store.read_attempts >= 2
+
+    def test_save_unrelated_config_keeps_credential_after_read_error(self, monkeypatch):
+        """hydration 读取失败后保存无关配置：不得删除安全凭据，显式清除才删。"""
+        import app.core.config as core_config
+        from app.core.credential_store import CredentialStoreError
+
+        class Store:
+            available = True
+
+            def __init__(self):
+                self.values = {"bangumi_access_token": "real-token"}
+                self.deleted: list[str] = []
+
+            def read(self, name: str) -> str:
+                raise CredentialStoreError("模拟 CM 读取失败")
+
+            def read_state(self, name: str) -> str:
+                try:
+                    self.read(name)
+                except CredentialStoreError:
+                    return "unavailable"
+                return "not_found"
+
+            def write(self, name: str, value: str) -> None:
+                self.values[name] = value
+
+            def delete(self, name: str) -> None:
+                self.deleted.append(name)
+                self.values.pop(name, None)
+
+        store = Store()
+        monkeypatch.setattr(core_config, "SECURE_CREDENTIAL_STORE", store)
+        monkeypatch.setattr(core_config, "_credential_storage_enabled", lambda: True)
+
+        # config 缓存为空 token（读取失败场景）
+        config = load_config()
+        assert not config.bangumi_access_token
+        # 保存无关配置（卡片样式）
+        config.series_card_image_mode = "fanart"
+        save_config(config)
+        assert store.deleted == [], "保存无关配置不得触发凭据删除"
+        assert store.values.get("bangumi_access_token") == "real-token", "凭据必须保留"
+
+        # 显式清除（用户退出）仍然工作
+        save_config(config, cleared_keys={"bangumi_access_token"})
+        assert "bangumi_access_token" in store.deleted
+        assert "bangumi_access_token" not in store.values
+
+
+class TestRealHttpStatusInDiagnostics:
+    """REWORK P1-2：诊断日志 status 与真实响应一致（200/204/429）。"""
+
+    def test_request_log_uses_real_http_status(self, monkeypatch, tmp_path):
+        from app.integrations import bangumi as bg
+
+        def _fake_httpx(statuses):
+            import httpx
+
+            class FakeResponse:
+                def __init__(self, status_code: int):
+                    self.status_code = status_code
+                    self.headers = {"Retry-After": "60"} if status_code == 429 else {}
+                    self.content = b'{"description": "boom"}' if status_code >= 400 else b'{"id": 1}'
+
+                @property
+                def text(self) -> str:
+                    return self.content.decode("utf-8")
+
+                def json(self):
+                    import json as _json
+                    try:
+                        return _json.loads(self.content)
+                    except ValueError:
+                        return {}
+
+            class FakeClient:
+                def __init__(self, **kwargs):
+                    self._statuses = statuses
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return False
+
+                def request(self, method, url, **kwargs):
+                    return FakeResponse(self._statuses.pop(0))
+
+            monkeypatch.setattr(httpx, "Client", FakeClient)
+
+        _fake_httpx([204, 200, 429])
+        client = bg.BangumiClient(access_token="tok", base_url="https://api.bgm.tv")
+        client.get_me()  # 204（空响应）
+        client.get_me()  # 200
+        try:
+            client.get_collection("tester", 1)  # 429
+        except bg.BangumiError:
+            pass
+
+        log_path = bg.get_data_dir() / "logs" / "bangumi_requests.log"
+        content = log_path.read_text(encoding="utf-8")
+        assert "GET /v0/me purpose=me_lookup status=204 error=ok" in content
+        assert "GET /v0/me purpose=me_lookup status=200 error=ok" in content
+        assert "status=429" in content
+        assert "error=rate_limited" in content
