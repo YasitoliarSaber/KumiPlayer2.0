@@ -557,3 +557,149 @@ class TestMediaLibrariesCanonicalProjection:
             "unit:unit-lib-solo:sub:A",
             "unit:unit-lib-solo:sub:B",
         ]
+
+
+class TestOpenlistSourceCardDurableLifecycle:
+    """CP9：来源卡 is_library_indexed 必须投影完整 durable 链
+    （mirror → scrape → library_rebuild）；只有 library_rebuild=succeeded
+    （LibraryIndex 已发布）才 indexed；任一 stage 失败计入 attention；
+    needs_review unit 不阻塞已成功发布的其他 unit。"""
+
+    def _root_with_unit(self, unit_id: str = "card-a", root_id: str = "root-x", rev_status: str = "confirmed") -> str:
+        from app.db.database import get_connection
+        from app.import_plan import revision_store
+
+        _make_unit(unit_id, root_id=root_id)
+        rev = revision_store.create_revision(
+            unit_id=unit_id, source_generation=1,
+            items=[_item(f"{unit_id}/Season 1/{unit_id}.mkv")],
+            status=rev_status,
+        )
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = ?",
+            (rev["revision_id"], unit_id),
+        )
+        conn.commit()
+        return rev["revision_id"]
+
+    def _finish(self, job_id: str, status: str, result: dict | None = None) -> None:
+        import json
+
+        from app.db.database import get_connection
+
+        conn = get_connection()
+        row = conn.execute("SELECT payload FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        payload = json.loads(row["payload"] or "{}")
+        if result:
+            payload["result"] = result
+        conn.execute(
+            "UPDATE jobs SET status = ?, payload = ? WHERE job_id = ?",
+            (status, json.dumps(payload, ensure_ascii=False), job_id),
+        )
+        conn.commit()
+
+    def _mirror_job(self, revision_id: str, unit_id: str, status: str = "succeeded", scrape_job_id: str = ""):
+        from app.jobs import store as job_store
+
+        job = job_store.create_job(
+            job_type="mirror_revision", resource_key=f"mirror:{revision_id}",
+            payload={"revision_id": revision_id, "unit_id": unit_id},
+        )
+        self._finish(job.job_id, status, {"scrape_job_id": scrape_job_id} if scrape_job_id else None)
+        return job
+
+    def _scrape_job(self, revision_id: str, unit_id: str, status: str = "succeeded", library_job_id: str = ""):
+        from app.jobs import store as job_store
+
+        job = job_store.create_job(
+            job_type="scrape_revision", resource_key="scrape:global",
+            payload={"revision_id": revision_id, "unit_id": unit_id},
+        )
+        self._finish(
+            job.job_id, status,
+            {"library_rebuild_job": library_job_id} if library_job_id else None,
+        )
+        return job
+
+    def _library_job(self, unit_id: str, status: str = "succeeded"):
+        from app.jobs import store as job_store
+
+        job = job_store.create_job(
+            job_type="library_rebuild", resource_key="library:global",
+            payload={"unit_id": unit_id},
+        )
+        self._finish(job.job_id, status)
+        return job
+
+    def test_mirror_success_scrape_pending_not_indexed(self):
+        """mirror success / scrape queued → 未 indexed（发布链未走完）。"""
+        from app.media_presets.service import openlist_preset_state
+
+        rev = self._root_with_unit("card-a")
+        self._mirror_job(rev, "card-a", status="succeeded")
+        self._scrape_job(rev, "card-a", status="queued")
+        state = openlist_preset_state("root-x")
+        assert state["is_library_indexed"] is False
+        assert state["attention_count"] == 0
+        assert state["unit_count"] == 1
+
+    def test_scrape_success_library_queued_not_indexed(self):
+        """scrape success / library queued → 未 indexed。"""
+        from app.media_presets.service import openlist_preset_state
+
+        rev = self._root_with_unit("card-a")
+        self._mirror_job(rev, "card-a", status="succeeded")
+        self._scrape_job(rev, "card-a", status="succeeded")
+        self._library_job("card-a", status="queued")
+        state = openlist_preset_state("root-x")
+        assert state["is_library_indexed"] is False
+        assert state["attention_count"] == 0
+
+    def test_library_failed_attention_not_indexed(self):
+        """library rebuild failed → attention + 未 indexed。"""
+        from app.media_presets.service import openlist_preset_state
+
+        rev = self._root_with_unit("card-a")
+        self._mirror_job(rev, "card-a", status="succeeded")
+        self._scrape_job(rev, "card-a", status="succeeded")
+        self._library_job("card-a", status="failed")
+        state = openlist_preset_state("root-x")
+        assert state["is_library_indexed"] is False
+        assert state["attention_count"] == 1
+
+    def test_library_success_indexed(self):
+        """library rebuild succeeded → indexed（LibraryIndex 已发布）。"""
+        from app.media_presets.service import openlist_preset_state
+
+        rev = self._root_with_unit("card-a")
+        self._mirror_job(rev, "card-a", status="succeeded")
+        self._scrape_job(rev, "card-a", status="succeeded")
+        self._library_job("card-a", status="succeeded")
+        state = openlist_preset_state("root-x")
+        assert state["is_library_indexed"] is True
+        assert state["attention_count"] == 0
+
+    def test_needs_review_unit_does_not_block_published_unit(self):
+        """一个 unit needs_review（draft）+ 另一个全链成功 → indexed=true 且 attention=1。"""
+        from app.media_presets.service import openlist_preset_state
+
+        rev_a = self._root_with_unit("card-a", root_id="root-x")
+        self._mirror_job(rev_a, "card-a", status="succeeded")
+        self._scrape_job(rev_a, "card-a", status="succeeded")
+        self._library_job("card-a", status="succeeded")
+        self._root_with_unit("card-b", root_id="root-x", rev_status="draft")
+        state = openlist_preset_state("root-x")
+        assert state["is_library_indexed"] is True
+        assert state["attention_count"] == 1
+        assert state["unit_count"] == 2
+
+    def test_mirror_failed_attention(self):
+        """mirror failed → attention，且不进入 indexed。"""
+        from app.media_presets.service import openlist_preset_state
+
+        rev = self._root_with_unit("card-a")
+        self._mirror_job(rev, "card-a", status="failed")
+        state = openlist_preset_state("root-x")
+        assert state["is_library_indexed"] is False
+        assert state["attention_count"] == 1

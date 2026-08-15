@@ -4,16 +4,16 @@ import re
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from fastapi import HTTPException, UploadFile
 
 from app.core.paths import get_data_dir, sanitize_filename
-from app.integrations.openlist.providers import compat_ingest, compat_provider
 from app.import_plan.diff import compute_diff
 from app.import_plan.incremental import build_incremental_plan, merge_incremental_plan
 from app.import_plan.service import build_preview
 from app.import_plan.store import load_import_plan, save_diff_result, save_import_plan
+from app.integrations.openlist.providers import compat_ingest, compat_provider
 from app.media_presets.models import MediaLibraryPreset, MediaTreeVersion
 from app.media_presets.store import get_presets_root, list_presets, save_preset, version_archive_dir
 from app.raw.store import load_raw_snapshot, save_raw_snapshot
@@ -36,10 +36,17 @@ def openlist_preset_state(catalog_root_id: str) -> dict:
     durable jobs 投影识别单元数、需处理数与是否已建立媒体库，**绝不依赖不存在
     的 current_plan_id**（来源卡代表 SourceRoot 生命周期，不是单个 ImportPlan）。
 
-    返回 ``unit_count``（识别单元数）、``attention_count``（需处理单元数：
-    draft revision 或 mirror/scrape 终态失败）与 ``is_library_indexed``
-    （已有镜像成功 → 媒体库作品卡可发布）。
+    状态机沿每个 current unit 自己的 ``mirror → scrape → library`` job chain
+    判断（library rebuild 的 ``succeeded`` 才代表 LibraryIndex 已经发布）：
+
+    - draft revision → attention（人工确认入口）；
+    - mirror / scrape / library 任一 durable stage ``failed/cancelled`` → attention；
+    - 只有**至少一个 current unit 真正到达 library_rebuild=succeeded** 才
+      ``is_library_indexed=true``；``needs_review`` unit 不阻塞其他已成功发布
+      的 unit（保持人工确认与自动发布并存）。
     """
+    import json
+
     from app.db.database import get_connection
 
     empty = {"unit_count": 0, "attention_count": 0, "is_library_indexed": False}
@@ -55,8 +62,57 @@ def openlist_preset_state(catalog_root_id: str) -> dict:
     unit_count = len(units)
     attention_count = 0
     indexed = False
+
+    def _latest_stage_job(job_type: str, resource_key: str):
+        return conn.execute(
+            "SELECT * FROM jobs WHERE job_type = ? AND resource_key = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (job_type, resource_key),
+        ).fetchone()
+
+    def _job_result(row) -> dict:
+        try:
+            return (json.loads(row["payload"] or "{}").get("result") or {})
+        except (TypeError, ValueError):
+            return {}
+
+    def _latest_scrape_job(revision_id: str):
+        """本 revision 的 scrape job：mirror result 链优先，payload 精确兜底。"""
+        mirror_row = _latest_stage_job("mirror_revision", f"mirror:{revision_id}")
+        if mirror_row is not None:
+            scrape_id = _job_result(mirror_row).get("scrape_job_id") or ""
+            if scrape_id:
+                row = conn.execute(
+                    "SELECT * FROM jobs WHERE job_id = ?", (scrape_id,)
+                ).fetchone()
+                if row is not None:
+                    return row
+        return conn.execute(
+            "SELECT * FROM jobs WHERE job_type = 'scrape_revision' AND payload LIKE ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (f'%"revision_id": "{revision_id}"%',),
+        ).fetchone()
+
+    def _latest_library_job(unit_id: str, revision_id: str):
+        """本 unit 的 library rebuild job：scrape result 链优先，payload 精确兜底。"""
+        scrape_row = _latest_scrape_job(revision_id)
+        if scrape_row is not None:
+            lib_id = _job_result(scrape_row).get("library_rebuild_job") or ""
+            if lib_id:
+                row = conn.execute(
+                    "SELECT * FROM jobs WHERE job_id = ?", (lib_id,)
+                ).fetchone()
+                if row is not None:
+                    return row
+        return conn.execute(
+            "SELECT * FROM jobs WHERE job_type = 'library_rebuild' AND payload LIKE ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (f'%"unit_id": "{unit_id}"%',),
+        ).fetchone()
+
     for unit in units:
         revision_id = str(unit["current_revision_id"] or "")
+        unit_id = str(unit["unit_id"] or "")
         if not revision_id:
             continue
         rev = conn.execute(
@@ -70,23 +126,42 @@ def openlist_preset_state(catalog_root_id: str) -> dict:
             continue
         if rev_status not in ("confirmed", "executed"):
             continue
-        mirror = conn.execute(
-            "SELECT status FROM jobs WHERE job_type = 'mirror_revision' AND resource_key = ? "
-            "ORDER BY created_at DESC LIMIT 1",
-            (f"mirror:{revision_id}",),
-        ).fetchone()
-        mirror_status = str(mirror["status"]) if mirror else ""
+        mirror = _latest_stage_job("mirror_revision", f"mirror:{revision_id}")
+        if mirror is None:
+            # 确认后尚未入队：等待，不计 attention 也不发布
+            continue
+        mirror_status = str(mirror["status"] or "")
         if mirror_status in ("failed", "cancelled"):
             attention_count += 1
             continue
-        if mirror_status == "succeeded":
-            scrape = conn.execute(
-                "SELECT status FROM jobs WHERE job_type = 'scrape_revision' AND payload LIKE ? "
-                "ORDER BY created_at DESC LIMIT 1",
-                (f'%"revision_id": "{revision_id}"%',),
-            ).fetchone()
-            if scrape is not None and str(scrape["status"] or "") in ("failed", "cancelled"):
-                attention_count += 1
+        if mirror_status in ("queued", "running"):
+            continue
+        if mirror_status != "succeeded":
+            continue
+        scrape = _latest_scrape_job(revision_id)
+        if scrape is None:
+            # 链路尚未推进（或无需刮削）：等待
+            continue
+        scrape_status = str(scrape["status"] or "")
+        if scrape_status in ("failed", "cancelled"):
+            attention_count += 1
+            continue
+        if scrape_status in ("queued", "running"):
+            continue
+        if scrape_status != "succeeded":
+            continue
+        library = _latest_library_job(unit_id, revision_id)
+        if library is None:
+            # library rebuild 尚未入队：等待
+            continue
+        library_status = str(library["status"] or "")
+        if library_status in ("failed", "cancelled"):
+            attention_count += 1
+            continue
+        if library_status in ("queued", "running"):
+            continue
+        if library_status == "succeeded":
+            # LibraryIndex 已经发布（handle_library_rebuild 完成）
             indexed = True
     return {
         "unit_count": unit_count,
