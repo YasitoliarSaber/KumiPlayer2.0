@@ -305,12 +305,14 @@ class TestRecoverableUnitActions:
         ).fetchone()
         assert mirror_jobs["n"] == 1
 
-        # 重复点击幂等：仍返回同一 job（不新增）
+        # 重复点击幂等：同一 job 已 queued → already_active，不伪报 retried
         retry2 = client.post(
             f"/api/openlist/import-batches/{batch_id}/units/{unit_id}/retry", json={}
         )
         assert retry2.status_code == 200, retry2.text
-        assert retry2.json()["retried_stages"]["mirror"] == second_job_id
+        data2 = retry2.json()
+        assert data2["already_active_stages"]["mirror"] == second_job_id
+        assert "mirror" not in (data2.get("retried_stages") or {})
 
     def test_retry_draft_revision_rejected_with_409(self, client, tmp_path):
         """needs_review（draft revision）不能走 retry —— 必须人工确认。"""
