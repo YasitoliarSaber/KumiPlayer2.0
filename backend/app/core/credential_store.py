@@ -102,6 +102,18 @@ class WindowsCredentialStore:
         finally:
             self._cred_free(credential_pointer)
 
+    def read_state(self, name: str) -> str:
+        """凭据三态：``found`` / ``not_found`` / ``unavailable``。
+
+        与 ``read()`` 的区别：存储本身的故障（CredentialStoreError）不吞成
+        “不存在”——调用方（如 Bangumi session 层）必须能区分
+        「凭据未保存」与「凭据存储暂时不可读」，两者绝不能都表现为退出登录。
+        """
+        try:
+            value = self.read(name)
+        except CredentialStoreError:
+            return "unavailable"
+        return "found" if value else "not_found"
     def write(self, name: str, value: str) -> None:
         if not self.available:
             raise CredentialStoreError("当前系统不支持 Windows Credential Manager")

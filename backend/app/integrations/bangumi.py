@@ -15,12 +15,11 @@ from typing import Any, Optional
 import httpx
 
 from app.core.config import DEFAULT_BANGUMI_USER_AGENT, load_config
-from app.core.paths import get_cache_dir
+from app.core.paths import get_cache_dir, get_data_dir
 from app.core.atomic_json import write_json_atomic
 from app.core.data_lock import DATA_WRITE_LOCK
 from app.library.models import EpisodeIndex, WorkIndex
 from app.library.store import load_library_index
-
 BANGUMI_BASE_URL = "https://api.bgm.tv"
 SUBJECT_COLLECTION_WISH = 1
 SUBJECT_COLLECTION_COLLECT = 2
@@ -32,14 +31,35 @@ EPISODE_COLLECTION_DONE = 2
 EPISODE_COLLECTION_DROPPED = 3
 
 
+# ---- Bangumi 统一错误分类（CP2：外层 API/UI 不再自行猜状态码）----
+AUTH_INVALID = "auth_invalid"                # 401：Token 需要更新
+FORBIDDEN = "forbidden"                      # 403：无权限（保留凭据，不等于退出）
+RATE_LIMITED = "rate_limited"                # 429：请求受限（保留凭据）
+NETWORK_UNAVAILABLE = "network_unavailable"  # 连接/DNS 失败
+PROXY_UNAVAILABLE = "proxy_unavailable"      # 代理不可连接
+TIMEOUT = "timeout"                          # 请求超时
+SERVER_ERROR = "server_error"                # 5xx
+BAD_RESPONSE = "bad_response"                # 响应无法解析
+UNKNOWN = "unknown"
+
+
 class BangumiError(RuntimeError):
     """Raised when a Bangumi API request fails."""
 
-    def __init__(self, message: str, status_code: int = 0, payload: Any = None):
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 0,
+        payload: Any = None,
+        error_code: str = UNKNOWN,
+        retry_after: str = "",
+    ):
         super().__init__(message)
         self.status_code = status_code
         self.payload = payload
-
+        self.error_code = error_code
+        # 429 时的 Retry-After 原始值（调用方据此停止立即重试）
+        self.retry_after = retry_after
 
 @dataclass
 class BangumiMatch:
@@ -77,6 +97,39 @@ class BangumiState:
     episode_sync: list[BangumiEpisodeSync] = field(default_factory=list)
 
 
+@dataclass
+class BangumiAccountSnapshot:
+    """非敏感的本地账户快照（**严禁保存 Access Token**）。
+
+    只缓存最近一次成功验证得到的用户资料与验证时间，供 /session 离线恢复
+    账户卡；Token 永远只存在于 Windows Credential Manager。
+    """
+
+    user_id: int | None = None
+    username: str = ""
+    nickname: str = ""
+    avatar_url: str = ""
+    sign: str = ""
+    auth_status: str = "unknown"  # unknown / valid / reauth_required
+    connectivity: str = "unknown"  # unknown / online / offline / rate_limited / forbidden / server_error
+    last_verified_at: str = ""
+    last_success_at: str = ""
+    last_failure_at: str = ""
+    last_http_status: int | None = None
+    last_error_code: str = ""
+    last_error_message: str = ""
+
+    def to_public_user(self) -> dict | None:
+        """恢复账户卡的最小用户资料；无任何资料时返回 None。"""
+        if self.user_id is None and not self.username and not self.nickname:
+            return None
+        return {
+            "id": self.user_id,
+            "username": self.username,
+            "nickname": self.nickname,
+            "avatar": self.avatar_url,
+            "sign": self.sign,
+        }
 class BangumiClient:
     """Small official v0 API client.
 
@@ -221,15 +274,22 @@ class BangumiClient:
                     headers=headers,
                 )
         except httpx.TimeoutException as e:
-            raise BangumiError("Bangumi 请求超时") from e
+            raise BangumiError("Bangumi 请求超时", error_code=TIMEOUT) from e
         except httpx.ConnectError as e:
             if self.proxy_url:
                 raise BangumiError(
-                    f"Bangumi 代理不可连接（{self.proxy_url}），请启动 Clash 或检查代理端口。"
+                    f"Bangumi 代理不可连接（{self.proxy_url}），请启动 Clash 或检查代理端口。",
+                    error_code=PROXY_UNAVAILABLE,
                 ) from e
-            raise BangumiError("Bangumi 无法连接到服务，请检查网络连接。") from e
+            raise BangumiError(
+                "Bangumi 无法连接到服务，请检查网络连接。",
+                error_code=NETWORK_UNAVAILABLE,
+            ) from e
         except httpx.HTTPError as e:
-            raise BangumiError(f"Bangumi 请求失败: {e}") from e
+            raise BangumiError(
+                f"Bangumi 请求失败: {e}",
+                error_code=NETWORK_UNAVAILABLE,
+            ) from e
 
         if response.status_code >= 400:
             payload: Any
@@ -239,17 +299,73 @@ class BangumiClient:
                 payload = response.text[:300]
             message = payload.get("description") if isinstance(payload, dict) else ""
             message = message or payload.get("message") if isinstance(payload, dict) else message
-            raise BangumiError(message or f"Bangumi 返回 {response.status_code}", response.status_code, payload)
+            status = response.status_code
+            if status == 401:
+                error_code = AUTH_INVALID
+                if auth_required:
+                    # 认证观察：401 → reauth_required（保留凭据，不删除）
+                    _observe_auth("reauth", status)
+            elif status == 403:
+                error_code = FORBIDDEN
+            elif status == 429:
+                error_code = RATE_LIMITED
+            elif 500 <= status < 600:
+                error_code = SERVER_ERROR
+            elif 400 <= status < 500:
+                error_code = BAD_RESPONSE
+            else:  # pragma: no cover - 理论不可达
+                error_code = UNKNOWN
+            raise BangumiError(
+                message or f"Bangumi 返回 {status}",
+                status,
+                payload,
+                error_code=error_code,
+                retry_after=response.headers.get("Retry-After") or "",
+            )
+
+        if auth_required:
+            # 认证观察：authenticated 请求成功 → valid/online（/v0/me 不再是唯一探针）
+            _observe_auth("success", response.status_code)
 
         if response.status_code == 204 or not response.content:
             return {}
-        return response.json()
+        try:
+            return response.json()
+        except ValueError as e:
+            raise BangumiError(
+                "Bangumi 响应格式无法解析",
+                response.status_code,
+                error_code=BAD_RESPONSE,
+            ) from e
+
+def _observe_auth(kind: str, status_code: int) -> None:
+    """认证观察（低频，仅 auth_required 请求）：把成功/401 结果反馈到账户快照。
+
+    - success：auth_status=valid、connectivity=online、last_success_at 更新；
+    - reauth：auth_status=reauth_required（**保留凭据与快照**，绝不删除）。
+
+    ``/v0/me`` 不再是唯一“生命探针”——任何 authenticated 请求的成功都是
+    认证证据；401 也是精确的失效信号。
+    """
+    snapshot = load_account_snapshot()
+    now = _now()
+    if kind == "success":
+        snapshot.auth_status = "valid"
+        snapshot.connectivity = "online"
+        snapshot.last_success_at = now
+        snapshot.last_error_code = ""
+        snapshot.last_error_message = ""
+    else:
+        snapshot.auth_status = "reauth_required"
+        snapshot.connectivity = "online"
+        snapshot.last_failure_at = now
+        snapshot.last_error_code = AUTH_INVALID
+    snapshot.last_http_status = status_code
+    save_account_snapshot(snapshot)
 
 
 def get_state_path() -> Path:
     return get_cache_dir() / "bangumi_state.json"
-
-
 def load_state() -> BangumiState:
     path = get_state_path()
     if not path.exists():
@@ -298,6 +414,49 @@ def save_state(state: BangumiState) -> None:
         }
         write_json_atomic(get_state_path(), payload)
 
+
+def get_account_snapshot_path() -> Path:
+    return get_data_dir() / "bangumi_account.json"
+
+
+def load_account_snapshot() -> BangumiAccountSnapshot:
+    """读取本地账户快照；缺失或损坏时返回空快照（不抛错、不删文件）。"""
+    path = get_account_snapshot_path()
+    if not path.exists():
+        return BangumiAccountSnapshot()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return BangumiAccountSnapshot()
+    return BangumiAccountSnapshot(
+        user_id=data.get("user_id"),
+        username=data.get("username", ""),
+        nickname=data.get("nickname", ""),
+        avatar_url=data.get("avatar_url", ""),
+        sign=data.get("sign", ""),
+        auth_status=data.get("auth_status", "unknown"),
+        connectivity=data.get("connectivity", "unknown"),
+        last_verified_at=data.get("last_verified_at", ""),
+        last_success_at=data.get("last_success_at", ""),
+        last_failure_at=data.get("last_failure_at", ""),
+        last_http_status=data.get("last_http_status"),
+        last_error_code=data.get("last_error_code", ""),
+        last_error_message=data.get("last_error_message", ""),
+    )
+
+
+def save_account_snapshot(snapshot: BangumiAccountSnapshot) -> None:
+    """原子写账户快照（DATA_WRITE_LOCK + 原子换位）。"""
+    with DATA_WRITE_LOCK:
+        write_json_atomic(get_account_snapshot_path(), asdict(snapshot))
+
+
+def clear_account_snapshot() -> None:
+    """用户主动退出/替换凭据时清理账户快照。"""
+    with DATA_WRITE_LOCK:
+        path = get_account_snapshot_path()
+        if path.exists():
+            path.unlink()
 
 def get_match(work_id: str, season_number: Optional[int]) -> Optional[BangumiMatch]:
     """查找当前季的已确认 Bangumi 条目。
