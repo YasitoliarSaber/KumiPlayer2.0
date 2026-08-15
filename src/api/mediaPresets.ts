@@ -43,6 +43,10 @@ export interface MediaLibraryPreset {
   video_count: number;
   lifecycle_status: 'draft' | 'confirmed' | 'mirrored' | 'needs_attention' | 'ready';
   is_library_indexed: boolean;
+  /** OpenList 来源卡：SourceRoot 投影出的识别单元数（不依赖 current_plan_id） */
+  openlist_unit_count?: number;
+  /** OpenList 来源卡：SourceRoot 投影出的需处理单元数（draft / failed stage） */
+  openlist_attention_count?: number;
   scrape_task?: TaskRecord | null;
   review_count?: number;
   versions: MediaTreeVersion[];

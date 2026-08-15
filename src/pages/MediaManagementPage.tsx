@@ -910,6 +910,8 @@ export default function MediaManagementPage() {
       });
       setOpenlistScanTask(null);
       attachOpenlistBatch(batch, `已创建持久批次，正在扫描 ${batch.roots.length} 个目录…`);
+      // import-batch 已创建/复用来源卡：立即刷新 preset 列表，避免用户重进页面
+      void loadPresets(true);
       const notices = openlistResolutionNotices(batch);
       if (notices.length) setOpenlistSelectionNotice(notices.join('；'));
     } catch (error) {
@@ -937,6 +939,8 @@ export default function MediaManagementPage() {
       });
       setOpenlistScanTask(null);
       attachOpenlistBatch(batch, `已创建持久批次，正在扫描 ${batch.roots.length} 个目录…`);
+      // import-batch 已创建/复用来源卡：立即刷新 preset 列表，避免用户重进页面
+      void loadPresets(true);
       const notices = openlistResolutionNotices(batch);
       if (notices.length) setOpenlistSelectionNotice(notices.join('；'));
     } catch (error) {
@@ -1444,7 +1448,8 @@ export default function MediaManagementPage() {
           </div>
           <span className={`media-preset-lifecycle ${preset.lifecycle_status}`}>{getPresetLifecycleLabel(preset.lifecycle_status)}</span>
           {taskLabel && <div className={`media-preset-task-state ${scrapeActive ? 'active' : scrapeStopped ? 'stopped' : 'attention'}`}>{scrapeActive && <Spinner size="tiny" />}<span>{taskLabel}</span></div>}
-          <div className="media-preset-stats"><span><strong>{preset.work_count}</strong> 识别作品</span><span><strong>{preset.video_count}</strong> 个视频</span><span><strong>{preset.version_count}</strong> {preset.update_mode === 'local_scan' ? '次扫描' : '个版本'}</span></div>
+          <div className="media-preset-stats"><span><strong>{preset.update_mode === 'openlist_scan' ? (preset.openlist_unit_count ?? 0) : preset.work_count}</strong> {preset.update_mode === 'openlist_scan' ? '识别单元' : '识别作品'}</span><span><strong>{preset.video_count}</strong> 个视频</span><span><strong>{preset.version_count}</strong> {preset.update_mode === 'local_scan' ? '次扫描' : '个版本'}</span></div>
+          {(preset.update_mode === 'openlist_scan' && (preset.openlist_attention_count ?? 0) > 0) && <div className="media-preset-task-state attention"><TriangleAlert size={13} /><span>{preset.openlist_attention_count} 个识别单元需处理，可在后台导入中处理或重试</span></div>}
           <small>上次更新：{new Date(preset.updated_at).toLocaleString()}</small>
           <div className="media-preset-card-actions">
             {preset.update_mode === 'directory_tree' && pathValidation?.ok === false && <Button className="media-preset-action repair" appearance="secondary" icon={<FolderOpen size={15} />} disabled={Boolean(repairingPresetId) || uploadingTree} onClick={() => void rebindPresetRoot(preset)}>选择实际文件夹并重新验证</Button>}
@@ -1452,7 +1457,7 @@ export default function MediaManagementPage() {
             {!scrapeActive && scrapeFailed && !hasManualReview && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree} onClick={() => void queuePresetScrape(preset)}>重新刮削</Button>}
             {scrapeActive && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree} onClick={() => { setTaskKind('scrape'); setTask(scrapeTask); setStep('workbench'); }}>查看进度</Button>}
             {!scrapeActive && !scrapeFailed && preset.lifecycle_status === 'mirrored' && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree} onClick={() => void queuePresetScrape(preset)}>{scrapeStopped ? '继续刮削' : '加入刮削队列'}</Button>}
-            {!scrapeActive && !preset.is_library_indexed && preset.lifecycle_status !== 'mirrored' && preset.lifecycle_status !== 'needs_attention' && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree || repairingPresetId === preset.preset_id} onClick={() => void resumePreset(preset)}>{pathValidation?.ok === false ? '重新验证并继续' : '继续处理'}</Button>}
+            {!scrapeActive && !preset.is_library_indexed && preset.lifecycle_status !== 'mirrored' && preset.lifecycle_status !== 'needs_attention' && preset.update_mode !== 'openlist_scan' && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree || repairingPresetId === preset.preset_id} onClick={() => void resumePreset(preset)}>{pathValidation?.ok === false ? '重新验证并继续' : '继续处理'}</Button>}
             {preset.update_mode === 'local_scan'
               ? <Button className="media-preset-action secondary" appearance="secondary" icon={scanningFolder ? <Spinner size="tiny" /> : <ScanLine size={15} />} disabled={scanningFolder || uploadingTree} onClick={() => void rescanLocalPreset(preset)}>重新扫描本地目录</Button>
               : preset.update_mode === 'openlist_scan'

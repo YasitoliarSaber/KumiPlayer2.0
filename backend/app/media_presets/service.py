@@ -31,9 +31,81 @@ def now_iso() -> str:
     return datetime.now(timezone(timedelta(hours=8))).isoformat()
 
 
+def openlist_preset_state(catalog_root_id: str) -> dict:
+    """OpenList 来源卡状态投影：从 SourceRoot 的 current MediaUnits / revisions /
+    durable jobs 投影识别单元数、需处理数与是否已建立媒体库，**绝不依赖不存在
+    的 current_plan_id**（来源卡代表 SourceRoot 生命周期，不是单个 ImportPlan）。
+
+    返回 ``unit_count``（识别单元数）、``attention_count``（需处理单元数：
+    draft revision 或 mirror/scrape 终态失败）与 ``is_library_indexed``
+    （已有镜像成功 → 媒体库作品卡可发布）。
+    """
+    from app.db.database import get_connection
+
+    empty = {"unit_count": 0, "attention_count": 0, "is_library_indexed": False}
+    if not catalog_root_id:
+        return empty
+    conn = get_connection()
+    units = conn.execute(
+        "SELECT unit_id, current_revision_id FROM media_units WHERE root_id = ?",
+        (catalog_root_id,),
+    ).fetchall()
+    if not units:
+        return empty
+    unit_count = len(units)
+    attention_count = 0
+    indexed = False
+    for unit in units:
+        revision_id = str(unit["current_revision_id"] or "")
+        if not revision_id:
+            continue
+        rev = conn.execute(
+            "SELECT status FROM import_revisions WHERE revision_id = ?", (revision_id,)
+        ).fetchone()
+        if rev is None:
+            continue
+        rev_status = str(rev["status"] or "")
+        if rev_status == "draft":
+            attention_count += 1
+            continue
+        if rev_status not in ("confirmed", "executed"):
+            continue
+        mirror = conn.execute(
+            "SELECT status FROM jobs WHERE job_type = 'mirror_revision' AND resource_key = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (f"mirror:{revision_id}",),
+        ).fetchone()
+        mirror_status = str(mirror["status"]) if mirror else ""
+        if mirror_status in ("failed", "cancelled"):
+            attention_count += 1
+            continue
+        if mirror_status == "succeeded":
+            scrape = conn.execute(
+                "SELECT status FROM jobs WHERE job_type = 'scrape_revision' AND payload LIKE ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (f'%"revision_id": "{revision_id}"%',),
+            ).fetchone()
+            if scrape is not None and str(scrape["status"] or "") in ("failed", "cancelled"):
+                attention_count += 1
+            indexed = True
+    return {
+        "unit_count": unit_count,
+        "attention_count": attention_count,
+        "is_library_indexed": indexed,
+    }
+
+
 def preset_to_dict(preset: MediaLibraryPreset) -> dict:
     data = asdict(preset)
     data["is_library_indexed"] = preset.lifecycle_status == "ready"
+    # OpenList 来源卡：is_library_indexed 与识别单元/需处理数来自 SourceRoot 的
+    # current MediaUnits/revisions/jobs 投影，不再用目录树 lifecycles 的 ready
+    # 判定（来源卡从不经过 directory_tree 的 lifecycle 推进）。
+    if preset.source == "openlist" and preset.catalog_root_id:
+        state = openlist_preset_state(preset.catalog_root_id)
+        data["is_library_indexed"] = state["is_library_indexed"]
+        data["openlist_unit_count"] = state["unit_count"]
+        data["openlist_attention_count"] = state["attention_count"]
     return data
 
 
