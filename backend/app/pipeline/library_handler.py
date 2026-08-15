@@ -140,8 +140,11 @@ def handle_library_rebuild(payload: dict, progress_callback=None, should_cancel=
     - 语义输入唯一：``media_units.current_revision_id``（superseded/draft 不投影）；
     - 逐 current plan 构建 fragment → merge → 一次 ``save_library_index()``
       （不再逐 plan 多次 read-modify-write legacy publishing）；
-    - 清理 current 指针已失效的 stale ``media_libraries`` 行（projection registry，
-      不是语义历史）。
+    - 清理 stale ``media_libraries`` 行（projection registry，不是语义历史）：
+      1. current 指针已失效的行删除；
+      2. current revision 下**不再属于 desired canonical identity** 的旧行删除
+         （自愈旧版本按 raw work_id 写入的错误 projection，如 ``w → rev-A``
+         在新 canonical ``unit:A:main → rev-A`` 发布后收敛）。
     """
     from app.library.index import build_library_index, rebuild_related_works_for_plan
     from app.library.models import LibraryIndex
@@ -155,6 +158,9 @@ def handle_library_rebuild(payload: dict, progress_callback=None, should_cancel=
     updated = 0
     fragments: list = []
     current_revision_ids: set[str] = set()
+    # desired identity：current revision → 本轮 upsert 的全部 library_id
+    # （canonical_work_id 优先；legacy 缺 canonical 时为 work_id/rev 兜底）
+    desired_by_revision: dict[str, set[str]] = {}
     # 同一 source 的全部 current plans 都参与关系重建（不能只保留第一个 plan，
     # 否则后续 unit 的 related_works 会被第一个 plan 覆盖重写为空）
     source_plans: dict[str, list] = {}
@@ -170,7 +176,9 @@ def handle_library_rebuild(payload: dict, progress_callback=None, should_cancel=
         if not items:
             continue
         current_revision_ids.add(revision["revision_id"])
-        _upsert_library(revision, items, timestamp)
+        desired_by_revision[revision["revision_id"]] = set(
+            _upsert_library(revision, items, timestamp)
+        )
         updated += 1
         plan = revision_store.load_plan(revision["revision_id"])
         if plan is None:
@@ -214,12 +222,27 @@ def handle_library_rebuild(payload: dict, progress_callback=None, should_cancel=
     merged.generated_at = timestamp
     save_library_index(merged)
 
-    # stale media_libraries 收敛：current 指针已不属于任何当前 unit 的行删除
+    # stale media_libraries 收敛（projection registry 可从 current facts 重建）：
+    # 1. current 指针已不属于任何当前 unit 的行删除；
+    # 2. current revision 下不再属于 desired identity 的旧行删除（自愈旧版本
+    #    按 raw work_id 写入的错误 projection，如 ``w → rev-A`` 在新 canonical
+    #    ``unit:A:main → rev-A`` 发布后收敛，避免新旧行并存）。
     stale_removed = 0
     for row in conn.execute(
         "SELECT library_id, current_revision_id FROM media_libraries"
     ).fetchall():
-        if row["current_revision_id"] and row["current_revision_id"] not in current_revision_ids:
+        revision_id = str(row["current_revision_id"] or "")
+        if not revision_id:
+            continue
+        if revision_id not in current_revision_ids:
+            conn.execute(
+                "DELETE FROM media_libraries WHERE library_id = ?",
+                (row["library_id"],),
+            )
+            stale_removed += 1
+            continue
+        desired = desired_by_revision.get(revision_id)
+        if desired is not None and row["library_id"] not in desired:
             conn.execute(
                 "DELETE FROM media_libraries WHERE library_id = ?",
                 (row["library_id"],),

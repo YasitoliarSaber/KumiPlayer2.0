@@ -973,3 +973,104 @@ class TestCanonicalSourceCardEndToEnd:
         assert state["unit_count"] == 2
         assert state["attention_count"] == 0
         assert state["is_library_indexed"] is True
+
+
+class TestLegacyProjectionSelfHeal:
+    """CP9-B：旧版本按 raw work_id 写入的 media_libraries 投影在 rebuild 后自愈，
+    且重复 rebuild 幂等（行数与内容完全不变）。"""
+
+    def _insert_legacy_row(self, library_id: str, revision_id: str, root_id: str = "root-x") -> None:
+        from app.db.database import get_connection
+        from app.import_plan import revision_store
+
+        ts = revision_store.now_iso()
+        conn = get_connection()
+        conn.execute(
+            """
+            INSERT INTO media_libraries (
+                library_id, name, root_id, remote_locator, import_family, import_scope,
+                current_revision_id, lifecycle_status, created_at, updated_at
+            ) VALUES (?, '作品', ?, '', 'anime', '', ?, 'draft', ?, ?)
+            """,
+            (library_id, root_id, revision_id, ts, ts),
+        )
+        conn.commit()
+
+    def _library_ids(self) -> list[str]:
+        from app.db.database import get_connection
+
+        conn = get_connection()
+        return [
+            row["library_id"]
+            for row in conn.execute(
+                "SELECT library_id FROM media_libraries ORDER BY library_id"
+            ).fetchall()
+        ]
+
+    def test_rebuild_removes_legacy_raw_projection_and_is_idempotent(self):
+        """预存旧行 w→rev；rebuild 后 w 删除、canonical 存在；再 rebuild 完全不变。"""
+        from app.db.database import get_connection
+        from app.import_plan import revision_store
+        from app.pipeline.library_handler import handle_library_rebuild
+
+        _make_unit("unit-heal-a")
+        rev = revision_store.create_revision(
+            unit_id="unit-heal-a", source_generation=1,
+            items=[_item("A/Season 1/a.mkv", canonical_work_id="unit:unit-heal-a:main", work_id="w")],
+            status="confirmed",
+        )
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = ?",
+            (rev["revision_id"], "unit-heal-a"),
+        )
+        conn.commit()
+        # cd502c4 时代旧版本写入的错误 projection（raw work_id 作 library_id）
+        self._insert_legacy_row("w", rev["revision_id"])
+
+        handle_library_rebuild(
+            {"unit_id": "unit-heal-a"},
+            progress_callback=lambda *a, **k: None,
+        )
+        ids = self._library_ids()
+        assert ids == ["unit:unit-heal-a:main"]
+        assert "w" not in ids
+
+        # 再 rebuild 一次：行数和内容完全不变（幂等收敛）
+        handle_library_rebuild(
+            {"unit_id": "unit-heal-a"},
+            progress_callback=lambda *a, **k: None,
+        )
+        assert self._library_ids() == ["unit:unit-heal-a:main"]
+
+    def test_rebuild_two_standalone_with_legacy_row_keeps_only_canonicals(self):
+        """同 revision 两 standalone canonical + 预存旧 raw 行 → 恰好两条 canonical。"""
+        from app.db.database import get_connection
+        from app.import_plan import revision_store
+        from app.pipeline.library_handler import handle_library_rebuild
+
+        _make_unit("unit-heal-solo")
+        rev = revision_store.create_revision(
+            unit_id="unit-heal-solo", source_generation=1,
+            items=[
+                _item("剧集/剧场版A/a.mkv", canonical_work_id="unit:unit-heal-solo:sub:A", work_id="w"),
+                _item("剧集/剧场版B/b.mkv", canonical_work_id="unit:unit-heal-solo:sub:B", work_id="w"),
+            ],
+            status="confirmed",
+        )
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = ?",
+            (rev["revision_id"], "unit-heal-solo"),
+        )
+        conn.commit()
+        self._insert_legacy_row("w", rev["revision_id"])
+
+        handle_library_rebuild(
+            {"unit_id": "unit-heal-solo"},
+            progress_callback=lambda *a, **k: None,
+        )
+        assert self._library_ids() == [
+            "unit:unit-heal-solo:sub:A",
+            "unit:unit-heal-solo:sub:B",
+        ]
