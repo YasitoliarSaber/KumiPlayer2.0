@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useUiStore } from './stores/ui';
 import { useLibraryStore } from './stores/library';
-import { useBangumiStore } from './stores/bangumi';
+import { useBangumiStore, SESSION_VERIFY_TTL_MS } from './stores/bangumi';
 import { useConnectionStore } from './stores/connection';
 import { useMediaWorkflowStore } from './stores/mediaWorkflow';
 import AppShell from './components/shell/AppShell';
@@ -27,7 +27,7 @@ const FirstRunSetup = lazy(() => import('./pages/FirstRunSetup'));
 export default function App() {
   const { page, query, selectedWorkId, source: activeSource, styleMode, motionMode, appearanceMode, setSeriesCardImageMode, setPosterSize, goManage } = useUiStore();
   const loadLibrary = useLibraryStore((state) => state.loadLibrary);
-  const { restoreSession, sessionStatus } = useBangumiStore();
+  const { restoreSession, verifySession } = useBangumiStore();
   const { startHeartbeat, stopHeartbeat, startHealthPolling, stopHealthPolling } = useConnectionStore();
   const queueDroppedTreePath = useMediaWorkflowStore((state) => state.queueDroppedTreePath);
   const fluentTheme = useMemo(() => getKumiFluentTheme(appearanceMode), [appearanceMode]);
@@ -146,25 +146,24 @@ export default function App() {
 
   useEffect(() => {
     if (!appConfig?.setup_completed) return undefined;
-    const timer = window.setTimeout(() => {
-      restoreSession().catch(() => {
-        // 登录恢复不阻断媒体库启动，连接状态会在账户页中明确显示。
-      });
-    }, 1200);
-    return () => window.clearTimeout(timer);
-  }, [appConfig?.setup_completed, restoreSession]);
-
-  useEffect(() => {
-    if (!appConfig?.setup_completed || sessionStatus !== 'saved_offline') return undefined;
-
-    const timer = window.setTimeout(() => {
-      restoreSession(1).catch(() => {
-        // 保留已保存凭据状态；下一轮会继续低频重试。
-      });
-    }, 30_000);
-
-    return () => window.clearTimeout(timer);
-  }, [appConfig?.setup_completed, restoreSession, sessionStatus]);
+    let disposed = false;
+    // 启动只做本地会话恢复（GET /session，0 远程请求、不重试）；
+    // 仅当上次验证超过 TTL 时后台执行一次远程验证（失败不阻塞 UI、不影响本地状态）
+    void restoreSession().then((session) => {
+      if (disposed || !session || session.credential_state !== 'found') return;
+      const stale =
+        !session.last_verified_at ||
+        Date.now() - new Date(session.last_verified_at).getTime() > SESSION_VERIFY_TTL_MS;
+      if (stale) {
+        void verifySession().catch(() => {
+          // 后台验证失败保留本地会话，账户卡不受影响
+        });
+      }
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [appConfig?.setup_completed, restoreSession, verifySession]);
 
   useEffect(() => {
     configApi.getConfig()

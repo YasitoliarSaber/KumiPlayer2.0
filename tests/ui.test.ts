@@ -458,12 +458,19 @@ test('Bangumi 启动恢复区分已保存凭据与临时连接失败', () => {
   const settings = readFileSync(new URL('../src/pages/SettingsPage.tsx', import.meta.url), 'utf8');
 
   assert.match(api, /getSession/);
+  assert.match(api, /verifySession/);
   assert.match(store, /saved_offline/);
   assert.match(store, /restoreSession/);
-  assert.match(app, /sessionStatus\s*!==\s*'saved_offline'/);
-  assert.match(app, /restoreSession\(1\)/);
+  assert.match(store, /SESSION_VERIFY_TTL_MS/);
+  assert.match(store, /credential_state/);
+  // 启动恢复：单次本地 /session（0 远程、不重试），无 4 连发、无 30 秒心跳；
+  // 仅 TTL 过期时后台触发一次远程验证（失败不阻塞 UI）
+  assert.doesNotMatch(app, /restoreSession\(1\)/);
+  assert.doesNotMatch(app, /30_000/);
+  assert.match(app, /SESSION_VERIFY_TTL_MS/);
+  assert.match(app, /verifySession/);
   assert.match(settings, /登录信息已保存/);
-  assert.match(settings, /重新连接/);
+  assert.match(settings, /重新验证/);
 });
 
 test('Bangumi 每次恢复连接只刷新当前已打开作品', () => {
