@@ -630,44 +630,37 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
     </PanelStack>
   );
 
-  const renderBangumi = () => (
+  const renderBangumi = () => {
+    // 仅当凭据有效且在线才允许显示“已连接”；cached user 只承担身份展示
+    const isConnected = hasStoredCredential && authStatus === 'valid' && connectivity === 'online';
+    return (
     <PanelStack>
       <SectionIntro title="账户与同步" description="连接 Bangumi 后，KumiPlayer 可以同步收藏状态和已看集数。" />
       <SettingsSection className="settings-account-card">
-        {hasStoredCredential && user ? (
-          <div className="settings-account-hero is-connected">
+        {user ? (
+          <div className={`settings-account-hero${isConnected ? ' is-connected' : ''}`}>
             <div className="settings-account-identity">
               {user.avatar ? <DecodedImage src={buildBangumiImageUrl(user.avatar)} alt={user.nickname || user.username} /> : <span className="settings-account-avatar"><UserRound size={24} /></span>}
               <div className="min-w-0">
-                <span className="settings-account-kicker">Bangumi 已连接</span>
+                <span className="settings-account-kicker">{isConnected ? 'Bangumi 已连接' : 'Bangumi 账户'}</span>
                 <strong>{user.nickname || user.username}</strong>
-                <small>@{user.username} · ID {user.id ?? '-'}{lastSuccessAt ? ` · 上次验证 ${lastSuccessAt.slice(0, 16).replace('T', ' ')}` : ''}</small>
+                <small>@{user.username} · ID {user.id ?? '-'}{lastSuccessAt ? ` · 上次成功连接 ${lastSuccessAt.slice(0, 16).replace('T', ' ')}` : ''}</small>
               </div>
             </div>
             <GhostButton onClick={logoutBangumi}>退出</GhostButton>
           </div>
         ) : bangumiSessionStatus === 'checking' ? (
           <div className="settings-note settings-bangumi-session"><Spinner size="tiny" />正在恢复已保存的 Bangumi 登录信息…</div>
-        ) : credentialState === 'unavailable' ? (
-          <div className="settings-bangumi-session settings-note">
-            <div><strong>暂时无法读取本机 Bangumi 登录凭据</strong><span>请检查 Windows Credential Manager 是否可用；已保存的账户资料不会被清除。</span></div>
-            <GhostButton onClick={() => void restoreBangumiSession()} disabled={bangumiLoading}>重试</GhostButton>
-          </div>
         ) : hasStoredCredential ? (
-          <div className="settings-bangumi-session settings-note">
-            {authStatus === 'reauth_required' ? (
-              <div><strong>Bangumi 登录授权已失效</strong><span>账户资料仍保存在本机，请更新 Personal Access Token。</span></div>
-            ) : connectivity === 'rate_limited' ? (
-              <div><strong>Bangumi 请求暂时受限</strong><span>登录信息仍然有效，稍后会自动恢复。</span></div>
-            ) : connectivity === 'forbidden' ? (
-              <div><strong>Bangumi 拒绝了本次请求</strong><span>登录信息仍然保存着，请稍后重新验证。</span></div>
-            ) : connectivity === 'offline' || connectivity === 'server_error' ? (
-              <div><strong>登录信息已保存，暂时无法连接 Bangumi</strong><span>本地服务、代理或网络恢复后会自动恢复。</span></div>
-            ) : (
-              <div><strong>登录信息已保存</strong><span>尚未验证 Bangumi 连接。</span></div>
-            )}
-            {lastSuccessAt && <small>上次成功连接：{lastSuccessAt.slice(0, 16).replace('T', ' ')}</small>}
-            <GhostButton onClick={() => void verifyBangumiSession()} disabled={bangumiLoading}>重新验证</GhostButton>
+          <div className="settings-account-hero">
+            <div className="settings-account-identity">
+              <span className="settings-account-avatar"><UserRound size={24} /></span>
+              <div>
+                <span className="settings-account-kicker">登录信息已保存</span>
+                <strong>Bangumi 账户</strong>
+                <small>尚未验证用户资料</small>
+              </div>
+            </div>
           </div>
         ) : (
           <div className="settings-account-hero">
@@ -684,10 +677,31 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
             </a>
           </div>
         )}
+        {hasStoredCredential && (
+          <div className="settings-bangumi-session settings-note">
+            {authStatus === 'reauth_required' ? (
+              <div><strong>Bangumi 登录授权已失效</strong><span>账户资料仍保存在本机，请更新 Personal Access Token。</span></div>
+            ) : connectivity === 'rate_limited' ? (
+              <div><strong>Bangumi 请求暂时受限</strong><span>登录信息仍然有效，稍后会自动恢复。</span></div>
+            ) : connectivity === 'forbidden' ? (
+              <div><strong>Bangumi 拒绝了本次请求</strong><span>登录信息仍然保存着，请稍后重新验证。</span></div>
+            ) : connectivity === 'offline' || connectivity === 'server_error' ? (
+              <div><strong>登录信息已保存，暂时无法连接 Bangumi</strong><span>本地服务、代理或网络恢复后会自动恢复。</span></div>
+            ) : credentialState === 'unavailable' ? (
+              <div><strong>暂时无法读取本机 Bangumi 登录凭据</strong><span>请检查 Windows Credential Manager 是否可用；已保存的账户资料不会被清除。</span></div>
+            ) : (
+              <div><strong>登录信息已保存</strong><span>尚未验证 Bangumi 连接。</span></div>
+            )}
+            {lastSuccessAt && !isConnected && <small>上次成功连接：{lastSuccessAt.slice(0, 16).replace('T', ' ')}</small>}
+            {!isConnected && (
+              <GhostButton onClick={() => void verifyBangumiSession()} disabled={bangumiLoading}>重新验证</GhostButton>
+            )}
+          </div>
+        )}
         {authStatus === 'reauth_required' && bangumiError && <div className="settings-note danger">已保存的登录信息无法通过验证：{bangumiError}</div>}
       </SettingsSection>
 
-      {!hasStoredCredential && bangumiSessionStatus !== 'checking' && (
+      {(!hasStoredCredential || authStatus === 'reauth_required') && bangumiSessionStatus !== 'checking' && (
         <details className="settings-section settings-token-login" open={authStatus === 'reauth_required'}>
           <summary className="settings-section-head">
             <span className="settings-token-title"><KeyRound size={17} /><span><strong>个人访问令牌登录</strong><small>Bangumi Access Token</small></span></span>
@@ -698,13 +712,14 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
               <input type="password" value={bangumiToken} onChange={(event) => setBangumiToken(event.target.value)} className="settings-input min-w-0 flex-1" placeholder="粘贴 Bangumi 个人访问令牌" autoComplete="off" />
               <PrimaryButton onClick={loginBangumi} busy={bangumiLoading} disabled={!bangumiToken.trim()}>{authStatus === 'reauth_required' ? '更新登录信息' : '验证并登录'}</PrimaryButton>
             </div>
-            <div className="settings-note">令牌只保存在本机安全存储中，提交前会先通过 Bangumi 当前用户接口验证。</div>
+            <div className="settings-note">令牌只保存在本机安全存储中，提交前会先通过 Bangumi 当前用户接口验证；授权失效时更新 Token 不会丢失已保存的账户资料。</div>
           </div>
         </details>
       )}
 
     </PanelStack>
-  );
+    );
+  };
 
   const renderSupport = () => (
     <PanelStack>

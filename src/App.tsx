@@ -148,12 +148,15 @@ export default function App() {
     if (!appConfig?.setup_completed) return undefined;
     let disposed = false;
     // 启动只做本地会话恢复（GET /session，0 远程请求、不重试）；
-    // 仅当上次验证超过 TTL 时后台执行一次远程验证（失败不阻塞 UI、不影响本地状态）
+    // 认证证据时间取 max(last_verified_at, last_success_at)：任何 authenticated
+    // 业务请求成功（_observe_auth 更新 last_success_at）都计入 TTL，避免刚同步
+    // 完又触发一次 /v0/me；仅超 TTL 时后台执行一次远程验证（失败不阻塞 UI）
     void restoreSession().then((session) => {
       if (disposed || !session || session.credential_state !== 'found') return;
-      const stale =
-        !session.last_verified_at ||
-        Date.now() - new Date(session.last_verified_at).getTime() > SESSION_VERIFY_TTL_MS;
+      const lastVerified = session.last_verified_at ? new Date(session.last_verified_at).getTime() : 0;
+      const lastSuccess = session.last_success_at ? new Date(session.last_success_at).getTime() : 0;
+      const effective = Math.max(lastVerified, lastSuccess);
+      const stale = !effective || Date.now() - effective > SESSION_VERIFY_TTL_MS;
       if (stale) {
         void verifySession().catch(() => {
           // 后台验证失败保留本地会话，账户卡不受影响

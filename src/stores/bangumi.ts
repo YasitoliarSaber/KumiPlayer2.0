@@ -47,15 +47,16 @@ function applySession(
     sessionStatus = 'saved_offline';
   } else if (session.auth_status === 'reauth_required') {
     sessionStatus = 'credential_invalid';
-  } else if (user) {
+  } else if (user && session.auth_status === 'valid' && session.connectivity === 'online') {
     sessionStatus = 'connected';
   } else {
-    // 有凭据但还没有验证快照：等待验证
+    // 身份保留但未连接（离线 / 受限 / 拒绝 / 未验证）：不显示退出
     sessionStatus = 'saved_offline';
   }
   set((state) => ({
     user,
-    isLoggedIn: hasStoredCredential && !!user,
+    // isLoggedIn = 真正“已连接”：凭据存在 + 身份 + valid + online
+    isLoggedIn: hasStoredCredential && !!user && session.auth_status === 'valid' && session.connectivity === 'online',
     sessionStatus,
     hasStoredCredential,
     credentialState: session.credential_state,
