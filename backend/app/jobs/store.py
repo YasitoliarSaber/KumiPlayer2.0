@@ -480,12 +480,16 @@ def retry_job(job_id: str, worker_id: str, *, error: str, error_type: str) -> bo
     return cursor.rowcount > 0
 
 
+@_admission_write
 def rerun_terminal_job(job_id: str) -> bool:
     """把终态（failed/cancelled）job 重新入队，复用同一 job 行（attempt+1）。
 
     与 retry_job 的区别：不要求 running 租约，供人工/API 对终态任务精确重试
     （OpenList failed unit 的 exact-stage retry）。重复调用幂等：第二次该 job
     已回到 queued/running，不再动作。
+
+    与其它外部任务写入口一样持有维护准入（admission）：从屏障检查到 SQLite
+    提交全程持锁，避免维护删除期间旧 job 被改回 queued 后又被 worker 领取。
 
     绝不新建业务任务——同一 resource_key 的 job 行保持唯一，符合
     「attempt 重试、不创建重复任务」的持久任务模型。
@@ -503,7 +507,6 @@ def rerun_terminal_job(job_id: str) -> bool:
     )
     conn.commit()
     return cursor.rowcount > 0
-
 
 def defer_job(
     job_id: str,

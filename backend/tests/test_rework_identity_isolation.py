@@ -703,3 +703,174 @@ class TestOpenlistSourceCardDurableLifecycle:
         state = openlist_preset_state("root-x")
         assert state["is_library_indexed"] is False
         assert state["attention_count"] == 1
+
+
+class TestTerminalRetryBarrierAndNoopSemantics:
+    """CP9：terminal retry 的维护屏障与无操作语义。
+
+    - 维护屏障激活 → 不得重新入队（409，旧 job 保持终态）；
+    - failed exact stage → 真正 rerun（同一行 attempt+1）；
+    - 重复点击 → 不新增 job 行（同 resource_key 仍一行）；
+    - 无失败阶段 → 409「当前没有可重试的失败阶段」，不伪报 retried_stages。"""
+
+    def _make_batch_with_unit(self, client, tmp_path) -> tuple[str, str]:
+        """单 unit 批次 + confirmed revision。"""
+        from app.db.database import get_connection
+        from app.import_plan import revision_store
+
+        _make_local_mount(tmp_path)
+        _save_config(client, tmp_path)
+        _save_routes(client)
+        resp = client.post(
+            "/api/openlist/import-batch",
+            json={"remote_paths": [REMOTE_ROOT + "/动画/冰菓"], "import_family": "anime"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        batch_id = data["batch_id"]
+        root_id = data["roots"][0]["root_id"]
+
+        conn = get_connection()
+        now = revision_store.now_iso()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO media_units (
+                unit_id, batch_id, root_id, discovery_scope, boundary, work_key,
+                status, closure_generation, current_revision_id, created_at, updated_at
+            ) VALUES (?, ?, ?, '', '/动画/冰菓', 'w', 'confirmed', 0, '', ?, ?)
+            """,
+            ("cp9-unit", batch_id, root_id, now, now),
+        )
+        conn.commit()
+        rev = revision_store.create_revision(
+            unit_id="cp9-unit", source_generation=1,
+            items=[_item("cp9-unit/Season 1/cp9-unit.mkv")],
+            status="confirmed",
+        )
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = ?",
+            (rev["revision_id"], "cp9-unit"),
+        )
+        conn.commit()
+        return batch_id, rev["revision_id"]
+
+    def test_barrier_active_blocks_requeue(self, client, tmp_path):
+        """维护屏障激活 → 409，旧 failed job 保持终态不被恢复。"""
+        from app.catalog import maintenance_guard
+        from app.db.database import get_connection
+        from app.jobs import store as job_store
+
+        batch_id, rev_id = self._make_batch_with_unit(client, tmp_path)
+        mirror = job_store.create_job(
+            job_type="mirror_revision", resource_key=f"mirror:{rev_id}",
+            payload={"revision_id": rev_id, "unit_id": "cp9-unit"},
+        )
+        conn = get_connection()
+        conn.execute("UPDATE jobs SET status='failed' WHERE job_id=?", (mirror.job_id,))
+        conn.commit()
+
+        with maintenance_guard.hold():
+            resp = client.post(
+                f"/api/openlist/import-batches/{batch_id}/units/cp9-unit/retry", json={}
+            )
+        assert resp.status_code == 409
+        row = conn.execute(
+            "SELECT status, attempt FROM jobs WHERE job_id=?", (mirror.job_id,)
+        ).fetchone()
+        assert row["status"] == "failed"
+        assert row["attempt"] == 0
+
+    def test_failed_exact_stage_reruns_same_row(self, client, tmp_path):
+        """failed mirror → 200，同一行 attempt+1 且回到 queued。"""
+        from app.db.database import get_connection
+        from app.jobs import store as job_store
+
+        batch_id, rev_id = self._make_batch_with_unit(client, tmp_path)
+        mirror = job_store.create_job(
+            job_type="mirror_revision", resource_key=f"mirror:{rev_id}",
+            payload={"revision_id": rev_id, "unit_id": "cp9-unit"},
+        )
+        conn = get_connection()
+        conn.execute("UPDATE jobs SET status='failed' WHERE job_id=?", (mirror.job_id,))
+        conn.commit()
+
+        resp = client.post(
+            f"/api/openlist/import-batches/{batch_id}/units/cp9-unit/retry", json={}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["retried_stages"]["mirror"] == mirror.job_id
+        row = conn.execute(
+            "SELECT status, attempt FROM jobs WHERE job_id=?", (mirror.job_id,)
+        ).fetchone()
+        assert row["status"] == "queued"
+        assert row["attempt"] == 1
+
+    def test_repeated_click_no_second_job(self, client, tmp_path):
+        """重复点击：第一次 rerun，第二次 already_active，同 resource_key 仍一行。"""
+        from app.db.database import get_connection
+        from app.jobs import store as job_store
+
+        batch_id, rev_id = self._make_batch_with_unit(client, tmp_path)
+        mirror = job_store.create_job(
+            job_type="mirror_revision", resource_key=f"mirror:{rev_id}",
+            payload={"revision_id": rev_id, "unit_id": "cp9-unit"},
+        )
+        conn = get_connection()
+        conn.execute("UPDATE jobs SET status='failed' WHERE job_id=?", (mirror.job_id,))
+        conn.commit()
+
+        r1 = client.post(
+            f"/api/openlist/import-batches/{batch_id}/units/cp9-unit/retry", json={}
+        )
+        assert r1.status_code == 200
+        assert r1.json()["retried_stages"]["mirror"] == mirror.job_id
+
+        r2 = client.post(
+            f"/api/openlist/import-batches/{batch_id}/units/cp9-unit/retry", json={}
+        )
+        assert r2.status_code == 200
+        data2 = r2.json()
+        assert data2["already_active_stages"]["mirror"] == mirror.job_id
+        assert "mirror" not in (data2.get("retried_stages") or {})
+        n = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE job_type='mirror_revision' AND resource_key=?",
+            (f"mirror:{rev_id}",),
+        ).fetchone()[0]
+        assert n == 1
+
+    def test_all_succeeded_returns_409_without_fake_retried(self, client, tmp_path):
+        """全链路 succeeded → 409，不把 succeeded job 伪报进 retried_stages。"""
+        from app.db.database import get_connection
+        from app.jobs import store as job_store
+
+        batch_id, rev_id = self._make_batch_with_unit(client, tmp_path)
+        mirror = job_store.create_job(
+            job_type="mirror_revision", resource_key=f"mirror:{rev_id}",
+            payload={"revision_id": rev_id, "unit_id": "cp9-unit"},
+        )
+        conn = get_connection()
+        conn.execute("UPDATE jobs SET status='succeeded' WHERE job_id=?", (mirror.job_id,))
+        conn.commit()
+
+        resp = client.post(
+            f"/api/openlist/import-batches/{batch_id}/units/cp9-unit/retry", json={}
+        )
+        assert resp.status_code == 409
+        assert "当前没有可重试的失败阶段" in resp.json()["detail"]
+
+    def test_queued_stage_reports_already_active(self, client, tmp_path):
+        """已有 queued stage → 200 + already_active_stages，不伪报 retried。"""
+        from app.jobs import store as job_store
+
+        batch_id, rev_id = self._make_batch_with_unit(client, tmp_path)
+        mirror = job_store.create_job(
+            job_type="mirror_revision", resource_key=f"mirror:{rev_id}",
+            payload={"revision_id": rev_id, "unit_id": "cp9-unit"},
+        )
+        resp = client.post(
+            f"/api/openlist/import-batches/{batch_id}/units/cp9-unit/retry", json={}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["already_active_stages"]["mirror"] == mirror.job_id
+        assert "mirror" not in (data.get("retried_stages") or {})

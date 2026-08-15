@@ -1273,6 +1273,7 @@ def retry_openlist_import_unit(batch_id: str, unit_id: str):
     """
     import json
 
+    from app.catalog import maintenance_guard
     from app.catalog import store as catalog_store
     from app.db.database import get_connection, init_db
     from app.jobs import store as job_store
@@ -1352,31 +1353,67 @@ def retry_openlist_import_unit(batch_id: str, unit_id: str):
         ).fetchone()
 
     def _requeue_terminal(job_row) -> str:
-        """把终态 failed/cancelled job 重新入队（同一行 attempt+1），返回 job_id。"""
+        """把终态 failed/cancelled job 重新入队（同一行 attempt+1），返回 job_id。
+
+        维护屏障激活时 rerun_terminal_job 拒绝写入 → 转 409（与其它任务写
+        入口一致），旧 job 保持终态不被误恢复。
+        """
+        from app.catalog import maintenance_guard
+
         job_id = str(job_row["job_id"])
         if job_row["status"] in ("failed", "cancelled"):
-            job_store.rerun_terminal_job(job_id)
+            try:
+                job_store.rerun_terminal_job(job_id)
+            except maintenance_guard.MaintenanceAdmissionDenied as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from None
         return job_id
-
     retried: dict[str, str] = {}
+    already_active: dict[str, str] = {}
+
+    def _stage_active(stage: str, job_row) -> None:
+        """已有 queued/running stage：记录为 already_active，不伪报 retried。"""
+        already_active[stage] = str(job_row["job_id"])
+
     mirror_job = _latest_stage_job("mirror_revision", f"mirror:{revision_id}")
-    if mirror_job is not None and mirror_job["status"] in ("failed", "cancelled"):
-        retried["mirror"] = _requeue_terminal(mirror_job)
-    else:
-        scrape_job = _latest_scrape_job_for_revision()
-        if scrape_job is not None and scrape_job["status"] in ("failed", "cancelled"):
-            retried["scrape"] = _requeue_terminal(scrape_job)
-        else:
-            library_job = _latest_library_job_for_unit()
-            if library_job is not None and library_job["status"] in ("failed", "cancelled"):
-                retried["library"] = _requeue_terminal(library_job)
-    if not retried:
-        # 没有失败阶段：业务幂等——返回当前 mirror job（同 resource_key 不重复
-        # 入队）；单元尚无 mirror 任务时补建一条（get-or-create 幂等）。
-        if mirror_job is not None:
-            retried["mirror"] = str(mirror_job["job_id"])
-        else:
+    if mirror_job is None:
+        # 尚无 mirror job → 正常补建（真实入队，属于本次实际调度）
+        try:
             retried["mirror"] = orchestrator.enqueue_mirror(revision_id, unit_id)
+        except maintenance_guard.MaintenanceAdmissionDenied as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+    elif mirror_job["status"] in ("failed", "cancelled"):
+        retried["mirror"] = _requeue_terminal(mirror_job)
+    elif mirror_job["status"] in ("queued", "running"):
+        _stage_active("mirror", mirror_job)
+    else:
+        # mirror succeeded → 检查 scrape 阶段
+        scrape_job = _latest_scrape_job_for_revision()
+        if scrape_job is None:
+            # 链路尚未推进（或无需刮削）：没有可重试的失败阶段
+            pass
+        elif scrape_job["status"] in ("failed", "cancelled"):
+            retried["scrape"] = _requeue_terminal(scrape_job)
+        elif scrape_job["status"] in ("queued", "running"):
+            _stage_active("scrape", scrape_job)
+        else:
+            # scrape succeeded → 检查 library 阶段
+            library_job = _latest_library_job_for_unit()
+            if library_job is None:
+                # library rebuild 尚未入队：没有可重试的失败阶段
+                pass
+            elif library_job["status"] in ("failed", "cancelled"):
+                retried["library"] = _requeue_terminal(library_job)
+            elif library_job["status"] in ("queued", "running"):
+                _stage_active("library", library_job)
+            # library succeeded：全链路完成，没有可重试的失败阶段
+
+    if not retried and not already_active:
+        raise HTTPException(
+            status_code=409,
+            detail="当前没有可重试的失败阶段",
+        )
     payload = _refresh_batch_status(catalog_store.get_import_batch(batch_id) or batch, persist=False)
     payload["retried_stages"] = retried
+    if already_active:
+        payload["already_active_stages"] = already_active
     return payload
