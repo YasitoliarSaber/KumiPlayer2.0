@@ -37,7 +37,7 @@ def _get_source_namespace(source: str) -> str:
 
 
 def _build_work_dir(item: ImportPlanItem) -> str:
-    """构建作品目录名
+    """构建作品目录名（人类可读；canonical ownership 约束在生成器内统一解析）
 
     主系列（main_series）：用 series_group 聚合，如 "CLANNAD"
     独立卡片（standalone）：用 work_title (year)，如 "剧场版 (2017)"
@@ -49,6 +49,30 @@ def _build_work_dir(item: ImportPlanItem) -> str:
     if item.year:
         return f"{title} ({item.year})"
     return title
+
+
+def _resolve_work_dir_ownership(
+    items: list,
+) -> dict[str, str]:
+    """解析 plan 内每个 item 的最终作品目录（canonical ownership 约束）。
+
+    - 有 canonical 的条目：目录名 = ``{可读名} [{canonical_hash8}]``——
+      canonical 短哈希保证跨 plan / 跨 revision 唯一，不同 canonical 即使
+      清洗后得到相同可读名也绝不共享 work root（不依赖覆盖先后顺序）；
+      同一 canonical 的季/SP/主条目共享同一可读名 + 同一 hash → 同一根。
+    - 无 canonical（legacy plan）：保持原 series_group 目录名，不做改动。
+
+    返回 {item_id: work_dir}。
+    """
+    result: dict[str, str] = {}
+    for item in items:
+        base = _build_work_dir(item)
+        canonical = str(getattr(item, "canonical_work_id", "") or "")
+        if canonical:
+            digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:8]
+            base = sanitize_filename(f"{base} [{digest}]")
+        result[str(item.id)] = base
+    return result
 
 
 def _movie_display_title(item: ImportPlanItem) -> str:
@@ -274,13 +298,15 @@ def build_target_for_item(
     source_ns: str,
     sp_sequence: Dict[str, int],
     oped_sequence: Dict[str, int],
+    work_dir: str | None = None,
 ) -> Tuple[Path, str, str]:
     """为单个 item 生成目标路径
 
     返回:
         (target_strm_path, target_dir, target_filename)
     """
-    work_dir = _build_work_dir(item)
+    if work_dir is None:
+        work_dir = _build_work_dir(item)
     group_dir = _build_group_dir(item)
     filename = _build_strm_filename(item, sp_sequence, oped_sequence)
 
@@ -512,11 +538,15 @@ def generate_mirror(
     sp_sequence = _compute_sequence(plan.items, "sps")
     oped_sequence = _compute_sequence(plan.items, "op_ed")
 
+    # canonical ownership 解析：不同 canonical 不得共享作品根（写入前稳定消歧）
+    work_dir_by_item = _resolve_work_dir_ownership(video_items)
+
     # 检测目标路径冲突（在写入前）
     target_paths: Dict[str, List[str]] = defaultdict(list)
     for item in video_items:
         target_path, _, _ = build_target_for_item(
             item, root, source_ns, sp_sequence, oped_sequence,
+            work_dir=work_dir_by_item.get(str(item.id)),
         )
         target_paths[str(target_path)].append(item.id)
 
@@ -533,6 +563,7 @@ def generate_mirror(
                     continue
                 base_path, _, _ = build_target_for_item(
                     item, root, source_ns, sp_sequence, oped_sequence,
+                    work_dir=work_dir_by_item.get(str(item.id)),
                 )
                 candidate = _with_filename_suffix(base_path, _conflict_suffix(item))
                 while str(candidate) in used_paths:
@@ -616,6 +647,7 @@ def generate_mirror(
         else:
             target_path, target_dir, target_filename = build_target_for_item(
                 item, root, source_ns, sp_sequence, oped_sequence,
+                work_dir=work_dir_by_item.get(str(item.id)),
             )
         content = item.real_path
 

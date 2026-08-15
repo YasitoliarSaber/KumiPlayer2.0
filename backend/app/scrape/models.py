@@ -13,6 +13,7 @@ class ScrapeTarget:
     source: str = ""
     import_plan_id: str = ""
     work_id: str = ""
+    canonical_work_id: str = ""       # V3 前台作品身份（CP2：target 唯一归属）
     card_type: str = ""           # main_series / standalone
     media_type: str = ""          # tv / movie
     show_type: str = ""           # anime_series / anime_movie / live_series / live_movie
@@ -66,6 +67,7 @@ class ScrapeMapItem:
 
     scrape_target_id: str = ""
     work_id: str = ""
+    canonical_work_id: str = ""       # V3 前台作品身份（CP2）
     source: str = ""
     import_plan_id: str = ""
     card_type: str = ""

@@ -50,9 +50,13 @@ def build_library_index(
     if scrape_map:
         for item in scrape_map.items:
             item_dict = _scrape_item_to_dict(item)
-            if item.work_id:
-                scrape_work_index[item.work_id] = item_dict
-                scrape_items_by_work_id[item.work_id].append(item_dict)
+            # CP2：索引键优先 canonical_work_id（V3 前台作品身份），
+            # 不同 canonical 即使 work_id 相同也不得串线；legacy 无 canonical
+            # 时保留 work_id 键兼容。
+            scrape_key = getattr(item, "canonical_work_id", "") or item.work_id
+            if scrape_key:
+                scrape_work_index[scrape_key] = item_dict
+                scrape_items_by_work_id[scrape_key].append(item_dict)
             if (
                 item.source
                 and item.series_group
@@ -261,17 +265,19 @@ def _build_work_index(
         title = item.work_title or item.series_group
     original_title = item.original_title or ""
 
-    # 从 scrape_map 补充展示信息
+    # 从 scrape_map 补充展示信息（CP2：canonical 优先，绝不跨 canonical 串线）
     if item.card_type == "main_series":
         scrape_info = (
-            scrape_work_index.get(library_work_id)
+            scrape_work_index.get(getattr(item, "canonical_work_id", "") or "")
+            or scrape_work_index.get(library_work_id)
             or _select_series_scrape_info(item, scrape_series_index)
             or scrape_work_index.get(item.work_id)
             or {}
         )
     else:
         scrape_info = (
-            scrape_work_index.get(library_work_id)
+            scrape_work_index.get(getattr(item, "canonical_work_id", "") or "")
+            or scrape_work_index.get(library_work_id)
             or scrape_work_index.get(item.work_id)
             or {}
         )
@@ -1517,6 +1523,7 @@ def _scrape_item_to_dict(item) -> dict:
     return {
         "scrape_target_id": item.scrape_target_id,
         "work_id": item.work_id,
+        "canonical_work_id": getattr(item, "canonical_work_id", "") or "",
         "source": item.source,
         "import_plan_id": item.import_plan_id,
         "card_type": item.card_type,

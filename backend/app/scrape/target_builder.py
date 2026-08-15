@@ -17,14 +17,15 @@ from app.scrape.models import ScrapeTarget
 
 
 def _make_target_id(
-    source: str, plan_id: str, series_group: str,
+    source: str, plan_id: str, canonical: str, series_group: str,
     local_title: str, group_type: str,
     local_season_number: Optional[int], scrape_type: str,
     card_identity: str,
 ) -> str:
-    """生成稳定的 scrape_target_id"""
+    """生成稳定的 scrape_target_id（CP2：聚合键必须包含 canonical ownership，
+    不同 canonical work 即使其他键相同也不会得到同一个 target id）"""
     parts = [
-        source, series_group, local_title,
+        source, canonical, series_group, local_title,
         group_type, str(local_season_number or ""), scrape_type, card_identity,
     ]
     content = ":".join(parts)
@@ -433,30 +434,35 @@ def build_scrape_targets(plan: ImportPlan) -> List[ScrapeTarget]:
         )
     ]
 
-    # 按聚合键分组
+    # 按聚合键分组（CP2：聚合键必须包含 canonical ownership——
+    # 不同 canonical work 即使 series_group/local_title/季号相同也不得合并）
     groups: Dict[Tuple, List[ImportPlanItem]] = defaultdict(list)
+    canonical_of_key: Dict[Tuple, str] = {}
     for item in scrape_items:
         local_title = _choose_local_title(item)
         card_identity = library_card_identity(item)
+        canonical = str(getattr(item, "canonical_work_id", "") or "")
         if item.group_type in ("season", "special"):
             season_number = item.season_number
             if item.group_type == "special" and season_number is None:
                 season_number = 0
             key = (
-                plan.source, plan.plan_id, item.series_group,
+                plan.source, plan.plan_id, canonical, item.series_group,
                 local_title, item.group_type, season_number, card_identity,
             )
         else:
             # movie: 每个 standalone 独立一个 target
             key = (
-                plan.source, plan.plan_id, item.series_group,
+                plan.source, plan.plan_id, canonical, item.series_group,
                 local_title, "movie", None, card_identity,
             )
         groups[key].append(item)
+        if canonical:
+            canonical_of_key[key] = canonical
 
     targets = []
     for key, items in groups.items():
-        source, plan_id, series_group, local_title, group_type, season_num, card_identity = key
+        source, plan_id, canonical, series_group, local_title, group_type, season_num, card_identity = key
         representative = items[0]
 
         # 提取子作品目录。一个目标如果混合了多个子目录（常见于主系列
@@ -520,7 +526,7 @@ def build_scrape_targets(plan: ImportPlan) -> List[ScrapeTarget]:
 
         # 构建 target
         target_id = _make_target_id(
-            source, plan_id, series_group, local_title,
+            source, plan_id, canonical, series_group, local_title,
             group_type, season_num, scrape_type, card_identity,
         )
         unique_episode_keys = {
@@ -546,6 +552,7 @@ def build_scrape_targets(plan: ImportPlan) -> List[ScrapeTarget]:
             source=source,
             import_plan_id=plan_id,
             work_id=representative.work_id,
+            canonical_work_id=canonical,
             card_type=representative.card_type,
             media_type=representative.media_type,
             show_type=representative.show_type,

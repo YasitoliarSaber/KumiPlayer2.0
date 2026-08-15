@@ -1712,6 +1712,7 @@ def execute_scrape(
         map_item = ScrapeMapItem(
             scrape_target_id=target.scrape_target_id,
             work_id=target.work_id,
+            canonical_work_id=target.canonical_work_id,
             source=target.source,
             import_plan_id=target.import_plan_id,
             card_type=target.card_type,

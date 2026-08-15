@@ -46,12 +46,13 @@ def _ensure_unit(unit_id: str, root_id: str = "root-x", boundary: str = "/动画
 
 
 def _make_items(paths, **overrides):
-    """构造带完整语义载荷的 revision item dict 列表。"""
+    """构造带完整语义载荷的 revision item dict 列表（V3 含 canonical_work_id）。"""
     defaults = dict(
         id="", source="openlist", provider_id="quark",
         relative_path="", real_path="", logical_locator="",
         resource_type="video", action="generate_strm",
-        work_id="w1", work_title="作品", original_title="",
+        work_id="w1", canonical_work_id="unit:unit-test:main",
+        work_title="作品", original_title="",
         year=2024, media_type="tv", show_type="anime_series",
         series_group="作品系列", card_type="main_series",
         belongs_to_series="", relation_type="",

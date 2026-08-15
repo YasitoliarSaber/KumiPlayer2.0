@@ -57,6 +57,20 @@ def library_card_identity(item: ImportPlanItem) -> str:
     return f"fallback:{item.source}:{fallback.casefold()}" if fallback else ""
 
 
+def effective_work_identity(item) -> str:
+    """V3 统一作品身份解析：canonical_work_id 为身份事实，缺失时兼容回退。
+
+    这是 Mirror / Scrape / LibraryIndex 共享的唯一入口，任何模块不得再
+    自己写 ``canonical_work_id or work_id or series_group...`` 的猜测链。
+    新 durable pipeline 的 current revision 必须携带 canonical_work_id；
+    只有 legacy plan（旧 JSON 计划）才允许回退 work_id。
+    """
+    canonical = str(getattr(item, "canonical_work_id", "") or "")
+    if canonical:
+        return canonical
+    return str(getattr(item, "work_id", "") or "")
+
+
 def _is_local_collection_root(value: str) -> bool:
     lower = value.casefold()
     return (

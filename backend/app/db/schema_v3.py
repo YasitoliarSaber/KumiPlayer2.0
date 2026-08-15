@@ -183,6 +183,7 @@ SCHEMA_V3_TABLES: tuple[str, ...] = (
         resource_type TEXT NOT NULL DEFAULT 'other',
         action TEXT NOT NULL DEFAULT 'ignore',
         work_id TEXT NOT NULL DEFAULT '',
+        canonical_work_id TEXT NOT NULL DEFAULT '',
         work_title TEXT NOT NULL DEFAULT '',
         original_title TEXT NOT NULL DEFAULT '',
         year INTEGER,

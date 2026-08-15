@@ -107,6 +107,7 @@ def init_db() -> None:
     # 不要求用户重置数据库。
     _REVISION_ITEM_EXTRA_COLUMNS = (
         ("card_type", "TEXT NOT NULL DEFAULT ''"),
+        ("canonical_work_id", "TEXT NOT NULL DEFAULT ''"),
         ("original_title", "TEXT NOT NULL DEFAULT ''"),
         ("year", "INTEGER"),
         ("media_type", "TEXT NOT NULL DEFAULT ''"),

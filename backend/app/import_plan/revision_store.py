@@ -32,7 +32,8 @@ class RevisionStatusError(RuntimeError):
 #: 除历史遗留列（logical_locator/real_path/override_json）外，与 ImportPlanItem 对齐。
 REVISION_ITEM_COLUMNS: tuple[str, ...] = (
     "item_id", "source", "provider_id", "relative_path", "real_path",
-    "logical_locator", "resource_type", "action", "work_id", "work_title",
+    "logical_locator", "resource_type", "action", "work_id", "canonical_work_id",
+    "work_title",
     "original_title", "year", "media_type", "show_type", "series_group",
     "card_type", "belongs_to_series", "relation_type", "group_type",
     "season_number", "episode_number", "special_number", "title",
@@ -47,11 +48,13 @@ _ITEM_UPDATE_COLUMNS: tuple[str, ...] = tuple(
 )
 
 
-#: semantic hash 字段集（规划员 2026-08-12 指定）。
+#: semantic hash 字段集（规划员 2026-08-12 指定；2026-08-16 增加
+#: canonical_work_id —— 作品身份是结构语义，身份改变必须产生新 revision）。
 #: target_dir / target_filename / target_strm_path / warnings / reasons /
 #: user_override_id 是执行或审计载荷，不参与结构判定。
 _HASH_FIELDS: tuple[str, ...] = (
-    "relative_path", "resource_type", "action", "work_id", "work_title",
+    "relative_path", "resource_type", "action", "work_id", "canonical_work_id",
+    "work_title",
     "original_title", "year", "media_type", "show_type", "series_group",
     "card_type", "belongs_to_series", "relation_type", "group_type",
     "season_number", "episode_number", "special_number", "title",
@@ -93,6 +96,7 @@ def _item_to_dict(item: Any, original: dict | None = None) -> dict:
         "resource_type": str(getattr(item, "resource_type", "") or "other"),
         "action": str(getattr(item, "action", "") or "ignore"),
         "work_id": str(getattr(item, "work_id", "") or ""),
+        "canonical_work_id": str(getattr(item, "canonical_work_id", "") or ""),
         "work_title": str(getattr(item, "work_title", "") or ""),
         "original_title": str(getattr(item, "original_title", "") or ""),
         "year": getattr(item, "year", None),
@@ -140,6 +144,7 @@ def _item_row_values(revision_id: str, item: dict) -> tuple:
         str(item.get("resource_type") or "other"),
         str(item.get("action") or "ignore"),
         str(item.get("work_id") or ""),
+        str(item.get("canonical_work_id") or ""),
         str(item.get("work_title") or ""),
         str(item.get("original_title") or ""),
         item.get("year"),
@@ -231,6 +236,7 @@ def _row_to_plan(revision: dict, items: list[dict]) -> Any:
                 resource_type=item["resource_type"],
                 action=item["action"],
                 work_id=item["work_id"],
+                canonical_work_id=item.get("canonical_work_id") or "",
                 work_title=item["work_title"],
                 original_title=item.get("original_title") or "",
                 year=item.get("year"),
@@ -576,6 +582,28 @@ def try_auto_confirm_revision(revision_id: str) -> tuple[bool, str]:
         issue for issue in preview.issues
         if issue.code == "needs_review" or issue.level == "error"
     ]
+    # CP2 门禁：durable 新链（非 local）的 main_series 必须携带
+    # canonical_work_id 才能自动进入投影；缺失 → needs_review，
+    # 不得无声回退 series_group 猜测身份。
+    missing_canonical = [
+        item.relative_path for item in plan.items
+        if item.action == "generate_strm"
+        and item.card_type == "main_series"
+        and str(getattr(plan, "source", "") or "") != "local"
+        and not (getattr(item, "canonical_work_id", "") or "")
+    ]
+    if missing_canonical:
+        blockers.append(
+            type(
+                "Issue",
+                (),
+                {
+                    "code": "needs_review",
+                    "level": "error",
+                    "message": f"{len(missing_canonical)} 个条目缺少作品身份(canonical_work_id)",
+                },
+            )()
+        )
     if blockers:
         details = "; ".join(issue.code or issue.message for issue in blockers)
         conn = get_connection()

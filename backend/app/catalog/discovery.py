@@ -525,6 +525,9 @@ class DiscoveryEngine:
             files=files,
         )
         plan = recognize_import_plan_media(build_draft_import_plan(snapshot))
+        # canonical 身份需要 unit_id（同一 root+boundary 跨 generation 复用），
+        # 因此先登记/复用 media_unit，再构造 items。
+        unit_id = self._create_unit(unit, status="plan_ready")
         items = [
             {
                 "id": item.id,
@@ -536,6 +539,7 @@ class DiscoveryEngine:
                 "resource_type": item.resource_type,
                 "action": item.action,
                 "work_id": item.work_id,
+                "canonical_work_id": _derive_canonical_work_id(unit_id, item),
                 "work_title": item.work_title,
                 "original_title": item.original_title,
                 "year": item.year,
@@ -561,7 +565,6 @@ class DiscoveryEngine:
             }
             for item in plan.items
         ]
-        unit_id = self._create_unit(unit, status="plan_ready")
         parent = revision_store.latest_confirmed_revision(unit_id)
         revision = revision_store.create_revision(
             unit_id=unit_id,
@@ -615,6 +618,27 @@ def _boundary_container_name(boundary: str, root_path: str) -> str:
     if boundary and boundary.rstrip("/") != (root_path or "").rstrip("/"):
         return boundary.rstrip("/").rsplit("/", 1)[-1] or ""
     return PurePosixPath(root_path or "").name or ""
+
+
+def _derive_canonical_work_id(unit_id: str, item) -> str:
+    """从 MediaUnit lineage 派生稳定的 canonical work 身份。
+
+    - main work（main_series 的季/SP/主条目）：``unit:{unit_id}``——
+      unit_id 由同一 root+boundary 复用生成，跨 incremental generation 稳定，
+      不依赖标题/系列名/TMDB；
+    - standalone（独立电影/外传等独立卡片）：unit 内稳定子身份
+      ``unit:{unit_id}:sub:{digest}``，digest 来自边界内相对路径
+      （不来自标题），保证同一 unit 下多个 standalone 拥有互不相同的
+      稳定 canonical ID，不会把整个 unit 强制合并成一个 canonical。
+    """
+    canonical = str(getattr(item, "canonical_work_id", "") or "")
+    if canonical:
+        return canonical
+    if str(getattr(item, "card_type", "") or "") != "standalone":
+        return f"unit:{unit_id}"
+    relative = str(getattr(item, "relative_path", "") or "").replace("\\", "/")
+    digest = hashlib.sha1(relative.encode("utf-8")).hexdigest()[:12]
+    return f"unit:{unit_id}:sub:{digest}"
 
 
 def _common_ancestor(left: str, right: str) -> str:
