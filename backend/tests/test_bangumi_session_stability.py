@@ -193,3 +193,198 @@ def test_delete_token_clears_credential_and_snapshot(client, tmp_path, monkeypat
     assert data["credential_state"] == "not_found"
     assert data["status"] == "signed_out"
     assert not get_account_snapshot_path().exists(), "DELETE /token 后快照应被清除"
+
+
+# ---------------------------------------------------------------------------
+# CP2 回归：POST /session/verify —— 远程验证只更新账户快照，
+# 任何失败分类都保留 config token 与快照文件，绝不伪装成退出登录。
+# ---------------------------------------------------------------------------
+
+VERIFY_URL = "/api/integrations/bangumi/session/verify"
+
+
+class _FakeBangumiClient:
+    """可编程 Fake：行为由类属性控制，端点实例化次数由 instances 统计。"""
+
+    instances: list = []
+    me_payload: dict | None = None
+    raise_error: Exception | None = None
+
+    def __init__(self, *args, **kwargs):
+        _FakeBangumiClient.instances.append(self)
+
+    def get_me(self):
+        if _FakeBangumiClient.raise_error is not None:
+            raise _FakeBangumiClient.raise_error
+        return _FakeBangumiClient.me_payload
+
+
+def _install_fake_client(monkeypatch, *, me=None, error=None) -> None:
+    """把 app.api.bangumi.BangumiClient 换成行为可控的 _FakeBangumiClient。"""
+    from app.api import bangumi as bangumi_api
+
+    _FakeBangumiClient.instances = []
+    _FakeBangumiClient.me_payload = me
+    _FakeBangumiClient.raise_error = error
+    monkeypatch.setattr(bangumi_api, "BangumiClient", _FakeBangumiClient)
+
+
+def test_verify_success_refreshes_snapshot_and_user(client, tmp_path, monkeypatch):
+    """verify 成功 → 快照刷新为 valid/online，用户资料完整，无错误记录。"""
+    _mock_credential_store_closed(monkeypatch, tmp_path)
+    _write_token(load_config(), "test-token")
+    _install_fake_client(
+        monkeypatch,
+        me={
+            "id": 1001,
+            "username": "hyakka",
+            "nickname": "冰菓",
+            "avatar": {"large": "http://x/a.jpg"},
+            "sign": "s",
+        },
+    )
+
+    response = client.post(VERIFY_URL)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["credential_state"] == "found"
+    assert data["credential_saved"] is True
+    assert data["status"] == "connected"
+    assert data["auth_status"] == "valid"
+    assert data["connectivity"] == "online"
+    assert data["user"] is not None
+    assert data["user"]["id"] == 1001
+    assert data["user"]["username"] == "hyakka"
+    assert data["user"]["nickname"] == "冰菓"
+    assert data["user"]["sign"] == "s"
+    assert data["user"]["avatar"].startswith("/api/integrations/bangumi/avatar?url=")
+    assert data["last_http_status"] == 200
+    assert data["last_verified_at"]
+    assert data["last_success_at"]
+    assert data["last_error_code"] == ""
+    assert data["last_error_message"] == ""
+
+
+def test_verify_401_marks_reauth_required_keeps_credential(client, tmp_path, monkeypatch):
+    """401 → reauth_required + online；保留 config token 与快照文件。"""
+    from app.integrations.bangumi import BangumiError
+
+    _mock_credential_store_closed(monkeypatch, tmp_path)
+    _write_token(load_config(), "test-token")
+    _install_fake_client(
+        monkeypatch,
+        error=BangumiError("401", status_code=401, error_code="auth_invalid"),
+    )
+
+    response = client.post(VERIFY_URL)
+    assert response.status_code == 200  # 认证错误仍返回 session payload，不抛 5xx
+    data = response.json()
+    assert data["auth_status"] == "reauth_required"
+    assert data["connectivity"] == "online"
+    assert data["last_http_status"] == 401
+    assert data["last_error_code"] == "auth_invalid"
+    assert data["last_error_message"]
+    assert load_config(force_reload=True).bangumi_access_token == "test-token"
+    assert get_account_snapshot_path().exists(), "401 不得清理快照文件"
+
+
+def test_verify_403_forbidden_not_signed_out(client, tmp_path, monkeypatch):
+    """403 → forbidden（保留凭据，绝不当成 signed_out）。"""
+    from app.integrations.bangumi import BangumiError
+
+    _mock_credential_store_closed(monkeypatch, tmp_path)
+    _write_token(load_config(), "test-token")
+    _install_fake_client(
+        monkeypatch,
+        error=BangumiError("403", status_code=403, error_code="forbidden"),
+    )
+
+    response = client.post(VERIFY_URL)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["connectivity"] == "forbidden"
+    assert data["status"] != "signed_out"
+    assert data["credential_saved"] is True
+    assert load_config(force_reload=True).bangumi_access_token == "test-token"
+
+
+def test_verify_429_rate_limited_no_retry_storm(client, tmp_path, monkeypatch):
+    """429 → rate_limited；端点只实例化一次客户端（无立即重试）。"""
+    from app.integrations.bangumi import BangumiError
+
+    _mock_credential_store_closed(monkeypatch, tmp_path)
+    _write_token(load_config(), "test-token")
+    _install_fake_client(
+        monkeypatch,
+        error=BangumiError("429", status_code=429, error_code="rate_limited", retry_after="60"),
+    )
+
+    response = client.post(VERIFY_URL)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["connectivity"] == "rate_limited"
+    assert len(_FakeBangumiClient.instances) == 1, "429 不得触发立即重试"
+    assert load_config(force_reload=True).bangumi_access_token == "test-token"
+
+
+def test_verify_5xx_server_error_keeps_credential(client, tmp_path, monkeypatch):
+    """5xx → server_error；token 保留，快照不清理。"""
+    from app.integrations.bangumi import BangumiError
+
+    _mock_credential_store_closed(monkeypatch, tmp_path)
+    _write_token(load_config(), "test-token")
+    _install_fake_client(
+        monkeypatch,
+        error=BangumiError("500", status_code=500, error_code="server_error"),
+    )
+
+    response = client.post(VERIFY_URL)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["connectivity"] == "server_error"
+    assert data["last_http_status"] == 500
+    assert data["last_error_code"] == "server_error"
+    assert load_config(force_reload=True).bangumi_access_token == "test-token"
+    assert get_account_snapshot_path().exists(), "5xx 不得清理快照文件"
+
+
+def test_verify_timeout_and_proxy_offline(client, tmp_path, monkeypatch):
+    """timeout / proxy_unavailable → offline；连续两次 verify 均保留 token。"""
+    from app.integrations.bangumi import BangumiError
+
+    _mock_credential_store_closed(monkeypatch, tmp_path)
+    _write_token(load_config(), "test-token")
+
+    _install_fake_client(monkeypatch, error=BangumiError("timeout", error_code="timeout"))
+    first = client.post(VERIFY_URL)
+    assert first.status_code == 200
+    assert first.json()["connectivity"] == "offline"
+
+    _install_fake_client(
+        monkeypatch, error=BangumiError("proxy", error_code="proxy_unavailable")
+    )
+    second = client.post(VERIFY_URL)
+    assert second.status_code == 200
+    assert second.json()["connectivity"] == "offline"
+
+    assert load_config(force_reload=True).bangumi_access_token == "test-token"
+    assert get_account_snapshot_path().exists(), "offline 分类同样保留凭据与快照"
+
+
+def test_observe_auth_success_updates_snapshot():
+    """_observe_auth("success") 直接把快照推进为 valid/online。"""
+    from app.integrations.bangumi import _observe_auth, load_account_snapshot
+
+    save_account_snapshot(BangumiAccountSnapshot(
+        username="old",
+        auth_status="reauth_required",
+        connectivity="offline",
+    ))
+    _observe_auth("success", 200)
+
+    snapshot = load_account_snapshot()
+    assert snapshot.auth_status == "valid"
+    assert snapshot.connectivity == "online"
+    assert snapshot.last_success_at
+    assert snapshot.last_error_code == ""
+    assert snapshot.last_http_status == 200
