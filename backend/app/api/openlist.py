@@ -1260,16 +1260,22 @@ def retry_openlist_import_unit(batch_id: str, unit_id: str):
     """重试批次中一个失败/待处理的识别单元（exact-stage retry，幂等）。
 
     - 单元必须属于该批次；
-    - 按当前 durable stage 精确定位失败阶段并只重试该阶段：
-      mirror 失败 → 重新入队 mirror revision（coalesced，不复制业务任务）；
-      scrape 失败 → 重新入队 scrape revision（全局单通道合并）；
-      library rebuild 失败 → 重新入队全局媒体库重建（coalesced）；
-      revision 仍是 draft（needs_review）→ 拒绝，走人工确认入口；
+    - 按当前 durable stage 精确定位失败阶段并只重试该阶段，按当前
+      revision/unit 精确归属（mirror 按 resource_key ``mirror:{revision}``、
+      scrape 按 mirror result 链 / payload.revision_id、library 按 scrape
+      result 链 / payload.unit_id），**绝不读取全局 ``scrape:global`` /
+      ``library:global`` 的“最近一条”跨作品串线**；
+    - 终态 failed/cancelled job 重新入队复用同一 job 行（attempt+1），不新建
+      业务任务，也不依赖 orchestrator 的本地未提交 rerun 参数；
+    - revision 仍是 draft（needs_review）→ 拒绝，走人工确认入口；
     - 不重新扫描整个 SourceRoot；
-    - 重复点击 / 页面刷新 / 进程重启均幂等（同 resource_key 合并）。
+    - 重复点击 / 页面刷新 / 进程重启均幂等（同一 job 行重入队）。
     """
+    import json
+
     from app.catalog import store as catalog_store
     from app.db.database import get_connection, init_db
+    from app.jobs import store as job_store
     from app.pipeline import orchestrator
 
     init_db()
@@ -1314,24 +1320,72 @@ def retry_openlist_import_unit(batch_id: str, unit_id: str):
             (job_type, resource_key),
         ).fetchone()
 
+    def _job_result(row) -> dict:
+        try:
+            return (json.loads(row["payload"] or "{}").get("result") or {})
+        except (TypeError, ValueError):
+            return {}
+
+    def _latest_scrape_job_for_revision():
+        """本 revision 的 scrape job：mirror result 链优先，payload 精确兜底。"""
+        mirror_row = _latest_stage_job("mirror_revision", f"mirror:{revision_id}")
+        if mirror_row is not None:
+            scrape_id = _job_result(mirror_row).get("scrape_job_id") or ""
+            if scrape_id:
+                row = get_connection().execute(
+                    "SELECT * FROM jobs WHERE job_id = ?", (scrape_id,)
+                ).fetchone()
+                if row is not None:
+                    return row
+        return get_connection().execute(
+            "SELECT * FROM jobs WHERE job_type = 'scrape_revision' AND payload LIKE ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (f'%"revision_id": "{revision_id}"%',),
+        ).fetchone()
+
+    def _latest_library_job_for_unit():
+        """本 unit 的 library rebuild job：scrape result 链优先，payload 精确兜底。"""
+        scrape_row = _latest_scrape_job_for_revision()
+        if scrape_row is not None:
+            lib_id = _job_result(scrape_row).get("library_rebuild_job") or ""
+            if lib_id:
+                row = get_connection().execute(
+                    "SELECT * FROM jobs WHERE job_id = ?", (lib_id,)
+                ).fetchone()
+                if row is not None:
+                    return row
+        return get_connection().execute(
+            "SELECT * FROM jobs WHERE job_type = 'library_rebuild' AND payload LIKE ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (f'%"unit_id": "{unit_id}"%',),
+        ).fetchone()
+
+    def _requeue_terminal(job_row) -> str:
+        """把终态 failed/cancelled job 重新入队（同一行 attempt+1），返回 job_id。"""
+        job_id = str(job_row["job_id"])
+        if job_row["status"] in ("failed", "cancelled"):
+            job_store.rerun_terminal_job(job_id)
+        return job_id
+
     retried: dict[str, str] = {}
     mirror_job = _latest_stage_job("mirror_revision", f"mirror:{revision_id}")
     if mirror_job is not None and mirror_job["status"] in ("failed", "cancelled"):
-        retried["mirror"] = orchestrator.enqueue_mirror(revision_id, unit_id, rerun=True)
+        retried["mirror"] = _requeue_terminal(mirror_job)
     else:
-        scrape_job = _latest_stage_job("scrape_revision", "scrape:global")
+        scrape_job = _latest_scrape_job_for_revision()
         if scrape_job is not None and scrape_job["status"] in ("failed", "cancelled"):
-            retried["scrape"] = orchestrator.enqueue_scrape(
-                revision_id, source, unit_id=unit_id,
-            )
+            retried["scrape"] = _requeue_terminal(scrape_job)
         else:
-            library_job = _latest_stage_job("library_rebuild", "library:global")
+            library_job = _latest_library_job_for_unit()
             if library_job is not None and library_job["status"] in ("failed", "cancelled"):
-                retried["library"] = orchestrator.enqueue_library_rebuild(unit_id=unit_id)
+                retried["library"] = _requeue_terminal(library_job)
     if not retried:
-        # 没有失败阶段（或已 succeeded）：按业务幂等语义重跑 mirror 链
-        # （coalesced 不会复制等价任务；已完成的 revision 直接复用）。
-        retried["mirror"] = orchestrator.enqueue_mirror(revision_id, unit_id, rerun=True)
+        # 没有失败阶段：业务幂等——返回当前 mirror job（同 resource_key 不重复
+        # 入队）；单元尚无 mirror 任务时补建一条（get-or-create 幂等）。
+        if mirror_job is not None:
+            retried["mirror"] = str(mirror_job["job_id"])
+        else:
+            retried["mirror"] = orchestrator.enqueue_mirror(revision_id, unit_id)
     payload = _refresh_batch_status(catalog_store.get_import_batch(batch_id) or batch, persist=False)
     payload["retried_stages"] = retried
     return payload

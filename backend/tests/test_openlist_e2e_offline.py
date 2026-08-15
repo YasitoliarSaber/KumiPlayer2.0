@@ -329,7 +329,6 @@ class TestOfflineE2E:
     def test_failed_mirror_retry_recovers_same_revision(self, client, tmp_path):
         """Work Y mirror 首败 → retry 同 revision 恢复，不创建重复业务 job。"""
         from app.db.database import get_connection
-        from app.jobs import store as job_store
         from app.pipeline import orchestrator
 
         batch = self._run_import_batch(client, tmp_path)
@@ -341,12 +340,14 @@ class TestOfflineE2E:
         revision_id = unit["current_revision_id"]
         unit_id = unit["unit_id"]
 
-        # 首败 mirror
-        first_job_id = orchestrator.enqueue_mirror(revision_id, unit_id, rerun=True)
-        job_store.finish_job(
-            first_job_id, "worker-test", status="failed",
-            error="模拟镜像失败", result={"status": "failed"},
+        # 首败 mirror（模拟 worker 终态失败：同一 job 行标记 failed）
+        first_job_id = orchestrator.enqueue_mirror(revision_id, unit_id)
+        conn.execute(
+            "UPDATE jobs SET status='failed', error=?, lease_owner='', lease_until='', "
+            "cancel_requested=0, version=version+1 WHERE job_id=?",
+            ("模拟镜像失败", first_job_id),
         )
+        conn.commit()
 
         # 通过批次 retry 恢复
         resp = client.post(

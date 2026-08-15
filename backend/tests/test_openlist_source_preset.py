@@ -270,7 +270,6 @@ class TestRecoverableUnitActions:
     def test_retry_unit_returns_batch_and_stages(self, client, tmp_path):
         """failed unit 的 retry：幂等返回同一批次，且不创建重复业务任务。"""
         from app.db.database import get_connection
-        from app.jobs import store as job_store
 
         _make_local_mount(tmp_path)
         _save_config(client, tmp_path)
@@ -280,14 +279,16 @@ class TestRecoverableUnitActions:
         unit_id = unit["unit_id"]
         revision_id = unit["current_revision_id"]
 
-        # 制造 mirror 失败痕迹：先入队一个 mirror job 并标记 failed
+        # 制造 mirror 失败痕迹：先入队一个 mirror job 并标记终态 failed
         from app.pipeline import orchestrator
 
-        first_job_id = orchestrator.enqueue_mirror(revision_id, unit_id, rerun=True)
-        job_store.finish_job(
-            first_job_id, "worker-test", status="failed",
-            error="模拟镜像失败", result={"status": "failed"},
+        first_job_id = orchestrator.enqueue_mirror(revision_id, unit_id)
+        get_connection().execute(
+            "UPDATE jobs SET status='failed', error=?, lease_owner='', lease_until='', "
+            "cancel_requested=0, version=version+1 WHERE job_id=?",
+            ("模拟镜像失败", first_job_id),
         )
+        get_connection().commit()
 
         retry = client.post(
             f"/api/openlist/import-batches/{batch_id}/units/{unit_id}/retry", json={}
