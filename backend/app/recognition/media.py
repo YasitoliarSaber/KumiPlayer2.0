@@ -39,9 +39,13 @@ _OP_ED_PATTERNS = [
 
 # OpenList 通用分类目录名：选中此类目录时不用目录名作为系列名
 # （选中“动画/剧集/已完结”导入多部作品，系列名必须来自各自作品）
+# 「刮削好的动画」等真实用户目录名仅作 legacy/fallback 兼容，正确性
+# 由 Discovery 的 boundary 结构归属承担（root_container 来自 MediaUnit
+# boundary，而不是 SourceRoot basename）。
 _GENERIC_CATEGORY_NAMES = {
     "动画", "新番", "剧集", "电影", "动漫", "番剧", "影视", "动画电影",
     "已完结", "完结", "全部", "网盘", "115网盘", "百度网盘", "夸克网盘",
+    "刮削好的动画", "刮好动画", "刮削动画",
     "media", "video", "tv", "anime", "movies", "series", "shows", "movie",
 }
 
@@ -147,6 +151,11 @@ _BAIDU_CATEGORY_DIRS = {
     "SPs",
     "Specials",
 }
+
+#: 大小写不敏感分类目录集合（_is_baidu_category_dir 使用）
+_BAIDU_CATEGORY_DIRS_CASEFOLD = frozenset(
+    name.casefold() for name in _BAIDU_CATEGORY_DIRS
+)
 
 _GROUP_FOLDER_PATTERNS = [
     re.compile(r"^Season\s*\d+$", re.IGNORECASE),
@@ -389,8 +398,10 @@ def _extract_local_series_container(relative_path: str, source: str = "pan115") 
 
 
 def _is_baidu_category_dir(dirname: str) -> bool:
-    normalized = dirname.strip()
-    return normalized in _BAIDU_CATEGORY_DIRS
+    # 大小写不敏感：真实目录树中 "TV" 与 "tv" 混用，必须一致识别为分类目录
+    # （规划员指出的 TV/tv 规则漂移修复）。
+    normalized = (dirname or "").strip().casefold()
+    return normalized in _BAIDU_CATEGORY_DIRS_CASEFOLD
 
 
 def _source_work_index(parts: List[str], source: str) -> Optional[int]:

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import uuid
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
@@ -40,6 +41,73 @@ def _check_cancel(should_cancel: Callable[[], bool] | None) -> None:
 
 def _stable_work_key(evidence: dict) -> str:
     return evidence.get("series_group") or evidence.get("work_id") or ""
+
+
+#: 通用内容层目录名（作品内部内容段的兼容 fallback，大小写不敏感）。
+#: 结构归属规则（同名 wrapper、父名前缀+季标记）承担正确性；这里只兜底
+#: 真实世界常见内容段命名（tv / episodes / 正片 / 特典 及拼写变体），
+#: 不得把整表当作作品边界判定依据。
+_CONTENT_LAYER_DIRNAMES = frozenset({
+    "tv", "episodes", "episode", "正片", "main", "extras", "extra",
+    "sp", "sps", "special", "specials", "sprcial",
+    "ova", "oad", "movie", "movies", "特典", "特典映像", "花絮",
+})
+
+
+def _content_layer_key(name: str) -> str:
+    return (name or "").strip().casefold()
+
+
+def _is_content_layer_dirname(child: str, parent: str) -> bool:
+    """子目录是否只是父作品的内容层（应被父吸收为同一作品边界）。
+
+    结构性规则优先（不依赖具体目录名）：
+    1. 同名 wrapper（``钢之炼金术师FA/钢之炼金术师FA``）；
+    2. 父名前缀 + 季/SP 标记（``虫师S1``、``更衣人偶坠入爱河Season 1``、
+       ``WorkCS1``、``WorkDSeason 2``）；
+    通用内容目录名（tv / episodes / 正片 / sprcial 等）仅作兼容 fallback。
+    """
+    child = (child or "").strip()
+    parent = (parent or "").strip()
+    if not child or not parent:
+        return False
+    if child == parent:
+        return True
+    if child.startswith(parent):
+        rest = child[len(parent):].strip(" ._-·")
+        if rest and re.fullmatch(
+            r"(?:Season\s*\d+|S\d+|SPs?|S00|OVA|OAD|第\s*\d+\s*季)",
+            rest, flags=re.IGNORECASE,
+        ):
+            return True
+    return _content_layer_key(child) in _CONTENT_LAYER_DIRNAMES
+
+
+def _resolve_boundary_owner(
+    path: str,
+    root_path: str,
+    is_structure: Callable[[str], bool],
+) -> str:
+    """从候选锚点向上确定唯一作品边界（吸收内容层目录）。
+
+    锚点 = 直接含视频或直接含结构子目录的目录（候选资格来源）。
+    若锚点自身只是父作品的内容层（同名 wrapper / 父名前缀+季标记 /
+    通用内容层目录名），候选资格上提到父目录，直到到达 root 或遇到
+    真正的作品容器名。返回最终 boundary（完整远端路径）。
+    """
+    current = (path or "").rstrip("/") or "/"
+    root = (root_path or "").rstrip("/") or "/"
+    while current != root:
+        parent = current.rsplit("/", 1)[0] if "/" in current else ""
+        if not parent or parent == root:
+            return current
+        child_name = current.rsplit("/", 1)[-1]
+        parent_name = parent.rsplit("/", 1)[-1] or parent
+        if _is_content_layer_dirname(child_name, parent_name) or is_structure(child_name):
+            current = parent
+            continue
+        return current
+    return current
 
 
 def _boundary_for_path(remote_path: str, root_path: str, is_structure: Callable[[str], bool]) -> str:
@@ -153,6 +221,16 @@ class DiscoveryEngine:
             return is_boundary_complete(self.root_id, boundary)
 
         def settle_candidates() -> None:
+            # 唯一 owner 收敛：候选若存在祖先候选，只保留最浅（祖先吸收后代）。
+            # 例：WorkA 与 WorkA/WorkX 同时是候选 → WorkA 拥有整个 subtree，
+            # WorkA/WorkX 不得再生成兄弟级 MediaUnit。
+            shallow: set[str] = set()
+            for candidate in sorted(candidates, key=lambda p: p.count("/")):
+                if any(candidate.startswith(anc + "/") for anc in shallow):
+                    continue
+                shallow.add(candidate)
+            candidates.clear()
+            candidates.update(shallow)
             for candidate in sorted(candidates):
                 if candidate in processed or not boundary_is_closed(candidate):
                     continue
@@ -195,7 +273,9 @@ class DiscoveryEngine:
                 continue
             for path in ancestors(directory["remote_path"]):
                 if is_candidate(path):
-                    candidates.add(path)
+                    candidates.add(
+                        _resolve_boundary_owner(path, root_path, self.is_structure)
+                    )
             if progress_callback is not None:
                 progress_callback(
                     0, f"已探测 {directory['remote_path']}",
@@ -434,9 +514,9 @@ class DiscoveryEngine:
             ),
             source_route_id=source_route_id,
             source_root=catalog_store.get_source_root(self.root_id).remote_locator,
-            root_container=PurePosixPath(
-                catalog_store.get_source_root(self.root_id).remote_locator
-            ).name or "",
+            # 作品容器上下文来自 MediaUnit boundary，而不是整个 SourceRoot：
+            # 多作品媒体库根（如「刮削好的动画」）不得进入每部作品的系列身份。
+            root_container=_boundary_container_name(boundary, catalog_store.get_source_root(self.root_id).remote_locator),
             import_family=(
                 catalog_store.get_source_root(self.root_id).import_family or ""
             ),
@@ -523,6 +603,18 @@ def _relative_to_root(remote_path: str, root_path: str) -> str:
     if remote_path.startswith(root_path.rstrip("/") + "/"):
         return remote_path[len(root_path.rstrip("/")) + 1:]
     return ""
+
+
+def _boundary_container_name(boundary: str, root_path: str) -> str:
+    """MediaUnit 作品容器名：boundary 名（单作品根时退回 SourceRoot basename）。
+
+    多作品媒体库根（如「刮削好的动画」）下每个 boundary 是具体作品目录，
+    容器名必须是作品名；用户直接选中单作品根时 boundary == root，
+    容器名就是根名（S1/S2 季归同一系列）。
+    """
+    if boundary and boundary.rstrip("/") != (root_path or "").rstrip("/"):
+        return boundary.rstrip("/").rsplit("/", 1)[-1] or ""
+    return PurePosixPath(root_path or "").name or ""
 
 
 def _common_ancestor(left: str, right: str) -> str:
