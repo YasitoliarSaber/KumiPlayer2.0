@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import { sourcesApi } from '../api/sources';
 import { configApi } from '../api/config';
-import { openlistApi, type OpenListCacheMeta, type OpenListEntry, type OpenListImportBatch } from '../api/openlist';
+import { openlistApi, type BackgroundImportUnit, type OpenListCacheMeta, type OpenListEntry, type OpenListImportBatch } from '../api/openlist';
 import type { OpenListRoute, ProviderId } from '../api/types';
 import { mediaPresetsApi, type MediaLibraryPreset, type PresetDeletePreview } from '../api/mediaPresets';
 import { importsApi } from '../api/imports';
@@ -831,6 +831,45 @@ export default function MediaManagementPage() {
     }
   };
 
+  // CP3：needs_review 单元的实际处理入口 —— 打开该 unit 的 V3 revision
+  // 确认界面（复用现有 confirm step：preview → patch → confirm → durable mirror），
+  // 而不是跳到一个没有对应动作的泛化维护页。
+  const retryingUnitIdRef = useRef<string>('');
+  const reviewUnit = async (unit: BackgroundImportUnit) => {
+    if (!unit.revision_id || !backgroundBatch) return;
+    setActionError('');
+    try {
+      const preview = await importsApi.getPreview(backgroundImport?.source === 'local' ? 'local' : 'openlist', unit.revision_id);
+      const entry = makeEntry();
+      entry.note = unit.work_title || unit.boundary || '待处理识别单元';
+      entry.status = 'parsed';
+      entry.planId = unit.revision_id;
+      entry.preview = preview;
+      setEntries([entry]);
+      setActiveEntryId(entry.id);
+      setStep('confirm');
+    } catch (error) {
+      setActionError(`无法打开识别处理界面：${(error as Error).message}`);
+    }
+  };
+
+  // CP3：failed 单元精确阶段重试（mirror/scrape/library），幂等合并入队。
+  const retryBackgroundUnit = async (unit: BackgroundImportUnit) => {
+    if (!backgroundBatch || retryingUnitIdRef.current) return;
+    retryingUnitIdRef.current = unit.unit_id;
+    setActionError('');
+    try {
+      const updated = await openlistApi.retryImportUnit(backgroundBatch.batch_id, unit.unit_id);
+      const stages = updated.retried_stages || {};
+      const label = stages.mirror ? '镜像' : stages.scrape ? '资料补充' : stages.library ? '媒体库更新' : '';
+      attachOpenlistBatch(updated, label ? `已重新排队${label}任务` : '已重新排队处理任务');
+    } catch (error) {
+      setActionError(`重试失败：${(error as Error).message}`);
+    } finally {
+      retryingUnitIdRef.current = '';
+    }
+  };
+
   useEffect(() => {
     if (source !== 'openlist' || !openlistConfigured) return;
     if (openlistScanTask || openlistBatch) return; // 本次会话已接管批次/任务
@@ -1398,10 +1437,10 @@ export default function MediaManagementPage() {
               <Button appearance="subtle" icon={<Trash2 size={15} />} aria-label={`维护或删除${title}`} title="维护或删除媒体库" disabled={Boolean(deletingPresetId) || scrapeActive} onClick={() => openPresetDelete(preset)} />
             </div>
           </div>
-          <div className="media-preset-card-title"><strong>{title}</strong><small>{latestVersion?.original_name || (preset.update_mode === 'local_scan' ? '本地路径扫描' : '目录树文件')}</small></div>
+          <div className="media-preset-card-title"><strong>{title}</strong><small>{preset.update_mode === 'openlist_scan' ? 'OpenList 远端媒体库' : latestVersion?.original_name || (preset.update_mode === 'local_scan' ? '本地路径扫描' : '目录树文件')}</small></div>
           <div className={`media-preset-path ${pathValidation?.ok ? 'verified' : pathValidation ? 'invalid' : 'unknown'}`}>
-            <span>{pathValidation?.ok ? <CheckCircle2 size={14} /> : pathValidation ? <TriangleAlert size={14} /> : <SearchCheck size={14} />}{pathValidation?.ok ? '路径已验证' : pathValidation ? '路径待修复' : '生成时验证路径'}</span>
-            <strong title={preset.source_root || '未配置'}>{preset.source_root || '未配置实际视频根目录'}</strong>
+            <span>{pathValidation?.ok ? <CheckCircle2 size={14} /> : pathValidation ? <TriangleAlert size={14} /> : <SearchCheck size={14} />}{preset.update_mode === 'openlist_scan' ? '远端媒体库根' : pathValidation?.ok ? '路径已验证' : pathValidation ? '路径待修复' : '生成时验证路径'}</span>
+            <strong title={preset.update_mode === 'openlist_scan' ? (preset.remote_locator || preset.source_root || '未配置') : (preset.source_root || '未配置')}>{preset.update_mode === 'openlist_scan' ? (preset.remote_locator || preset.source_root || '未配置') : (preset.source_root || '未配置实际视频根目录')}</strong>
           </div>
           <span className={`media-preset-lifecycle ${preset.lifecycle_status}`}>{getPresetLifecycleLabel(preset.lifecycle_status)}</span>
           {taskLabel && <div className={`media-preset-task-state ${scrapeActive ? 'active' : scrapeStopped ? 'stopped' : 'attention'}`}>{scrapeActive && <Spinner size="tiny" />}<span>{taskLabel}</span></div>}
@@ -1416,7 +1455,9 @@ export default function MediaManagementPage() {
             {!scrapeActive && !preset.is_library_indexed && preset.lifecycle_status !== 'mirrored' && preset.lifecycle_status !== 'needs_attention' && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree || repairingPresetId === preset.preset_id} onClick={() => void resumePreset(preset)}>{pathValidation?.ok === false ? '重新验证并继续' : '继续处理'}</Button>}
             {preset.update_mode === 'local_scan'
               ? <Button className="media-preset-action secondary" appearance="secondary" icon={scanningFolder ? <Spinner size="tiny" /> : <ScanLine size={15} />} disabled={scanningFolder || uploadingTree} onClick={() => void rescanLocalPreset(preset)}>重新扫描本地目录</Button>
-              : preset.update_mode === 'directory_tree' && <Button className="media-preset-action secondary" appearance="secondary" icon={<FileUp size={15} />} disabled={uploadingTree} onClick={() => chooseTreeFile({ kind: 'update', presetId: preset.preset_id, presetName: title, presetSource: preset.source as 'pan115' | 'baidu', presetSourceRoot: preset.source_root })}>导入新版并安全比对</Button>}
+              : preset.update_mode === 'openlist_scan'
+                ? <Button className="media-preset-action secondary" appearance="secondary" icon={<RefreshCw size={15} />} disabled={uploadingTree} onClick={() => void rescanOpenlistPreset(preset)}>增量扫描</Button>
+                : preset.update_mode === 'directory_tree' && <Button className="media-preset-action secondary" appearance="secondary" icon={<FileUp size={15} />} disabled={uploadingTree} onClick={() => chooseTreeFile({ kind: 'update', presetId: preset.preset_id, presetName: title, presetSource: preset.source as 'pan115' | 'baidu', presetSourceRoot: preset.source_root })}>导入新版并安全比对</Button>}
           </div>
         </article>
       );
@@ -1911,6 +1952,9 @@ export default function MediaManagementPage() {
       {step === 'background' && <MediaBackgroundImportStatus
         batch={backgroundBatch}
         source={backgroundImport?.source || 'local'}
+        onReviewUnit={(unit) => void reviewUnit(unit)}
+        onRetryUnit={(unit) => void retryBackgroundUnit(unit)}
+        retryingUnitId={retryingUnitIdRef.current}
       />}
       {step === 'maintenance' && <LibraryMaintenancePanel onCleared={() => loadPresets(true)} />}
 

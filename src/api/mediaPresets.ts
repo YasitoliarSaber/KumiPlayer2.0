@@ -22,7 +22,11 @@ export interface MediaLibraryPreset {
   source_root: string;
   import_family: ImportFamily;
   import_scope: '' | 'seasonal';
-  update_mode: 'directory_tree' | 'local_scan';
+  update_mode: 'directory_tree' | 'local_scan' | 'openlist_scan';
+  /** OpenList 远端选中目录（独立于本地 source_root） */
+  remote_locator?: string;
+  /** 关联的 Source Catalog source_root（OpenList 来源卡的权威关联） */
+  catalog_root_id?: string;
   /** 内容提供商（OpenList 导入显示真实 provider，不再统一显示为 OpenList） */
   provider_id?: 'pan115' | 'baidu' | 'quark' | 'other' | 'local';
   /** 导入方式：openlist_api / directory_tree / local_scan */

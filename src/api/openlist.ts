@@ -162,6 +162,14 @@ export interface OpenListImportBatch {
   updated_at: string
   roots: OpenListImportBatchRoot[]
   job_ids: string[]
+  // import-batch 同步创建/复用的来源媒体库卡（OpenList SourceRoot 长期入口）
+  presets?: {
+    preset_id: string
+    name: string
+    remote_locator: string
+    catalog_root_id: string
+    created: boolean
+  }[]
 }
 
 export const openlistApi = {
@@ -186,6 +194,9 @@ export const openlistApi = {
     api.get<OpenListImportBatch>(`/api/openlist/import-batches/${batchId}`),
   cancelImportBatch: (batchId: string) =>
     api.post<OpenListImportBatch>(`/api/openlist/import-batches/${batchId}/cancel`, {}),
+  retryImportUnit: (batchId: string, unitId: string) =>
+    api.post<OpenListImportBatch & { retried_stages?: Record<string, string> }>(
+      `/api/openlist/import-batches/${batchId}/units/${unitId}/retry`, {}),
   rescanPreset: (presetId: string) =>
     api.post<OpenListTaskResult>(`/api/openlist/presets/${presetId}/rescan`, {}),
 }

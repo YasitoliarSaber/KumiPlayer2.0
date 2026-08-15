@@ -38,6 +38,7 @@ class MediaLibraryPreset:
     provider_id: str = ""  # 内容提供商（pan115/baidu/quark/other/local）
     ingest_method: str = ""  # openlist_api / directory_tree / local_scan
     source_route_id: str = ""  # 使用的 OpenList 提供商路由，可为空
+    catalog_root_id: str = ""  # 关联的 Source Catalog source_root（OpenList 来源卡的权威关联）
     created_at: str = ""
     updated_at: str = ""
     current_snapshot_id: str = ""

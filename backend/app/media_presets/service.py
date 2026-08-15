@@ -474,6 +474,7 @@ def create_preset_record(
     provider_id: str = "",
     ingest_method: str = "",
     source_route_id: str = "",
+    catalog_root_id: str = "",
 ) -> MediaLibraryPreset:
     """创建媒体库预设；新记录显式写入 provider/ingest 元数据。
 
@@ -492,9 +493,115 @@ def create_preset_record(
         provider_id=provider_id or compat_provider(source),
         ingest_method=ingest_method or compat_ingest(source),
         source_route_id=source_route_id or "",
+        catalog_root_id=catalog_root_id or "",
         created_at=timestamp,
         updated_at=timestamp,
     )
+
+
+def _normalized_remote_locator(value: str) -> str:
+    """OpenList 远端定位归一化：去尾部斜杠，用于来源卡复用判定。"""
+    value = (value or "").strip()
+    if not value:
+        return ""
+    value = value.replace("\\", "/")
+    while len(value) > 1 and value.endswith("/"):
+        value = value[:-1]
+    return value
+
+
+def find_openlist_preset_by_root(
+    catalog_root_id: str,
+    remote_locator: str,
+    provider_id: str = "",
+    source_route_id: str = "",
+) -> MediaLibraryPreset | None:
+    """按 Source Catalog root 或归一化远端定位复用 OpenList 来源卡。
+
+    优先精确匹配 ``catalog_root_id``（权威关联）；旧记录没有该字段时回退
+    到 ``remote_locator`` 归一化匹配（exact reuse / promote 后的 canonical
+    locator 可能变化，因此 locator 匹配只作兼容兜底）。
+    """
+    if catalog_root_id:
+        exact = next(
+            (item for item in list_presets()
+             if item.source == "openlist" and item.catalog_root_id == catalog_root_id),
+            None,
+        )
+        if exact is not None:
+            return exact
+    expected = _normalized_remote_locator(remote_locator)
+    if expected:
+        candidates = [
+            item for item in list_presets()
+            if item.source == "openlist"
+            and _normalized_remote_locator(item.remote_locator) == expected
+        ]
+        if candidates:
+            # 多个历史卡指向同一 locator（旧数据无 root 关联）：优先带
+            # catalog_root_id 的，其次最早的。
+            with_root = [item for item in candidates if item.catalog_root_id]
+            pool = with_root or candidates
+            return min(pool, key=lambda item: (item.created_at or item.updated_at, item.preset_id))
+    return None
+
+
+def sync_openlist_source_preset(
+    *,
+    catalog_root_id: str,
+    remote_locator: str,
+    local_locator: str = "",
+    provider_id: str = "",
+    source_route_id: str = "",
+    import_family: str = "anime",
+    import_scope: str = "",
+) -> tuple[MediaLibraryPreset, bool]:
+    """OpenList import-batch 的来源卡同步：复用已有关卡或创建一张新卡。
+
+    来源卡代表用户选中的 OpenList SourceRoot（长期媒体管理入口），不是
+    某一部作品；同一 canonical SourceRoot 再次导入必须复用同一张卡，
+    不得制造重复来源卡。
+
+    返回 ``(preset, created)``。
+    """
+    existing = find_openlist_preset_by_root(
+        catalog_root_id, remote_locator, provider_id, source_route_id
+    )
+    if existing is not None:
+        # 复用：刷新权威关联与元数据（不覆盖用户改名/归档）
+        changed = False
+        if catalog_root_id and existing.catalog_root_id != catalog_root_id:
+            existing.catalog_root_id = catalog_root_id
+            changed = True
+        if provider_id and existing.provider_id != provider_id:
+            existing.provider_id = provider_id
+            changed = True
+        if source_route_id and existing.source_route_id != source_route_id:
+            existing.source_route_id = source_route_id
+            changed = True
+        if existing.import_family != import_family or existing.import_scope != import_scope:
+            existing.import_family = import_family
+            existing.import_scope = import_scope
+            changed = True
+        if changed:
+            existing.updated_at = now_iso()
+            save_preset(existing)
+        return existing, False
+    preset = create_preset_record(
+        "openlist",
+        local_locator,
+        import_family,
+        import_scope,
+        update_mode="openlist_scan",
+        provider_id=provider_id,
+        ingest_method="openlist_api",
+        source_route_id=source_route_id,
+        catalog_root_id=catalog_root_id,
+    )
+    preset.remote_locator = _normalized_remote_locator(remote_locator)
+    preset.name = _normalized_remote_locator(remote_locator).rsplit("/", 1)[-1] or "OpenList 媒体库"
+    save_preset(preset)
+    return preset, True
 
 
 def scan_local_preset(

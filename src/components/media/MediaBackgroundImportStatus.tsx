@@ -1,10 +1,16 @@
-import { ProgressBar, Spinner } from '@fluentui/react-components';
-import { CheckCircle2, CircleAlert, Layers3, LoaderCircle, Sparkles } from 'lucide-react';
+import { Button, ProgressBar, Spinner } from '@fluentui/react-components';
+import { CheckCircle2, CircleAlert, Layers3, LoaderCircle, RefreshCw, Sparkles, Wrench } from 'lucide-react';
 import type { BackgroundImportUnit, OpenListImportBatch } from '../../api/openlist';
 
 type Props = {
   batch: OpenListImportBatch | null;
   source: 'local' | 'openlist';
+  /** 处理识别结果（needs_review）：打开该 unit 的实际 revision 确认界面 */
+  onReviewUnit?: (unit: BackgroundImportUnit) => void;
+  /** 重试失败单元（exact-stage retry） */
+  onRetryUnit?: (unit: BackgroundImportUnit) => void;
+  /** 重试进行中的 unit_id（幂等去重） */
+  retryingUnitId?: string;
 };
 
 const stateLabel: Record<string, string> = {
@@ -32,7 +38,7 @@ function unitDetail(unit: BackgroundImportUnit): string {
   if (unit.error) return unit.error;
   const job = unit.library_rebuild_job || unit.scrape_job || unit.mirror_job;
   if (job?.message) return job.message;
-  if (unit.state === 'needs_review') return '已保留该作品，稍后可在媒体库维护中处理。';
+  if (unit.state === 'needs_review') return '识别结果需要确认，处理后才会继续生成媒体库。';
   return unit.video_count ? `${unit.video_count} 个视频` : '正在整理任务状态';
 }
 
@@ -90,7 +96,7 @@ function rootIsCoolingDown(root: OpenListImportBatch['roots'][number]): boolean 
   return /访问保护|冷却/.test(detail) && root.job_status === 'queued';
 }
 
-export default function MediaBackgroundImportStatus({ batch, source }: Props) {
+export default function MediaBackgroundImportStatus({ batch, source, onReviewUnit, onRetryUnit, retryingUnitId }: Props) {
   const roots = batch?.roots || [];
   const units = roots.flatMap((root) => root.units || []);
   const coolingDown = source === 'openlist' && roots.some(rootIsCoolingDown);
@@ -126,7 +132,7 @@ export default function MediaBackgroundImportStatus({ batch, source }: Props) {
         </div>
       </header>
       <div className="media-background-progress" aria-label="后台处理进度">
-        <div><strong>{units.length ? `${completed} / ${units.length} 部作品已完成` : '正在建立作品清单'}</strong><span>{attention ? `${attention} 个项目不会阻塞其他作品` : '识别、媒体库生成与资料补充会自动衔接'}</span></div>
+        <div><strong>{units.length ? `${completed} / ${units.length} 个识别单元已完成` : '正在建立作品清单'}</strong><span>{attention ? `${attention} 个项目不会阻塞其他作品` : '识别、媒体库生成与资料补充会自动衔接'}</span></div>
         <ProgressBar value={progress} max={1} />
       </div>
       <ol className="media-workbench-substages media-background-stages" aria-label="执行阶段">
@@ -147,7 +153,11 @@ export default function MediaBackgroundImportStatus({ batch, source }: Props) {
           <article key={`${unit.unit_id}-${unit.revision_id}`} className={`media-background-unit ${unit.state}`}>
             <div className="media-background-unit-icon">{isActive(unit) ? <Spinner size="tiny" /> : unit.state === 'completed' ? <CheckCircle2 size={17} /> : unit.state === 'mirrored' ? <Layers3 size={17} /> : unit.state === 'scraping' ? <Sparkles size={17} /> : <CircleAlert size={17} />}</div>
             <div><strong>{unit.work_title}</strong><span>{unitDetail(unit)}</span></div>
-            <span className="media-background-unit-state">{stateLabel[unit.state] || '正在处理'}</span>
+            <div className="media-background-unit-actions">
+              {unit.state === 'needs_review' && onReviewUnit && <Button appearance="secondary" size="small" icon={<Wrench size={14} />} onClick={() => onReviewUnit(unit)}>处理识别</Button>}
+              {unit.state === 'failed' && onRetryUnit && <Button appearance="secondary" size="small" icon={retryingUnitId === unit.unit_id ? <Spinner size="tiny" /> : <RefreshCw size={14} />} disabled={Boolean(retryingUnitId)} onClick={() => onRetryUnit(unit)}>重试</Button>}
+              <span className="media-background-unit-state">{stateLabel[unit.state] || '正在处理'}</span>
+            </div>
           </article>
         )) : roots.map((root) => {
           const rootCoolingDown = source === 'openlist' && rootIsCoolingDown(root);

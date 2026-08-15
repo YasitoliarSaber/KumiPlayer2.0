@@ -1126,6 +1126,12 @@ def create_openlist_import_batch(req: BatchImportRequest):
         })
     batch = None
     created_job_ids: list[str] = []
+    preset_by_root: dict[str, dict] = {}
+    # provider/route 是请求级事实（batch roots 不投影这些字段）
+    provider_by_locator = {
+        normalize_remote_path(str(r["remote_locator"])): (r["provider_id"], r["source_route_id"])
+        for r in roots
+    }
     try:
         batch = catalog_store.create_import_batch(
             source_id=source_id,
@@ -1149,6 +1155,30 @@ def create_openlist_import_batch(req: BatchImportRequest):
             )
             root["generation"] = generation
             root["job_id"] = job_id
+            # OpenList 来源卡：每个 canonical SourceRoot 同步一张长期媒体库
+            # 入口卡（复用/创建），作为“我选中的这个 OpenList 媒体库根”的
+            # 持久身份；不按 MediaUnit 建卡。
+            from app.media_presets.service import sync_openlist_source_preset
+
+            provider_id, source_route_id = provider_by_locator.get(
+                normalize_remote_path(str(root["remote_locator"] or "")), ("", "")
+            )
+            preset, _created = sync_openlist_source_preset(
+                catalog_root_id=root["root_id"],
+                remote_locator=root["remote_locator"],
+                local_locator=root.get("local_locator") or "",
+                provider_id=provider_id,
+                source_route_id=source_route_id,
+                import_family=family,
+                import_scope=scope,
+            )
+            preset_by_root[root["root_id"]] = {
+                "preset_id": preset.preset_id,
+                "name": preset.name,
+                "remote_locator": preset.remote_locator,
+                "catalog_root_id": preset.catalog_root_id,
+                "created": _created,
+            }
     except (ValueError, OSError) as exc:
         from app.db.database import get_connection
         from app.jobs import store as job_store
@@ -1160,7 +1190,9 @@ def create_openlist_import_batch(req: BatchImportRequest):
             conn.execute("DELETE FROM import_batches WHERE batch_id = ?", (batch["batch_id"],))
             conn.commit()
         raise HTTPException(status_code=409, detail=str(exc)) from None
-    return _refresh_batch_status(batch)
+    payload = _refresh_batch_status(batch)
+    payload["presets"] = list(preset_by_root.values())
+    return payload
 
 
 @router.get("/import-batches/{batch_id}")
@@ -1221,3 +1253,85 @@ def cancel_openlist_import_batch(batch_id: str):
             if job.status in {"queued", "running"}:
                 job_store.cancel_job(job.job_id)
     return _refresh_batch_status(catalog_store.get_import_batch(batch_id) or batch)
+
+
+@router.post("/import-batches/{batch_id}/units/{unit_id}/retry")
+def retry_openlist_import_unit(batch_id: str, unit_id: str):
+    """重试批次中一个失败/待处理的识别单元（exact-stage retry，幂等）。
+
+    - 单元必须属于该批次；
+    - 按当前 durable stage 精确定位失败阶段并只重试该阶段：
+      mirror 失败 → 重新入队 mirror revision（coalesced，不复制业务任务）；
+      scrape 失败 → 重新入队 scrape revision（全局单通道合并）；
+      library rebuild 失败 → 重新入队全局媒体库重建（coalesced）；
+      revision 仍是 draft（needs_review）→ 拒绝，走人工确认入口；
+    - 不重新扫描整个 SourceRoot；
+    - 重复点击 / 页面刷新 / 进程重启均幂等（同 resource_key 合并）。
+    """
+    from app.catalog import store as catalog_store
+    from app.db.database import get_connection, init_db
+    from app.pipeline import orchestrator
+
+    init_db()
+    batch = catalog_store.get_import_batch(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail="导入批次不存在")
+    unit = get_connection().execute(
+        "SELECT * FROM media_units WHERE unit_id = ? AND root_id IN "
+        "(SELECT root_id FROM import_batch_roots WHERE batch_id = ?)",
+        (unit_id, batch_id),
+    ).fetchone()
+    if unit is None:
+        raise HTTPException(status_code=404, detail="识别单元不存在于该批次")
+    revision_id = str(unit["current_revision_id"] or "")
+    if not revision_id:
+        raise HTTPException(status_code=409, detail="该识别单元还没有可执行的识别版本")
+    revision = get_connection().execute(
+        "SELECT * FROM import_revisions WHERE revision_id = ? AND unit_id = ?",
+        (revision_id, unit_id),
+    ).fetchone()
+    if revision is None:
+        raise HTTPException(status_code=409, detail="识别版本不存在，请重新扫描")
+    if revision["status"] not in ("confirmed", "executed"):
+        raise HTTPException(
+            status_code=409,
+            detail="识别结果仍待人工确认，请先处理识别结果再重试",
+        )
+
+    source_id = str(unit["root_id"] and catalog_store.get_source_root(unit["root_id"]).source_id or "")
+    source = "openlist"
+    if source_id.startswith("local"):
+        source = "local"
+    elif source_id.startswith("pan115"):
+        source = "pan115"
+    elif source_id.startswith("baidu"):
+        source = "baidu"
+
+    def _latest_stage_job(job_type: str, resource_key: str):
+        return get_connection().execute(
+            "SELECT * FROM jobs WHERE job_type = ? AND resource_key = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (job_type, resource_key),
+        ).fetchone()
+
+    retried: dict[str, str] = {}
+    mirror_job = _latest_stage_job("mirror_revision", f"mirror:{revision_id}")
+    if mirror_job is not None and mirror_job["status"] in ("failed", "cancelled"):
+        retried["mirror"] = orchestrator.enqueue_mirror(revision_id, unit_id, rerun=True)
+    else:
+        scrape_job = _latest_stage_job("scrape_revision", "scrape:global")
+        if scrape_job is not None and scrape_job["status"] in ("failed", "cancelled"):
+            retried["scrape"] = orchestrator.enqueue_scrape(
+                revision_id, source, unit_id=unit_id,
+            )
+        else:
+            library_job = _latest_stage_job("library_rebuild", "library:global")
+            if library_job is not None and library_job["status"] in ("failed", "cancelled"):
+                retried["library"] = orchestrator.enqueue_library_rebuild(unit_id=unit_id)
+    if not retried:
+        # 没有失败阶段（或已 succeeded）：按业务幂等语义重跑 mirror 链
+        # （coalesced 不会复制等价任务；已完成的 revision 直接复用）。
+        retried["mirror"] = orchestrator.enqueue_mirror(revision_id, unit_id, rerun=True)
+    payload = _refresh_batch_status(catalog_store.get_import_batch(batch_id) or batch, persist=False)
+    payload["retried_stages"] = retried
+    return payload
