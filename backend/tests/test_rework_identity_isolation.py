@@ -874,3 +874,102 @@ class TestTerminalRetryBarrierAndNoopSemantics:
         data = resp.json()
         assert data["already_active_stages"]["mirror"] == mirror.job_id
         assert "mirror" not in (data.get("retried_stages") or {})
+
+
+class TestCanonicalSourceCardEndToEnd:
+    """CP9 联测：真实 library_rebuild handler 发布 canonical works 后，
+    来源卡 is_library_indexed=true（来源卡状态投影与 canonical 投影一致）。"""
+
+    def test_published_canonical_units_mark_source_card_indexed(self, tmp_path):
+        from app.db.database import get_connection
+        from app.import_plan import revision_store
+        from app.jobs import store as job_store
+        from app.media_presets.service import openlist_preset_state
+        from app.pipeline.artifacts import upsert_artifact
+        from app.pipeline.library_handler import handle_library_rebuild
+
+        # 两个 current unit：raw work_id 相同、canonical 不同
+        _make_unit("e2e-a", root_id="root-x")
+        _make_unit("e2e-b", root_id="root-x")
+        strm_a = tmp_path / "mirror" / "e2e-a" / "Season 1" / "a.strm"
+        strm_b = tmp_path / "mirror" / "e2e-b" / "Season 1" / "b.strm"
+        strm_a.parent.mkdir(parents=True)
+        strm_b.parent.mkdir(parents=True)
+        strm_a.write_text("H:/open/e2e-a.mkv", encoding="utf-8")
+        strm_b.write_text("H:/open/e2e-b.mkv", encoding="utf-8")
+
+        revs = {}
+        for unit_id, canonical, strm in (
+            ("e2e-a", "unit:e2e-a:main", strm_a),
+            ("e2e-b", "unit:e2e-b:main", strm_b),
+        ):
+            rev = revision_store.create_revision(
+                unit_id=unit_id, source_generation=1,
+                items=[_item(
+                    f"{unit_id}/Season 1/{unit_id}.mkv", canonical_work_id=canonical, work_id="w",
+                    target_strm_path=str(strm), target_dir=str(strm.parent),
+                )],
+                status="confirmed",
+            )
+            upsert_artifact(kind="strm", path=str(strm), revision_id=rev["revision_id"], work_id="w")
+            conn = get_connection()
+            conn.execute(
+                "UPDATE media_units SET current_revision_id = ? WHERE unit_id = ?",
+                (rev["revision_id"], unit_id),
+            )
+            conn.commit()
+            revs[unit_id] = rev["revision_id"]
+
+        # mirror / scrape 已成功（scrape result 精确链到 library job）
+        lib = job_store.create_job(
+            job_type="library_rebuild", resource_key="library:global",
+            payload={"unit_id": "e2e-a"},
+        )
+        conn = get_connection()
+        for unit_id in ("e2e-a", "e2e-b"):
+            mirror = job_store.create_job(
+                job_type="mirror_revision", resource_key=f"mirror:{revs[unit_id]}",
+                payload={"revision_id": revs[unit_id], "unit_id": unit_id},
+            )
+            conn.execute("UPDATE jobs SET status='succeeded' WHERE job_id=?", (mirror.job_id,))
+            scrape = job_store.create_job(
+                job_type="scrape_revision", resource_key="scrape:global",
+                payload={"revision_id": revs[unit_id], "unit_id": unit_id},
+            )
+            import json
+
+            conn.execute(
+                "UPDATE jobs SET status='succeeded', payload=? WHERE job_id=?",
+                (
+                    json.dumps(
+                        {"revision_id": revs[unit_id], "unit_id": unit_id,
+                         "result": {"library_rebuild_job": lib.job_id}},
+                        ensure_ascii=False,
+                    ),
+                    scrape.job_id,
+                ),
+            )
+        conn.commit()
+
+        # 真实 library_rebuild handler 执行发布（LibraryIndex 物化）
+        result = handle_library_rebuild(
+            {"unit_id": "e2e-a"},
+            progress_callback=lambda *a, **k: None,
+        )
+        assert result["status"] == "succeeded"
+        conn = get_connection()
+        conn.execute("UPDATE jobs SET status='succeeded' WHERE job_id=?", (lib.job_id,))
+        conn.commit()
+
+        # media_libraries：canonical 两行，不因 raw work_id 相同互相覆盖
+        rows = conn.execute(
+            "SELECT library_id FROM media_libraries WHERE current_revision_id IN (?, ?) ORDER BY library_id",
+            (revs["e2e-a"], revs["e2e-b"]),
+        ).fetchall()
+        assert [row["library_id"] for row in rows] == ["unit:e2e-a:main", "unit:e2e-b:main"]
+
+        # 来源卡：library rebuild 已发布 → indexed=true，无 attention
+        state = openlist_preset_state("root-x")
+        assert state["unit_count"] == 2
+        assert state["attention_count"] == 0
+        assert state["is_library_indexed"] is True
