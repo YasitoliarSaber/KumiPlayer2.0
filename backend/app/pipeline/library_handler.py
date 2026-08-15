@@ -60,19 +60,20 @@ def record_scrape_outcome(
     conn.commit()
 
 
-def _upsert_library(revision: dict, items: list[dict], timestamp: str) -> str:
-    """按 work 聚合 revision items，写/更新 media_libraries 行。
+def _upsert_library(revision: dict, items: list[dict], timestamp: str) -> list[str]:
+    """按 effective canonical identity 分组 revision items，每个 canonical work
+    写/更新一条 ``media_libraries`` 行（不再只取第一条 work_id）。
+
+    - ``canonical_work_id`` 非空 → ``library_id = canonical_work_id``（V3 事实）；
+    - 仅 legacy 数据缺 canonical 时允许 ``work_id`` fallback（保持旧库可重建）；
+    - 同 revision 多个 standalone canonical → 每个 canonical 一行；
+    - 全部无身份时保留 revision 级兜底行（旧行为，避免遗留库丢失投影）。
 
     root 事实正确化（Module 5 十八.2）：``root_id`` 必须是真实 SourceRoot.root_id
     （revision.unit_id → media_units.root_id → source_roots），不再把 unit_id 当
     root_id、不再 hard-code import_family/remote_locator。
     """
     conn = get_connection()
-    work_ids = [item.get("work_id") or "" for item in items if item.get("work_id")]
-    work_titles = [item.get("work_title") or "" for item in items if item.get("work_title")]
-    library_id = work_ids[0] if work_ids else f"rev-{revision['revision_id']}"
-    name = work_titles[0] if work_titles else (library_id if work_ids else revision["revision_id"])
-
     unit = conn.execute(
         "SELECT root_id FROM media_units WHERE unit_id = ?",
         (str(revision.get("unit_id") or ""),),
@@ -94,28 +95,44 @@ def _upsert_library(revision: dict, items: list[dict], timestamp: str) -> str:
             import_family = str(root["import_family"] or "anime")
             import_scope = str(root["import_scope"] or "")
 
-    conn.execute(
-        """
-        INSERT INTO media_libraries (
-            library_id, name, root_id, remote_locator, import_family, import_scope,
-            current_revision_id, lifecycle_status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
-        ON CONFLICT (library_id) DO UPDATE SET
-            name = excluded.name,
-            root_id = excluded.root_id,
-            remote_locator = excluded.remote_locator,
-            import_family = excluded.import_family,
-            import_scope = excluded.import_scope,
-            current_revision_id = excluded.current_revision_id,
-            updated_at = excluded.updated_at
-        """,
-        (
-            library_id, name, root_id, remote_locator, import_family, import_scope,
-            revision["revision_id"], timestamp, timestamp,
-        ),
-    )
-    return library_id
+    # effective canonical identity 分组：canonical 优先，legacy 缺 canonical 才用 work_id
+    grouped: dict[str, str] = {}
+    for item in items:
+        identity = str(item.get("canonical_work_id") or "") or str(item.get("work_id") or "")
+        if not identity:
+            continue
+        title = str(item.get("work_title") or "")
+        if identity not in grouped:
+            grouped[identity] = title
+        elif not grouped[identity] and title:
+            grouped[identity] = title
 
+    if not grouped:
+        # 全无身份：保留 revision 级兜底行（旧行为）
+        grouped[f"rev-{revision['revision_id']}"] = revision["revision_id"]
+
+    for library_id, name in grouped.items():
+        conn.execute(
+            """
+            INSERT INTO media_libraries (
+                library_id, name, root_id, remote_locator, import_family, import_scope,
+                current_revision_id, lifecycle_status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+            ON CONFLICT (library_id) DO UPDATE SET
+                name = excluded.name,
+                root_id = excluded.root_id,
+                remote_locator = excluded.remote_locator,
+                import_family = excluded.import_family,
+                import_scope = excluded.import_scope,
+                current_revision_id = excluded.current_revision_id,
+                updated_at = excluded.updated_at
+            """,
+            (
+                library_id, name, root_id, remote_locator, import_family, import_scope,
+                revision["revision_id"], timestamp, timestamp,
+            ),
+        )
+    return list(grouped.keys())
 
 def handle_library_rebuild(payload: dict, progress_callback=None, should_cancel=None) -> dict:
     """从 SQLite current state 一次性重建 LibraryIndex 投影。

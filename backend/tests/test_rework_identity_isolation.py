@@ -445,3 +445,115 @@ class TestOpenlistSourceCardLifecycle:
         assert "preset.update_mode !== 'openlist_scan'" in text
         # 来源卡保留“增量扫描”入口
         assert "rescanOpenlistPreset(preset)" in text
+
+class TestMediaLibrariesCanonicalProjection:
+    """CP9：media_libraries 是最后一个 SQLite projection——必须按 effective
+    canonical identity 分组，raw work_id 相同但 canonical 不同绝不互相覆盖
+    （ON CONFLICT 合并），同 revision 多 standalone canonical 各占一行。"""
+
+    def _set_current(self, unit_id: str, revision_id: str) -> None:
+        from app.db.database import get_connection
+
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET current_revision_id = ? WHERE unit_id = ?",
+            (revision_id, unit_id),
+        )
+        conn.commit()
+
+    def test_two_units_same_raw_work_id_distinct_canonical(self, tmp_path):
+        """两个 current unit：raw work_id 相同、canonical A != B
+        → handle_library_rebuild 产生两条 media_libraries，LibraryIndex 两个 works。"""
+        from app.db.database import get_connection
+        from app.import_plan import revision_store
+        from app.library.store import load_library_index
+        from app.pipeline.artifacts import upsert_artifact
+        from app.pipeline.library_handler import handle_library_rebuild
+
+        # 镜像发布链要求 .strm 真实存在（无现存 strm 的 WorkIndex 不发布空卡）
+        strm_a = tmp_path / "mirror" / "A" / "Season 1" / "a.strm"
+        strm_b = tmp_path / "mirror" / "B" / "Season 1" / "b.strm"
+        strm_a.parent.mkdir(parents=True)
+        strm_b.parent.mkdir(parents=True)
+        strm_a.write_text("H:/open/A/Season 1/a.mkv", encoding="utf-8")
+        strm_b.write_text("H:/open/B/Season 1/b.mkv", encoding="utf-8")
+
+        _make_unit("unit-lib-a")
+        _make_unit("unit-lib-b")
+        rev_a = revision_store.create_revision(
+            unit_id="unit-lib-a", source_generation=1,
+            items=[_item(
+                "A/Season 1/a.mkv", canonical_work_id="unit:unit-lib-a:main", work_id="w",
+                target_strm_path=str(strm_a), target_dir=str(strm_a.parent),
+            )],
+            status="confirmed",
+        )
+        upsert_artifact(kind="strm", path=str(strm_a), revision_id=rev_a["revision_id"], work_id="w")
+        self._set_current("unit-lib-a", rev_a["revision_id"])
+        rev_b = revision_store.create_revision(
+            unit_id="unit-lib-b", source_generation=1,
+            items=[_item(
+                "B/Season 1/b.mkv", canonical_work_id="unit:unit-lib-b:main", work_id="w",
+                target_strm_path=str(strm_b), target_dir=str(strm_b.parent),
+            )],
+            status="confirmed",
+        )
+        upsert_artifact(kind="strm", path=str(strm_b), revision_id=rev_b["revision_id"], work_id="w")
+        self._set_current("unit-lib-b", rev_b["revision_id"])
+
+        result = handle_library_rebuild(
+            {"unit_id": "unit-lib-a"},
+            progress_callback=lambda *a, **k: None,
+        )
+        assert result["status"] == "succeeded"
+
+        conn = get_connection()
+        rows = conn.execute(
+            "SELECT library_id, current_revision_id FROM media_libraries "
+            "WHERE current_revision_id IN (?, ?) ORDER BY library_id",
+            (rev_a["revision_id"], rev_b["revision_id"]),
+        ).fetchall()
+        # A/B raw work_id 相同（都是 "w"）→ canonical 不同必须两行，不互相覆盖
+        assert [row["library_id"] for row in rows] == [
+            "unit:unit-lib-a:main",
+            "unit:unit-lib-b:main",
+        ]
+        # LibraryIndex 两个 works（canonical 身份分开）
+        index = load_library_index()
+        assert index is not None
+        work_ids = {work.work_id for work in index.works}
+        assert "unit:unit-lib-a:main" in work_ids
+        assert "unit:unit-lib-b:main" in work_ids
+
+    def test_one_revision_two_standalone_same_raw_work_id(self):
+        """一个 revision 两个 standalone：raw work_id 相同、canonical A != B
+        → media_libraries 两条记录（不再只取第一条 work_id）。"""
+        from app.db.database import get_connection
+        from app.import_plan import revision_store
+        from app.pipeline.library_handler import handle_library_rebuild
+
+        _make_unit("unit-lib-solo")
+        rev = revision_store.create_revision(
+            unit_id="unit-lib-solo", source_generation=1,
+            items=[
+                _item("剧集/剧场版A/a.mkv", canonical_work_id="unit:unit-lib-solo:sub:A", work_id="w"),
+                _item("剧集/剧场版B/b.mkv", canonical_work_id="unit:unit-lib-solo:sub:B", work_id="w"),
+            ],
+            status="confirmed",
+        )
+        self._set_current("unit-lib-solo", rev["revision_id"])
+
+        handle_library_rebuild(
+            {"unit_id": "unit-lib-solo"},
+            progress_callback=lambda *a, **k: None,
+        )
+
+        conn = get_connection()
+        rows = conn.execute(
+            "SELECT library_id FROM media_libraries WHERE current_revision_id = ? ORDER BY library_id",
+            (rev["revision_id"],),
+        ).fetchall()
+        assert [row["library_id"] for row in rows] == [
+            "unit:unit-lib-solo:sub:A",
+            "unit:unit-lib-solo:sub:B",
+        ]
