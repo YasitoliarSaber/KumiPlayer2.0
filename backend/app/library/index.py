@@ -78,6 +78,7 @@ def build_library_index(
     # 构建 works
     works_map: Dict[str, WorkIndex] = {}
     raw_work_ids_by_library: Dict[str, set[str]] = defaultdict(set)
+    canonical_work_ids_by_library: Dict[str, set[str]] = defaultdict(set)
     episode_positions: Dict[Tuple[str, str, int, int], int] = {}
     episode_variant_keys: Dict[Tuple[str, str, int, int], tuple] = {}
     missing_strm = 0
@@ -96,6 +97,8 @@ def build_library_index(
             continue
         if item.work_id:
             raw_work_ids_by_library[work_id].add(item.work_id)
+        if getattr(item, "canonical_work_id", ""):
+            canonical_work_ids_by_library[work_id].add(item.canonical_work_id)
 
         # 获取或创建 WorkIndex
         if work_id not in works_map:
@@ -160,11 +163,22 @@ def build_library_index(
         work.episodes.sort(key=_episode_sort_key)
         _normalize_special_episode_numbers(work.episodes)
         work.episodes.sort(key=_episode_sort_key)
-        scrape_infos = [
-            info
-            for raw_work_id in raw_work_ids_by_library.get(work.work_id, set())
-            for info in scrape_items_by_work_id.get(raw_work_id, [])
-        ]
+        # V3：按 canonical 精确取刮削信息（work.work_id 即 canonical）；只有
+        # legacy（无 canonical）才按 raw work_id 兼容取回。绝不从其他 canonical
+        # 借 season 级 poster/fanart/NFO。
+        canonical_ids = canonical_work_ids_by_library.get(work.work_id, set())
+        if canonical_ids:
+            scrape_infos = [
+                info
+                for cid in canonical_ids
+                for info in scrape_items_by_work_id.get(cid, [])
+            ]
+        else:
+            scrape_infos = [
+                info
+                for raw_work_id in raw_work_ids_by_library.get(work.work_id, set())
+                for info in scrape_items_by_work_id.get(raw_work_id, [])
+            ]
         work.seasons = _build_season_indexes(
             work, scrape_infos, asset_index
         )
@@ -265,22 +279,29 @@ def _build_work_index(
         title = item.work_title or item.series_group
     original_title = item.original_title or ""
 
-    # 从 scrape_map 补充展示信息（CP2：canonical 优先，绝不跨 canonical 串线）
+    # 从 scrape_map 补充展示信息（CP6：有 canonical 身份只按 canonical 精确取，
+    # 绝不跨 canonical 通过 series_group / work_id 兜底借料；legacy 无 canonical
+    # 的旧计划才保留 series_group / work_id 兼容 fallback）
+    canonical_id = str(getattr(item, "canonical_work_id", "") or "")
     if item.card_type == "main_series":
-        scrape_info = (
-            scrape_work_index.get(getattr(item, "canonical_work_id", "") or "")
-            or scrape_work_index.get(library_work_id)
-            or _select_series_scrape_info(item, scrape_series_index)
-            or scrape_work_index.get(item.work_id)
-            or {}
-        )
+        if canonical_id:
+            scrape_info = scrape_work_index.get(canonical_id) or {}
+        else:
+            scrape_info = (
+                scrape_work_index.get(library_work_id)
+                or _select_series_scrape_info(item, scrape_series_index)
+                or scrape_work_index.get(item.work_id)
+                or {}
+            )
     else:
-        scrape_info = (
-            scrape_work_index.get(getattr(item, "canonical_work_id", "") or "")
-            or scrape_work_index.get(library_work_id)
-            or scrape_work_index.get(item.work_id)
-            or {}
-        )
+        if canonical_id:
+            scrape_info = scrape_work_index.get(canonical_id) or {}
+        else:
+            scrape_info = (
+                scrape_work_index.get(library_work_id)
+                or scrape_work_index.get(item.work_id)
+                or {}
+            )
 
     # 图片路径
     poster_path = scrape_info.get("poster_path", "")

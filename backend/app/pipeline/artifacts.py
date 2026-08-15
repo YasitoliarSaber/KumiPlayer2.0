@@ -21,25 +21,52 @@ class StaleRevisionError(RuntimeError):
     """V3 事实写入被拒：目标 revision 已不再是 current（stale/superseded）。"""
 
 
-def _resolve_canonical_work_id(revision_id: str, work_id: str) -> str:
-    """把 item 级 work_id 解析为 V3 canonical work 身份（attribution 统一入口）。
+def _resolve_canonical_work_id(
+    revision_id: str,
+    work_id: str,
+    *,
+    path: str = "",
+    canonical_work_id: str = "",
+) -> str:
+    """把 item 级身份解析为 V3 canonical work 身份（attribution 统一入口）。
 
-    - 优先同 revision 中 ``work_id`` 匹配条目的 canonical_work_id；
-    - 匹配不到时取该 revision 第一个非空 canonical（同一 unit 主系列共享）；
-    - 均无（legacy 数据）→ 原样返回 work_id，不做猜测。
+    归属优先级（CP6：**绝不跨 canonical 猜测**）：
+    - 调用方已给出精确 ``canonical_work_id``（同一 revision 内多个 standalone
+      共享 work_id 时唯一可靠来源）；
+    - ``path`` 与 revision item 的 ``target_strm_path`` 精确匹配（strm 产物）；
+    - ``work_id`` 在 revision 内唯一命中 canonical；
+    - 以上都无法唯一归属（同 work_id 命中多个不同 canonical）→ 原样返回
+      work_id，**绝不取 revision 第一条 canonical**（否则会把产物错误归属到
+      另一作品）；legacy 数据无 canonical → 同样原样返回 work_id。
     """
+    if canonical_work_id:
+        return canonical_work_id
     if not revision_id or not work_id:
         return work_id
     revision = revision_store.load_revision(revision_id)
     if revision is None:
         return work_id
     items = revision.get("items") or []
-    for item in items:
-        if str(item.get("work_id") or "") == work_id and item.get("canonical_work_id"):
-            return str(item["canonical_work_id"])
-    for item in items:
-        if item.get("canonical_work_id"):
-            return str(item["canonical_work_id"])
+    if path:
+        path_matches = [
+            item for item in items
+            if str(item.get("target_strm_path") or "") == path
+            and item.get("canonical_work_id")
+        ]
+        if len(path_matches) == 1:
+            return str(path_matches[0]["canonical_work_id"])
+    matches = [
+        item for item in items
+        if str(item.get("work_id") or "") == work_id
+        and item.get("canonical_work_id")
+    ]
+    if len(matches) == 1:
+        return str(matches[0]["canonical_work_id"])
+    if len(matches) > 1:
+        canonicals = {str(item["canonical_work_id"]) for item in matches}
+        if len(canonicals) == 1:
+            return canonicals.pop()
+        return work_id  # 无法唯一归属 → fail safe，不做第一条猜测
     return work_id
 
 
@@ -49,6 +76,7 @@ def upsert_artifact(
     path: str,
     revision_id: str,
     work_id: str,
+    canonical_work_id: str = "",
     require_current: bool = False,
 ) -> None:
     """登记一个已确认物化的本地产物；同 path 新 revision 重写则更新归属。
@@ -58,14 +86,18 @@ def upsert_artifact(
     已切换 current 的 stale worker 会被拒（StaleRevisionError），不能把
     attribution 抢回旧 revision。legacy/默认保持 False 不误杀。
 
-    CP2（canonical identity）：V3 revision 的 attribution 统一解析为
-    canonical_work_id，避免 Library projection 通过 item 级 work_id 串线。
+    CP6（canonical identity）：V3 revision 的 attribution 精确归属到
+    canonical_work_id。调用方可显式传入该 item 的 canonical（多 standalone
+    场景唯一可靠），否则 ``_resolve_canonical_work_id`` 用 path / work_id
+    精确匹配，绝不取 revision 第一条 canonical 猜测。
     """
     if kind not in ARTIFACT_KINDS:
         raise ValueError(f"不支持的 artifact kind: {kind}")
     if not path:
         raise ValueError("artifact path 不能为空")
-    effective_work_id = _resolve_canonical_work_id(revision_id, work_id)
+    effective_work_id = _resolve_canonical_work_id(
+        revision_id, work_id, path=path, canonical_work_id=canonical_work_id,
+    )
     from app.db.transactions import transaction
     from app.import_plan import revision_store
 

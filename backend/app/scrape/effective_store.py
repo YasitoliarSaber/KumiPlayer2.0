@@ -58,6 +58,7 @@ def register_scrape_artifacts(item: ScrapeMapItem, episode_nfo_paths: list[str] 
         # Review Fix 2：V3 事务级 current fence
         upsert_artifact(
             kind=kind, path=value, revision_id=revision_id, work_id=work_id,
+            canonical_work_id=str(getattr(item, "canonical_work_id", "") or ""),
             require_current=True,
         )
     for path_value in episode_nfo_paths or []:
@@ -65,6 +66,7 @@ def register_scrape_artifacts(item: ScrapeMapItem, episode_nfo_paths: list[str] 
         if value and Path(value).exists():
             upsert_artifact(
                 kind="nfo", path=value, revision_id=revision_id, work_id=work_id,
+                canonical_work_id=str(getattr(item, "canonical_work_id", "") or ""),
                 require_current=True,
             )
 
