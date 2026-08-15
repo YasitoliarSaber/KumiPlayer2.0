@@ -1304,15 +1304,6 @@ def retry_openlist_import_unit(batch_id: str, unit_id: str):
             detail="识别结果仍待人工确认，请先处理识别结果再重试",
         )
 
-    source_id = str(unit["root_id"] and catalog_store.get_source_root(unit["root_id"]).source_id or "")
-    source = "openlist"
-    if source_id.startswith("local"):
-        source = "local"
-    elif source_id.startswith("pan115"):
-        source = "pan115"
-    elif source_id.startswith("baidu"):
-        source = "baidu"
-
     def _latest_stage_job(job_type: str, resource_key: str):
         return get_connection().execute(
             "SELECT * FROM jobs WHERE job_type = ? AND resource_key = ? "
