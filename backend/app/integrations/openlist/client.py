@@ -617,14 +617,25 @@ def get_openlist_client(
 ) -> OpenListClient:
     """取得同一连接的进程内共享客户端。
 
-    密码不参与键值，也绝不存入池的索引或日志。可选参数主要供测试注入；测试
-    通过 :func:`clear_openlist_client_pool` 隔离，生产调用不会传入它们。
+    池键仍为匿名键（server_url + username，sha256，密码不参与键值，
+    绝不存入池的索引或日志）；但**有效凭据身份包含密码**：
+    - 同 server / username / password → 复用既有会话（含内存 Token）；
+    - 同 server / username、password 变化 → 丢弃旧 client 并新建，
+      防止旧密码 / 旧 Token 污染新配置（ROOT-2）。
+
+    密码仅在内存中与池内既有 client 的 ``password`` 字段比较，不生成、
+    不记录任何密码哈希。可选参数主要供测试注入；测试通过
+    :func:`clear_openlist_client_pool` 隔离，生产调用不会传入它们。
     """
     key = _client_pool_key(server_url, username)
     with _CLIENT_POOL_LOCK:
         existing = _CLIENT_POOL.get(key)
         if existing is not None:
-            return existing
+            # 有效身份比较：密码相同才复用；不同则替换（不修改旧对象，
+            # 直接整体丢弃，避免旧 Token 继续参与新配置的请求）
+            if existing.password == password:
+                return existing
+            _CLIENT_POOL.pop(key, None)
         factory = client_factory or OpenListClient
         client = factory(server_url, username, password, **kwargs)
         if isinstance(client, OpenListClient):

@@ -98,9 +98,42 @@ class TestProcessClientPool:
         first.login()
         second.list_dir("/动画")
         assert calls == ["/api/auth/login", "/api/fs/list"]
+    def test_pool_reuses_same_effective_credentials(self):
+        """同 server + 同 username + 同 password → 复用同一 pooled client。
+
+        （有效凭据身份包含密码；密码一致时不得新建会话。）
+        """
+        first = get_openlist_client(
+            "https://ol.example.com", "user", "secret-pass",
+            transport=httpx.MockTransport(lambda req: _json_response(200, {})),
+            governor=OpenListRequestGovernor(rate_per_second=1000),
+        )
+        second = get_openlist_client("https://ol.example.com", "user", "secret-pass")
+
+        assert first is second
+
+    def test_pool_replaces_client_when_password_changes(self):
+        """同 server + 同 username、password 变化 → 旧 client 必须被替换。
+
+        否则旧 client 携带旧密码 / 旧 Token 继续参与新配置请求（ROOT-2）。
+        """
+        first = get_openlist_client(
+            "https://ol.example.com", "user", "password-a",
+            transport=httpx.MockTransport(lambda req: _json_response(200, {})),
+            governor=OpenListRequestGovernor(rate_per_second=1000),
+        )
+        second = get_openlist_client("https://ol.example.com", "user", "password-b")
+
+        assert first is not second
+        assert second.password == "password-b"
+        # 旧 client 已从池中移除，不会在密码改回时被重新复用
+        third = get_openlist_client("https://ol.example.com", "user", "password-a")
+        assert third is not first
+        assert third.password == "password-a"
 
     def test_concurrent_first_reads_share_one_login(self):
         """同一连接首次并发读取只允许一个登录请求，其他请求等待会话结果。"""
+
         login_started = threading.Event()
         allow_login = threading.Event()
         errors: list[Exception] = []

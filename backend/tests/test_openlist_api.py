@@ -105,6 +105,8 @@ def fake_client(monkeypatch):
     # 恢复 list_dir 为默认实例方法（取消测试可能整体替换过）
     FakeOpenListClient.list_dir = FakeOpenListClient._list_dir_default
     monkeypatch.setattr("app.api.openlist.OpenListClient", FakeOpenListClient)
+    # fresh probe（connection.py）同样使用 Fake client，保证连接测试离线
+    monkeypatch.setattr("app.integrations.openlist.connection.OpenListClient", FakeOpenListClient)
     yield
 
 
@@ -377,15 +379,17 @@ class TestTestConnection:
         resp = client.post("/api/openlist/test-connection", json={})
         body = resp.json()
         assert body["ok"] is False
-        assert "认证失败" in body["message"]
+        assert body["code"] == "credential_rejected"
+        assert body["phase"] == "credential"
         self._assert_no_credentials(body)
-
     def test_no_permission(self, client, tmp_path):
         _save_config(client, tmp_path)
         FakeOpenListClient.permission_path = REMOTE_ROOT
         resp = client.post("/api/openlist/test-connection", json={})
         body = resp.json()
         assert body["ok"] is False
+        assert body["code"] == "root_permission_denied"
+        assert body["phase"] == "root"
         assert "权限" in body["message"]
         self._assert_no_credentials(body)
 
@@ -394,6 +398,7 @@ class TestTestConnection:
         resp = client.post("/api/openlist/test-connection", json={})
         body = resp.json()
         assert body["ok"] is True
+        assert body["code"] == "connected"
         assert "连接成功" in body["message"]
         self._assert_no_credentials(body)
 
@@ -401,8 +406,122 @@ class TestTestConnection:
         resp = client.post("/api/openlist/test-connection", json={})
         body = resp.json()
         assert body["ok"] is False
+        assert body["code"] == "not_configured"
         self._assert_no_credentials(body)
 
+    def test_connection_does_not_reuse_runtime_pool(self, client, tmp_path):
+        """Test Connection 永远使用 fresh probe，不进入 production client pool。"""
+        _save_config(client, tmp_path)
+        # 预置一个已登录的 pooled client（模拟运行时池已有会话）
+        from app.integrations.openlist.client import clear_openlist_client_pool, get_openlist_client
+
+        clear_openlist_client_pool()
+        pooled = get_openlist_client(
+            "https://ol.example.com:5244", "quark-user", "p@ssw0rd",
+            client_factory=FakeOpenListClient,
+        )
+        pooled.login()
+        instances_before = len(FakeOpenListClient.instances)
+
+        resp = client.post("/api/openlist/test-connection", json={})
+        body = resp.json()
+        assert body["ok"] is True
+        # probe 必须新建 client，而不是复用 pool 中的实例
+        assert len(FakeOpenListClient.instances) == instances_before + 1
+        clear_openlist_client_pool()
+
+    def test_connection_rejects_bad_candidate_even_when_pool_has_valid_token(self, client, tmp_path):
+        """pool 有有效 token 时，坏候选也必须真实重登并失败（禁止假成功）。"""
+        _save_config(client, tmp_path)
+        from app.integrations.openlist.client import clear_openlist_client_pool, get_openlist_client
+
+        clear_openlist_client_pool()
+        pooled = get_openlist_client(
+            "https://ol.example.com:5244", "quark-user", "p@ssw0rd",
+            client_factory=FakeOpenListClient,
+        )
+        pooled.login()  # 池内已有“有效 token”
+        instances_before = len(FakeOpenListClient.instances)
+
+        FakeOpenListClient.login_user = "quark-user"  # 候选密码无效 → 登录失败
+        resp = client.post(
+            "/api/openlist/test-connection",
+            json={"username": "quark-user", "password": "wrong-pass"},
+        )
+        body = resp.json()
+        assert body["ok"] is False
+        assert body["code"] == "credential_rejected"
+        # 必须真正走 login，而不是返回旧 token → connected
+        assert len(FakeOpenListClient.instances) == instances_before + 1
+        clear_openlist_client_pool()
+
+    def test_connection_uses_saved_password_when_password_is_blank(self, client, tmp_path):
+        """username 与保存账号相同、password 为空 → 使用 saved password。"""
+        _save_config(client, tmp_path)
+        resp = client.post(
+            "/api/openlist/test-connection",
+            json={"username": "quark-user", "password": ""},
+        )
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["code"] == "connected"
+        # probe 拿到的必须是 saved password（Fake 不校验密码，但实例携带它）
+        probe_client = FakeOpenListClient.instances[-1]
+        assert probe_client.password == "p@ssw0rd"
+
+    def test_connection_uses_candidate_remote_root(self, client, tmp_path):
+        """draft remote_root 必须真正参与 /api/fs/list（候选 /new 而非已保存 /old）。"""
+        _save_config(client, tmp_path)
+        resp = client.post(
+            "/api/openlist/test-connection",
+            json={"remote_root": "/new-root"},
+        )
+        body = resp.json()
+        assert body["ok"] is True
+        probe_client = FakeOpenListClient.instances[-1]
+        # FakeOpenListClient.list_dir 记录 (path, refresh, page)
+        assert probe_client.calls and probe_client.calls[0][0] == "/new-root"
+
+    def test_connection_new_username_requires_password(self, client, tmp_path):
+        """修改 username 但 password 为空 → 禁止把旧账号密码套给新账号。"""
+        _save_config(client, tmp_path)
+        resp = client.post(
+            "/api/openlist/test-connection",
+            json={"username": "another-user", "password": ""},
+        )
+        body = resp.json()
+        assert body["ok"] is False
+        assert body["code"] == "invalid_configuration"
+        assert "密码" in body["message"]
+        # 未发起任何探测
+        assert FakeOpenListClient.instances == []
+
+    def test_connection_permission_error_is_not_auth_error(self, client, tmp_path):
+        """登录成功但 root 403 → root_permission_denied，不是 credential_rejected。"""
+        _save_config(client, tmp_path)
+        FakeOpenListClient.permission_path = REMOTE_ROOT
+        resp = client.post(
+            "/api/openlist/test-connection",
+            json={"username": "quark-user", "password": "p@ssw0rd"},
+        )
+        body = resp.json()
+        assert body["ok"] is False
+        assert body["code"] == "root_permission_denied"
+        assert body["phase"] == "root"
+        assert body["code"] != "credential_rejected"
+        self._assert_no_credentials(body)
+
+    def test_connection_response_never_contains_credentials(self, client, tmp_path):
+        """响应只含 code/phase/安全消息，绝不包含 username/password/token。"""
+        _save_config(client, tmp_path)
+        for payload in ({}, {"username": "quark-user", "password": "wrong-pass"}):
+            resp = client.post("/api/openlist/test-connection", json=payload)
+            body = resp.json()
+            assert set(body) <= {"ok", "code", "phase", "message", "insecure_http_required"}
+            assert "username" not in body
+            assert "password" not in body
+            assert "token" not in body
+            self._assert_no_credentials(body)
 
 class TestBrowse:
     def test_unconfigured_returns_400(self, client):

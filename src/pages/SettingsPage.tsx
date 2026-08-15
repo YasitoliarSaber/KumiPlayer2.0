@@ -363,6 +363,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
   const testOpenlistConnection = () => runAction('测试 OpenList 连接', async () => {
     const result = await openlistApi.testConnection({
       server_url: openlistDraft.server_url,
+      remote_root: openlistDraft.remote_root,
       username: openlistDraft.username,
       password: openlistDraft.password,
       allow_insecure_http: allowOpenlistHttp || isNonLoopbackHttp(openlistDraft.server_url) === false,

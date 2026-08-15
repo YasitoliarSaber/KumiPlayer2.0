@@ -42,6 +42,7 @@ from app.integrations.openlist.client import (
     normalize_remote_path,
     validate_server_url,
 )
+from app.integrations.openlist.connection import probe_openlist_connection
 from app.integrations.openlist.governor import governor_connection_key
 from app.integrations.openlist.models import OpenListError
 from app.integrations.openlist.providers import (
@@ -120,6 +121,7 @@ class TestConnectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     server_url: str = ""
+    remote_root: str = ""
     username: str = ""
     password: str = ""
     allow_insecure_http: bool = False
@@ -410,66 +412,63 @@ def _schedule_background_refresh(
 
 @router.post("/test-connection")
 def test_connection(req: TestConnectionRequest):
-    """连接测试：URL 校验 + 登录 + 目录可读性（只读，不保存任何配置）。
+    """连接测试：对**当前候选**执行 Fresh Probe（只读，不保存任何配置）。
 
-    响应只含结果与安全消息；用户名、密码、Token、Authorization 与
-    服务端原始错误一律不回传前端。
+    凭据解析语义固定：
+    - username / password 都为空 → KEEP SAVED（使用已保存凭据）；
+    - username 与已保存账号相同、password 为空 → 使用已保存密码；
+    - 显式填写新 password → 使用新密码；
+    - 修改 username 但 password 为空 → 拒绝（禁止把旧账号密码套给新账号）。
+
+    探测使用全新 client（不进入 production pool），draft remote_root 会真正
+    参与 ``/api/fs/list`` 请求；响应只含固定 ``code`` / ``phase`` / 安全消息，
+    用户名、密码、Token、Authorization 与服务端原始错误一律不回传前端。
     """
     config = load_config()
     server_url = (req.server_url or config.openlist_server_url).strip()
     username = req.username if req.username else config.openlist_username
     password = req.password if req.password else config.openlist_password
 
+    # 修改 username 但未提供新密码：禁止把旧账号密码套给新账号
+    if req.username and req.username != config.openlist_username and not req.password:
+        return {
+            "ok": False,
+            "code": "invalid_configuration",
+            "phase": "validation",
+            "message": "请输入新 OpenList 账号对应的密码",
+        }
+
     if not server_url or not username or not password:
-        return {"ok": False, "message": _NOT_CONFIGURED_MESSAGE}
-
-    ok, reason = validate_server_url(server_url)
-    if not ok:
-        if "公网 HTTP" in reason:
-            reason = "该地址是公网 HTTP 明文传输，已拒绝连接；请改用 HTTPS"
-        return {"ok": False, "message": reason}
-    if server_url.startswith("http://") and not _is_loopback_http(server_url) and not req.allow_insecure_http:
         return {
             "ok": False,
-            "message": "本地/局域网 HTTP 将以明文传输密码，请在设置中确认风险后重试",
-            "insecure_http_required": True,
+            "code": "not_configured",
+            "phase": "validation",
+            "message": _NOT_CONFIGURED_MESSAGE,
         }
 
-    # 模块 1：该连接正在冷却时，主动测试也不向远端发请求（用户可见的安全提示）
-    allowed, _health = source_health.peek_request_allowed(
-        governor_connection_key(normalize_openlist_server_url(server_url), username)
+    # draft remote_root 纳入测试契约：页面当前显示什么，就真正读取什么
+    remote_root = (req.remote_root or config.openlist_remote_root or "/").strip()
+
+    result = probe_openlist_connection(
+        server_url=server_url,
+        remote_root=remote_root,
+        username=username,
+        password=password,
+        allow_insecure_http=req.allow_insecure_http,
     )
-    if not allowed:
-        return {
-            "ok": False,
-            "message": "远端网盘疑似触发访问保护，KumiPlayer 已暂停该来源的自动请求，请稍后再试",
-        }
-
-    client = get_openlist_client(
-        server_url, username, password, client_factory=OpenListClient,
-    )
-    try:
-        client.login()
-    except OpenListError as exc:
-        return {"ok": False, "message": str(exc)}
-
-    # 登录成功后验证目录读取权限，返回可操作提示
-    remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
-    try:
-        client.list_dir(remote_root, page=1, per_page=10)
-    except OpenListError as exc:
-        if exc.kind == "permission":
-            return {
-                "ok": False,
-                "message": "认证成功，但没有读取目录的权限；请在 OpenList 为账号开启只读目录权限",
-            }
-        return {"ok": False, "message": str(exc)}
-
-    return {
-        "ok": True,
-        "message": "连接成功，认证与目录读取权限正常",
+    payload = {
+        "ok": result.ok,
+        "code": result.code,
+        "phase": result.phase,
+        "message": result.message,
     }
-
+    if (
+        not result.ok
+        and result.code == "invalid_configuration"
+        and "明文传输密码" in result.message
+    ):
+        payload["insecure_http_required"] = True
+    return payload
 
 @router.post("/config")
 def save_connection_config(req: SaveConfigRequest):

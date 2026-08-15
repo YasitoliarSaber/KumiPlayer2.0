@@ -37,9 +37,19 @@ export interface OpenListBrowseResult {
   refresh_requested?: boolean
   cache: OpenListCacheMeta
 }
+//: 连接测试请求契约：候选配置（KEEP SAVED / 显式新值语义由后端解析）
+export interface OpenListTestConnectionPayload {
+  server_url: string
+  remote_root: string
+  username: string
+  password: string
+  allow_insecure_http?: boolean
+}
 
 export interface OpenListTestResult {
   ok: boolean
+  code: string
+  phase: string
   message: string
   insecure_http_required?: boolean
 }
@@ -173,7 +183,7 @@ export interface OpenListImportBatch {
 }
 
 export const openlistApi = {
-  testConnection: (payload: Partial<OpenListConfigPayload>) =>
+  testConnection: (payload: OpenListTestConnectionPayload) =>
     api.post<OpenListTestResult>('/api/openlist/test-connection', payload),
   saveConfig: (payload: OpenListConfigPayload) =>
     api.post<OpenListSaveResult>('/api/openlist/config', payload),
