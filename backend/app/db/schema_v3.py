@@ -521,3 +521,30 @@ def ensure_source_health_table(conn) -> None:
     """幂等补齐 source_health 及轻量扩展表（已有 v3 库的轻量迁移，不重置数据库）。"""
     for ddl in _EXTRA_TABLES:
         conn.execute(ddl)
+    ensure_source_directories_columns(conn)
+
+
+#: HYB-3：source_directories 轻量扩展列（幂等 ALTER，不重置数据库）。
+_SOURCE_DIRECTORY_EXTRA_COLUMNS = (
+    (
+        "last_remote_verified_at",
+        "ALTER TABLE source_directories ADD COLUMN last_remote_verified_at TEXT DEFAULT ''",
+    ),
+)
+
+
+def ensure_source_directories_columns(conn) -> None:
+    """幂等补齐 source_directories 扩展列（老库轻量迁移）。
+
+    ``last_remote_verified_at``（HYB-3）：区分「TXT 快照见过该目录」与
+    「OpenList 真正 list 验证过该目录」——snapshot 扫描提交置空，
+    OpenList list 成功提交置 now。据此可计算远端基线覆盖率，
+    restart 后状态随表持久化不丢失。
+    """
+    for column, ddl in _SOURCE_DIRECTORY_EXTRA_COLUMNS:
+        try:
+            conn.execute(ddl)
+        except Exception:
+            # 列已存在（幂等）或旧库结构差异：SQLite 对已存在列抛
+            # duplicate column name，忽略即可。
+            pass

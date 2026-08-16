@@ -538,7 +538,8 @@ def get_directory(root_id: str, remote_path: str) -> dict | None:
 def update_directory(root_id: str, remote_path: str, **fields: Any) -> None:
     allowed = {
         "state", "accepted_generation", "entry_count", "member_hash",
-        "last_verified_at", "next_verify_at", "retry_count", "last_error_kind",
+        "last_verified_at", "last_remote_verified_at", "next_verify_at",
+        "retry_count", "last_error_kind",
     }
     assignments = [f"{key} = ?" for key in fields if key in allowed]
     if not assignments:
@@ -577,8 +578,38 @@ def list_all_directories(root_id: str) -> list[dict]:
         (root_id,),
     ).fetchall()
     return [dict(row) for row in rows]
+def remote_baseline_coverage(root_id: str) -> dict:
+    """HYB-3：远端基线覆盖率统计。
 
-
+    返回 {total_directories, remote_verified_count, coverage}：
+    - total_directories：该 root 已知目录数（含 queued/complete）；
+    - remote_verified_count：OpenList 真正 list 验证过的目录数
+      （last_remote_verified_at 非空）；
+    - coverage：0.0~1.0 比例（无目录时为 1.0）。
+    """
+    conn = get_connection()
+    total = int(
+        conn.execute(
+            "SELECT COUNT(*) AS c FROM source_directories WHERE root_id = ?",
+            (root_id,),
+        ).fetchone()["c"]
+    )
+    if total == 0:
+        return {"total_directories": 0, "remote_verified_count": 0, "coverage": 1.0}
+    verified = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM source_directories
+            WHERE root_id = ? AND last_remote_verified_at != ''
+            """,
+            (root_id,),
+        ).fetchone()["c"]
+    )
+    return {
+        "total_directories": total,
+        "remote_verified_count": verified,
+        "coverage": round(verified / total, 4),
+    }
 def prepare_scan(root_id: str, *, generation: int, mode: str = "incremental") -> None:
     """把需要验证的目录写入持久 frontier。
 
@@ -764,6 +795,7 @@ def commit_directory(
     generation: int,
     *,
     max_batch: int = BATCH_WRITE_LIMIT,
+    remote_verified: bool = False,
 ) -> dict:
     """把完整分页读取的暂存区原子合并到 source_nodes 并落 directory checkpoint。
 
@@ -933,14 +965,20 @@ def commit_directory(
         tx.execute("DELETE FROM source_stage_entries WHERE run_id = ?", (run_id,))
         tx.execute("DELETE FROM source_stage_runs WHERE run_id = ?", (run_id,))
         next_verify_at = (datetime.now(timezone(timedelta(hours=8))) + VERIFY_INTERVAL).isoformat()
+        # HYB-3：区分「TXT 快照见过」与「OpenList 真正 list 验证过」。
+        # OpenList 通道提交成功 → last_remote_verified_at=now；
+        # snapshot 通道（TXT）提交 → 置空（远端未验证）。
+        verified_at = timestamp if remote_verified else ""
         tx.execute(
             """
             UPDATE source_directories
             SET state = 'complete', accepted_generation = ?, entry_count = ?,
-                member_hash = ?, last_verified_at = ?, next_verify_at = ?, last_error_kind = ''
+                member_hash = ?, last_verified_at = ?, next_verify_at = ?,
+                last_remote_verified_at = ?, last_error_kind = ''
             WHERE root_id = ? AND remote_path = ?
             """,
-            (generation, len(stage), member_hash, timestamp, next_verify_at, root_id, remote_path),
+            (generation, len(stage), member_hash, timestamp, next_verify_at,
+             verified_at, root_id, remote_path),
         )
     return stats
 
