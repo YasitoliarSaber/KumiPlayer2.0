@@ -1212,3 +1212,203 @@ class TestAtomicConfigCommit:
         assert real_store.values.get("openlist_username") == "quark-user"
         assert real_store.values.get("openlist_password") == "p@ssw0rd"
 
+    def test_browse_recovers_without_restart_or_rehydrate(self, client, tmp_path, monkeypatch):
+        """runtime 回归 A/C：hydrate 中途失败 → stale cache → Credential Store
+        恢复（不 invalidate、不 restart、不先行 test/save）→ 直接 GET /browse
+        必须使用恢复后的真实凭据成功（Fake client 收到真实凭据）。"""
+        from app.core import config as config_module
+        from app.core.credential_store import CredentialStoreError
+
+        class RealStore:
+            available = True
+
+            def __init__(self):
+                self.values: dict[str, str] = {}
+
+            def read(self, name):
+                return self.values.get(name, "")
+
+            def write(self, name, value):
+                self.values[name] = value
+
+            def delete(self, name):
+                self.values.pop(name, None)
+
+        real_store = RealStore()
+        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", real_store)
+        monkeypatch.setattr(config_module, "_credential_storage_enabled", lambda: True)
+        config_module.invalidate_config_cache()
+        resp = client.post(
+            "/api/openlist/config",
+            json={
+                "server_url": "https://ol.example.com:5244",
+                "remote_root": REMOTE_ROOT,
+                "mount_root": str(tmp_path / "quark"),
+                "username": "quark-user",
+                "password": "p@ssw0rd",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+        # 记录 Fake client 实际收到的凭据
+        captured: list[tuple[str, str]] = []
+
+        original_init = FakeOpenListClient.__init__
+
+        def capturing_init(self, server_url, username, password, **kwargs):
+            captured.append((username, password))
+            original_init(self, server_url, username, password, **kwargs)
+
+        FakeOpenListClient.__init__ = capturing_init
+
+        class FailingOnceStore:
+            available = True
+            failed = False
+
+            def __init__(self, real):
+                self.real = real
+
+            def read(self, name):
+                if name == "openlist_username" and not self.failed:
+                    self.failed = True
+                    raise CredentialStoreError("temporary")
+                return self.real.read(name)
+
+            def write(self, name, value):
+                return self.real.write(name, value)
+
+            def delete(self, name):
+                return self.real.delete(name)
+
+        # hydrate 中途失败 → stale cache（openlist_username 留空）
+        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", FailingOnceStore(real_store))
+        config_module.invalidate_config_cache()
+        try:
+            config_module.load_config(force_reload=True)
+        except Exception:
+            pass
+        assert config_module.load_config().openlist_username == ""
+
+        # Credential Store 恢复（FailingOnceStore 已自愈）——**不 invalidate、
+        # 不 restart、不先行 Test Connection / Save**，直接 browse
+        resp = client.get("/api/openlist/browse", params={"path": REMOTE_ROOT})
+        assert resp.status_code == 200, resp.text
+        # 请求使用恢复后的真实凭据（不是 stale 空凭据）
+        assert captured, "browse 必须构造 runtime client"
+        last_username, last_password = captured[-1]
+        assert last_username == "quark-user"
+        assert last_password == "p@ssw0rd"
+        # 凭据仍在 store 中（未被误删）
+        assert real_store.values.get("openlist_password") == "p@ssw0rd"
+
+    def test_background_refresh_uses_recovered_credentials(self, client, tmp_path, monkeypatch):
+        """runtime 回归 B：stale cache 存在 → 后台 stale-while-revalidate 刷新
+        必须使用恢复后的真实凭据，而不是 stale config 中的空凭据。"""
+        import time
+
+        from app.core import config as config_module
+        from app.core.credential_store import CredentialStoreError
+        from app.integrations.openlist.cache import connection_key, write_cache
+
+        class RealStore:
+            available = True
+
+            def __init__(self):
+                self.values: dict[str, str] = {}
+
+            def read(self, name):
+                return self.values.get(name, "")
+
+            def write(self, name, value):
+                self.values[name] = value
+
+            def delete(self, name):
+                self.values.pop(name, None)
+
+        real_store = RealStore()
+        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", real_store)
+        monkeypatch.setattr(config_module, "_credential_storage_enabled", lambda: True)
+        config_module.invalidate_config_cache()
+        resp = client.post(
+            "/api/openlist/config",
+            json={
+                "server_url": "https://ol.example.com:5244",
+                "remote_root": REMOTE_ROOT,
+                "mount_root": str(tmp_path / "quark"),
+                "username": "quark-user",
+                "password": "p@ssw0rd",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+        # 预置过期缓存（stale）→ browse 会触发后台刷新
+        remote_root = REMOTE_ROOT
+        conn_key = connection_key("https://ol.example.com:5244", "quark-user", remote_root)
+        write_cache(
+            conn_key, remote_root, [],
+            ttl_minutes=1,
+            page=1, per_page=100,
+            total=0, has_more=False,
+        )
+        # 把缓存 JSON 的 fetched_at/expires_at 改为过去（强制 stale）
+        import json as _json
+
+        from app.integrations.openlist.cache import _entry_file
+
+        cache_file = _entry_file(conn_key, remote_root, 1, 100)
+        payload = _json.loads(cache_file.read_text(encoding="utf-8"))
+        payload["fetched_at"] = time.time() - 7200
+        payload["expires_at"] = time.time() - 3600
+        cache_file.write_text(_json.dumps(payload), encoding="utf-8")
+
+        captured: list[tuple[str, str]] = []
+        original_init = FakeOpenListClient.__init__
+
+        def capturing_init(self, server_url, username, password, **kwargs):
+            captured.append((username, password))
+            original_init(self, server_url, username, password, **kwargs)
+
+        FakeOpenListClient.__init__ = capturing_init
+
+        class FailingOnceStore:
+            available = True
+            failed = False
+
+            def __init__(self, real):
+                self.real = real
+
+            def read(self, name):
+                if name == "openlist_username" and not self.failed:
+                    self.failed = True
+                    raise CredentialStoreError("temporary")
+                return self.real.read(name)
+
+            def write(self, name, value):
+                return self.real.write(name, value)
+
+            def delete(self, name):
+                return self.real.delete(name)
+
+        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", FailingOnceStore(real_store))
+        config_module.invalidate_config_cache()
+        try:
+            config_module.load_config(force_reload=True)
+        except Exception:
+            pass
+        assert config_module.load_config().openlist_username == ""
+
+        # browse stale 缓存 → 触发后台刷新（worker 内 resolver 回源）
+        resp = client.get("/api/openlist/browse", params={"path": remote_root})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["cache"]["status"] == "stale"
+
+        # 等待后台刷新完成（worker 有界线程池）
+        deadline = time.time() + 5
+        while time.time() < deadline and not captured:
+            time.sleep(0.05)
+        assert captured, "后台刷新必须构造 runtime client"
+        last_username, last_password = captured[-1]
+        assert last_username == "quark-user"
+        assert last_password == "p@ssw0rd"
+
+

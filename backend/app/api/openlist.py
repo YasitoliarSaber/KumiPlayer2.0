@@ -173,6 +173,27 @@ class SaveRoutesRequest(BaseModel):
 # 内部工具
 # ============================================================
 
+def _effective_openlist_credentials() -> tuple[str, str]:
+    """解析 runtime 有效 OpenList 凭据（统一 credential source）。
+
+    - 优先走 ``resolve_openlist_credentials()``：cached 有值直接用；
+      cached 为空（hydrate 中途故障）但 Credential Store 已恢复 → 回源读取；
+    - store 不可读（unavailable）且 cached 又不完整 → 受控 503，
+      不猜 missing、不清凭据、不创建错误 pool identity；
+    - 返回 ``(username, password)``，供 browse / prefetch / 后台刷新 /
+      runtime client 统一消费，保证「恢复后无需重启」。
+    """
+    username, password, state = resolve_openlist_credentials()
+    if state == "unavailable":
+        raise HTTPException(
+            status_code=503,
+            detail="本机凭据管理器暂时不可用，OpenList 请求已暂停，请稍后重试",
+        )
+    if not username or not password:
+        raise HTTPException(status_code=400, detail=_NOT_CONFIGURED_MESSAGE)
+    return username, password
+
+
 def _client_from_config(
     config=None,
     *,
@@ -180,22 +201,26 @@ def _client_from_config(
     username: str | None = None,
     password: str | None = None,
 ) -> OpenListClient:
-    """从配置（或显式覆盖）构建客户端。
+    """从配置（或显式覆盖）构建 runtime 客户端。
 
-    凭据在正式环境由 ``load_config`` 从 Windows Credential Manager 水合。
-    ``username`` / ``password`` 为 None 时回落到配置中的值。
+    凭据解析统一走 :func:`_effective_openlist_credentials`：没有显式
+    override 时使用恢复后的真实 saved credential，而不是 stale cached
+    config 中可能为空的字段（REWORK：runtime 恢复不需要重启）。
+
+    ``username`` / ``password`` 为 None 时回落为 resolver 结果。
     """
     config = config or load_config()
     url = server_url or config.openlist_server_url
-    user = username if username is not None else config.openlist_username
-    pwd = password if password is not None else config.openlist_password
-    if not url or not user or not pwd:
+    if username is not None and password is not None:
+        user, pwd = username, password
+    else:
+        user, pwd = _effective_openlist_credentials()
+    if not url:
         raise HTTPException(status_code=400, detail=_NOT_CONFIGURED_MESSAGE)
     try:
         return get_openlist_client(url, user, pwd, client_factory=OpenListClient)
     except OpenListError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
-
 
 def _routes_from_config(config) -> list[OpenListRouteConfig]:
     routes = config.openlist_routes or []
@@ -375,14 +400,22 @@ def _schedule_background_refresh(
     def worker() -> None:
         global _refresh_active
         try:
+            # runtime 凭据统一走 resolver：即使 browse 请求时 cached credential
+            # 为空（hydrate 中途故障），后台刷新也使用 Credential Store 恢复后
+            # 的真实凭据（REWORK：runtime 恢复不需要重启）。
+            try:
+                eff_user, eff_password = _effective_openlist_credentials()
+            except HTTPException:
+                # store 不可用或未配置：保留旧缓存，不发请求
+                return
             # 模块 1 冷却拦截：冷却中保留旧缓存，不发任何请求
             allowed, _health = source_health.peek_request_allowed(
-                governor_connection_key(server_url, username)
+                governor_connection_key(server_url, eff_user)
             )
             if not allowed:
                 return
             client = get_openlist_client(
-                server_url, username, password, client_factory=OpenListClient,
+                server_url, eff_user, eff_password, client_factory=OpenListClient,
             )
             page_payload = _fetch_dir_page(
                 client, remote_path, int(page), int(per_page), refresh=False
@@ -642,6 +675,11 @@ def browse(path: str = "", page: int = 1, per_page: int = _BROWSE_PER_PAGE, refr
     path = normalize_remote_path(path) if path else remote_root
     _ensure_within_remote_root(remote_root, path)
 
+    # runtime 凭据统一走 resolver（REWORK）：cached 为空但 Credential Store
+    # 已恢复时回源读取真实凭据；store 不可用 → 受控 503（不清凭据、不猜 missing）。
+    # conn_key / governor key / 后台刷新 / runtime client 全部使用同一份身份。
+    eff_username, eff_password = _effective_openlist_credentials()
+
     parent_path = None
     if remote_root != "/" and path != remote_root:
         parent_path = str(PurePosixPath(path).parent)
@@ -649,7 +687,7 @@ def browse(path: str = "", page: int = 1, per_page: int = _BROWSE_PER_PAGE, refr
     ttl_minutes = max(1, int(config.openlist_cache_ttl_minutes or 1440))
     conn_key = connection_key(
         config.openlist_server_url,
-        config.openlist_username,
+        eff_username,
         remote_root,
     )
 
@@ -657,7 +695,7 @@ def browse(path: str = "", page: int = 1, per_page: int = _BROWSE_PER_PAGE, refr
     # 冷却中：fresh 缓存直接返回（标注 health）；无 fresh 缓存则拒绝请求，
     # 不发起任何网络请求。
     allowed, _health = source_health.peek_request_allowed(
-        governor_connection_key(config.openlist_server_url, config.openlist_username)
+        governor_connection_key(config.openlist_server_url, eff_username)
     )
     if not allowed:
         if not refresh:
@@ -694,8 +732,8 @@ def browse(path: str = "", page: int = 1, per_page: int = _BROWSE_PER_PAGE, refr
             _schedule_background_refresh(
                 conn_key, path,
                 config.openlist_server_url,
-                config.openlist_username,
-                config.openlist_password,
+                eff_username,
+                eff_password,
                 ttl_minutes,
                 page=page, per_page=per_page,
             )
@@ -798,7 +836,12 @@ def prefetch(req: PrefetchRequest):
     with _prefetch_generation_guard:
         _prefetch_generation += 1
         my_generation = _prefetch_generation
-    if not (config.openlist_server_url and config.openlist_username and config.openlist_password):
+    # runtime 凭据统一走 resolver（REWORK）：恢复后无需重启即可预取
+    try:
+        eff_username, eff_password = _effective_openlist_credentials()
+    except HTTPException:
+        return {"prefetched": 0, "skipped": 0, "busy": False, "cancelled": True}
+    if not config.openlist_server_url:
         return {"prefetched": 0, "skipped": 0, "busy": False, "cancelled": True}
     limit = max(0, min(int(config.openlist_prefetch_limit if config.openlist_prefetch_limit is not None else 12), _PREFETCH_MAX))
     remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
@@ -822,7 +865,7 @@ def prefetch(req: PrefetchRequest):
 
     # 模块 1 冷却拦截：冷却中不发任何请求，直接返回空结果 + health 标注
     allowed, _health = source_health.peek_request_allowed(
-        governor_connection_key(config.openlist_server_url, config.openlist_username)
+        governor_connection_key(config.openlist_server_url, eff_username)
     )
     if not allowed:
         _prefetch_guard.release()
@@ -834,7 +877,7 @@ def prefetch(req: PrefetchRequest):
     ttl_minutes = max(1, int(config.openlist_cache_ttl_minutes or 1440))
     conn_key = connection_key(
         config.openlist_server_url,
-        config.openlist_username,
+        eff_username,
         remote_root,
     )
     try:
@@ -854,8 +897,8 @@ def prefetch(req: PrefetchRequest):
                 if client is None:
                     client = get_openlist_client(
                         config.openlist_server_url,
-                        config.openlist_username,
-                        config.openlist_password,
+                        eff_username,
+                        eff_password,
                         client_factory=OpenListClient,
                     )
                 # 预取只拉当前层 page 1（有上限、不递归）；继续走 OpenListClient
@@ -1087,10 +1130,20 @@ def rescan_openlist_preset(preset_id: str):
 # ============================================================
 
 def _openlist_source_id(config) -> str:
+    """OpenList 来源身份键（runtime identity 统一走 resolver）。
+
+    调用方（import-batch / rescan）在构造客户端时已通过
+    ``_client_from_config`` 校验凭据可达；这里同样使用恢复后的真实
+    username 参与连接身份，避免 stale cached 空凭据产生错误 source id。
+    """
     remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
+    try:
+        eff_username, _ = _effective_openlist_credentials()
+    except HTTPException:
+        eff_username = config.openlist_username or ""
     identity = connection_key(
         config.openlist_server_url,
-        config.openlist_username,
+        eff_username,
         remote_root,
     )
     return f"openlist-{identity}"
