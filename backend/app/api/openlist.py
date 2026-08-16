@@ -28,7 +28,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 from app.catalog import source_health
-from app.core.config import load_config, openlist_credential_state, save_config
+from app.core.config import load_config, resolve_openlist_credentials, save_config
 from app.core.credential_store import CredentialStoreError
 from app.integrations.openlist.cache import (
     connection_key,
@@ -427,14 +427,17 @@ def test_connection(req: TestConnectionRequest):
     """
     config = load_config()
     server_url = (req.server_url or config.openlist_server_url).strip()
+    # 真实 saved credential resolver（REWORK）：cached 为空但 Credential Store
+    # 已恢复时直接回源读取真实凭据，KEEP SAVED 不需要重启即可重新可用。
+    saved_username, saved_password, cred_state = resolve_openlist_credentials()
     # username 统一 strip，与 save 端点语义一致（审计 L2：带首尾空格的
     # username 不得被误判为「新账号」而要求密码）
     req_username = req.username.strip() if req.username else ""
-    username = req_username if req_username else config.openlist_username
-    password = req.password if req.password else config.openlist_password
+    username = req_username if req_username else saved_username
+    password = req.password if req.password else saved_password
 
     # 修改 username 但未提供新密码：禁止把旧账号密码套给新账号
-    if req_username and req_username != config.openlist_username and not req.password:
+    if req_username and req_username != saved_username and not req.password:
         return {
             "ok": False,
             "code": "invalid_configuration",
@@ -507,24 +510,25 @@ def save_connection_config(req: SaveConfigRequest):
 
     config = load_config()
     old_server = normalize_openlist_server_url(config.openlist_server_url) if config.openlist_server_url else ""
-    old_username = config.openlist_username or ""
-    old_password = config.openlist_password or ""
     old_remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
     new_server = normalize_openlist_server_url(req.server_url)
     username = req.username.strip()
     password = req.password or ""
 
-    # 更换 username 但未提供新密码：禁止把旧账号密码套给新账号
-    if username and username != old_username and not password:
-        raise HTTPException(status_code=400, detail="请输入新 OpenList 账号对应的密码")
+    # 真实 saved credential resolver（REWORK）：cached 为空但 Credential Store
+    # 已恢复时直接回源读取真实凭据，KEEP SAVED 不需要重启即可重新可用。
+    old_username, old_password, cred_state = resolve_openlist_credentials()
 
     # 凭据存储暂时不可读：不能安全提交（防止通用持久化把空字段解释成 delete）
-    if openlist_credential_state() == "unavailable":
+    if cred_state == "unavailable":
         raise HTTPException(
             status_code=503,
             detail="本机凭据管理器暂时不可用，无法安全保存 OpenList 配置，请稍后重试",
         )
 
+    # 更换 username 但未提供新密码：禁止把旧账号密码套给新账号
+    if username and username != old_username and not password:
+        raise HTTPException(status_code=400, detail="请输入新 OpenList 账号对应的密码")
     # 有效凭据解析（KEEP SAVED 语义）
     effective_username = username or old_username
     effective_password = password or old_password

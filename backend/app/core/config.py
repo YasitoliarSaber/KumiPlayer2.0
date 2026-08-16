@@ -148,18 +148,63 @@ def openlist_credential_state() -> str:
         return "unavailable"
     return "found" if (username and password) else "missing"
 
+def resolve_openlist_credentials() -> tuple[str, str, str]:
+    """解析真实已保存的 OpenList 凭据，返回 ``(username, password, state)``。
 
-def _persist_config_payload(config: AppConfig) -> None:
-    """持久化配置；凭据写入带补偿回滚（ROOT-7 / OL-3）。
+    ``state`` 固定为 ``found`` / ``missing`` / ``unavailable``。
+
+    语义（REWORK：Credential Store 恢复后 KEEP SAVED 必须可用）：
+    - cached config 已有可靠值（username 与 password 都非空）→ 直接使用；
+    - cached config 为空（例如启动时 hydrate 中途 read failure 留下 stale
+      blank cache）但 Credential Store 已恢复 → **重新直接读取 secure store**，
+      取回真实凭据，不依赖缓存重新 hydrate；
+    - 任何 read failure → ``("", "", "unavailable")``——绝不猜 missing、
+      绝不触发任何 mutation。
+    """
+    if not _credential_storage_enabled():
+        cfg = load_config()
+        if cfg.openlist_username and cfg.openlist_password:
+            return cfg.openlist_username, cfg.openlist_password, "found"
+        return "", "", "missing"
+    try:
+        cached = load_config()
+        if cached.openlist_username and cached.openlist_password:
+            return cached.openlist_username, cached.openlist_password, "found"
+        # stale/partial cache：直接回源读取 secure store（恢复后无需重启）
+        username = SECURE_CREDENTIAL_STORE.read("openlist_username")
+        password = SECURE_CREDENTIAL_STORE.read("openlist_password")
+    except CredentialStoreError:
+        return "", "", "unavailable"
+    if username and password:
+        return username, password, "found"
+    return "", "", "missing"
+def _persist_config_payload_guarded(config: AppConfig) -> None:
+    """load_config 迁移路径的持久化保护：store 暂时不可读时跳过迁移。
+
+    迁移（legacy 升级 / UA 清理 / 明文凭据搬移）不是用户主动保存操作；
+    store 不可读时直接跳过，保留原文件，不以迁移失败阻断启动或把
+    「不可读」当作「清除凭据」。
+    """
+    try:
+        _persist_config_payload(config)
+    except CredentialStoreError:
+        _logger.warning("凭据存储暂时不可读，跳过配置迁移（不影响启动）")
+
+
+def _persist_config_payload(config: AppConfig, *, cleared_keys: set[str] | None = None) -> None:
+    """持久化配置；凭据写入带补偿回滚（ROOT-7 / OL-3 / REWORK）。
 
     - 凭据先于 JSON 写入；任一凭据写入失败 → 恢复已写入的旧凭据后抛出；
     - JSON 原子写失败 → 恢复全部本次写入的凭据后抛出；
-    - 凭据读取失败（``CredentialStoreError``）→ 该字段跳过：**既不写入也不
-      delete**，绝不允许把「存储暂时不可读」当作「清除凭据」。
+    - 凭据读取失败（``CredentialStoreError``）→ 直接中止本次保存（0 mutation），
+      绝不允许把「存储暂时不可读」当作「清除凭据」；
+    - **空值语义 = KEEP**：只有 ``cleared_keys`` 中显式列出的字段才执行
+      DELETE；其余空值字段既不写也不删（防止 stale blank cache 误删真实凭据）。
     """
     with DATA_WRITE_LOCK:
         payload = asdict(config)
         written: list[tuple[str, str]] = []  # (key, 旧值)
+        cleared = cleared_keys or set()
         if _credential_storage_enabled():
             try:
                 for key in _CREDENTIAL_FIELDS:
@@ -173,9 +218,20 @@ def _persist_config_payload(config: AppConfig) -> None:
                         raise
                     written.append((key, old or ""))
                     if value:
+                        if value == old:
+                            # 值未变化：跳过（幂等保存不产生多余秘密操作；
+                            # 同时保证「只 SET 目标字段」的跨字段隔离）
+                            payload[key] = ""
+                            continue
+                        # SET：非空新值
                         SECURE_CREDENTIAL_STORE.write(key, value)
-                    else:
+                    elif key in cleared:
+                        # 显式 CLEAR intent：只有调用方明确要求清除才 delete
                         SECURE_CREDENTIAL_STORE.delete(key)
+                    else:
+                        # KEEP：空值且无显式 clear intent → 不写不删
+                        # （防止 hydrate 故障留下的 stale blank cache 误删真实凭据）
+                        pass
                     payload[key] = ""
             except Exception:
                 _rollback_credentials(written)
@@ -262,14 +318,14 @@ def load_config(force_reload: bool = False) -> AppConfig:
                 # 已经在使用 KumiPlayer 的用户不能因为新增引导字段被强制打断。
                 config.setup_completed = True
                 config.setup_version = 1
-                _persist_config_payload(config)
+                _persist_config_payload_guarded(config)
             if config.bangumi_user_agent != DEFAULT_BANGUMI_USER_AGENT:
                 # 旧版允许用户填写该请求头，可能把姓名或昵称写进网络请求。
                 # 分发版统一使用应用标识，并在首次读取时清理个人化旧值。
                 config.bangumi_user_agent = DEFAULT_BANGUMI_USER_AGENT
-                _persist_config_payload(config)
+                _persist_config_payload_guarded(config)
             elif migrated_credentials:
-                _persist_config_payload(config)
+                _persist_config_payload_guarded(config)
         except (OSError, json.JSONDecodeError):
             config = AppConfig()
     else:
@@ -288,12 +344,16 @@ def load_config(force_reload: bool = False) -> AppConfig:
     return config
 
 
-def save_config(config: AppConfig) -> None:
-    """保存配置文件"""
-    global _cached_config
-    _persist_config_payload(config)
-    _cached_config = config
+def save_config(config: AppConfig, *, cleared_keys: set[str] | None = None) -> None:
+    """保存配置文件。
 
+    ``cleared_keys``：本次保存中需要显式清除的 secure credential 字段名集合。
+    缺省（None）时**空值一律 KEEP**——不写不删，绝不隐式 CLEAR。
+    只有调用方明确传入的字段才会执行 DELETE（例如用户主动退出登录）。
+    """
+    global _cached_config
+    _persist_config_payload(config, cleared_keys=cleared_keys)
+    _cached_config = config
 
 def invalidate_config_cache() -> None:
     """清除配置缓存"""
