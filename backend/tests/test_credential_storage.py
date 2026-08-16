@@ -238,7 +238,12 @@ def _seed_all_credentials(store) -> None:
 
 def test_rework_stale_cache_after_recovery_keeps_all_credentials(monkeypatch, tmp_path):
     """事故链：hydrate 中途 read failure → stale blank cache → CM 恢复 →
-    OpenList local-only 保存（空凭据）→ 所有 secure credential 必须保持不变。"""
+    OpenList local-only 保存（空凭据）→ 所有 secure credential 必须保持不变。
+
+    关键：保存走的是跟踪 store（记录全部 write/delete），断言：
+    - 保存动作对凭据**零写入、零删除**（空值 = KEEP）；
+    - 保存后所有凭据值（在保存 store 与 seed store 中）完全不变。
+    """
     store, config_file = enable_fake_store(monkeypatch, tmp_path)
     _seed_all_credentials(store)
     save_config(AppConfig(openlist_username="ol-user", openlist_password="ol-pass",
@@ -246,43 +251,65 @@ def test_rework_stale_cache_after_recovery_keeps_all_credentials(monkeypatch, tm
                           deepseek_api_key="deepseek-secret",
                           bangumi_access_token="bangumi-secret"))
 
+    # 保存路径使用跟踪 store（记录 write/delete 调用；seed 真实值）
+    writes: list[str] = []
+    deletes: list[str] = []
+
+    class TrackingStore(FakeCredentialStore):
+        def write(self, name: str, value: str) -> None:
+            writes.append(name)
+            super().write(name, value)
+
+        def delete(self, name: str) -> None:
+            deletes.append(name)
+            super().delete(name)
+
+    tracking = TrackingStore()
+    tracking.values.update(store.values)
+    monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", tracking)
+    invalidate_config_cache()
+
     # 模拟 hydrate 中途 read failure（bangumi_access_token 读取失败一次）
-    partial = PartialFailStore("bangumi_access_token", seed=dict(store.values))
+    # → 缓存的 config 中该字段留空（stale blank cache）
+    partial = PartialFailStore("bangumi_access_token")
+    partial.values.update(tracking.values)
     monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", partial)
     invalidate_config_cache()
     try:
-        load_config(force_reload=True)  # hydrate 中途失败 → 部分字段留空
+        stale_cfg = load_config(force_reload=True)  # hydrate 中途失败 → 部分字段留空
     except Exception:
         pass  # load_config 内部捕获 CredentialStoreError
+    assert stale_cfg.bangumi_access_token == ""  # 确认 stale blank 已产生
 
-    # Credential Store 恢复（partial store 已自愈，且 seed 含全部真实值）
-    monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", partial)
-    cfg = load_config(force_reload=True)  # 这次 hydrate 完整，但用于模拟 stale 场景
-    # 模拟 stale cache：直接构造一个缓存了部分空字段的 config（等价于 hydrate
-    # 失败时被缓存的 AppConfig）
-    stale = AppConfig(**{f.name: getattr(cfg, f.name) for f in AppConfig.__dataclass_fields__.values()})
-    # 关键：把 bangumi_access_token 置空模拟 hydrate 失败留下的 blank
-    stale.bangumi_access_token = ""
-    # 只保存 OpenList local-only 字段（username/password 空 = KEEP SAVED）
-    stale.openlist_cache_ttl_minutes = 720
-    save_config(stale)
+    # Credential Store 恢复（用回 tracking store，全部真实值仍在）
+    monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", tracking)
+    # 用 stale 缓存对象（bangumi_access_token 为空）做 OpenList local-only 保存
+    stale_cfg.openlist_cache_ttl_minutes = 720
+    save_config(stale_cfg)
 
-    # OpenList 凭据不变
-    assert store.values.get("openlist_username") == "ol-user"
-    assert store.values.get("openlist_password") == "ol-pass"
-    # 所有其他 secure credential 不变（未被空值误删）
-    assert store.values.get("tmdb_bearer_token") == "tmdb-secret"
-    assert store.values.get("deepseek_api_key") == "deepseek-secret"
+    # 关键断言：保存动作对凭据零写入、零删除（空值 = KEEP，绝不隐式 CLEAR）
+    assert writes == []
+    assert deletes == []
+    # 保存 store 中所有凭据完全不变
+    assert tracking.values.get("openlist_username") == "ol-user"
+    assert tracking.values.get("openlist_password") == "ol-pass"
+    assert tracking.values.get("tmdb_bearer_token") == "tmdb-secret"
+    assert tracking.values.get("deepseek_api_key") == "deepseek-secret"
+    assert tracking.values.get("bangumi_access_token") == "bangumi-secret"
+    # seed store 同样不变（原始凭据未被删除）
     assert store.values.get("bangumi_access_token") == "bangumi-secret"
 
-
 def test_rework_resolver_reads_recovered_store_when_cache_blank(monkeypatch, tmp_path):
-    """CM hydrate 失败 → 恢复 → cached 为空但 resolver 必须回源读到真实凭据。"""
+    """CM hydrate 失败 → 恢复 → cached 为空但 resolver 必须回源读到真实凭据。
+
+    关键：调用 resolver 前**不重新 hydrate**——直接保留 stale blank 缓存，
+    让 resolver 真正走「cached 空 + store 已恢复 → 回源读取」分支。
+    """
     store, config_file = enable_fake_store(monkeypatch, tmp_path)
     _seed_all_credentials(store)
     save_config(AppConfig(openlist_username="ol-user", openlist_password="ol-pass"))
 
-    # 模拟 hydrate 失败：第一次 load 时 store read 失败 → cache 中凭据为空
+    # 模拟 hydrate 失败：load 时 store read 失败 → cache 中凭据为空
     partial = PartialFailStore("openlist_username", seed=dict(store.values))
     monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", partial)
     invalidate_config_cache()
@@ -294,15 +321,12 @@ def test_rework_resolver_reads_recovered_store_when_cache_blank(monkeypatch, tmp
     cached = load_config()
     assert cached.openlist_username == ""
 
-    # Credential Store 恢复 → resolver 必须回源读到真实凭据（found）
-    monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", store)
-    invalidate_config_cache()
-    load_config(force_reload=True)  # 重新 hydrate（这次成功）
+    # Credential Store 恢复（partial 已自愈）——注意：**不 invalidate、不重新
+    # hydrate**，缓存仍是 stale blank；resolver 必须直接回源读到真实凭据
     username, password, state = config_module.resolve_openlist_credentials()
     assert state == "found"
     assert username == "ol-user"
     assert password == "ol-pass"
-
 
 def test_rework_resolver_unavailable_never_mutates(monkeypatch, tmp_path):
     """resolver read failure → unavailable，绝不猜 missing、绝不 mutation。"""
@@ -370,3 +394,47 @@ def test_rework_openlist_save_isolated_to_openlist_credentials(monkeypatch, tmp_
     assert tracking.values.get("deepseek_api_key") == "deepseek-secret"
     assert tracking.values.get("bangumi_access_token") == "bangumi-secret"
     assert tracking.values.get("openlist_username") == "ol-user"
+
+
+def test_rework_clear_token_isolated_to_target_credential(monkeypatch, tmp_path):
+    """端点级：DELETE /token（cleared_keys）只删除 bangumi_access_token，
+    其他 secure credential 不 write、不 delete、值完全不变（跨字段隔离）。"""
+
+    store, config_file = enable_fake_store(monkeypatch, tmp_path)
+    _seed_all_credentials(store)
+    save_config(AppConfig(openlist_username="ol-user", openlist_password="ol-pass",
+                          tmdb_bearer_token="tmdb-secret",
+                          deepseek_api_key="deepseek-secret",
+                          bangumi_access_token="bangumi-secret"))
+
+    writes: list[str] = []
+    deletes: list[str] = []
+
+    class TrackingStore(FakeCredentialStore):
+        def write(self, name: str, value: str) -> None:
+            writes.append(name)
+            super().write(name, value)
+
+        def delete(self, name: str) -> None:
+            deletes.append(name)
+            super().delete(name)
+
+    tracking = TrackingStore()
+    tracking.values.update(store.values)
+    monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", tracking)
+    invalidate_config_cache()
+
+    # 直接调用 save_config 的 cleared_keys 路径（等价于 DELETE /token 端点）
+    current = load_config(force_reload=True)
+    current.bangumi_access_token = ""
+    save_config(current, cleared_keys={"bangumi_access_token"})
+
+    # 只有 bangumi_access_token 被删除；其余字段零写入零删除
+    assert deletes == ["bangumi_access_token"]
+    assert writes == []
+    assert "bangumi_access_token" not in tracking.values
+    assert tracking.values.get("tmdb_bearer_token") == "tmdb-secret"
+    assert tracking.values.get("deepseek_api_key") == "deepseek-secret"
+    assert tracking.values.get("openlist_username") == "ol-user"
+    assert tracking.values.get("openlist_password") == "ol-pass"
+

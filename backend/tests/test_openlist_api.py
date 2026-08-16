@@ -972,11 +972,43 @@ class TestAtomicConfigCommit:
 
     def test_connection_uses_recovered_credentials_after_store_failure(self, client, tmp_path, monkeypatch):
         """CM hydrate failure → 恢复 → Test Connection draft 为空 → 实际使用
-        secure store 中已保存的 OpenList 凭据（KEEP SAVED 不需要重启）。"""
+        secure store 中已保存的 OpenList 凭据（KEEP SAVED 不需要重启）。
+
+        真实生产形态：启用 secure store（JSON 无明文），凭据仅存在于 store。
+        """
         from app.core import config as config_module
         from app.core.credential_store import CredentialStoreError
 
-        _save_config(client, tmp_path)
+        class RealStore:
+            available = True
+
+            def __init__(self):
+                self.values: dict[str, str] = {}
+
+            def read(self, name):
+                return self.values.get(name, "")
+
+            def write(self, name, value):
+                self.values[name] = value
+
+            def delete(self, name):
+                self.values.pop(name, None)
+
+        real_store = RealStore()
+        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", real_store)
+        monkeypatch.setattr(config_module, "_credential_storage_enabled", lambda: True)
+        config_module.invalidate_config_cache()
+        resp = client.post(
+            "/api/openlist/config",
+            json={
+                "server_url": "https://ol.example.com:5244",
+                "remote_root": REMOTE_ROOT,
+                "mount_root": str(tmp_path / "quark"),
+                "username": "quark-user",
+                "password": "p@ssw0rd",
+            },
+        )
+        assert resp.status_code == 200, resp.text
 
         class FailingOnceStore:
             """第一次 read openlist_username 失败，之后恢复。"""
@@ -998,28 +1030,64 @@ class TestAtomicConfigCommit:
             def delete(self, name):
                 return self.real.delete(name)
 
-        real = config_module.SECURE_CREDENTIAL_STORE
-        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", FailingOnceStore(real))
+        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", FailingOnceStore(real_store))
         config_module.invalidate_config_cache()
         # 模拟启动时 hydrate 失败 → stale cache（openlist_username 留空）
         try:
             config_module.load_config(force_reload=True)
         except Exception:
             pass
+        assert config_module.load_config().openlist_username == ""
+
         # store 恢复后（FailingOnceStore 已自愈），Test Connection 全空 draft
-        # 必须解析到真实已保存凭据并成功
+        # 必须通过 resolver 回源解析到真实已保存凭据并成功
         resp = client.post("/api/openlist/test-connection", json={})
         body = resp.json()
         assert body["ok"] is True, body
         assert body["code"] == "connected"
+        # 凭据仍在 store 中（未被误删）
+        assert real_store.values.get("openlist_username") == "quark-user"
+        assert real_store.values.get("openlist_password") == "p@ssw0rd"
 
     def test_save_remote_affecting_uses_recovered_credentials(self, client, tmp_path, monkeypatch):
         """CM hydrate failure → 恢复 → remote-affecting 修改且 password 留空
-        （KEEP SAVED）→ probe 使用恢复后的 saved credential → commit 成功。"""
+        （KEEP SAVED）→ probe 使用恢复后的 saved credential → commit 成功。
+
+        真实生产形态：启用 secure store（JSON 无明文），凭据仅存在于 store。
+        """
         from app.core import config as config_module
         from app.core.credential_store import CredentialStoreError
 
-        _save_config(client, tmp_path)
+        class RealStore:
+            available = True
+
+            def __init__(self):
+                self.values: dict[str, str] = {}
+
+            def read(self, name):
+                return self.values.get(name, "")
+
+            def write(self, name, value):
+                self.values[name] = value
+
+            def delete(self, name):
+                self.values.pop(name, None)
+
+        real_store = RealStore()
+        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", real_store)
+        monkeypatch.setattr(config_module, "_credential_storage_enabled", lambda: True)
+        config_module.invalidate_config_cache()
+        resp = client.post(
+            "/api/openlist/config",
+            json={
+                "server_url": "https://ol.example.com:5244",
+                "remote_root": REMOTE_ROOT,
+                "mount_root": str(tmp_path / "quark"),
+                "username": "quark-user",
+                "password": "p@ssw0rd",
+            },
+        )
+        assert resp.status_code == 200, resp.text
 
         class FailingOnceStore:
             available = True
@@ -1040,15 +1108,16 @@ class TestAtomicConfigCommit:
             def delete(self, name):
                 return self.real.delete(name)
 
-        real = config_module.SECURE_CREDENTIAL_STORE
-        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", FailingOnceStore(real))
+        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", FailingOnceStore(real_store))
         config_module.invalidate_config_cache()
         try:
             config_module.load_config(force_reload=True)
         except Exception:
             pass
+        assert config_module.load_config().openlist_username == ""
 
-        # remote-affecting（remote_root 变化）+ password 留空 → KEEP SAVED
+        # remote-affecting（remote_root 变化）+ password 留空 → KEEP SAVED；
+        # probe 必须通过 resolver 回源拿到恢复后的真实凭据
         resp = client.post(
             "/api/openlist/config",
             json={
@@ -1062,11 +1131,84 @@ class TestAtomicConfigCommit:
         assert resp.status_code == 200, resp.text
         saved = self._config_json(tmp_path)
         assert saved["openlist_remote_root"] == "/new-root"
-        # 凭据未丢失（probe 用恢复后的真实凭据）
-        from app.core import config as config_module2
-
-        u, p, state = config_module2.resolve_openlist_credentials()
+        # 凭据未丢失（probe 用恢复后的真实凭据，KEEP 语义生效）
+        u, p, state = config_module.resolve_openlist_credentials()
         assert state == "found"
         assert u == "quark-user"
+        assert p == "p@ssw0rd"
+        assert real_store.values.get("openlist_password") == "p@ssw0rd"
 
+    def test_cache_hot_store_down_save_is_zero_mutation(self, client, tmp_path, monkeypatch):
+        """M1：cache 热（凭据已在内存）+ store 此刻故障 → 保存必须 0 mutation。
 
+        安全属性要求：store 不可读时任何保存动作都不得删除/修改凭据，
+        即使 resolver fast-path 已放行（此时 _persist_config_payload 的
+        read 会中止保存，返回 500 + 0 mutation）。
+        """
+        from app.core import config as config_module
+        from app.core.credential_store import CredentialStoreError
+
+        class RealStore:
+            available = True
+
+            def __init__(self):
+                self.values: dict[str, str] = {}
+
+            def read(self, name):
+                return self.values.get(name, "")
+
+            def write(self, name, value):
+                self.values[name] = value
+
+            def delete(self, name):
+                self.values.pop(name, None)
+
+        real_store = RealStore()
+        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", real_store)
+        monkeypatch.setattr(config_module, "_credential_storage_enabled", lambda: True)
+        config_module.invalidate_config_cache()
+        resp = client.post(
+            "/api/openlist/config",
+            json={
+                "server_url": "https://ol.example.com:5244",
+                "remote_root": REMOTE_ROOT,
+                "mount_root": str(tmp_path / "quark"),
+                "username": "quark-user",
+                "password": "p@ssw0rd",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+        class UnavailableStore:
+            available = True
+
+            def read(self, name):
+                raise CredentialStoreError("temporary")
+
+            def write(self, name, value):
+                pass
+
+            def delete(self, name):
+                pass
+
+        # cache 热（不 invalidate）：resolver fast-path 会命中缓存返回 found；
+        # store 此刻故障 → save_config 的 _persist_config_payload read 中止
+        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", UnavailableStore())
+        resp = client.post(
+            "/api/openlist/config",
+            json={
+                "server_url": "https://ol.example.com:5244",
+                "remote_root": REMOTE_ROOT,
+                "mount_root": str(tmp_path / "quark"),
+                "username": "quark-user",
+                "password": "",
+                "cache_ttl_minutes": 720,
+            },
+        )
+        # 500（store 故障中止保存）且 0 mutation：凭据与配置全部保持
+        assert resp.status_code in (500, 503)
+        saved = self._config_json(tmp_path)
+        assert saved["openlist_cache_ttl_minutes"] == 1440
+        assert real_store.values.get("openlist_username") == "quark-user"
+        assert real_store.values.get("openlist_password") == "p@ssw0rd"
+
