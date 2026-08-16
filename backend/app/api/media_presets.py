@@ -212,13 +212,27 @@ def import_local_tree(req: LocalTreeImportRequest):
     result = {
         "preset": preset_to_dict(preset),
         "version": asdict(selected_version),
-        "preview": _preview_to_dict(build_preview(plan)),
+        "preview": _bridge_preview_plan_id(
+            _preview_to_dict(build_preview(plan)), baseline
+        ),
         "reused_preset": reused,
         "unchanged": unchanged,
     }
     if baseline:
         result["baseline"] = baseline
     return result
+
+
+def _bridge_preview_plan_id(preview: dict, baseline: dict | None) -> dict:
+    """RWK-31：确认身份桥接——baseline 同步产生的 draft revision 替换
+    preview.plan_id，使用户确认页的 confirm 命中 durable mirror 分支。
+    无 revision（失败/非 Provider）时保持 legacy plan_id 兼容。"""
+    if not baseline or not baseline.get("revision_id"):
+        return preview
+    if not isinstance(preview, dict) or "plan_id" not in preview:
+        return preview
+    preview["plan_id"] = baseline["revision_id"]
+    return preview
 
 
 def _ensure_tree_baseline(
@@ -272,10 +286,15 @@ def _ensure_tree_baseline(
             preset.catalog_root_id = info["root_id"]
             preset.updated_at = now_iso()
             _save_preset(preset)
+        # RWK-31（确认身份桥接）：入队后同步执行 snapshot discovery，使
+        # draft revisions 立即可用于确认页——返回第一个 revision_id，
+        # 调用方把 preview.plan_id 替换为它，用户确认即命中 durable mirror。
+        revision_id = _run_baseline_sync(info["root_id"], info["job_id"])
         return {
             "root_id": info["root_id"],
             "job_id": info["job_id"],
             "status": "baseline_queued",
+            "revision_id": revision_id,
         }
     except Exception:
         import logging
@@ -288,6 +307,43 @@ def _ensure_tree_baseline(
         return {"status": "baseline_failed"}
 
 
+def _run_baseline_sync(root_id: str, job_id: str) -> str:
+    """RWK-31：同步执行 snapshot discovery job，返回第一个 draft revision_id。
+
+    TXT 导入是同步用户流程——确认页需要立即可确认的 revision id，
+    不能等后台 worker。执行失败（异常/全部 failed）返回空串，调用方
+    保留 legacy plan_id 兼容（此时确认走 legacy 分支，但 baseline 仍建立）。
+    """
+    from app.jobs import store as job_store
+    from app.pipeline.discovery_handler import handle_discovery_scan
+
+    job = job_store.get_job(job_id) if job_id else None
+    if job is None:
+        return ""
+    try:
+        result = handle_discovery_scan(job.payload)
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "TXT baseline 同步执行失败（root=%s）", root_id, exc_info=True,
+        )
+        return ""
+    if result.get("summary", {}).get("failed_count", 0) > 0:
+        return ""
+    # 取该 root 最新 generation 的第一个 draft revision
+    from app.db.database import get_connection
+
+    row = get_connection().execute(
+        """
+        SELECT r.revision_id FROM import_revisions r
+        JOIN media_units u ON u.unit_id = r.unit_id
+        WHERE u.root_id = ? AND r.status = 'draft'
+        ORDER BY r.created_at ASC LIMIT 1
+        """,
+        (root_id,),
+    ).fetchone()
+    return str(row["revision_id"]) if row else ""
 def _discard_temporary_preset(preset_id: str) -> None:
     """清理解析失败/来源不匹配时临时创建的预设与归档目录，避免残留。
 
@@ -386,7 +442,9 @@ async def create_media_preset(
     result = {
         "preset": preset_to_dict(preset),
         "version": asdict(selected_version),
-        "preview": _preview_to_dict(build_preview(plan)),
+        "preview": _bridge_preview_plan_id(
+            _preview_to_dict(build_preview(plan)), baseline
+        ),
         "reused_preset": reused,
         "unchanged": unchanged,
     }
@@ -524,7 +582,9 @@ async def update_media_preset(preset_id: str, tree_file: UploadFile = File(...))
         "preset": preset_to_dict(preset),
         "version": asdict(version),
         "diff": _diff_to_dict(diff),
-        "preview": _preview_to_dict(build_preview(cumulative)),
+        "preview": _bridge_preview_plan_id(
+            _preview_to_dict(build_preview(cumulative)), baseline
+        ),
     }
     if baseline:
         result["baseline"] = baseline
@@ -667,7 +727,9 @@ def update_media_preset_from_path(preset_id: str, req: LocalTreeUpdateRequest):
         "preset": preset_to_dict(preset),
         "version": asdict(version),
         "diff": _diff_to_dict(diff),
-        "preview": _preview_to_dict(build_preview(cumulative)),
+        "preview": _bridge_preview_plan_id(
+            _preview_to_dict(build_preview(cumulative)), baseline
+        ),
     }
     if baseline:
         result["baseline"] = baseline

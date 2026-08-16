@@ -91,6 +91,9 @@ def db_ready(tmp_path, monkeypatch):
     monkeypatch.setattr(paths_mod, "get_data_dir", lambda: data_dir)
     monkeypatch.setattr(mstore, "get_data_dir", lambda: data_dir)
     monkeypatch.setattr(mservice, "get_data_dir", lambda: data_dir)
+    import app.api.media_presets as api_mp
+
+    monkeypatch.setattr(api_mp, "get_data_dir", lambda: data_dir)
     yield
     close_connection()
 

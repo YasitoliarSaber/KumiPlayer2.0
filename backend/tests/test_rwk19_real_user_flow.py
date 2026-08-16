@@ -75,6 +75,9 @@ def db_ready(tmp_path, monkeypatch):
     monkeypatch.setattr(paths_mod, "get_data_dir", lambda: data_dir)
     monkeypatch.setattr(mstore, "get_data_dir", lambda: data_dir)
     monkeypatch.setattr(mservice, "get_data_dir", lambda: data_dir)
+    import app.api.media_presets as api_mp
+
+    monkeypatch.setattr(api_mp, "get_data_dir", lambda: data_dir)
     yield
     close_connection()
 
@@ -157,11 +160,11 @@ class TestRealUserFlow:
         root = catalog_store.get_source_root(root_id)
         assert root is not None and root.source_id == source_id
 
-        # 2.5 从 bindable-providers 确认 baseline 状态（TXT 导入后未执行 baseline 前不可绑定）
+        # 2.5 从 bindable-providers 确认 baseline 状态（TXT 导入即同步完成 baseline → ready）
         bp_resp = client.get("/api/openlist/bindable-providers")
         providers0 = bp_resp.json()["providers"]
         entry0 = next(p for p in providers0 if p["root_id"] == root_id)
-        assert entry0["baseline_ready"] is False, "TXT 导入后未执行 baseline 前必须不可绑定"
+        assert entry0["baseline_ready"] is True, "TXT 导入同步完成后必须可绑定"
 
         # 3. 配置 OpenList + route → bind（preset 已关联 root_id，UI 免手填）
         resp = client.post(

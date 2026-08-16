@@ -616,9 +616,39 @@ def list_all_directories(root_id: str) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def mark_baseline_completed(root_id: str, generation: int) -> None:
-    """RWK-25：TXT snapshot baseline 完整完成的 durable fact（原子标记）。"""
+def set_baseline_target(root_id: str, generation: int) -> None:
+    """RWK-30：snapshot 入队时设置 baseline target（进入 pending 状态）。
+
+    新 TXT 版本入队即把 target 前进到新 generation——旧 completed fact 不再
+    表示当前基线（ready 失效），防止"v1 完成、v2 半途"被误判为 ready。
+    """
     conn = get_connection()
+    conn.execute(
+        """
+        UPDATE source_roots
+        SET baseline_target_generation = ?,
+            updated_at = ?
+        WHERE root_id = ?
+        """,
+        (generation, now_iso(), root_id),
+    )
+    conn.commit()
+
+
+def mark_baseline_completed(root_id: str, generation: int) -> None:
+    """RWK-25/30：TXT snapshot baseline 完整完成的 durable fact。
+
+    仅当当前 target 仍是该 generation 时才写 completed（旧 job 晚完成不得
+    覆盖新 snapshot 的 pending 状态——晚到的旧 generation 直接忽略）。
+    """
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT baseline_target_generation FROM source_roots WHERE root_id = ?",
+        (root_id,),
+    ).fetchone()
+    target = int(row["baseline_target_generation"] if row else 0)
+    if target != generation:
+        return  # 旧 job 晚完成 / 目标已前进：不覆盖
     conn.execute(
         """
         UPDATE source_roots
@@ -645,10 +675,14 @@ def source_catalog_baseline_stats(root_id: str) -> dict:
     """
     conn = get_connection()
     row = conn.execute(
-        "SELECT baseline_completed_generation FROM source_roots WHERE root_id = ?",
+        "SELECT baseline_target_generation, baseline_completed_generation FROM source_roots WHERE root_id = ?",
         (root_id,),
     ).fetchone()
-    completed_gen = int(row["baseline_completed_generation"] if row else 0) > 0
+    target = int(row["baseline_target_generation"] if row else 0)
+    completed = int(row["baseline_completed_generation"] if row else 0)
+    # RWK-30：ready 仅当「最新 snapshot target 已完整完成」——新版本入队
+    # （target 前进）后旧 completed 不再代表当前基线。
+    ready = target > 0 and completed == target
     dirs = int(
         conn.execute(
             """
@@ -668,7 +702,7 @@ def source_catalog_baseline_stats(root_id: str) -> dict:
         ).fetchone()["c"]
     )
     return {
-        "baseline_ready": completed_gen and dirs > 0,
+        "baseline_ready": ready and dirs > 0,
         "baseline_directory_count": dirs,
         "baseline_node_count": nodes,
     }

@@ -90,6 +90,10 @@ def db_ready(tmp_path, monkeypatch):
     monkeypatch.setattr(paths_mod, "get_data_dir", lambda: data_dir)
     monkeypatch.setattr(mstore, "get_data_dir", lambda: data_dir)
     monkeypatch.setattr(mservice, "get_data_dir", lambda: data_dir)
+    # api 层模块级绑定的 get_data_dir 也要 patch（否则归档路径指向真实 data）
+    import app.api.media_presets as api_mp
+
+    monkeypatch.setattr(api_mp, "get_data_dir", lambda: data_dir)
     yield
     close_connection()
 
@@ -429,10 +433,13 @@ class TestBaselineReuseSafety:
 
 
 class TestBindBaselineGuard:
-    def test_bind_rejected_before_baseline(self, client, tmp_path):
-        """RWK-23：baseline 未就绪时 bind-root 必须拒绝（400，不写 binding）。"""
+    def test_bind_rejected_when_baseline_failed(self, client, tmp_path):
+        """RWK-23/30：baseline 未就绪（同步执行失败）时 bind-root 必须拒绝（400）。"""
         from app.catalog import store as catalog_store
+        from app.db.database import get_connection
 
+        # 构造会导致 baseline 同步失败的导入：TXT 正常，但随后手工清掉
+        # baseline completed fact 并把 target 前移（模拟 v2 pending 且未完成）
         tree = _write_tree(tmp_path, _big_tree())
         resp = client.post(
             "/api/media-presets/import-local-tree",
@@ -441,8 +448,17 @@ class TestBindBaselineGuard:
         assert resp.status_code == 200, resp.text
         preset = next(p for p in list_presets() if p.source == "pan115")
         root_id = preset.catalog_root_id
+        # 同步执行已完成 baseline（ready）——模拟 v2 入队 pending：target 前移但未完成
+        conn = get_connection()
+        conn.execute(
+            "UPDATE source_roots SET baseline_target_generation = baseline_target_generation + 10 WHERE root_id = ?",
+            (root_id,),
+        )
+        conn.commit()
+        stats = catalog_store.source_catalog_baseline_stats(root_id)
+        assert stats["baseline_ready"] is False, "target 前移但未完成 → 不 ready"
 
-        # 配置 OpenList + route，但**不执行** snapshot baseline job
+        # 配置 OpenList + route → bind 必须拒绝
         resp = client.post(
             "/api/openlist/config",
             json={
@@ -467,7 +483,6 @@ class TestBindBaselineGuard:
             },
         )
         assert resp.status_code == 200, resp.text
-
         bind = client.post(
             "/api/openlist/bind-root",
             json={"root_id": root_id, "remote_locator": "/115网盘/动画1"},
@@ -475,65 +490,60 @@ class TestBindBaselineGuard:
         assert bind.status_code == 400, bind.text
         assert "尚未建立 Source Catalog 本地基线" in bind.json()["detail"]
         root = catalog_store.get_source_root(root_id)
-        assert root.openlist_conn_hash == "", "拒绝时不得写 binding"
+        assert root.openlist_conn_hash == ""
 
 
 class TestPartialBaselineNotReady:
-    def test_partial_snapshot_not_ready_and_bind_rejected(self, client, tmp_path):
-        """事故①：部分 snapshot 完成（有 complete 目录但仍有 queued）→ 不 ready，bind 拒绝。"""
+    def test_v2_pending_after_v1_ready_revokes_ready(self, client, tmp_path):
+        """事故①（真实事故链）：v1 完成 ready → v2 入队（target 前进但未执行）
+        → ready=false → bind 被阻止；v2 完成 → ready=true。"""
         from app.catalog import store as catalog_store
-        from app.db.database import get_connection
         from app.jobs import store as job_store
+        from app.pipeline.discovery_handler import handle_discovery_scan
 
-        tree = _write_tree(tmp_path, _big_tree())
+        # 1. v1 TXT baseline（导入即同步完成）→ ready
+        tree_v1 = _write_tree(tmp_path, _big_tree())
         resp = client.post(
             "/api/media-presets/import-local-tree",
-            json={"tree_path": str(tree), "import_family": "anime", "import_scope": ""},
+            json={"tree_path": str(tree_v1), "import_family": "anime", "import_scope": ""},
         )
         assert resp.status_code == 200, resp.text
         preset = next(p for p in list_presets() if p.source == "pan115")
         root_id = preset.catalog_root_id
+        root_v1 = catalog_store.get_source_root(root_id)
+        stats1 = catalog_store.source_catalog_baseline_stats(root_id)
+        assert stats1["baseline_ready"] is True, "v1 完成后必须 ready"
+        assert root_v1.baseline_completed_generation == root_v1.baseline_target_generation
 
-        # 模拟部分完成：root complete，但仍有大量 queued 目录（未扫描）
-        jobs = job_store.list_jobs(job_type="discovery_scan", status="queued", limit=100)
-        snapshot_job = next(
-            (j for j in jobs if j.payload.get("root_id") == root_id),
-            None,
+        # 2. 模拟 v2 入队（target 前进但**不执行**）：直接调 bootstrap 入队
+        from app.media_presets.service import bootstrap_provider_catalog_from_tree
+
+        tree_v2 = _write_tree(
+            tmp_path,
+            _big_tree() + "| | | | |-作品1-001.S01E03.extra.mkv\n",
+            name="v2目录树.txt",
         )
-        assert snapshot_job is not None
-        from app.pipeline.discovery_handler import handle_discovery_scan
-
-        result = handle_discovery_scan(snapshot_job.payload)
-        assert result["summary"].get("failed_count", 0) == 0
-
-        # 故意制造部分状态：把部分 complete 目录改回 queued（模拟中断/后续未完成）
-        conn = get_connection()
-        conn.execute(
-            """
-            UPDATE source_directories SET state = 'queued'
-            WHERE root_id = ? AND remote_path IN (
-                SELECT remote_path FROM source_directories
-                WHERE root_id = ? AND state = 'complete' LIMIT 10
-            )
-            """,
-            (root_id, root_id),
+        info = bootstrap_provider_catalog_from_tree(
+            provider="pan115",
+            tree_archive=str(tree_v2),
+            local_mount_root=str(tmp_path),
+            import_family="anime",
+            import_scope="",
         )
-        conn.commit()
-        # 同时清掉 baseline completed fact（模拟中断时未走到标记）
-        conn.execute(
-            "UPDATE source_roots SET baseline_completed_generation = 0, baseline_completed_at = '' WHERE root_id = ?",
-            (root_id,),
+        assert info["root_id"] == root_id, "v2 必须复用同一 root"
+        root_v2 = catalog_store.get_source_root(root_id)
+        assert root_v2.baseline_target_generation > root_v1.baseline_completed_generation, (
+            "v2 入队必须前进 target"
         )
-        conn.commit()
+        assert root_v2.baseline_completed_generation == root_v1.baseline_completed_generation
 
-        # baseline_ready 必须为 false（有 complete 目录但未完整完成）
-        stats = catalog_store.source_catalog_baseline_stats(root_id)
-        assert stats["baseline_directory_count"] > 0, "前置：确有 complete 目录"
-        assert stats["baseline_ready"] is False, (
-            "部分完成（仍有 queued）不得视为 ready"
+        # v2 pending（未执行）→ ready 必须为 false
+        stats2 = catalog_store.source_catalog_baseline_stats(root_id)
+        assert stats2["baseline_ready"] is False, (
+            "v2 pending（target 前进但未完成）不得视为 ready"
         )
 
-        # bind 必须拒绝
+        # 3. bind 被拒绝（v2 未 ready）
         resp = client.post(
             "/api/openlist/config",
             json={
@@ -563,27 +573,39 @@ class TestPartialBaselineNotReady:
             json={"root_id": root_id, "remote_locator": "/115网盘/动画1"},
         )
         assert bind.status_code == 400, bind.text
-        root = catalog_store.get_source_root(root_id)
-        assert root.openlist_conn_hash == ""
+        assert "尚未建立 Source Catalog 本地基线" in bind.json()["detail"]
 
-        # 完整重扫后恢复 ready
-        conn.execute(
-            "UPDATE source_directories SET state = 'complete' WHERE root_id = ? AND state = 'queued'",
-            (root_id,),
+        # 4. 执行 v2 snapshot job → ready 恢复 true
+        jobs2 = job_store.list_jobs(job_type="discovery_scan", status="queued", limit=100)
+        v2_job = next(
+            (j for j in jobs2
+             if j.payload.get("root_id") == root_id
+             and j.payload.get("generation") == root_v2.baseline_target_generation),
+            None,
         )
-        conn.commit()
-        catalog_store.mark_baseline_completed(root_id, 999)
-        stats2 = catalog_store.source_catalog_baseline_stats(root_id)
-        assert stats2["baseline_ready"] is True
+        assert v2_job is not None, "v2 snapshot job 必须存在"
+        result2 = handle_discovery_scan(v2_job.payload)
+        assert result2["summary"].get("failed_count", 0) == 0
+        root_after = catalog_store.get_source_root(root_id)
+        assert root_after.baseline_completed_generation == root_after.baseline_target_generation
+        stats3 = catalog_store.source_catalog_baseline_stats(root_id)
+        assert stats3["baseline_ready"] is True, "v2 完成后必须恢复 ready"
+
+        # 5. 此时 bind 成功
+        bind2 = client.post(
+            "/api/openlist/bind-root",
+            json={"root_id": root_id, "remote_locator": "/115网盘/动画1"},
+        )
+        assert bind2.status_code == 200, bind2.text
 
 
 class TestSingleExecutionAuthority:
-    def test_txt_baseline_no_auto_mirror_then_confirm_single_chain(self, client, tmp_path):
-        """事故②：TXT baseline 阶段不自动 mirror；用户确认 revision 后仅一条 durable chain。"""
+    def test_txt_confirm_uses_durable_revision_from_api(self, client, tmp_path):
+        """事故②：真实 TXT API 响应 preview.plan_id 已桥接为 durable revision；
+        用该 plan_id confirm → execution_mode=durable → 恰一 mirror job。"""
         from app.db.database import get_connection
         from app.jobs import store as job_store
         from app.import_plan import revision_store
-        from app.pipeline.discovery_handler import handle_discovery_scan
 
         tree = _write_tree(tmp_path, _big_tree())
         resp = client.post(
@@ -591,64 +613,49 @@ class TestSingleExecutionAuthority:
             json={"tree_path": str(tree), "import_family": "anime", "import_scope": ""},
         )
         assert resp.status_code == 200, resp.text
-        preset = next(p for p in list_presets() if p.source == "pan115")
-        root_id = preset.catalog_root_id
+        body = resp.json()
+        preview = body["preview"]
+        baseline = body.get("baseline", {})
+        assert baseline.get("status") == "baseline_queued", body
 
-        # 执行 snapshot baseline：不得 auto-confirm / 不得 enqueue mirror
-        jobs = job_store.list_jobs(job_type="discovery_scan", status="queued", limit=200)
-        snapshot_job = next(
-            (j for j in jobs if j.payload.get("root_id") == root_id), None,
-        )
-        assert snapshot_job is not None
-        result = handle_discovery_scan(snapshot_job.payload)
-        assert result["summary"].get("mirror_enqueued", 0) == 0, (
-            "TXT baseline 不得自动 enqueue mirror（单执行权威）"
-        )
-        assert result["summary"].get("plan_ready", 0) > 0
-
-        # baseline 后：revision 全部 draft（未 auto-confirm）
+        # 关键：preview.plan_id 必须是 SQLite revision（不是 legacy plan）
+        plan_id = preview["plan_id"]
         conn = get_connection()
-        revisions = conn.execute(
-            """
-            SELECT r.revision_id, r.status FROM import_revisions r
-            JOIN media_units u ON u.unit_id = r.unit_id
-            WHERE u.root_id = ?
-            """,
-            (root_id,),
-        ).fetchall()
-        assert len(revisions) > 0
-        assert all(r["status"] == "draft" for r in revisions), (
-            "TXT baseline 的 revision 必须全部 draft（等待用户确认）"
+        rev = conn.execute(
+            "SELECT revision_id FROM import_revisions WHERE revision_id = ?",
+            (plan_id,),
+        ).fetchone()
+        assert rev is not None, (
+            f"TXT API 返回的 preview.plan_id 必须是 SQLite revision（实际 {plan_id}）"
         )
-        # 无 mirror job 产生
-        mirror_jobs = job_store.list_jobs(job_type="mirror_revision", status="queued", limit=100)
-        assert not any(
-            j.payload.get("revision_id") in {r["revision_id"] for r in revisions}
-            for j in mirror_jobs
-        ), "TXT baseline 阶段不得存在对应 mirror job"
+        # load_import_plan 对 revision_id 走 V3 优先（返回 revision 的 plan，
+        # 而非 legacy JSON）——确认链唯一指向 durable revision
+        from app.import_plan.store import load_import_plan
 
-        # 用户确认一个 revision → 走 durable confirm → 唯一 mirror chain
-        rev = revisions[0]
+        bridged_plan = load_import_plan(plan_id=plan_id)
+        assert bridged_plan is not None
+        assert bridged_plan.plan_id == plan_id
+
+        # 用真实 UI 的 plan_id confirm → durable mirror
         resp_confirm = client.post(
             "/api/imports/pan115/confirm",
-            json={"plan_id": rev["revision_id"], "items": []},
+            json={"plan_id": plan_id, "items": []},
         )
-        # confirm 端点对 SQLite revision 走 durable 路径
         assert resp_confirm.status_code == 200, resp_confirm.text
-        body = resp_confirm.json()
-        assert body.get("execution_mode") == "durable", body
-        assert body.get("job_id"), body
+        cbody = resp_confirm.json()
+        assert cbody.get("execution_mode") == "durable", cbody
+        assert cbody.get("job_id"), cbody
 
         # 该 revision 恰好一个 mirror job（幂等 get-or-create）
-        mirror_jobs_after = [
+        mirror_jobs = [
             j for j in job_store.list_jobs(job_type="mirror_revision", status="queued", limit=100)
-            if j.payload.get("revision_id") == rev["revision_id"]
+            if j.payload.get("revision_id") == plan_id
         ]
-        assert len(mirror_jobs_after) == 1, "同一 revision 只有一条 mirror chain"
+        assert len(mirror_jobs) == 1, "同一 revision 只有一条 mirror chain"
         # revision 已 confirmed
         rev_after = conn.execute(
             "SELECT status FROM import_revisions WHERE revision_id = ?",
-            (rev["revision_id"],),
+            (plan_id,),
         ).fetchone()
         assert rev_after["status"] == "confirmed"
 

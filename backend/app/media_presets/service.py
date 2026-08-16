@@ -301,6 +301,9 @@ def bootstrap_provider_catalog_from_tree(
     if root is None:
         raise ValueError("来源根建立失败")
     generation = catalog_store.bump_generation(root_id)
+    # RWK-30：新 TXT baseline 入队即把 target 前进到该 generation——
+    # 旧 completed fact 不再代表当前基线（ready 失效），直到新版本完整完成。
+    catalog_store.set_baseline_target(root_id, generation)
     job_id = orchestrator.enqueue_scan(
         root_id,
         generation,

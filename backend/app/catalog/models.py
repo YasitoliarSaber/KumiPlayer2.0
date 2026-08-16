@@ -49,7 +49,8 @@ class SourceRootRecord:
     # RWK-3：可选 OpenList 增量通道 binding（空 = 未绑定）
     openlist_conn_hash: str = ""
     openlist_remote_locator: str = ""
-    # RWK-25：TXT snapshot baseline 完整完成的 durable fact
+    # RWK-25/30：TXT snapshot baseline 状态机（target + completed）
+    baseline_target_generation: int = 0
     baseline_completed_generation: int = 0
     baseline_completed_at: str = ""
     created_at: str = ""
@@ -71,6 +72,7 @@ class SourceRootRecord:
             last_successful_scan_at=data.get("last_successful_scan_at") or "",
             openlist_conn_hash=data.get("openlist_conn_hash") or "",
             openlist_remote_locator=data.get("openlist_remote_locator") or "",
+            baseline_target_generation=int(data.get("baseline_target_generation") or 0),
             baseline_completed_generation=int(data.get("baseline_completed_generation") or 0),
             baseline_completed_at=data.get("baseline_completed_at") or "",
             created_at=data.get("created_at") or "",

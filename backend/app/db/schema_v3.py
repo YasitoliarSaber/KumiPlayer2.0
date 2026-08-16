@@ -554,7 +554,11 @@ _SOURCE_ROOT_EXTRA_COLUMNS = (
         "openlist_remote_locator",
         "ALTER TABLE source_roots ADD COLUMN openlist_remote_locator TEXT DEFAULT ''",
     ),
-    # RWK-25：TXT snapshot baseline 完整完成的 durable fact（generation + 时间戳）
+    # RWK-25/30：TXT snapshot baseline 状态机（target + completed）
+    (
+        "baseline_target_generation",
+        "ALTER TABLE source_roots ADD COLUMN baseline_target_generation INTEGER DEFAULT 0",
+    ),
     (
         "baseline_completed_generation",
         "ALTER TABLE source_roots ADD COLUMN baseline_completed_generation INTEGER DEFAULT 0",

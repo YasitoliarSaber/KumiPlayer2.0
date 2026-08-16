@@ -22,7 +22,7 @@ import { sourcesApi } from '../api/sources';
 import { configApi } from '../api/config';
 import { openlistApi, type BackgroundImportUnit, type OpenListCacheMeta, type OpenListEntry, type OpenListImportBatch } from '../api/openlist';
 import type { OpenListRoute, ProviderId } from '../api/types';
-import { mediaPresetsApi, type MediaLibraryPreset, type PresetDeletePreview } from '../api/mediaPresets';
+import { mediaPresetsApi, type MediaLibraryPreset, type PresetDeletePreview, type PresetImportResult } from '../api/mediaPresets';
 import { importsApi } from '../api/imports';
 import { mirrorApi } from '../api/mirror';
 import { scrapeApi, type ReviewQueueItem, type ScrapeCandidate } from '../api/scrape';
@@ -428,6 +428,13 @@ export default function MediaManagementPage() {
     }
   };
 
+  /** RWK-32：baseline_failed 用户可见（媒体库已创建但本地增量基线初始化失败）。 */
+  const applyBaselineFailureHint = (result: PresetImportResult) => {
+    if (result.baseline?.status === 'baseline_failed') {
+      setActionError('媒体库已创建，但本地增量基线初始化失败：OpenList 增量暂不可用，可稍后重新导入目录树或检查数据目录权限。');
+    }
+  };
+
   const importTreePath = async (treePath: string, action: PendingTreeAction) => {
     // 创建导入要求页面全局来源不是本地目录；更新导入不依赖全局 source，
     // 必须按目标预设自身的 source（action.presetSource）执行，
@@ -465,10 +472,7 @@ export default function MediaManagementPage() {
         : result.reused_preset && result.unchanged
           ? `${getPresetDisplayName(result.preset)} 已存在，内容相同，未创建重复卡片或版本`
           : `${result.preset.name} 已创建，目录树已由 KumiPlayer 保存`);
-      // RWK-28：baseline_failed 对用户可见（媒体库已创建但本地增量基线初始化失败）
-      if (result.baseline?.status === 'baseline_failed') {
-        setActionError('媒体库已创建，但本地增量基线初始化失败：OpenList 增量暂不可用，可稍后重新导入目录树或检查数据目录权限。');
-      }
+      applyBaselineFailureHint(result);
       if (action.kind === 'create') setSelectedCloudRoot('');
       await loadPresets();
       setStep('confirm');
@@ -533,6 +537,7 @@ export default function MediaManagementPage() {
         : result.reused_preset && result.unchanged
           ? `${getPresetDisplayName(result.preset)} 已存在，内容相同，未创建重复卡片或版本`
         : `${result.preset.name} 已创建，目录树已由 KumiPlayer 保存`);
+      applyBaselineFailureHint(result);
       if (action.kind === 'create') setSelectedCloudRoot('');
       await loadPresets();
       setStep('confirm');
@@ -579,6 +584,7 @@ export default function MediaManagementPage() {
           ? `已识别为${result.preset.source === 'pan115' ? ' 115' : '百度网盘'}目录树，并复用现有${getPresetDisplayName(result.preset)}`
           : `已识别为${result.preset.source === 'pan115' ? ' 115' : '百度网盘'}目录树，${result.preset.name} 已创建`,
       );
+      applyBaselineFailureHint(result);
       await loadPresets();
       setStep('confirm');
     } catch (error) {

@@ -1332,6 +1332,9 @@ async def bootstrap_provider_with_tree(
     scan_mode = "full"
     root_id = root.root_id
     generation = catalog_store.bump_generation(root_id)
+    # RWK-30：与 bootstrap_provider_catalog_from_tree 一致——snapshot 入队即
+    # 设置 baseline target（pending），旧 completed fact 不再代表当前基线。
+    catalog_store.set_baseline_target(root_id, generation)
     job_id = orchestrator.enqueue_scan(
         root_id,
         generation,
