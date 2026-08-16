@@ -534,11 +534,25 @@ def ensure_source_health_table(conn) -> None:
     ensure_source_directories_columns(conn)
 
 
-#: HYB-3：source_directories 轻量扩展列（幂等 ALTER，不重置数据库）。
+#: HYB-3/RWK-3：source_directories / source_roots 轻量扩展列（幂等 ALTER，不重置数据库）。
 _SOURCE_DIRECTORY_EXTRA_COLUMNS = (
     (
         "last_remote_verified_at",
         "ALTER TABLE source_directories ADD COLUMN last_remote_verified_at TEXT DEFAULT ''",
+    ),
+)
+
+#: RWK-3：Provider root 的可选 OpenList binding（openlist_conn_hash +
+#: openlist_remote_locator），持久化「同一 Provider root 以后走 OpenList
+#: 增量通道」的事实；空值 = 未绑定。
+_SOURCE_ROOT_EXTRA_COLUMNS = (
+    (
+        "openlist_conn_hash",
+        "ALTER TABLE source_roots ADD COLUMN openlist_conn_hash TEXT DEFAULT ''",
+    ),
+    (
+        "openlist_remote_locator",
+        "ALTER TABLE source_roots ADD COLUMN openlist_remote_locator TEXT DEFAULT ''",
     ),
 )
 
@@ -557,4 +571,9 @@ def ensure_source_directories_columns(conn) -> None:
         except Exception:
             # 列已存在（幂等）或旧库结构差异：SQLite 对已存在列抛
             # duplicate column name，忽略即可。
+            pass
+    for column, ddl in _SOURCE_ROOT_EXTRA_COLUMNS:
+        try:
+            conn.execute(ddl)
+        except Exception:
             pass

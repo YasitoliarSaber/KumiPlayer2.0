@@ -227,6 +227,10 @@ def _routes_from_config(config) -> list[OpenListRouteConfig]:
     routes = config.openlist_routes or []
     return [item for item in routes if isinstance(item, OpenListRouteConfig)]
 
+def _normalized_mount_root(value: str) -> str:
+    """本地挂载根归一化（大小写 + 尾部斜杠），用于 Provider preset 复用判定。"""
+    return str(value or "").strip().rstrip("\\/").casefold()
+
 
 def _ensure_within_remote_root(remote_root: str, path: str) -> None:
     """浏览/导入范围限制在远端总根路径内。"""
@@ -1157,31 +1161,40 @@ def rescan_openlist_preset(preset_id: str):
 
 
 
+
 # ============================================================
-# HYB-2：OpenList SourceRoot 的 TXT Zero-API Bootstrap
+# HYB-2（REWORK）：TXT Zero-API Bootstrap —— Provider Source Identity
 # ============================================================
 
 @router.post("/bootstrap-tree")
 @_admitted_import_endpoint
-async def bootstrap_openlist_with_tree(
-    remote_locator: str = Form(...),
-    local_mount_root: str = Form(""),
+async def bootstrap_provider_with_tree(
+    provider: str = Form("pan115"),
+    remote_locator: str = Form(""),
+    local_mount_root: str = Form(...),
     import_family: str = Form("anime"),
     import_scope: str = Form(""),
     tree_file: UploadFile = File(...),
 ):
-    """用 115 目录树 TXT 对 OpenList SourceRoot 做零请求 bootstrap（HYB-2）。
+    """用目录树 TXT 对 Provider SourceRoot 做零请求 bootstrap（HYB-2 REWORK）。
 
-    与 rescan 的区别：
-    - 不构造 OpenList 客户端、不发任何网络请求（OpenList list count = 0）；
-    - 以本地 TXT 快照建立完整 Source Catalog（scan_channel=snapshot_pan115）；
-    - 来源身份与 root 身份都是 canonical OpenList 身份（openlist-{hash}），
-      后续切回 OpenList 增量扫描时 root_id 不变，media_units 不重复。
+    **身份模型（REWORK）**：Provider Identity ≠ Scan Channel。
+    - 来源身份 = Provider（pan115 / baidu）+ 本地挂载根，稳定为
+      ``pan115-{hash}`` / ``baidu-{hash}``——**不依赖 OpenList 配置**；
+    - OpenList 只是可选的后续增量通道（RWK-3 binding）；
+    - 因此：纯 TXT + 本地挂载用户完全不配 OpenList 也能完整建库；
+      以后绑定 OpenList 增量时 root_id / media_units 不变。
 
-    流程：校验远端定位 → 校验路由归属 → TXT 归档（MediaTreeVersion）→
-    解析 TXT 建立 Source Catalog 树 → resolve/create canonical root →
-    enqueue scan(scan_channel=snapshot_pan115, scan_mode=full)。
+    与旧实现（把 OpenList 当长期身份）的区别：
+    - 不再要求 OpenList 凭据/路由/远端根——全部本地校验；
+    - source/root/preset 全部挂在 Provider 身份下；
+    - 0 OpenList 网络请求；OpenList 冷却/凭据故障不影响本通道。
+
+    流程：TXT 归档（MediaTreeVersion）→ 本地解析 → create/reuse Provider
+    root → enqueue scan(scan_channel=snapshot_{provider}, scan_mode=full)。
     """
+    import hashlib
+
     from app.catalog import lifecycle
     from app.catalog import store as catalog_store
     from app.db.database import init_db
@@ -1190,7 +1203,6 @@ async def bootstrap_openlist_with_tree(
         _MAX_UPLOAD_BYTES,
         _archive_tree_bytes,
         create_preset_record,
-        find_openlist_preset_by_root,
         save_preset,
     )
     from app.media_presets.store import list_presets
@@ -1198,30 +1210,44 @@ async def bootstrap_openlist_with_tree(
     from app.sources.registry import get_source_adapter
 
     init_db()
-    config = load_config()
 
-    # —— 身份：bootstrap 不要求 OpenList 可用（不发请求），但 source identity
-    # 需要 server_url + username 构成稳定的 openlist-{hash}；未配置时拒绝，
-    # 提示走纯 TXT 链路（media_presets 的 115/百度目录树导入）或先配置 OpenList。
-    username = (config.openlist_username or "").strip()
-    if not config.openlist_server_url.strip() or not username:
+    # —— Provider 通道归一化（不读 OpenList 配置）
+    provider = (provider or "pan115").strip().lower()
+    if provider not in {"pan115", "baidu"}:
+        raise HTTPException(status_code=400, detail="provider 仅支持 pan115 或 baidu")
+    channel = f"snapshot_{provider}"
+
+    # —— 本地挂载根（TXT 相对路径的本地基准，唯一必需的输入）
+    mount_root = (local_mount_root or "").strip()
+    if not mount_root:
         raise HTTPException(
             status_code=400,
-            detail="TXT 安全初始化需要已配置的 OpenList 连接身份；"
-                   "未配置 OpenList 时请直接使用 115/百度目录树导入",
+            detail="缺少本地挂载根：请填写网盘挂载盘符路径（如 K:\\115网盘）",
         )
-    source_id = _openlist_source_id(config, username=username)
-    _ensure_openlist_source(catalog_store, source_id)
+    effective_root = Path(mount_root).expanduser()
 
-    # —— 远端定位与路由归属（纯本地校验，无网络）
-    remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
-    normalized = normalize_remote_path(remote_locator)
-    if not normalized or normalized == "/":
-        raise HTTPException(status_code=400, detail="请选择 OpenList 远端媒体目录（不能是根目录）")
-    _ensure_within_remote_root(remote_root, normalized)
-    _require_route_for_import(config, normalized)
+    # —— Provider Source Identity：稳定哈希，与 OpenList 完全解耦
+    provider_key = hashlib.sha256(
+        str(effective_root).casefold().encode("utf-8")
+    ).hexdigest()[:16]
+    source_id = f"{provider}-{provider_key}"
+    catalog_store.create_source(
+        source_id=source_id,
+        source_type=provider,
+        provider_id=provider,
+        ingest_method="directory_tree",
+        connection_key=source_id,
+        display_name="115 目录树" if provider == "pan115" else "百度目录树",
+    )
 
-    # —— TXT 归档（KumiPlayer 数据目录 + MediaTreeVersion 承载，不指向用户临时文件）
+    # —— remote_locator（可选）：未来 OpenList binding 的远端路径基准。
+    # 未提供时用本地路径的 POSIX 形式（纯 TXT 用户无 OpenList 远端概念）。
+    if remote_locator and remote_locator.strip():
+        normalized = normalize_remote_path(remote_locator)
+    else:
+        normalized = "/" + str(effective_root).replace("\\", "/").strip("/")
+
+    # —— TXT 归档（KumiPlayer 数据目录 + MediaTreeVersion，不指向用户临时文件）
     original_name = Path(tree_file.filename or "目录树.txt").name
     if Path(original_name).suffix.lower() not in _ALLOWED_SUFFIXES:
         raise HTTPException(status_code=400, detail="仅支持 .txt、.tree 或 .log 目录树文件")
@@ -1231,52 +1257,53 @@ async def bootstrap_openlist_with_tree(
     if len(data) > _MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="目录树文件超过 64 MB")
 
-    # —— canonical OpenList preset：复用已有关卡或创建新卡（不制造第二来源身份）
-    preset = find_openlist_preset_by_root("", normalized)
+    # —— Provider preset：复用已有关卡或创建新卡（同一 Provider 身份）
+    from app.media_presets.service import find_matching_preset
+
+    preset = next(
+        (
+            p for p in list_presets()
+            if p.source == provider
+            and _normalized_mount_root(p.source_root) == _normalized_mount_root(str(effective_root))
+        ),
+        None,
+    )
     if preset is None:
         preset = create_preset_record(
-            "openlist",
-            local_mount_root or normalized,
+            provider,
+            str(effective_root),
             (import_family or "anime").strip(),
             (import_scope or "").strip(),
-            update_mode="openlist_scan",
-            provider_id="pan115",
+            update_mode="directory_tree",
+            provider_id=provider,
             ingest_method="directory_tree",
-            source_route_id="",
             catalog_root_id="",
         )
-        preset.remote_locator = normalized
-        preset.name = normalized.rsplit("/", 1)[-1] or "OpenList 媒体库"
         save_preset(preset)
 
     version, archive = _archive_tree_bytes(
         preset.preset_id,
         original_name,
         data,
-        source_tree_path=local_mount_root or "",
-        provider_id="pan115",
+        source_tree_path=str(effective_root),
+        provider_id=provider,
         ingest_method="directory_tree",
     )
-    version.remote_locator = normalized
     version.input_type = "directory_tree"
-    version.source_route_id = ""
+    version.remote_locator = normalized
     preset.versions.append(version)
     preset.version_count += 1
     preset.updated_at = datetime.now(timezone(timedelta(hours=8))).isoformat()
     save_preset(preset)
 
-    # —— 解析 TXT 建立 Source Catalog 树（本地解析，0 网络）
+    # —— 本地解析 TXT（0 网络）
     try:
-        adapter = get_source_adapter("pan115")
-        mount_root = local_mount_root or config.openlist_mount_root or ""
-        if not mount_root:
-            raise ValueError("缺少本地挂载根：请填写 115 挂载盘符路径（如 K:\\115网盘）")
-        effective_root = Path(mount_root).expanduser()
+        adapter = get_source_adapter(provider)
         snapshot = adapter.parse(str(archive), str(effective_root))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"目录树解析失败: {exc}") from None
 
-    # —— resolve/create canonical OpenList root（同一 root，后续 OpenList 增量复用）
+    # —— resolve/create Provider root（同一 root，后续 OpenList 增量复用）
     resolution = lifecycle.resolve_root_for_import(
         source_id,
         normalized,
@@ -1312,7 +1339,6 @@ async def bootstrap_openlist_with_tree(
         root = catalog_store.get_source_root(resolution.canonical_root_id)
         if root is None:
             raise HTTPException(status_code=409, detail="来源根归并失败，请重试")
-        scan_mode = "full"
     else:
         # reuse_exact / reuse_ancestor：复用既有 root
         root = catalog_store.get_source_root(resolution.canonical_root_id)
@@ -1325,7 +1351,8 @@ async def bootstrap_openlist_with_tree(
                 import_scope=(import_scope or "").strip(),
             )
 
-    # —— enqueue TXT snapshot 扫描（显式 scan_channel，0 OpenList 请求）
+    # —— enqueue TXT snapshot 扫描（显式 scan_channel，0 OpenList 请求；
+    # 冷却门按通道判定，snapshot 通道不查 OpenList health）
     root_id = root.root_id
     generation = catalog_store.bump_generation(root_id)
     job_id = orchestrator.enqueue_scan(
@@ -1334,7 +1361,7 @@ async def bootstrap_openlist_with_tree(
         source_id,
         input_path=str(archive),
         scan_mode=scan_mode,
-        scan_channel="snapshot_pan115",
+        scan_channel=channel,
     )
     return {
         "task_id": job_id,
@@ -1342,14 +1369,100 @@ async def bootstrap_openlist_with_tree(
         "generation": generation,
         "preset_id": preset.preset_id,
         "execution_mode": "durable",
-        "scan_channel": "snapshot_pan115",
+        "scan_channel": channel,
         "scan_mode": scan_mode,
+        "source_id": source_id,
         "resolution": lifecycle.resolution_api_label(resolution.action),
         "requested_locator": normalized,
         "canonical_locator": resolution.canonical_locator,
         "tree_file_count": snapshot.file_count,
         "tree_video_count": snapshot.video_count,
     }
+
+
+class BindRootRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    root_id: str
+    remote_locator: str
+
+
+@router.post("/bind-root")
+@_admitted_import_endpoint
+def bind_provider_root_to_openlist(req: BindRootRequest):
+    """RWK-3：给已存在的 Provider SourceRoot 绑定可选 OpenList 增量通道。
+
+    Provider Identity ≠ Scan Channel 的落地：
+    - root 的长期身份仍是 Provider（pan115/baidu），本端点**不创建新 source/root**；
+    - 只持久化 binding 元数据（openlist_conn_hash + openlist_remote_locator），
+      之后对该 root 的扫描使用 scan_channel=openlist，root_id/media_units 不变；
+    - 要求 OpenList 已配置（可信 resolver，防 stale credential——REWORK）。
+
+    binding 前做一次错绑预检（HYB-5 preflight 同款）：只 list root 直接成员，
+    与 Provider 快照直接成员对比，双方非空但完全无重叠 → 拒绝，0 变更。
+    """
+    from app.catalog import store as catalog_store
+    from app.db.database import init_db
+    from app.integrations.openlist.governor import governor_connection_key
+    from app.pipeline.discovery_handler import _reconcile_preflight
+
+    init_db()
+    root_id = (req.root_id or "").strip()
+    if not root_id:
+        raise HTTPException(status_code=400, detail="缺少 root_id")
+    root = catalog_store.get_source_root(root_id)
+    if root is None:
+        raise HTTPException(status_code=404, detail="来源根不存在")
+
+    # OpenList 凭据必须可用（可信 resolver）：绑定本身就是 OpenList 通道
+    # 的开启动作，禁止用 stale cached username 派生连接身份。
+    username, _password, state = resolve_openlist_credentials()
+    if state == "unavailable":
+        raise HTTPException(
+            status_code=503,
+            detail="本机凭据管理器暂时不可用，请稍后重试",
+        )
+    if not username or not _password:
+        raise HTTPException(
+            status_code=400,
+            detail="尚未配置 OpenList 连接，请先到设置页完成配置",
+        )
+    config = load_config()
+    conn_hash = governor_connection_key(config.openlist_server_url, username)
+    normalized = normalize_remote_path(req.remote_locator)
+    if not normalized or normalized == "/":
+        raise HTTPException(status_code=400, detail="请选择 OpenList 远端媒体目录（不能是根目录）")
+
+    # 错绑预检：构建临时 OpenList scanner 做一次有界 root list（1 次请求）。
+    from app.integrations.openlist.client import get_openlist_client
+
+    client = get_openlist_client(config.openlist_server_url, username, _password)
+    from app.catalog.scanner import SourceCatalogScanner
+
+    scanner = SourceCatalogScanner(source="openlist", client=client)
+    try:
+        # snapshot_locator=root.remote_locator：快照直接成员挂在 root 实际
+        # locator 下（Provider 模型下可能是本地 POSIX 形式，与绑定远端路径不同）
+        _reconcile_preflight(
+            scanner, root_id, normalized,
+            snapshot_locator=root.remote_locator,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    catalog_store.bind_root_to_openlist(
+        root_id,
+        openlist_conn_hash=conn_hash,
+        openlist_remote_locator=normalized,
+    )
+    return {
+        "root_id": root_id,
+        "bound": True,
+        "openlist_remote_locator": normalized,
+        "source_id": root.source_id,
+    }
+
+
 # ============================================================
 # Durable batch API（v2：import-batch → discovery job → SQLite revision）
 # ============================================================

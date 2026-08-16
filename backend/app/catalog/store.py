@@ -480,6 +480,29 @@ def update_root_metadata(root_id: str, *, import_family: str = "", import_scope:
     )
     get_connection().commit()
 
+def bind_root_to_openlist(
+    root_id: str,
+    *,
+    openlist_conn_hash: str,
+    openlist_remote_locator: str,
+) -> None:
+    """RWK-3：把 Provider root 绑定到可选 OpenList 增量通道。
+
+    只写 binding 元数据，不改变 root identity / source / media_units；
+    后续对该 root 的 scan 使用 scan_channel=openlist 时，同一 root 复用。
+    """
+    if not root_id or not openlist_conn_hash:
+        return
+    get_connection().execute(
+        """
+        UPDATE source_roots
+        SET openlist_conn_hash = ?, openlist_remote_locator = ?, updated_at = ?
+        WHERE root_id = ?
+        """,
+        (openlist_conn_hash, openlist_remote_locator or "", now_iso(), root_id),
+    )
+    get_connection().commit()
+
 
 def touch_successful_scan(root_id: str) -> None:
     conn = get_connection()

@@ -176,7 +176,13 @@ def _needs_first_remote_reconcile(root_id: str) -> bool:
     return stats["remote_verified_count"] == 0
 
 
-def _reconcile_preflight(scanner, root_id: str, remote_locator: str):
+def _reconcile_preflight(
+    scanner,
+    root_id: str,
+    remote_locator: str,
+    *,
+    snapshot_locator: str = "",
+):
     """HYB-5：首次 TXT→OpenList 对账保护（bootstrap compatibility preflight）。
 
     只 list 选定 root 的直接成员（1 次请求），与 TXT 快照的直接成员对比：
@@ -184,12 +190,18 @@ def _reconcile_preflight(scanner, root_id: str, remote_locator: str):
       0 tombstone、不生成大量 revisions（用户可能把 TXT 与错误的远端
       目录绑定了）；
     - 正常/轻微差异（TXT 是旧快照，允许增减）→ 放行进入 baseline learning。
+
+    ``snapshot_locator``：快照直接成员实际挂在的 parent locator（默认等于
+    remote_locator；Provider 模型下 root.remote_locator 可能是本地 POSIX
+    形式，而 binding 的远端路径不同——传 root.remote_locator 精确查快照子项）。
     """
     from app.catalog import store as catalog_store
 
     snapshot_children = {
         row["name"]
-        for row in catalog_store.list_current_children(root_id, remote_locator)
+        for row in catalog_store.list_current_children(
+            root_id, snapshot_locator or remote_locator
+        )
     }
     # 只取第一页（root 直接成员通常远小于分页上限）；有界读取，不递归。
     page = scanner.enumerate_directory(remote_locator, page=1, per_page=100)
@@ -217,12 +229,19 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
     if root is None:
         raise ValueError(f"source root 不存在: {root_id}")
 
-    # 模块 1 冷却拦截：OpenList 来源在构造扫描器之前检查连接健康。
-    # 冷却中不构造扫描器、不跑 engine、不请求远程；保留 Source Catalog 已有数据。
-    # 与 OpenListClient 上报一致：连接键 = sha256(server_url|username)
+    # REWORK（Blocker 3）：健康门按实际 scan_channel 判定，而不是 source_id
+    # 前缀。只有 OpenList 通道才进入 credential / health / cooldown gate；
+    # snapshot_pan115 / snapshot_baidu / local 是纯本地（或本地挂载）通道，
+    # 完全不读 OpenList 凭据、不查 source_health——OpenList 冷却/凭据故障
+    # 绝不能阻塞本地 TXT 扫描。
     health_key = ""
     source = str(root.source_id or "")
-    if source.startswith("openlist") or source == "openlist":
+    channel = str(payload.get("scan_channel") or "")
+    is_openlist_channel = (
+        channel == "openlist"
+        or (not channel and (source.startswith("openlist") or source == "openlist"))
+    )
+    if is_openlist_channel:
         from app.core.config import load_config, resolve_openlist_credentials
         from app.integrations.openlist.governor import governor_connection_key
 
