@@ -253,6 +253,13 @@ export const openlistApi = {
     body.append('tree_file', params.treeFile)
     return api.form<OpenListBootstrapResult>('/api/openlist/bootstrap-tree', 'POST', body)
   },
+  // RWK-18：列出可绑定 OpenList 增量的 115/百度 Provider 来源
+  getBindableProviders: () =>
+    api.get<{ providers: Array<{
+      preset_id: string; name: string; provider: string; root_id: string;
+      source_id: string; local_locator: string; bound: boolean;
+      openlist_remote_locator: string;
+    }> }>('/api/openlist/bindable-providers'),
   // RWK-3：给已存在的 Provider root 绑定可选 OpenList 增量通道
   bindRoot: (rootId: string, remoteLocator: string) =>
     api.post<{ root_id: string; bound: boolean; openlist_remote_locator: string; source_id: string }>(

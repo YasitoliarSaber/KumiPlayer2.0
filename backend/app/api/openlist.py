@@ -1303,56 +1303,33 @@ async def bootstrap_provider_with_tree(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"目录树解析失败: {exc}") from None
 
-    # —— resolve/create Provider root（同一 root，后续 OpenList 增量复用）
+    # —— resolve/create Provider root（同一 root，后续 OpenList 增量复用）。
+    # RWK-17：与现有 TXT 导入共用 ensure_provider_source_root（幂等）。
+    from app.media_presets.service import ensure_provider_source_root
+
+    try:
+        root_id = ensure_provider_source_root(
+            provider=provider,
+            local_mount_root=str(effective_root),
+            import_family=(import_family or "anime").strip(),
+            import_scope=(import_scope or "").strip(),
+            remote_locator=normalized,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    root = catalog_store.get_source_root(root_id)
+    if root is None:
+        raise HTTPException(status_code=409, detail="来源根解析失败，请重新导入")
     resolution = lifecycle.resolve_root_for_import(
-        source_id,
+        root.source_id,
         normalized,
         import_family=(import_family or "anime").strip(),
         import_scope=(import_scope or "").strip(),
         local_locator=str(effective_root),
     )
-    scan_mode = "full"
-    if resolution.action == "create":
-        try:
-            root = catalog_store.create_source_root(
-                source_id=source_id,
-                remote_locator=normalized,
-                local_locator=str(effective_root),
-                import_family=(import_family or "anime").strip(),
-                import_scope=(import_scope or "").strip(),
-                scan_policy="standard",
-            )
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=409,
-                detail=f"预设远端定位与既有来源根重叠，拒绝扩大扫描范围：{exc}",
-            ) from None
-    elif resolution.action == "promote_parent":
-        resolution = lifecycle.promote_parent_root(
-            source_id,
-            normalized,
-            local_locator=str(effective_root),
-            import_family=(import_family or "anime").strip(),
-            import_scope=(import_scope or "").strip(),
-            child_root_ids=resolution.covered_root_ids,
-        )
-        root = catalog_store.get_source_root(resolution.canonical_root_id)
-        if root is None:
-            raise HTTPException(status_code=409, detail="来源根归并失败，请重试")
-    else:
-        # reuse_exact / reuse_ancestor：复用既有 root
-        root = catalog_store.get_source_root(resolution.canonical_root_id)
-        if root is None:
-            raise HTTPException(status_code=409, detail="来源根解析失败，请重新导入")
-        if resolution.action == "reuse_ancestor":
-            catalog_store.update_root_metadata(
-                root.root_id,
-                import_family=(import_family or "anime").strip(),
-                import_scope=(import_scope or "").strip(),
-            )
-
     # —— enqueue TXT snapshot 扫描（显式 scan_channel，0 OpenList 请求；
     # 冷却门按通道判定，snapshot 通道不查 OpenList health）
+    scan_mode = "full"
     root_id = root.root_id
     generation = catalog_store.bump_generation(root_id)
     job_id = orchestrator.enqueue_scan(
@@ -1488,13 +1465,52 @@ def bind_provider_root_to_openlist(req: BindRootRequest):
         "source_id": root.source_id,
     }
 
+@router.get("/bindable-providers")
+def list_bindable_providers():
+    """RWK-18：列出可绑定 OpenList 增量的 Provider 来源（115/百度）。
+
+    从 media presets（TXT 导入/安全初始化建立的）读取 catalog_root_id 关联，
+    返回来源名、provider、root_id、绑定状态——UI 据此做下拉选择，
+    不再要求用户手填内部 root_id。
+    """
+    from app.catalog import store as catalog_store
+    from app.media_presets.store import list_presets
+
+    providers = []
+    seen_roots = set()
+    for preset in list_presets():
+        if preset.source not in {"pan115", "baidu"}:
+            continue
+        root_id = (preset.catalog_root_id or "").strip()
+        if not root_id or root_id in seen_roots:
+            continue
+        root = catalog_store.get_source_root(root_id)
+        if root is None:
+            continue
+        seen_roots.add(root_id)
+        bound = bool(
+            (getattr(root, "openlist_conn_hash", "") or "")
+            and (getattr(root, "openlist_remote_locator", "") or "")
+        )
+        providers.append({
+            "preset_id": preset.preset_id,
+            "name": preset.name or preset.source,
+            "provider": preset.source,
+            "root_id": root_id,
+            "source_id": root.source_id,
+            "local_locator": root.local_locator,
+            "bound": bound,
+            "openlist_remote_locator": (
+                getattr(root, "openlist_remote_locator", "") or ""
+            ),
+        })
+    return {"providers": providers}
+
 
 class BoundRootRescanRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     root_id: str
-
-
 @router.post("/bound-roots/rescan")
 @_admitted_import_endpoint
 def rescan_bound_provider_root(req: BoundRootRescanRequest):

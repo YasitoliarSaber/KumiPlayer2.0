@@ -150,10 +150,30 @@ export default function OpenListSettingsPanel({
   const [telemetry, setTelemetry] = useState<OpenListTelemetrySummary | null>(null);
   // RWK-11：Provider root 绑定 OpenList 增量通道（最小可用入口）
   const [bindOpen, setBindOpen] = useState(false);
+  const [bindProviders, setBindProviders] = useState<Array<{
+    preset_id: string; name: string; provider: string; root_id: string;
+    source_id: string; local_locator: string; bound: boolean;
+    openlist_remote_locator: string;
+  }>>([]);
   const [bindRootId, setBindRootId] = useState('');
   const [bindLocator, setBindLocator] = useState('');
   const [bindBusy, setBindBusy] = useState(false);
   const [bindMessage, setBindMessage] = useState('');
+
+  const loadBindProviders = async () => {
+    try {
+      const data = await openlistApi.getBindableProviders();
+      setBindProviders(data.providers || []);
+      if (data.providers && data.providers.length > 0 && !bindRootId) {
+        setBindRootId(data.providers[0].root_id);
+      }
+    } catch { /* 尽力而为 */ }
+  };
+  const toggleBindOpen = () => {
+    const next = !bindOpen;
+    setBindOpen(next);
+    if (next) loadBindProviders();
+  };
 
   const runBindRoot = async () => {
     if (!bindRootId.trim() || !bindLocator.trim()) {
@@ -327,17 +347,30 @@ export default function OpenListSettingsPanel({
       )}
 
       <div className="sources-openlist-binding">
-        <Button appearance="secondary" size="small" onClick={() => setBindOpen((v) => !v)} className="settings-ghost-btn fluent-settings-btn">
+        <Button appearance="secondary" size="small" onClick={toggleBindOpen} className="settings-ghost-btn fluent-settings-btn">
           {bindOpen ? '收起 Provider 增量绑定' : 'Provider 增量绑定（可选）'}
         </Button>
+        <span className="sources-route-hint">为 115/百度目录树来源绑定 OpenList 增量检测（root 身份不变）</span>
         {bindOpen && (
           <div className="sources-openlist-binding-editor">
             <span className="sources-route-hint">
               纯 TXT 建立的 115/百度来源根可绑定 OpenList 作为增量检测通道（root 身份不变）。
             </span>
             <label className="settings-config-row">
-              <span>来源根 ID（root_id）</span>
-              <input type="text" value={bindRootId} onChange={(event) => setBindRootId(event.target.value)} className="settings-input" placeholder="bootstrap 返回的 root_id" />
+              <span>115/百度来源</span>
+              {bindProviders.length > 0 ? (
+                <select value={bindRootId} onChange={(event) => setBindRootId(event.target.value)} className="settings-input">
+                  {bindProviders.map((item) => (
+                    <option key={item.root_id} value={item.root_id}>
+                      {item.name}（{item.provider}）{item.bound ? ' · 已绑定' : ' · 未绑定'}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <span className="sources-route-hint">
+                  暂无 115/百度来源。请先在媒体管理中导入目录树 TXT（导入后这里会出现来源）。
+                </span>
+              )}
             </label>
             <label className="settings-config-row">
               <span>OpenList 远端目录</span>

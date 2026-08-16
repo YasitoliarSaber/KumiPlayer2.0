@@ -170,6 +170,92 @@ def openlist_preset_state(catalog_root_id: str) -> dict:
     }
 
 
+def ensure_provider_source_root(
+    *,
+    provider: str,
+    local_mount_root: str,
+    import_family: str,
+    import_scope: str = "",
+    remote_locator: str = "",
+) -> str:
+    """RWK-17：建立/复用 Provider（pan115/baidu）SourceRoot，返回 root_id。
+
+    bootstrap-tree 与现有 115/百度 TXT 导入路径共用同一实现：
+    - Provider source identity = {provider}-{sha256(local_mount_root)[:16]}，
+      与 OpenList 完全解耦；
+    - root 复用/创建遵循 lifecycle 覆盖解析（exact/ancestor/promote/create）；
+    - 同一本地挂载根永远只产生一个 Provider root（幂等）。
+
+    0 OpenList 请求；root 建立后 preset.catalog_root_id 由调用方关联。
+    """
+    from app.catalog import lifecycle
+    from app.catalog import store as catalog_store
+    from app.db.database import init_db
+
+    init_db()
+    provider = (provider or "").strip().lower()
+    if provider not in {"pan115", "baidu"}:
+        raise ValueError("provider 仅支持 pan115 或 baidu")
+    mount_root = (local_mount_root or "").strip()
+    if not mount_root:
+        raise ValueError("缺少本地挂载根")
+    effective_root = Path(mount_root).expanduser()
+
+    provider_key = hashlib.sha256(
+        str(effective_root).casefold().encode("utf-8")
+    ).hexdigest()[:16]
+    source_id = f"{provider}-{provider_key}"
+    catalog_store.create_source(
+        source_id=source_id,
+        source_type=provider,
+        provider_id=provider,
+        ingest_method="directory_tree",
+        connection_key=source_id,
+        display_name="115 目录树" if provider == "pan115" else "百度目录树",
+    )
+
+    normalized = remote_locator.strip() or (
+        "/" + str(effective_root).replace("\\", "/").strip("/")
+    )
+    resolution = lifecycle.resolve_root_for_import(
+        source_id,
+        normalized,
+        import_family=(import_family or "anime").strip(),
+        import_scope=(import_scope or "").strip(),
+        local_locator=str(effective_root),
+    )
+    if resolution.action == "create":
+        root = catalog_store.create_source_root(
+            source_id=source_id,
+            remote_locator=normalized,
+            local_locator=str(effective_root),
+            import_family=(import_family or "anime").strip(),
+            import_scope=(import_scope or "").strip(),
+            scan_policy="standard",
+        )
+    elif resolution.action == "promote_parent":
+        resolution = lifecycle.promote_parent_root(
+            source_id,
+            normalized,
+            local_locator=str(effective_root),
+            import_family=(import_family or "anime").strip(),
+            import_scope=(import_scope or "").strip(),
+            child_root_ids=resolution.covered_root_ids,
+        )
+        root = catalog_store.get_source_root(resolution.canonical_root_id)
+        if root is None:
+            raise ValueError("来源根归并失败，请重试")
+    else:
+        root = catalog_store.get_source_root(resolution.canonical_root_id)
+        if root is None:
+            raise ValueError("来源根解析失败，请重新导入")
+        if resolution.action == "reuse_ancestor":
+            catalog_store.update_root_metadata(
+                root.root_id,
+                import_family=(import_family or "anime").strip(),
+                import_scope=(import_scope or "").strip(),
+            )
+    return root.root_id
 def preset_to_dict(preset: MediaLibraryPreset) -> dict:
     data = asdict(preset)
     data["is_library_indexed"] = preset.lifecycle_status == "ready"

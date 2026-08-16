@@ -285,6 +285,29 @@ async def create_media_preset(
         version,
         snapshot,
     )
+    # RWK-17：现有 115/百度 TXT 导入也建立 Provider SourceRoot 并关联 preset，
+    # 来源卡才能出现"启用 OpenList 增量"入口（不要求用户手填内部 root_id）。
+    if preset.source in {"pan115", "baidu"}:
+        try:
+            from app.media_presets.service import ensure_provider_source_root
+            from app.media_presets.store import save_preset as _save_preset
+
+            from app.media_presets.service import ensure_provider_source_root, now_iso
+            from app.media_presets.store import save_preset as _save_preset
+
+            root_id = ensure_provider_source_root(
+                provider=preset.source,
+                local_mount_root=preset.source_root or source_root,
+                import_family=preset.import_family,
+                import_scope=preset.import_scope,
+            )
+            if root_id and preset.catalog_root_id != root_id:
+                preset.catalog_root_id = root_id
+                preset.updated_at = now_iso()
+                _save_preset(preset)
+        except Exception:
+            # Provider root 建立失败不阻塞 TXT 导入主流程（旧路径继续可用）
+            pass
     return {
         "preset": preset_to_dict(preset),
         "version": asdict(selected_version),
