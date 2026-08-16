@@ -1055,9 +1055,12 @@ def rescan_openlist_preset(preset_id: str):
         raise HTTPException(status_code=400, detail="该媒体库不是 OpenList 来源")
     if not preset.remote_locator:
         raise HTTPException(status_code=400, detail="该媒体库缺少 OpenList 远端定位，请重新导入")
-    _client_from_config(config)  # 未配置时快速失败
+    # 一次 resolve → 同一份可信 identity（REWORK）：credential resolution 在
+    # 任何 durable mutation 之前；unavailable → 503 / missing → 400，0 mutation。
+    eff_username, eff_password = _effective_openlist_credentials()
+    _client_from_config(config, username=eff_username, password=eff_password)  # client 校验用同一份身份
 
-    source_id = _openlist_source_id(config)
+    source_id = _openlist_source_id(config, username=eff_username)
     remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
     normalized = normalize_remote_path(preset.remote_locator)
     _ensure_within_remote_root(remote_root, normalized)
@@ -1129,21 +1132,19 @@ def rescan_openlist_preset(preset_id: str):
 # Durable batch API（v2：import-batch → discovery job → SQLite revision）
 # ============================================================
 
-def _openlist_source_id(config) -> str:
-    """OpenList 来源身份键（runtime identity 统一走 resolver）。
+def _openlist_source_id(config, *, username: str) -> str:
+    """OpenList 来源身份键（纯函数，只接受**已解析的可信 identity**）。
 
-    调用方（import-batch / rescan）在构造客户端时已通过
-    ``_client_from_config`` 校验凭据可达；这里同样使用恢复后的真实
-    username 参与连接身份，避免 stale cached 空凭据产生错误 source id。
+    关键原则（REWORK）：身份函数不自己 catch credential failure、不猜
+    fallback——``username`` 必须由调用方在 durable DB mutation 之前通过
+    resolver 解析完成（unavailable → 503 / missing → 400，0 mutation）。
+    这保证同一真实 OpenList 连接永远只产生一个稳定的 source identity，
+    不会因 stale cached 空凭据产生 ``blank-user`` 错误身份。
     """
     remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
-    try:
-        eff_username, _ = _effective_openlist_credentials()
-    except HTTPException:
-        eff_username = config.openlist_username or ""
     identity = connection_key(
         config.openlist_server_url,
-        eff_username,
+        username,
         remote_root,
     )
     return f"openlist-{identity}"
@@ -1239,9 +1240,14 @@ def create_openlist_import_batch(req: BatchImportRequest):
     from app.pipeline import orchestrator
 
     config = load_config()
+    # credential resolution 必须发生在第一次 durable DB mutation 之前
+    # （REWORK）：unavailable → 503 / missing → 400，0 mutation；
+    # 同一份可信 username 用于 source identity，杜绝 blank-user 错误身份。
+    eff_username, eff_password = _effective_openlist_credentials()
+    _client_from_config(config, username=eff_username, password=eff_password)  # 快速失败 + 同一身份
     normalized = _validate_batch_paths(config, req.remote_paths)
     remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
-    source_id = _openlist_source_id(config)
+    source_id = _openlist_source_id(config, username=eff_username)
     _ensure_openlist_source(catalog_store, source_id)
     family = (req.import_family or "anime").strip()
     scope = (req.import_scope or "").strip()
