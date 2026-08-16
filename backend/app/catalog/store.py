@@ -678,25 +678,28 @@ def prepare_scan(root_id: str, *, generation: int, mode: str = "incremental") ->
             """,
             (root_id, timestamp),
         )
-        # HYB-5：rolling baseline learning 预算——snapshot-only（TXT bootstrap
-        # 遗留、从未被 OpenList 验证过）的 complete 目录每轮只取有限数量入队，
-        # 选“最久未验证 + stable hash jitter”而非全部同时到期，避免一轮
-        # 变相全扫。TXT 提交的目录 next_verify_at 已带 jitter 分散，这里
-        # 再按 last_verified_at 升序取预算内最旧的一批做基线学习。
+        # HYB-5：rolling baseline learning 预算——从未被 OpenList 验证过
+        # （last_remote_verified_at=''）且**没有未来到期安排**（next_verify_at
+        # 为空或已到期）的 complete 目录每轮只取有限数量入队，选“最久未
+        # 验证 + stable hash jitter”而非全部同时到期，避免一轮变相全扫。
+        # 已有未来到期安排的目录（next_verify_at 在未来）不被 baseline
+        # 提前拉取，保持其既定滚动节奏。
         tx.execute(
             """
             UPDATE source_directories SET state = 'queued'
             WHERE root_id = ? AND state = 'complete'
               AND last_remote_verified_at = ''
+              AND (next_verify_at = '' OR next_verify_at <= ?)
               AND remote_path IN (
                   SELECT remote_path FROM source_directories
                   WHERE root_id = ? AND state = 'complete'
                     AND last_remote_verified_at = ''
+                    AND (next_verify_at = '' OR next_verify_at <= ?)
                   ORDER BY last_verified_at ASC, remote_path ASC
                   LIMIT ?
               )
             """,
-            (root_id, root_id, BASELINE_VERIFY_BUDGET),
+            (root_id, timestamp, root_id, timestamp, BASELINE_VERIFY_BUDGET),
         )
 
 
