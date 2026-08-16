@@ -243,11 +243,15 @@ def _ensure_tree_baseline(
     """
     if not preset or preset.source not in {"pan115", "baidu"}:
         return None
-    if reused or unchanged:
-        # 复用路径：既有 preset 已关联过 baseline（或归档已失效），不重复入队
+    if unchanged:
+        # 内容真正无变化（同 SHA/同媒体）：归档已被 discard，root 已有 baseline——
+        # 跳过重新入队（避免悬空 input_path；既有 Source Catalog 数据保持）。
         root_id = (preset.catalog_root_id or "").strip()
         if root_id:
             return {"root_id": root_id, "job_id": "", "status": "baseline_reused"}
+    # reused（卡片复用）但内容更新（v2 新版本）：仍须重新入队更新同 root
+    # 的 Source Catalog baseline（RWK-27）——archive 已 move 到版本目录，用
+    # version.archive_path 重取后有效。
     if not tree_archive:
         return {"status": "baseline_failed"}
     try:
@@ -508,12 +512,23 @@ async def update_media_preset(preset_id: str, tree_file: UploadFile = File(...))
     )
     version.path_validation = path_validation.to_dict()
     cumulative, diff = update_preset_from_tree(preset, version, snapshot)
-    return {
+    # RWK-27：新版本 TXT 同步同一 Provider Source Catalog baseline
+    baseline = _ensure_tree_baseline(
+        preset,
+        str(Path(get_data_dir()) / version.archive_path) if version.archive_path else "",
+        preset.source_root,
+        preset.import_family,
+        preset.import_scope,
+    )
+    result = {
         "preset": preset_to_dict(preset),
         "version": asdict(version),
         "diff": _diff_to_dict(diff),
         "preview": _preview_to_dict(build_preview(cumulative)),
     }
+    if baseline:
+        result["baseline"] = baseline
+    return result
 
 
 class LocalTreeUpdateRequest(BaseModel):
@@ -638,9 +653,22 @@ def update_media_preset_from_path(preset_id: str, req: LocalTreeUpdateRequest):
     preset.source_root = source_root
     preset.updated_at = version.created_at
     save_preset(preset)
-    return {
+    # RWK-27：新版本 TXT 同步同一 Provider Source Catalog baseline——
+    # 同 root_id 重新 enqueue snapshot full 更新，generation 前进；
+    # 失败/安全阻断在上面的 update_preset_from_tree 已保持旧 baseline 不动。
+    baseline = _ensure_tree_baseline(
+        preset,
+        str(Path(get_data_dir()) / version.archive_path) if version.archive_path else "",
+        source_root,
+        preset.import_family,
+        preset.import_scope,
+    )
+    result = {
         "preset": preset_to_dict(preset),
         "version": asdict(version),
         "diff": _diff_to_dict(diff),
         "preview": _preview_to_dict(build_preview(cumulative)),
     }
+    if baseline:
+        result["baseline"] = baseline
+    return result

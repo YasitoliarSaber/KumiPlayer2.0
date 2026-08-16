@@ -65,6 +65,12 @@ export interface PresetImportResult {
   };
   reused_preset?: boolean;
   unchanged?: boolean;
+  /** RWK-21/22/27：Provider Source Catalog baseline 状态（TXT 导入/更新） */
+  baseline?: {
+    root_id?: string;
+    job_id?: string;
+    status: 'baseline_queued' | 'baseline_reused' | 'baseline_failed';
+  };
 }
 
 export interface PresetDeletePreview {

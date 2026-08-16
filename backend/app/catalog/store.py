@@ -616,16 +616,39 @@ def list_all_directories(root_id: str) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def mark_baseline_completed(root_id: str, generation: int) -> None:
+    """RWK-25：TXT snapshot baseline 完整完成的 durable fact（原子标记）。"""
+    conn = get_connection()
+    conn.execute(
+        """
+        UPDATE source_roots
+        SET baseline_completed_generation = ?,
+            baseline_completed_at = ?,
+            updated_at = ?
+        WHERE root_id = ?
+        """,
+        (generation, now_iso(), now_iso(), root_id),
+    )
+    conn.commit()
+
+
 def source_catalog_baseline_stats(root_id: str) -> dict:
-    """RWK-23：Provider root 的 Source Catalog 本地基线统计。
+    """RWK-25：Provider root 的 Source Catalog 本地基线统计。
 
     返回 {baseline_ready, baseline_directory_count, baseline_node_count}：
-    - baseline_ready：存在至少一个 complete 的 source_directories
-      （TXT snapshot discovery 完成过，不是空 root）；
+    - baseline_ready：**完整** TXT snapshot baseline 已完成（durable fact：
+      baseline_completed_generation > 0，由 snapshot job 全部目录完成后原子标记）。
+      部分完成/中断的扫描不得视为 ready——否则第一次 OpenList 增量会继续
+      远端展开尚未本地建立的 subtree；
     - baseline_directory_count：complete 目录数；
     - baseline_node_count：非 tombstone 的 source_nodes 数。
     """
     conn = get_connection()
+    row = conn.execute(
+        "SELECT baseline_completed_generation FROM source_roots WHERE root_id = ?",
+        (root_id,),
+    ).fetchone()
+    completed_gen = int(row["baseline_completed_generation"] if row else 0) > 0
     dirs = int(
         conn.execute(
             """
@@ -645,7 +668,7 @@ def source_catalog_baseline_stats(root_id: str) -> dict:
         ).fetchone()["c"]
     )
     return {
-        "baseline_ready": dirs > 0,
+        "baseline_ready": completed_gen and dirs > 0,
         "baseline_directory_count": dirs,
         "baseline_node_count": nodes,
     }

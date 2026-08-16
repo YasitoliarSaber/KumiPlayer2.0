@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@fluentui/react-components';
-import { openlistApi, type OpenListConfigPayload, type OpenListTestConnectionPayload, type OpenListTestResult, type OpenListTelemetrySummary } from '../../api/openlist';
+import { openlistApi, type BindableProvider, type OpenListConfigPayload, type OpenListTestConnectionPayload, type OpenListTestResult, type OpenListTelemetrySummary } from '../../api/openlist';
 import type { PublicConfig } from '../../api/config';
 
 /**
@@ -150,11 +150,7 @@ export default function OpenListSettingsPanel({
   const [telemetry, setTelemetry] = useState<OpenListTelemetrySummary | null>(null);
   // RWK-11：Provider root 绑定 OpenList 增量通道（最小可用入口）
   const [bindOpen, setBindOpen] = useState(false);
-  const [bindProviders, setBindProviders] = useState<Array<{
-    preset_id: string; name: string; provider: string; root_id: string;
-    source_id: string; local_locator: string; bound: boolean;
-    openlist_remote_locator: string;
-  }>>([]);
+  const [bindProviders, setBindProviders] = useState<BindableProvider[]>([]);
   const [bindRootId, setBindRootId] = useState('');
   const [bindLocator, setBindLocator] = useState('');
   const [bindBusy, setBindBusy] = useState(false);

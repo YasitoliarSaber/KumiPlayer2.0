@@ -465,6 +465,10 @@ export default function MediaManagementPage() {
         : result.reused_preset && result.unchanged
           ? `${getPresetDisplayName(result.preset)} 已存在，内容相同，未创建重复卡片或版本`
           : `${result.preset.name} 已创建，目录树已由 KumiPlayer 保存`);
+      // RWK-28：baseline_failed 对用户可见（媒体库已创建但本地增量基线初始化失败）
+      if (result.baseline?.status === 'baseline_failed') {
+        setActionError('媒体库已创建，但本地增量基线初始化失败：OpenList 增量暂不可用，可稍后重新导入目录树或检查数据目录权限。');
+      }
       if (action.kind === 'create') setSelectedCloudRoot('');
       await loadPresets();
       setStep('confirm');

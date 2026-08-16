@@ -80,6 +80,21 @@ export interface OpenListBootstrapResult {
   tree_video_count: number
 }
 
+/** RWK-18/23：可绑定 OpenList 增量的 115/百度 Provider 来源 */
+export interface BindableProvider {
+  preset_id: string
+  name: string
+  provider: string
+  root_id: string
+  source_id: string
+  local_locator: string
+  bound: boolean
+  openlist_remote_locator: string
+  baseline_ready: boolean
+  baseline_directory_count: number
+  baseline_node_count: number
+}
+
 /** HYB-6：KumiPlayer → OpenList 请求成本遥测摘要 */
 export interface OpenListTelemetrySummary {
   fs_list: number
@@ -255,13 +270,7 @@ export const openlistApi = {
   },
   // RWK-18/23：列出可绑定 OpenList 增量的 115/百度 Provider 来源（含本地基线状态）
   getBindableProviders: () =>
-    api.get<{ providers: Array<{
-      preset_id: string; name: string; provider: string; root_id: string;
-      source_id: string; local_locator: string; bound: boolean;
-      openlist_remote_locator: string;
-      baseline_ready: boolean; baseline_directory_count: number;
-      baseline_node_count: number;
-    }> }>('/api/openlist/bindable-providers'),
+    api.get<{ providers: BindableProvider[] }>('/api/openlist/bindable-providers'),
   // RWK-3：给已存在的 Provider root 绑定可选 OpenList 增量通道
   bindRoot: (rootId: string, remoteLocator: string) =>
     api.post<{ root_id: string; bound: boolean; openlist_remote_locator: string; source_id: string }>(

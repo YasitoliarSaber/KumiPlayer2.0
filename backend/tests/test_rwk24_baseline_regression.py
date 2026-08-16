@@ -476,3 +476,233 @@ class TestBindBaselineGuard:
         assert "尚未建立 Source Catalog 本地基线" in bind.json()["detail"]
         root = catalog_store.get_source_root(root_id)
         assert root.openlist_conn_hash == "", "拒绝时不得写 binding"
+
+
+class TestPartialBaselineNotReady:
+    def test_partial_snapshot_not_ready_and_bind_rejected(self, client, tmp_path):
+        """事故①：部分 snapshot 完成（有 complete 目录但仍有 queued）→ 不 ready，bind 拒绝。"""
+        from app.catalog import store as catalog_store
+        from app.db.database import get_connection
+        from app.jobs import store as job_store
+
+        tree = _write_tree(tmp_path, _big_tree())
+        resp = client.post(
+            "/api/media-presets/import-local-tree",
+            json={"tree_path": str(tree), "import_family": "anime", "import_scope": ""},
+        )
+        assert resp.status_code == 200, resp.text
+        preset = next(p for p in list_presets() if p.source == "pan115")
+        root_id = preset.catalog_root_id
+
+        # 模拟部分完成：root complete，但仍有大量 queued 目录（未扫描）
+        jobs = job_store.list_jobs(job_type="discovery_scan", status="queued", limit=100)
+        snapshot_job = next(
+            (j for j in jobs if j.payload.get("root_id") == root_id),
+            None,
+        )
+        assert snapshot_job is not None
+        from app.pipeline.discovery_handler import handle_discovery_scan
+
+        result = handle_discovery_scan(snapshot_job.payload)
+        assert result["summary"].get("failed_count", 0) == 0
+
+        # 故意制造部分状态：把部分 complete 目录改回 queued（模拟中断/后续未完成）
+        conn = get_connection()
+        conn.execute(
+            """
+            UPDATE source_directories SET state = 'queued'
+            WHERE root_id = ? AND remote_path IN (
+                SELECT remote_path FROM source_directories
+                WHERE root_id = ? AND state = 'complete' LIMIT 10
+            )
+            """,
+            (root_id, root_id),
+        )
+        conn.commit()
+        # 同时清掉 baseline completed fact（模拟中断时未走到标记）
+        conn.execute(
+            "UPDATE source_roots SET baseline_completed_generation = 0, baseline_completed_at = '' WHERE root_id = ?",
+            (root_id,),
+        )
+        conn.commit()
+
+        # baseline_ready 必须为 false（有 complete 目录但未完整完成）
+        stats = catalog_store.source_catalog_baseline_stats(root_id)
+        assert stats["baseline_directory_count"] > 0, "前置：确有 complete 目录"
+        assert stats["baseline_ready"] is False, (
+            "部分完成（仍有 queued）不得视为 ready"
+        )
+
+        # bind 必须拒绝
+        resp = client.post(
+            "/api/openlist/config",
+            json={
+                "server_url": "http://127.0.0.1:5244",
+                "remote_root": "/115网盘",
+                "mount_root": str(tmp_path / "mount"),
+                "username": "test-user",
+                "password": "p@ssw0rd",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        resp = client.put(
+            "/api/openlist/routes",
+            json={
+                "routes": [
+                    {
+                        "route_id": "r-115", "label": "115",
+                        "remote_prefix": "/115网盘/动画1",
+                        "provider_id": "pan115", "enabled": True,
+                    }
+                ]
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        bind = client.post(
+            "/api/openlist/bind-root",
+            json={"root_id": root_id, "remote_locator": "/115网盘/动画1"},
+        )
+        assert bind.status_code == 400, bind.text
+        root = catalog_store.get_source_root(root_id)
+        assert root.openlist_conn_hash == ""
+
+        # 完整重扫后恢复 ready
+        conn.execute(
+            "UPDATE source_directories SET state = 'complete' WHERE root_id = ? AND state = 'queued'",
+            (root_id,),
+        )
+        conn.commit()
+        catalog_store.mark_baseline_completed(root_id, 999)
+        stats2 = catalog_store.source_catalog_baseline_stats(root_id)
+        assert stats2["baseline_ready"] is True
+
+
+class TestSingleExecutionAuthority:
+    def test_txt_baseline_no_auto_mirror_then_confirm_single_chain(self, client, tmp_path):
+        """事故②：TXT baseline 阶段不自动 mirror；用户确认 revision 后仅一条 durable chain。"""
+        from app.db.database import get_connection
+        from app.jobs import store as job_store
+        from app.import_plan import revision_store
+        from app.pipeline.discovery_handler import handle_discovery_scan
+
+        tree = _write_tree(tmp_path, _big_tree())
+        resp = client.post(
+            "/api/media-presets/import-local-tree",
+            json={"tree_path": str(tree), "import_family": "anime", "import_scope": ""},
+        )
+        assert resp.status_code == 200, resp.text
+        preset = next(p for p in list_presets() if p.source == "pan115")
+        root_id = preset.catalog_root_id
+
+        # 执行 snapshot baseline：不得 auto-confirm / 不得 enqueue mirror
+        jobs = job_store.list_jobs(job_type="discovery_scan", status="queued", limit=200)
+        snapshot_job = next(
+            (j for j in jobs if j.payload.get("root_id") == root_id), None,
+        )
+        assert snapshot_job is not None
+        result = handle_discovery_scan(snapshot_job.payload)
+        assert result["summary"].get("mirror_enqueued", 0) == 0, (
+            "TXT baseline 不得自动 enqueue mirror（单执行权威）"
+        )
+        assert result["summary"].get("plan_ready", 0) > 0
+
+        # baseline 后：revision 全部 draft（未 auto-confirm）
+        conn = get_connection()
+        revisions = conn.execute(
+            """
+            SELECT r.revision_id, r.status FROM import_revisions r
+            JOIN media_units u ON u.unit_id = r.unit_id
+            WHERE u.root_id = ?
+            """,
+            (root_id,),
+        ).fetchall()
+        assert len(revisions) > 0
+        assert all(r["status"] == "draft" for r in revisions), (
+            "TXT baseline 的 revision 必须全部 draft（等待用户确认）"
+        )
+        # 无 mirror job 产生
+        mirror_jobs = job_store.list_jobs(job_type="mirror_revision", status="queued", limit=100)
+        assert not any(
+            j.payload.get("revision_id") in {r["revision_id"] for r in revisions}
+            for j in mirror_jobs
+        ), "TXT baseline 阶段不得存在对应 mirror job"
+
+        # 用户确认一个 revision → 走 durable confirm → 唯一 mirror chain
+        rev = revisions[0]
+        resp_confirm = client.post(
+            "/api/imports/pan115/confirm",
+            json={"plan_id": rev["revision_id"], "items": []},
+        )
+        # confirm 端点对 SQLite revision 走 durable 路径
+        assert resp_confirm.status_code == 200, resp_confirm.text
+        body = resp_confirm.json()
+        assert body.get("execution_mode") == "durable", body
+        assert body.get("job_id"), body
+
+        # 该 revision 恰好一个 mirror job（幂等 get-or-create）
+        mirror_jobs_after = [
+            j for j in job_store.list_jobs(job_type="mirror_revision", status="queued", limit=100)
+            if j.payload.get("revision_id") == rev["revision_id"]
+        ]
+        assert len(mirror_jobs_after) == 1, "同一 revision 只有一条 mirror chain"
+        # revision 已 confirmed
+        rev_after = conn.execute(
+            "SELECT status FROM import_revisions WHERE revision_id = ?",
+            (rev["revision_id"],),
+        ).fetchone()
+        assert rev_after["status"] == "confirmed"
+
+
+class TestTxtUpdateSyncsCatalog:
+    def test_txt_v2_update_syncs_same_root(self, client, tmp_path):
+        """事故③：TXT v1 baseline → 导入 v2 → 同 root、Catalog 更新为 v2。"""
+        from app.catalog import store as catalog_store
+        from app.db.database import get_connection
+        from app.jobs import store as job_store
+        from app.pipeline.discovery_handler import handle_discovery_scan
+
+        # v1 TXT（2 部作品）
+        tree_v1 = _write_tree(tmp_path, "|——根目录\n| |-动画1\n| | |-作品A\n| | | |-作品A.S01E01.mkv\n| | |-作品B\n| | | |-作品B.S01E01.mkv\n", name="v1目录树.txt")
+        resp = client.post(
+            "/api/media-presets/import-local-tree",
+            json={"tree_path": str(tree_v1), "import_family": "anime", "import_scope": ""},
+        )
+        assert resp.status_code == 200, resp.text
+        preset = next(p for p in list_presets() if p.source == "pan115")
+        root_id = preset.catalog_root_id
+        source_id = catalog_store.get_source_root(root_id).source_id
+        _run_snapshot_baseline(client, root_id)
+        gen_v1 = catalog_store.get_source_root(root_id).active_generation
+        assert catalog_store.source_catalog_baseline_stats(root_id)["baseline_ready"] is True
+
+        # v2 TXT（新增作品C）
+        tree_v2 = _write_tree(tmp_path, "|——根目录\n| |-动画1\n| | |-作品A\n| | | |-作品A.S01E01.mkv\n| | |-作品B\n| | | |-作品B.S01E01.mkv\n| | |-作品C\n| | | |-作品C.S01E01.mkv\n", name="v2目录树.txt")
+        resp2 = client.post(
+            "/api/media-presets/import-local-tree",
+            json={"tree_path": str(tree_v2), "import_family": "anime", "import_scope": ""},
+        )
+        assert resp2.status_code == 200, resp2.text
+        preset2 = next(p for p in list_presets() if p.source == "pan115")
+        assert preset2.catalog_root_id == root_id, "TXT v2 必须复用同一 root"
+        root2 = catalog_store.get_source_root(root_id)
+        assert root2.source_id == source_id
+
+        # 执行 v2 的 snapshot baseline 更新 → generation 前进、目录数增加
+        gen_before_run = root2.active_generation
+        _run_snapshot_baseline(client, root_id)
+        gen_v2 = catalog_store.get_source_root(root_id).active_generation
+        assert gen_v2 > gen_v1, "v2 baseline 必须 bump generation"
+        dirs = int(get_connection().execute(
+            "SELECT COUNT(*) AS c FROM source_directories WHERE root_id = ? AND state = 'complete'",
+            (root_id,),
+        ).fetchone()["c"])
+        assert dirs > 0
+        # Catalog 已含作品C（source_nodes 有 C 的目录）
+        nodes = get_connection().execute(
+            "SELECT COUNT(*) AS c FROM source_nodes WHERE root_id = ? AND remote_path LIKE '%作品C%' AND tombstone = ''",
+            (root_id,),
+        ).fetchone()["c"]
+        assert int(nodes) > 0, "v2 更新后 Catalog 必须包含新增作品C"
+        # baseline 完成标记前进（不保留 v1 假 baseline）
+        root_after = catalog_store.get_source_root(root_id)
+        assert root_after.baseline_completed_generation >= gen_v1

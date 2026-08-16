@@ -357,17 +357,28 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
 
     summary = {"plan_ready": 0, "needs_review": 0, "mirror_enqueued": 0}
 
+    # RWK-26（单执行权威）：snapshot（TXT）通道是 baseline-only——只建立
+    # draft revision（Source Catalog 索引事实），**不自动确认、不入队 mirror**；
+    # 用户通过确认页确认时走 durable mirror（confirm 端点识别 SQLite revision）。
+    # 否则 TXT 导入会同时启动 legacy plan 确认链与 auto-confirm 的 durable
+    # mirror 链（双执行权威），且用户未确认时后台已开始镜像。
+    baseline_only = scan_channel.startswith("snapshot_")
+
     def on_unit(result: dict) -> None:
         if result.get("status") == "plan_ready" and result.get("revision_id"):
             # closure 后仍须通过同一确认门槛；不确定的识别只能进入复核，
             # 绝不能因“渐进导入”而绕过安全检查。
-            confirmed, _reason = revision_store.try_auto_confirm_revision(result["revision_id"])
-            if confirmed:
-                orchestrator.enqueue_mirror(result["revision_id"], result["unit_id"])
+            if baseline_only:
+                # TXT baseline：保留 draft（供用户确认页确认），不入队 mirror
                 summary["plan_ready"] += 1
-                summary["mirror_enqueued"] += 1
             else:
-                summary["needs_review"] += 1
+                confirmed, _reason = revision_store.try_auto_confirm_revision(result["revision_id"])
+                if confirmed:
+                    orchestrator.enqueue_mirror(result["revision_id"], result["unit_id"])
+                    summary["plan_ready"] += 1
+                    summary["mirror_enqueued"] += 1
+                else:
+                    summary["needs_review"] += 1
         elif result.get("status") == "needs_review":
             summary["needs_review"] += 1
         if progress_callback is not None:
@@ -422,12 +433,40 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
             {"phase": "discovery_done", "failed_count": len(failed_paths)},
         )
 
+    # RWK-25：snapshot（TXT）通道完整完成后，原子标记 baseline completed——
+    # 仅当无 failed 目录、且无 queued/scanning 残留（重启/中断时 prepare_scan
+    # 会把 scanning 恢复为 queued，故不会误标）。部分完成的 baseline 不得
+    # 被视为 ready（否则第一次 OpenList 增量会继续远端展开未本地建立的子树）。
+    if scan_channel.startswith("snapshot_") and not failed_paths:
+        _mark_baseline_completed_if_ready(root_id, generation)
+
     return {
         "root_id": root_id,
         "generation": generation,
         "units": results,
         "summary": summary,
     }
+
+
+def _mark_baseline_completed_if_ready(root_id: str, generation: int) -> None:
+    """RWK-25：全部目录 complete（无 queued/scanning/failed）时标记 baseline 完成。"""
+    row = catalog_store.get_connection().execute(
+        """
+        SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN state = 'queued' THEN 1 ELSE 0 END) AS queued,
+            SUM(CASE WHEN state = 'scanning' THEN 1 ELSE 0 END) AS scanning,
+            SUM(CASE WHEN state = 'failed' THEN 1 ELSE 0 END) AS failed
+        FROM source_directories WHERE root_id = ?
+        """,
+        (root_id,),
+    ).fetchone()
+    total = int(row["total"] or 0)
+    queued = int(row["queued"] or 0)
+    scanning = int(row["scanning"] or 0)
+    failed = int(row["failed"] or 0)
+    if total > 0 and queued == 0 and scanning == 0 and failed == 0:
+        catalog_store.mark_baseline_completed(root_id, generation)
 
 
 def register_discovery_handler() -> None:
