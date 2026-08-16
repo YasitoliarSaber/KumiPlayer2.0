@@ -16,6 +16,7 @@ from typing import Any, Optional
 import httpx
 
 from app.core.config import DEFAULT_BANGUMI_USER_AGENT, load_config
+from app.core.credential_store import SECURE_CREDENTIAL_STORE, CredentialStoreError
 from app.core.paths import get_cache_dir, get_data_dir
 from app.core.atomic_json import write_json_atomic
 from app.core.data_lock import DATA_WRITE_LOCK
@@ -97,6 +98,31 @@ class BangumiState:
     matches: list[BangumiMatch] = field(default_factory=list)
     episode_sync: list[BangumiEpisodeSync] = field(default_factory=list)
 
+def resolve_bangumi_access_token() -> str:
+    """统一运行时凭据解析：整个 Bangumi runtime 的真实 token 来源。
+
+    语义（REWORK：CM 恢复无需重启即可恢复所有 authenticated 业务请求）：
+    1. config cache 中有 token → 返回（测试走 config.json、生产已 hydrate）；
+    2. config cache 为空且安全存储启用 → **直接读安全存储拿真实 token**
+       （不依赖可能陈旧的 config cache，CM 恢复后立即生效）；
+    3. 读取错误 → 返回 ""（不删除、不改写、不误判退出——与 not_found
+       同值，调用方只关心有没有 token，session 层另有三态判定）。
+
+    ``BangumiClient`` 默认 token 来源、/session/verify、收藏同步、已看状态
+    写入等所有 authenticated 请求都消费本函数。
+    """
+    from app.core.config import _credential_storage_enabled
+
+    config = load_config()
+    if config.bangumi_access_token:
+        return config.bangumi_access_token
+    if _credential_storage_enabled():
+        try:
+            return SECURE_CREDENTIAL_STORE.read("bangumi_access_token")
+        except CredentialStoreError:
+            return ""
+    return ""
+
 
 @dataclass
 class BangumiAccountSnapshot:
@@ -131,6 +157,8 @@ class BangumiAccountSnapshot:
             "avatar": self.avatar_url,
             "sign": self.sign,
         }
+
+
 class BangumiClient:
     """Small official v0 API client.
 
@@ -146,7 +174,9 @@ class BangumiClient:
         timeout: float = 15.0,
     ):
         config = load_config()
-        self.access_token = access_token or config.bangumi_access_token
+        # 显式 access_token 优先；否则统一运行时解析（config cache → 安全存储），
+        # CM 暂时故障恢复后无需重启即可恢复普通 authenticated 业务请求
+        self.access_token = access_token or resolve_bangumi_access_token()
         # User-Agent 是应用身份，不应携带用户姓名、昵称或其他个人配置。
         # 保留参数只为兼容旧调用方，但请求始终使用统一的公开应用标识。
         self.user_agent = DEFAULT_BANGUMI_USER_AGENT

@@ -670,3 +670,121 @@ class TestRealHttpStatusInDiagnostics:
         assert "GET /v0/me purpose=me_lookup status=200 error=ok" in content
         assert "status=429" in content
         assert "error=rate_limited" in content
+
+
+class TestRuntimeCredentialResolver:
+    """REWORK：统一运行时凭据解析——CM 恢复后普通 authenticated 业务请求
+    无需重启即可使用真实 token；通用 CLEAR 只删指定凭据。"""
+
+    def test_normal_authenticated_request_uses_recovered_token(self, monkeypatch):
+        """config cache 空 + CM 先不可读后恢复 → 同一进程 BangumiClient()
+        发起正常业务请求直接携带 recovered token 且成功。"""
+        import httpx
+        import app.core.config as core_config
+        from app.core.credential_store import CredentialStoreError
+        from app.integrations import bangumi as bg
+
+        class RecoveringStore:
+            available = True
+
+            def __init__(self):
+                self.read_attempts = 0
+
+            def read(self, name: str) -> str:
+                self.read_attempts += 1
+                if self.read_attempts == 1:
+                    raise CredentialStoreError("模拟 CM 暂时不可读")
+                return "recovered-token"
+
+            def read_state(self, name: str) -> str:
+                try:
+                    return "found" if self.read(name) else "not_found"
+                except CredentialStoreError:
+                    return "unavailable"
+
+        store = RecoveringStore()
+        monkeypatch.setattr(core_config, "SECURE_CREDENTIAL_STORE", store)
+        monkeypatch.setattr(core_config, "_credential_storage_enabled", lambda: True)
+        monkeypatch.setattr(bg, "SECURE_CREDENTIAL_STORE", store)
+
+        # config cache 空 token（hydration 失败场景）
+        assert not load_config().bangumi_access_token
+
+        # CM 不可读期间：client 拿不到 token（不误判、不崩溃）
+        client_before = bg.BangumiClient(base_url="https://api.bgm.tv")
+        assert client_before.access_token == ""
+
+        # CM 恢复后：同一进程普通业务请求立即拿到真实 token
+        captured: dict = {}
+
+        class FakeResponse:
+            status_code = 200
+            headers: dict = {}
+            content = b'{"data": []}'
+
+            @property
+            def text(self) -> str:
+                return self.content.decode("utf-8")
+
+            def json(self):
+                return {"data": []}
+
+        class FakeHttpClient:
+            def __init__(self, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def request(self, method, url, **kwargs):
+                captured["authorization"] = (kwargs.get("headers") or {}).get("Authorization", "")
+                return FakeResponse()
+
+        monkeypatch.setattr(httpx, "Client", FakeHttpClient)
+
+        client_after = bg.BangumiClient(base_url="https://api.bgm.tv")
+        assert client_after.access_token == "recovered-token"
+        result = client_after.get_collection("tester", 1)  # auth_required 正常业务请求
+        assert result == {"data": []}
+        assert captured["authorization"] == "Bearer recovered-token"
+        assert store.read_attempts >= 2
+
+    def test_clear_only_removes_requested_credential(self, monkeypatch):
+        """cleared_keys 只删除指定凭据，其他 secure credential 完全不变。"""
+        import app.core.config as core_config
+
+        class Store:
+            available = True
+
+            def __init__(self):
+                self.values = {
+                    "bangumi_access_token": "bangumi-tok",
+                    "tmdb_bearer_token": "tmdb-key",
+                }
+                self.deleted: list[str] = []
+
+            def read(self, name: str) -> str:
+                return self.values.get(name, "")
+
+            def read_state(self, name: str) -> str:
+                return "found" if self.values.get(name) else "not_found"
+
+            def write(self, name: str, value: str) -> None:
+                self.values[name] = value
+
+            def delete(self, name: str) -> None:
+                self.deleted.append(name)
+                self.values.pop(name, None)
+
+        store = Store()
+        monkeypatch.setattr(core_config, "SECURE_CREDENTIAL_STORE", store)
+        monkeypatch.setattr(core_config, "_credential_storage_enabled", lambda: True)
+
+        config = load_config()
+        save_config(config, cleared_keys={"bangumi_access_token"})
+        assert store.deleted == ["bangumi_access_token"], "只允许删除被显式指定的凭据"
+        assert "bangumi_access_token" not in store.values
+        assert store.values["tmdb_bearer_token"] == "tmdb-key", "其他 secure credential 必须保持不变"
