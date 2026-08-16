@@ -224,14 +224,12 @@ def import_local_tree(req: LocalTreeImportRequest):
 
 
 def _bridge_preview_plan_id(preview: dict, baseline: dict | None) -> dict:
-    """RWK-31：确认身份桥接——baseline 同步产生的 draft revision 替换
-    preview.plan_id，使用户确认页的 confirm 命中 durable mirror 分支。
-    无 revision（失败/非 Provider）时保持 legacy plan_id 兼容。"""
-    if not baseline or not baseline.get("revision_id"):
-        return preview
-    if not isinstance(preview, dict) or "plan_id" not in preview:
-        return preview
-    preview["plan_id"] = baseline["revision_id"]
+    """RWK-35：preview 保留 legacy 展示结构（plan_id 不变，用于确认页渲染）。
+
+    多作品 TXT 的确认不再用单个 revision_id 冒充全库计划——确认身份由
+    baseline 的 confirmation_root_id / confirmation_generation（root 级批量）
+    承担，前端确认时调 confirm-root 一次性确认全部 eligible revisions。
+    """
     return preview
 
 
@@ -270,12 +268,14 @@ def _ensure_tree_baseline(
         return {"status": "baseline_failed"}
     try:
         from app.media_presets.service import (
-            bootstrap_provider_catalog_from_tree,
+            bootstrap_provider_catalog_sync,
             now_iso,
         )
         from app.media_presets.store import save_preset as _save_preset
 
-        info = bootstrap_provider_catalog_from_tree(
+        # RWK-34：同步执行（不创建 queued job）——单次 handler 调用，
+        # 无 worker 双执行窗口、无重复 draft revision。
+        info = bootstrap_provider_catalog_sync(
             provider=preset.source,
             tree_archive=tree_archive,
             local_mount_root=local_mount_root,
@@ -286,15 +286,22 @@ def _ensure_tree_baseline(
             preset.catalog_root_id = info["root_id"]
             preset.updated_at = now_iso()
             _save_preset(preset)
-        # RWK-31（确认身份桥接）：入队后同步执行 snapshot discovery，使
-        # draft revisions 立即可用于确认页——返回第一个 revision_id，
-        # 调用方把 preview.plan_id 替换为它，用户确认即命中 durable mirror。
-        revision_id = _run_baseline_sync(info["root_id"], info["job_id"])
+        if info["summary"].get("failed_count", 0) > 0:
+            # 部分目录失败：baseline 未完整完成 → 不提供确认身份（防错误基线）
+            return {
+                "root_id": info["root_id"],
+                "status": "baseline_failed",
+                "failed_count": info["summary"].get("failed_count", 0),
+            }
+        # RWK-35：root 级确认身份——全部 draft revision ids（多作品），
+        # 用户一次确认 → 全部 eligible revisions durable confirm。
         return {
             "root_id": info["root_id"],
-            "job_id": info["job_id"],
+            "generation": info["generation"],
             "status": "baseline_queued",
-            "revision_id": revision_id,
+            "revision_ids": info["revision_ids"],
+            "confirmation_root_id": info["root_id"],
+            "confirmation_generation": info["generation"],
         }
     except Exception:
         import logging
@@ -304,46 +311,12 @@ def _ensure_tree_baseline(
             getattr(preset, "preset_id", ""),
             exc_info=True,
         )
+        # RWK-36：baseline 已启动（root/事实可能已部分写入）——**不返回可执行
+        # 的 legacy plan_id**（避免双执行权威）；明确 baseline_failed，UI 提示
+        # 用户重新导入，而不是退回 legacy mirror 链。
         return {"status": "baseline_failed"}
 
 
-def _run_baseline_sync(root_id: str, job_id: str) -> str:
-    """RWK-31：同步执行 snapshot discovery job，返回第一个 draft revision_id。
-
-    TXT 导入是同步用户流程——确认页需要立即可确认的 revision id，
-    不能等后台 worker。执行失败（异常/全部 failed）返回空串，调用方
-    保留 legacy plan_id 兼容（此时确认走 legacy 分支，但 baseline 仍建立）。
-    """
-    from app.jobs import store as job_store
-    from app.pipeline.discovery_handler import handle_discovery_scan
-
-    job = job_store.get_job(job_id) if job_id else None
-    if job is None:
-        return ""
-    try:
-        result = handle_discovery_scan(job.payload)
-    except Exception:
-        import logging
-
-        logging.getLogger(__name__).warning(
-            "TXT baseline 同步执行失败（root=%s）", root_id, exc_info=True,
-        )
-        return ""
-    if result.get("summary", {}).get("failed_count", 0) > 0:
-        return ""
-    # 取该 root 最新 generation 的第一个 draft revision
-    from app.db.database import get_connection
-
-    row = get_connection().execute(
-        """
-        SELECT r.revision_id FROM import_revisions r
-        JOIN media_units u ON u.unit_id = r.unit_id
-        WHERE u.root_id = ? AND r.status = 'draft'
-        ORDER BY r.created_at ASC LIMIT 1
-        """,
-        (root_id,),
-    ).fetchone()
-    return str(row["revision_id"]) if row else ""
 def _discard_temporary_preset(preset_id: str) -> None:
     """清理解析失败/来源不匹配时临时创建的预设与归档目录，避免残留。
 

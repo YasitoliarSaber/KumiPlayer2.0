@@ -33,6 +33,21 @@ export const importsApi = {
       { plan_id: planId }
     ),
 
+  // RWK-35：root 级批量确认（多作品 TXT baseline 一次确认全部 revisions）
+  confirmRoot: (source: string, rootId: string) =>
+    api.post<{
+      root_id: string
+      generation: number
+      source: string
+      execution_mode: 'durable'
+      confirmed_count: number
+      revision_ids: string[]
+      job_ids: string[]
+    }>(
+      `/api/imports/${source}/confirm-root`,
+      { root_id: rootId }
+    ),
+
   // 生成 diff
   createDiff: (source: string, params?: { old_snapshot_id?: string; new_snapshot_id?: string }) =>
     api.post<{

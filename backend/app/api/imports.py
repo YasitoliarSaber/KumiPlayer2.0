@@ -102,10 +102,22 @@ def patch_item(source: str, item_id: str, req: PatchRequest):
             "summary": preview.summary,
         }
 
+    # RWK-37（C）：TXT baseline 场景——plan_id 是 legacy 展示计划（preview 用），
+    # 但人工修正必须命中对应 durable revision。按 item 的 relative_path 在该
+    # root 的 draft revisions 中定位并 patch（保证确认时用到修正后的事实）。
+    preset = _preset_for_legacy_plan(req.plan_id, source)
+    if preset is not None and preset.catalog_root_id:
+        try:
+            return _patch_txt_baseline_item(
+                preset.catalog_root_id, item_id, req.patch, source,
+            )
+        except _TxtBaselinePatchMiss:
+            # 该 item 不属于任何 draft revision（可能在确认中已确认）→ 回退 legacy
+            pass
+
     plan = _load_plan_or_404(plan_id=req.plan_id)
     if plan.source != source:
         raise HTTPException(status_code=400, detail=f"plan.source={plan.source} 与 URL source={source} 不匹配")
-
     item, preview, error = patch_plan_item(plan, item_id, req.patch)
     if error:
         raise HTTPException(status_code=400, detail=error)
@@ -213,6 +225,182 @@ def confirm(source: str, req: ConfirmRequest):
         "status": confirmed_plan.status,
         "message": "import_plan confirmed; review warnings deferred",
     }
+
+
+class ConfirmRootRequest(BaseModel):
+    """RWK-35：root 级批量确认请求（多作品 TXT baseline 一次确认全部 revisions）。"""
+    root_id: str
+    force: bool = False
+
+
+@router.post("/{source}/confirm-root")
+def confirm_root(source: str, req: ConfirmRootRequest):
+    """RWK-35：一次性确认 Provider root 当前 generation 的全部 draft revisions。
+
+    多作品 TXT 的确认身份是 root（+generation），不是单个 revision——
+    UI 展示全库 preview 后用户点一次"确认并继续"，这里把该 root 当前
+    baseline generation 的全部 eligible draft revisions 逐个 durable confirm，
+    每个 revision 各自 enqueue 恰一个 mirror job（幂等 get-or-create）。
+
+    返回 {root_id, generation, confirmed_count, job_ids, revision_ids}。
+    """
+    from app.catalog import store as catalog_store
+    from app.db.database import get_connection
+    from app.import_plan import revision_store
+    from app.pipeline import orchestrator
+
+    root_id = (req.root_id or "").strip()
+    if not root_id:
+        raise HTTPException(status_code=400, detail="缺少 root_id")
+    root = catalog_store.get_source_root(root_id)
+    if root is None:
+        raise HTTPException(status_code=404, detail="来源根不存在")
+
+    # 该 root 当前 baseline target generation 的全部 draft revisions
+    target = int(getattr(root, "baseline_target_generation", 0) or 0)
+    if target <= 0:
+        raise HTTPException(status_code=400, detail="该来源根没有进行中的目录树基线")
+    rows = get_connection().execute(
+        """
+        SELECT r.revision_id, r.unit_id FROM import_revisions r
+        JOIN media_units u ON u.unit_id = r.unit_id
+        WHERE u.root_id = ? AND r.source_generation = ? AND r.status = 'draft'
+        ORDER BY r.created_at ASC
+        """,
+        (root_id, target),
+    ).fetchall()
+    if not rows:
+        raise HTTPException(status_code=400, detail="没有可确认的草稿修订")
+
+    confirmed_ids = []
+    job_ids = []
+    for row in rows:
+        revision_id = str(row["revision_id"])
+        unit_id = str(row["unit_id"])
+        try:
+            revision_store.confirm_revision_manually(revision_id, force=req.force)
+        except revision_store.RevisionStatusError:
+            current = revision_store.load_revision(revision_id)
+            if current is None or current["status"] not in ("confirmed", "executed"):
+                raise HTTPException(
+                    status_code=409, detail=f"修订 {revision_id} 确认冲突，请刷新后重试"
+                ) from None
+        job_id = orchestrator.enqueue_mirror(revision_id, unit_id)
+        confirmed_ids.append(revision_id)
+        job_ids.append(job_id)
+
+    return {
+        "root_id": root_id,
+        "generation": target,
+        "source": source,
+        "execution_mode": "durable",
+        "confirmed_count": len(confirmed_ids),
+        "revision_ids": confirmed_ids,
+        "job_ids": job_ids,
+    }
+class _TxtBaselinePatchMiss(Exception):
+    """RWK-37（C）：item 不属于该 root 的任何 draft revision。"""
+
+
+def _preset_for_legacy_plan(plan_id: str, source: str):
+    """按 legacy plan_id 找关联 preset（含 catalog_root_id 的 TXT baseline 卡）。"""
+    from app.media_presets.store import list_presets
+
+    for preset in list_presets():
+        if preset.source != source:
+            continue
+        if not preset.catalog_root_id:
+            continue
+        if preset.current_plan_id == plan_id:
+            return preset
+    return None
+
+
+def _preset_for_legacy_plan_by_root(root_id: str, source: str):
+    """按 root_id 找关联 preset（TXT baseline 卡）。"""
+    from app.media_presets.store import list_presets
+
+    for preset in list_presets():
+        if preset.source == source and preset.catalog_root_id == root_id:
+            return preset
+    return None
+
+
+def _patch_txt_baseline_item(root_id: str, item_id: str, patch: dict, source: str) -> dict:
+    """RWK-37（C）：在 root 的 draft revisions 中按 item.relative_path 定位并 patch。
+
+    多作品 TXT 的人工修正是逐作品（preview item）——item 属于哪个 revision 由
+    relative_path 匹配（legacy 与 revision items 共用 relative_path 语义）。
+    """
+    from app.catalog import store as catalog_store
+    from app.db.database import get_connection
+    from app.import_plan import revision_store
+
+    root = catalog_store.get_source_root(root_id)
+    if root is None:
+        raise _TxtBaselinePatchMiss()
+    target = int(getattr(root, "baseline_target_generation", 0) or 0)
+    if target <= 0:
+        raise _TxtBaselinePatchMiss()
+
+    # 加载该 root 全部 draft revision 的 plans，按 relative_path 索引
+    rows = get_connection().execute(
+        """
+        SELECT r.revision_id FROM import_revisions r
+        JOIN media_units u ON u.unit_id = r.unit_id
+        WHERE u.root_id = ? AND r.source_generation = ? AND r.status = 'draft'
+        """,
+        (root_id, target),
+    ).fetchall()
+    # 先按 legacy plan 找到该 item 的 relative_path（revision 与 legacy items
+    # 共用 relative_path 语义，但 item_id 不同——不能按 id 匹配）。
+    from app.import_plan.store import load_import_plan
+
+    preset = _preset_for_legacy_plan_by_root(root_id, source)
+    legacy_plan = None
+    if preset is not None and preset.current_plan_id:
+        legacy_plan = load_import_plan(plan_id=preset.current_plan_id)
+    if legacy_plan is None:
+        legacy_plan = load_import_plan(plan_id=None, source=source)
+    if legacy_plan is None:
+        raise _TxtBaselinePatchMiss()
+    legacy_item = next((it for it in legacy_plan.items if it.id == item_id), None)
+    if legacy_item is None:
+        raise _TxtBaselinePatchMiss()
+    rel_path = str(getattr(legacy_item, "relative_path", "") or "")
+
+    for row in rows:
+        revision_id = str(row["revision_id"])
+        plan = revision_store.load_plan(revision_id)
+        if plan is None:
+            continue
+        item = next(
+            (it for it in plan.items if str(getattr(it, "relative_path", "") or "") == rel_path),
+            None,
+        )
+        if item is None:
+            continue
+        # 命中对应 revision → durable patch（用 revision 自己的 item_id）
+        rev_item_id = item.id
+        try:
+            revision_store.patch_draft_revision_item(revision_id, rev_item_id, patch)
+        except revision_store.RevisionStatusError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        plan_after = revision_store.load_plan(revision_id)
+        item_after = next((it for it in plan_after.items if it.id == rev_item_id), None)
+        if item_after is None:
+            raise HTTPException(status_code=400, detail=f"未找到 item_id={rev_item_id}")
+        from app.import_plan.service import build_preview
+
+        preview = build_preview(plan_after)
+        return {
+            "item": _item_to_dict(item_after),
+            "summary": preview.summary,
+            "revision_id": revision_id,
+        }
+    raise _TxtBaselinePatchMiss()
 
 
 # ============================================================

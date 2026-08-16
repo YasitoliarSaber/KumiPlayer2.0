@@ -334,6 +334,18 @@ export default function MediaManagementPage() {
     void (async () => {
       try {
         setActionError('');
+        // RWK-35：TXT baseline 场景走 root 级批量确认（一次确认全部 revisions）；
+        // 其余（OpenList 等单 revision）走原 confirm（幂等 durable 门面）。
+        if (activeEntry.confirmationRootId) {
+          const rootResult = await importsApi.confirmRoot(source, activeEntry.confirmationRootId);
+          setTask(null);
+          setTaskKind('mirror');
+          setStep('workbench');
+          if (rootResult.job_ids && rootResult.job_ids.length > 0) {
+            setTask(await tasksApi.get(rootResult.job_ids[0]));
+          }
+          return;
+        }
         // 幂等确认门面：draft → confirm+入队，confirmed → ensure（后端幂等）。
         // 恢复场景（preview 已 confirmed，如 OpenList batch 恢复/刷新页面）同样
         // 拿到 durable job_id，避免掉回 legacy mirror 生成造成双轨。
@@ -462,6 +474,11 @@ export default function MediaManagementPage() {
       entry.preview = result.preview;
       entry.resolvedRoot = result.preset.source_root;
       entry.pathValidation = result.version.path_validation;
+      // RWK-35：TXT baseline 的 root 级确认身份（若已同步建立）
+      if (result.baseline?.confirmation_root_id) {
+        entry.confirmationRootId = result.baseline.confirmation_root_id;
+        entry.confirmationGeneration = result.baseline.confirmation_generation;
+      }
       setEntries([entry]);
       setActiveEntryId(entry.id);
       setSource(result.preset.source);
@@ -527,6 +544,11 @@ export default function MediaManagementPage() {
       entry.preview = result.preview;
       entry.resolvedRoot = result.preset.source_root;
       entry.pathValidation = result.version.path_validation;
+      // RWK-35：TXT baseline 的 root 级确认身份（若已同步建立）
+      if (result.baseline?.confirmation_root_id) {
+        entry.confirmationRootId = result.baseline.confirmation_root_id;
+        entry.confirmationGeneration = result.baseline.confirmation_generation;
+      }
       setEntries([entry]);
       setActiveEntryId(entry.id);
       setSource(result.preset.source);
@@ -574,6 +596,11 @@ export default function MediaManagementPage() {
       entry.preview = result.preview;
       entry.resolvedRoot = result.preset.source_root;
       entry.pathValidation = result.version.path_validation;
+      // RWK-35：TXT baseline 的 root 级确认身份（若已同步建立）
+      if (result.baseline?.confirmation_root_id) {
+        entry.confirmationRootId = result.baseline.confirmation_root_id;
+        entry.confirmationGeneration = result.baseline.confirmation_generation;
+      }
       setEntries([entry]);
       setActiveEntryId(entry.id);
       setSource(result.preset.source);
@@ -1247,6 +1274,11 @@ export default function MediaManagementPage() {
       entry.preview = result.preview;
       entry.resolvedRoot = result.preset.source_root;
       entry.pathValidation = result.version.path_validation;
+      // RWK-35：TXT baseline 的 root 级确认身份（若已同步建立）
+      if (result.baseline?.confirmation_root_id) {
+        entry.confirmationRootId = result.baseline.confirmation_root_id;
+        entry.confirmationGeneration = result.baseline.confirmation_generation;
+      }
       setEntries([entry]);
       setActiveEntryId(entry.id);
       setSource(result.preset.source);

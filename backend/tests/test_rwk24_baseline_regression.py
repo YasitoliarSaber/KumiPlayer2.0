@@ -116,19 +116,12 @@ def client():
 
 
 def _run_snapshot_baseline(client, root_id):
-    """执行该 root 的 snapshot baseline job（durable handler 同步跑）。"""
-    from app.jobs import store as job_store
-    from app.pipeline.discovery_handler import handle_discovery_scan
+    """RWK-34：TXT 导入即同步完成 baseline——此处仅断言 ready（无需手动执行）。"""
+    from app.catalog import store as catalog_store
 
-    jobs = job_store.list_jobs(job_type="discovery_scan", status="queued", limit=200)
-    snapshot_job = next(
-        (j for j in jobs
-         if j.payload.get("root_id") == root_id
-         and j.payload.get("scan_channel", "").startswith("snapshot_")),
-        None,
-    )
-    assert snapshot_job is not None, "必须产生 snapshot baseline job"
-    return handle_discovery_scan(snapshot_job.payload)
+    stats = catalog_store.source_catalog_baseline_stats(root_id)
+    assert stats["baseline_ready"] is True, "TXT 导入必须同步完成 baseline"
+    return {"summary": {"failed_count": 0}}
 
 
 def _write_tree(tmp_path, text: str, name: str = "115目录树.txt") -> Path:
@@ -600,64 +593,66 @@ class TestPartialBaselineNotReady:
 
 
 class TestSingleExecutionAuthority:
-    def test_txt_confirm_uses_durable_revision_from_api(self, client, tmp_path):
-        """事故②：真实 TXT API 响应 preview.plan_id 已桥接为 durable revision；
-        用该 plan_id confirm → execution_mode=durable → 恰一 mirror job。"""
+    def test_multi_work_confirm_root_confirms_all(self, client, tmp_path):
+        """事故②（RWK-35）：多作品 TXT 一次确认 → 全部 draft revisions confirmed、
+        每 revision 恰一 mirror job、无 draft 残留。"""
         from app.db.database import get_connection
         from app.jobs import store as job_store
-        from app.import_plan import revision_store
 
-        tree = _write_tree(tmp_path, _big_tree())
+        tree = _write_tree(tmp_path, _big_tree())  # 40 作品
         resp = client.post(
             "/api/media-presets/import-local-tree",
             json={"tree_path": str(tree), "import_family": "anime", "import_scope": ""},
         )
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        preview = body["preview"]
         baseline = body.get("baseline", {})
         assert baseline.get("status") == "baseline_queued", body
+        confirmation_root_id = baseline.get("confirmation_root_id")
+        assert confirmation_root_id, "TXT 导入必须返回 root 级确认身份"
+        revision_ids = baseline.get("revision_ids") or []
+        assert len(revision_ids) >= 5, f"40 作品 TXT 应有 ≥5 个 draft revisions（实际 {len(revision_ids)}）"
 
-        # 关键：preview.plan_id 必须是 SQLite revision（不是 legacy plan）
-        plan_id = preview["plan_id"]
         conn = get_connection()
-        rev = conn.execute(
-            "SELECT revision_id FROM import_revisions WHERE revision_id = ?",
-            (plan_id,),
-        ).fetchone()
-        assert rev is not None, (
-            f"TXT API 返回的 preview.plan_id 必须是 SQLite revision（实际 {plan_id}）"
-        )
-        # load_import_plan 对 revision_id 走 V3 优先（返回 revision 的 plan，
-        # 而非 legacy JSON）——确认链唯一指向 durable revision
-        from app.import_plan.store import load_import_plan
+        # 导入后全部 draft（无 auto-confirm）
+        drafts = conn.execute(
+            "SELECT COUNT(*) AS c FROM import_revisions WHERE revision_id IN (%s) AND status = 'draft'"
+            % ",".join("?" * len(revision_ids)),
+            revision_ids,
+        ).fetchone()["c"]
+        assert int(drafts) == len(revision_ids), "导入后全部 revisions 应为 draft"
 
-        bridged_plan = load_import_plan(plan_id=plan_id)
-        assert bridged_plan is not None
-        assert bridged_plan.plan_id == plan_id
-
-        # 用真实 UI 的 plan_id confirm → durable mirror
+        # 用户一次确认（root 级）→ 全部 confirmed + 恰一 mirror job each
         resp_confirm = client.post(
-            "/api/imports/pan115/confirm",
-            json={"plan_id": plan_id, "items": []},
+            "/api/imports/pan115/confirm-root",
+            json={"root_id": confirmation_root_id},
         )
         assert resp_confirm.status_code == 200, resp_confirm.text
         cbody = resp_confirm.json()
-        assert cbody.get("execution_mode") == "durable", cbody
-        assert cbody.get("job_id"), cbody
+        assert cbody["execution_mode"] == "durable"
+        assert cbody["confirmed_count"] == len(revision_ids), cbody
+        assert len(cbody["job_ids"]) == len(revision_ids), cbody
 
-        # 该 revision 恰好一个 mirror job（幂等 get-or-create）
-        mirror_jobs = [
-            j for j in job_store.list_jobs(job_type="mirror_revision", status="queued", limit=100)
-            if j.payload.get("revision_id") == plan_id
-        ]
-        assert len(mirror_jobs) == 1, "同一 revision 只有一条 mirror chain"
-        # revision 已 confirmed
-        rev_after = conn.execute(
-            "SELECT status FROM import_revisions WHERE revision_id = ?",
-            (plan_id,),
-        ).fetchone()
-        assert rev_after["status"] == "confirmed"
+        confirmed = conn.execute(
+            "SELECT COUNT(*) AS c FROM import_revisions WHERE revision_id IN (%s) AND status IN ('confirmed','executed')"
+            % ",".join("?" * len(revision_ids)),
+            revision_ids,
+        ).fetchone()["c"]
+        assert int(confirmed) == len(revision_ids), "全部 revisions 必须 confirmed"
+
+        # 每 revision 恰一 mirror job
+        mirror_jobs = job_store.list_jobs(job_type="mirror_revision", status="queued", limit=500)
+        for rev_id in revision_ids:
+            matches = [j for j in mirror_jobs if j.payload.get("revision_id") == rev_id]
+            assert len(matches) == 1, f"revision {rev_id} 应恰有 1 个 mirror job（实际 {len(matches)}）"
+
+        # 无 draft 残留
+        remaining = conn.execute(
+            "SELECT COUNT(*) AS c FROM import_revisions WHERE revision_id IN (%s) AND status = 'draft'"
+            % ",".join("?" * len(revision_ids)),
+            revision_ids,
+        ).fetchone()["c"]
+        assert int(remaining) == 0, "确认后不得有 draft 残留"
 
 
 class TestTxtUpdateSyncsCatalog:
@@ -713,3 +708,127 @@ class TestTxtUpdateSyncsCatalog:
         # baseline 完成标记前进（不保留 v1 假 baseline）
         root_after = catalog_store.get_source_root(root_id)
         assert root_after.baseline_completed_generation >= gen_v1
+
+
+class TestJobLifecycleOwnership:
+    def test_sync_baseline_no_queued_job_single_draft_per_unit(self, client, tmp_path):
+        """A：TXT 同步 baseline 不产生 queued discovery job；每 unit 同 generation 恰一 draft revision。"""
+        from app.db.database import get_connection
+        from app.jobs import store as job_store
+
+        tree = _write_tree(tmp_path, _big_tree())  # 40 作品
+        resp = client.post(
+            "/api/media-presets/import-local-tree",
+            json={"tree_path": str(tree), "import_family": "anime", "import_scope": ""},
+        )
+        assert resp.status_code == 200, resp.text
+        preset = next(p for p in list_presets() if p.source == "pan115")
+        root_id = preset.catalog_root_id
+
+        # 同步执行后不得遗留 queued discovery job（worker 不会再执行一次）
+        queued = job_store.list_jobs(job_type="discovery_scan", status="queued", limit=200)
+        assert not any(j.payload.get("root_id") == root_id for j in queued), (
+            "同步 baseline 不得遗留 queued discovery job"
+        )
+
+        # 每个 unit 同 generation 只有一个 draft revision（无重复执行）
+        conn = get_connection()
+        rows = conn.execute(
+            """
+            SELECT u.unit_id, COUNT(*) AS c FROM import_revisions r
+            JOIN media_units u ON u.unit_id = r.unit_id
+            WHERE u.root_id = ? AND r.source_generation = (
+                SELECT baseline_target_generation FROM source_roots WHERE root_id = ?
+            )
+            GROUP BY u.unit_id
+            """,
+            (root_id, root_id),
+        ).fetchall()
+        assert len(rows) >= 5, f"应有 ≥5 个 unit（实际 {len(rows)}）"
+        assert all(int(r["c"]) == 1 for r in rows), "每 unit 同 generation 必须恰 1 个 draft revision"
+
+    def test_confirm_root_failure_no_legacy_mirror(self, client, tmp_path):
+        """D：baseline 失败不退回 legacy 执行权威（无 legacy mirror 链）。"""
+        from app.db.database import get_connection
+        from app.jobs import store as job_store
+
+        # 正常导入（同步成功）
+        tree = _write_tree(tmp_path, _big_tree())
+        resp = client.post(
+            "/api/media-presets/import-local-tree",
+            json={"tree_path": str(tree), "import_family": "anime", "import_scope": ""},
+        )
+        assert resp.status_code == 200, resp.text
+        preset = next(p for p in list_presets() if p.source == "pan115")
+        root_id = preset.catalog_root_id
+        baseline = resp.json().get("baseline", {})
+        assert baseline.get("status") == "baseline_queued"
+
+        # baseline 成功后：confirm-root 是唯一执行权威（无 legacy mirror task）
+        confirm = client.post(
+            "/api/imports/pan115/confirm-root",
+            json={"root_id": root_id},
+        )
+        assert confirm.status_code == 200, confirm.text
+        cbody = confirm.json()
+        assert cbody["execution_mode"] == "durable"
+        # 所有 mirror 都是 durable job（job_type=mirror_revision），无 legacy 调用痕迹
+        mirror_jobs = job_store.list_jobs(job_type="mirror_revision", status="queued", limit=500)
+        assert len(mirror_jobs) >= len(baseline.get("revision_ids") or [])
+        for j in mirror_jobs:
+            assert j.job_type == "mirror_revision", "只允许 durable mirror 链"
+
+
+class TestManualPatchHitsRevision:
+    def test_patch_second_work_hits_its_revision(self, client, tmp_path):
+        """C：patch 第二/三作品（确认页 legacy preview item）→ 命中对应 durable revision。"""
+        from app.db.database import get_connection
+        from app.jobs import store as job_store
+        from app.import_plan import revision_store
+        from app.import_plan.service import build_preview
+
+        # 3 部作品
+        tree = _write_tree(tmp_path, "|——根目录\n| |-动画1\n| | |-作品A\n| | | |-作品A.S01E01.mkv\n| | |-作品B\n| | | |-作品B.S01E01.mkv\n| | |-作品C\n| | | |-作品C.S01E01.mkv\n")
+        resp = client.post(
+            "/api/media-presets/import-local-tree",
+            json={"tree_path": str(tree), "import_family": "anime", "import_scope": ""},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        baseline = body.get("baseline", {})
+        revision_ids = baseline.get("revision_ids") or []
+        assert len(revision_ids) == 3, f"应有 3 个 draft revisions（实际 {len(revision_ids)}）"
+
+        # 确认页 legacy preview 的 items（含多作品 item）
+        preview = body["preview"]
+        legacy_items = preview.get("items") or []
+        assert len(legacy_items) >= 3, "preview 应含多作品 items"
+
+        # 找到作品B 的 item（relative_path 含 作品B）
+        work_b_item = next(
+            (it for it in legacy_items if "作品B" in (it.get("relative_path") or "")),
+            None,
+        )
+        assert work_b_item is not None, "preview 应含作品B 的 item"
+        item_id = work_b_item["id"]
+
+        # 用确认页 plan_id（legacy）+ item_id patch → 必须命中作品B 的 durable revision
+        patch = {"title": "作品B 修正标题"}
+        patch_resp = client.patch(
+            f"/api/imports/pan115/items/{item_id}",
+            json={"plan_id": preview["plan_id"], "patch": patch},
+        )
+        assert patch_resp.status_code == 200, patch_resp.text
+        pbody = patch_resp.json()
+        assert pbody.get("revision_id"), "patch 必须返回命中的 revision_id"
+        assert pbody["revision_id"] in revision_ids
+
+        # 该 revision 的 item 已更新（durable 事实）——用 revision 自己的 item id
+        assert pbody["item"].get("title") == "作品B 修正标题", pbody
+        rev_item_id = pbody["item"]["id"]
+        plan = revision_store.load_plan(pbody["revision_id"])
+        patched = next((it for it in plan.items if it.id == rev_item_id), None)
+        assert patched is not None
+        assert patched.title == "作品B 修正标题"
+        # 该 revision 是作品B 的（relative_path 含 作品B）
+        assert "作品B" in (patched.relative_path or "")

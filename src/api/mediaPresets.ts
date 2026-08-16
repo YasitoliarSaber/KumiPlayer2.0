@@ -70,6 +70,10 @@ export interface PresetImportResult {
     root_id?: string;
     job_id?: string;
     status: 'baseline_queued' | 'baseline_reused' | 'baseline_failed';
+    /** RWK-35：root 级确认身份（多作品一次确认全部 revisions） */
+    confirmation_root_id?: string;
+    confirmation_generation?: number;
+    revision_ids?: string[];
   };
 }
 

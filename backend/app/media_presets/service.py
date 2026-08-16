@@ -320,6 +320,79 @@ def bootstrap_provider_catalog_from_tree(
     }
 
 
+def bootstrap_provider_catalog_sync(
+    *,
+    provider: str,
+    tree_archive: str,
+    local_mount_root: str,
+    import_family: str,
+    import_scope: str = "",
+    remote_locator: str = "",
+) -> dict:
+    """RWK-34：同步执行 TXT → Source Catalog baseline（**不创建 queued job**）。
+
+    与 ``bootstrap_provider_catalog_from_tree`` 的区别：不在 durable queue 创建
+    discovery job，而是直接构造 payload 单次调用 handler——消除「API 同步调
+    handler + worker 再 claim 同一 queued job」的双执行窗口与重复 draft revision。
+
+    TXT 导入是同步用户流程：成功即数据落库（Source Catalog 持久化），
+    失败当场可见可重试，无需 restart 恢复（v2 更新同理）。若调用方需要
+    durable 后台/重启恢复语义，请用 ``bootstrap_provider_catalog_from_tree``。
+
+    返回 {"root_id", "generation", "source_id", "summary", "revision_ids"}。
+    """
+    from app.catalog import store as catalog_store
+    from app.db.database import init_db
+    from app.pipeline.discovery_handler import handle_discovery_scan
+
+    init_db()
+    root_id = ensure_provider_source_root(
+        provider=provider,
+        local_mount_root=local_mount_root,
+        import_family=import_family,
+        import_scope=import_scope,
+        remote_locator=remote_locator,
+    )
+    root = catalog_store.get_source_root(root_id)
+    if root is None:
+        raise ValueError("来源根建立失败")
+    generation = catalog_store.bump_generation(root_id)
+    catalog_store.set_baseline_target(root_id, generation)
+    # RWK-37：同步执行必须与 enqueue_scan 等价地先 prepare_scan(full)——
+    # 否则既有 complete 目录不在 pending frontier，engine 不会重扫，
+    # 新版本 TXT（v2 新增作品）会被遗漏（仅扫 root）。
+    catalog_store.prepare_scan(root_id, generation=generation, mode="full")
+    payload = {
+        "root_id": root_id,
+        "generation": generation,
+        "source_id": root.source_id,
+        "input_path": tree_archive,
+        "scan_mode": "full",
+        "scan_channel": f"snapshot_{provider}",
+    }
+    summary = handle_discovery_scan(payload).get("summary", {})
+    # 收集该 generation 的全部 draft revision ids（root 级确认身份）
+    from app.db.database import get_connection
+
+    rows = get_connection().execute(
+        """
+        SELECT r.revision_id FROM import_revisions r
+        JOIN media_units u ON u.unit_id = r.unit_id
+        WHERE u.root_id = ? AND r.source_generation = ? AND r.status = 'draft'
+        ORDER BY r.created_at ASC
+        """,
+        (root_id, generation),
+    ).fetchall()
+    revision_ids = [str(r["revision_id"]) for r in rows]
+    return {
+        "root_id": root_id,
+        "generation": generation,
+        "source_id": root.source_id,
+        "summary": summary,
+        "revision_ids": revision_ids,
+    }
+
+
 def preset_to_dict(preset: MediaLibraryPreset) -> dict:
     data = asdict(preset)
     data["is_library_indexed"] = preset.lifecycle_status == "ready"

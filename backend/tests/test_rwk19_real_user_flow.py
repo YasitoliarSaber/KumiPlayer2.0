@@ -192,19 +192,7 @@ class TestRealUserFlow:
         )
         assert resp.status_code == 200, resp.text
         # 执行 TXT baseline discovery（从 job store 找到该 root 的 snapshot job）
-        from app.jobs import store as job_store
-        from app.pipeline.discovery_handler import handle_discovery_scan
-
-        jobs = job_store.list_jobs(job_type="discovery_scan", status="queued", limit=100)
-        snapshot_job = next(
-            (j for j in jobs
-             if j.payload.get("root_id") == root_id
-             and j.payload.get("scan_channel", "").startswith("snapshot_")),
-            None,
-        )
-        assert snapshot_job is not None, "TXT 导入必须产生 snapshot baseline job"
-        result = handle_discovery_scan(snapshot_job.payload)
-        assert result["summary"].get("failed_count", 0) == 0
+        # RWK-34：TXT 导入即同步完成 baseline（无 queued job、无需手动执行）
 
         # baseline 就绪后 bindable-providers 显示 ready
         bp_resp2 = client.get("/api/openlist/bindable-providers")

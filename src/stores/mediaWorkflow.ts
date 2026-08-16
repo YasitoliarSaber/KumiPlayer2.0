@@ -14,6 +14,9 @@ export interface MediaWorkflowEntry {
   status: MediaWorkflowEntryStatus;
   presetId?: string;
   planId?: string;
+  /** RWK-35：TXT baseline 的 root 级确认身份（多作品一次确认全部 revisions） */
+  confirmationRootId?: string;
+  confirmationGeneration?: number;
   preview?: ImportPreview;
   resolvedRoot?: string;
   pathValidation?: SourcePathValidation;
