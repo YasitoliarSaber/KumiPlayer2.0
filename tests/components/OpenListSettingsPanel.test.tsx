@@ -225,3 +225,26 @@ describe('REWORK：状态与安全语义', () => {
     expect(await screen.findByText(/尚未检查当前连接/)).toBeTruthy();
   });
 });
+
+describe('REWORK：Test Connection payload 契约', () => {
+  test('testConnection 只发送 TestConnectionRequest 接受的字段（不含 mount_root/cache_ttl）', () => {
+    const { onTestConnection } = renderPanel({
+      config: baseConfig(),
+      draft: baseDraft({ server_url: 'http://192.168.1.10:5244', mount_root: 'M:\media', cache_ttl: '720' }),
+    });
+    // server_url 是 remote-affecting → 按钮为「验证并保存」；先展开并清空修改：
+    // 用无 dirty 的 draft 重新渲染
+    const panel2 = renderPanel({ onTestConnection });
+    fireEvent.click(panel2.getByText('检查连接'));
+    const payload = (onTestConnection as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(payload).toHaveProperty('server_url');
+    expect(payload).toHaveProperty('remote_root');
+    expect(payload).toHaveProperty('username');
+    expect(payload).toHaveProperty('password');
+    expect(payload).toHaveProperty('allow_insecure_http');
+    // extra="forbid"：不得携带保存配置专用字段
+    expect(payload).not.toHaveProperty('mount_root');
+    expect(payload).not.toHaveProperty('cache_ttl_minutes');
+    expect(payload).not.toHaveProperty('prefetch_limit');
+  });
+});

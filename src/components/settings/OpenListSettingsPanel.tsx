@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@fluentui/react-components';
-import type { OpenListConfigPayload, OpenListTestResult } from '../../api/openlist';
+import type { OpenListConfigPayload, OpenListTestConnectionPayload, OpenListTestResult } from '../../api/openlist';
 import type { PublicConfig } from '../../api/config';
 
 /**
@@ -79,8 +79,8 @@ interface OpenListSettingsPanelProps {
   onChangeDraft: (key: keyof OpenListDraft, value: string) => void;
   /** 保存连接：resolve 表示成功；reject 会被面板收口为可见错误 */
   onSaveConnection: (payload: OpenListConfigPayload) => Promise<void>;
-  /** 测试连接：返回后端 machine status code（不 throw 分类错误；网络异常才 reject） */
-  onTestConnection: (payload: OpenListConfigPayload) => Promise<OpenListTestResult>;
+  /** 测试连接：接收 TestConnection 专用 payload，返回后端 machine status code（不 throw 分类错误；网络异常才 reject） */
+  onTestConnection: (payload: OpenListTestConnectionPayload) => Promise<OpenListTestResult>;
   notice: string;
   noticeKind: 'success' | 'error' | 'info';
   /** 面板内部操作触发的提示（错误收口用）；外部 busy 锁 */
@@ -191,6 +191,19 @@ export default function OpenListSettingsPanel({
     prefetch_limit: Math.max(0, Math.min(50, Number(draft.prefetch_limit) || 12)),
   });
 
+  // Test Connection 专用 payload：后端 TestConnectionRequest 为 extra="forbid"，
+  // 只发送其接受的字段（server_url/remote_root/username/password/allow_insecure_http）
+  const buildTestPayload = () => {
+    const full = buildPayload();
+    return {
+      server_url: full.server_url,
+      remote_root: full.remote_root,
+      username: full.username,
+      password: full.password,
+      allow_insecure_http: full.allow_insecure_http,
+    };
+  };
+
   const handleSave = async () => {
     if (actionLock) return; // 单操作锁：双击不产生并发
     setActionLock('save');
@@ -213,7 +226,7 @@ export default function OpenListSettingsPanel({
     setActionLock('test');
     setProbeState('checking');
     try {
-      const result = await onTestConnection(buildPayload());
+      const result = await onTestConnection(buildTestPayload());
       // 真实 machine status code 映射，不得全部折叠为 network_unavailable
       setProbeState(result.ok ? 'connected' : mapProbeCode(result.code));
     } catch {
