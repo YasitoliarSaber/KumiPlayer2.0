@@ -244,6 +244,7 @@ export default function OpenListSettingsPanel({
       </div>
 
       <div className="sources-openlist-meta">
+        <span className="sources-route-summary">OpenList 用于读取远程目录；115、百度、夸克是实际内容来源。通常只需配置一次。</span>
         {config.openlist_server_url && <span>服务地址：<code>{config.openlist_server_url}</code></span>}
         {config.openlist_mount_root && <span>本地挂载：<code>{config.openlist_mount_root}</code></span>}
         {saved && <span>账号与密码已保存（仅存本机凭据管理器）</span>}
