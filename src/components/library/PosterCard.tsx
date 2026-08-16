@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { useUiStore } from '../../stores/ui';
 import { useLibraryStore } from '../../stores/library';
 import { cleanDisplayTitle } from '../../utils/title';
@@ -14,14 +14,14 @@ interface PosterCardProps {
   localArtworkOnly?: boolean;
 }
 
-export default function PosterCard({
+function PosterCard({
   work,
   showType = 'default',
   recentLabel = '',
   thumbnailWidth = 0,
   localArtworkOnly = false,
 }: PosterCardProps) {
-  const { seriesCardImageMode } = useUiStore();
+  const seriesCardImageMode = useUiStore((state) => state.seriesCardImageMode);
   const openWorkDetail = useLibraryStore((state) => state.openWorkDetail);
   const getWorkDetail = useLibraryStore((state) => state.getWorkDetail);
   const prewarmTimerRef = useRef<number | null>(null);
@@ -138,6 +138,8 @@ export default function PosterCard({
     </button>
   );
 }
+
+export default memo(PosterCard);
 
 function latestEpisodeLabel(work: any) {
   const summarized = Number(work.latest_episode_number || 0);
