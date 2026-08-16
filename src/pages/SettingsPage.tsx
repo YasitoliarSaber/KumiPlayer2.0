@@ -52,7 +52,6 @@ const sourceLabels: Record<SourceKey | 'all' | 'openlist', string> = {
   local: '本地',
 };
 
-// OpenList 提供商选项（不含 local：local 仅用于本地来源）
 const sectionId = (key: SettingsTab) => `settings-panel-${key}`;
 
 
