@@ -465,14 +465,18 @@ def bump_generation(root_id: str) -> int:
 
 
 def update_root_metadata(root_id: str, *, import_family: str = "", import_scope: str = "") -> None:
-    """更新来源根的 family/scope 元数据（不改变 locator，供复用既有根时对齐语义）。"""
+    """更新来源根的 family/scope 元数据（不改变 locator，供复用既有根时对齐语义）。
+
+    空值不覆盖既有值：import_scope 传 "" 不得清空共享祖先 root 的既有 scope
+    （季节/子目录导入最后写入者不得胜出——RWK-17 修复）。
+    """
     if not root_id:
         return
     get_connection().execute(
         """
         UPDATE source_roots
         SET import_family = CASE WHEN ? != '' THEN ? ELSE import_family END,
-            import_scope = CASE WHEN ? IS NOT NULL THEN ? ELSE import_scope END,
+            import_scope = CASE WHEN ? != '' THEN ? ELSE import_scope END,
             updated_at = ?
         WHERE root_id = ?
         """,

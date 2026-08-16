@@ -289,12 +289,8 @@ async def create_media_preset(
     # 来源卡才能出现"启用 OpenList 增量"入口（不要求用户手填内部 root_id）。
     if preset.source in {"pan115", "baidu"}:
         try:
-            from app.media_presets.service import ensure_provider_source_root
-            from app.media_presets.store import save_preset as _save_preset
-
             from app.media_presets.service import ensure_provider_source_root, now_iso
             from app.media_presets.store import save_preset as _save_preset
-
             root_id = ensure_provider_source_root(
                 provider=preset.source,
                 local_mount_root=preset.source_root or source_root,
@@ -306,8 +302,15 @@ async def create_media_preset(
                 preset.updated_at = now_iso()
                 _save_preset(preset)
         except Exception:
-            # Provider root 建立失败不阻塞 TXT 导入主流程（旧路径继续可用）
-            pass
+            # Provider root 建立失败不阻塞 TXT 导入主流程（旧路径继续可用），
+            # 但必须留痕，避免来源卡静默缺失"增量入口"且用户无提示。
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "TXT 导入时 Provider SourceRoot 关联失败（preset=%s）",
+                getattr(preset, "preset_id", ""),
+                exc_info=True,
+            )
     return {
         "preset": preset_to_dict(preset),
         "version": asdict(selected_version),

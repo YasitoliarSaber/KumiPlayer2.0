@@ -155,11 +155,13 @@ def _build_openlist_scanner(root: dict):
     if not username or not password:
         raise ValueError("OpenList 尚未配置，无法执行扫描")
     bound_conn_hash = str(root.get("openlist_conn_hash") or "")
-    bound_locator = str(root.get("openlist_remote_locator") or "")
-    if bound_conn_hash:
-        # RWK-15：job 真正执行时完整复核 binding 契约（0 请求 / 0 mutation）——
-        # 连接身份 + 当前 remote_root scope + 当前 route/provider。bind 后用户
-        # 修改 remote_root / 路由 / provider，或连接变更，这里都会拒绝。
+    source_id = str(root.get("source_id") or "")
+    is_provider_root = source_id.startswith("pan115-") or source_id.startswith("baidu-")
+    if is_provider_root:
+        # RWK-15：Provider root 走 OpenList 通道必须通过完整 binding 复核
+        # （无条件调用：未绑定 / 连接变更 / remote_root 或 route 变更都会拒绝），
+        # 防未来新增入队路径绕过"请先绑定"保护。纯 OpenList 来源（openlist-*）
+        # 无 binding 语义，跳过。
         from app.catalog.binding import validate_runtime_binding
 
         current_hash = governor_connection_key(

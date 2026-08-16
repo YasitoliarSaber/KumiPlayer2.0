@@ -204,3 +204,57 @@ class TestRealUserFlow:
             (source_id,),
         ).fetchone()["c"]
         assert int(roots) == 1
+
+
+class TestProviderIdempotency:
+    def test_trailing_slash_same_provider_root(self, client, tmp_path):
+        """尾斜杠/大小写差异不产生第二套 Provider source（RWK-17 修复）。"""
+        from app.catalog import store as catalog_store
+        from app.media_presets.service import ensure_provider_source_root
+
+        root_a = ensure_provider_source_root(
+            provider="pan115",
+            local_mount_root=str(tmp_path / "mount"),
+            import_family="anime",
+        )
+        root_b = ensure_provider_source_root(
+            provider="pan115",
+            local_mount_root=str(tmp_path / "mount") + "\\",
+            import_family="anime",
+        )
+        assert root_a == root_b, "尾斜杠差异必须复用同一 root"
+        source_a = catalog_store.get_source_root(root_a).source_id
+        sources = catalog_store.get_connection().execute(
+            "SELECT COUNT(*) AS c FROM sources WHERE source_id = ?", (source_a,)
+        ).fetchone()["c"]
+        assert int(sources) == 1
+
+    def test_bindable_providers_lists_association(self, client, tmp_path):
+        """bindable-providers 返回 TXT 导入建立的 Provider 来源（免手填 root_id）。"""
+        from app.catalog import store as catalog_store
+
+        tree = tmp_path / "115目录树.txt"
+        tree.write_text(TREE_TXT, encoding="utf-8")
+        with open(tree, "rb") as fh:
+            resp = client.post(
+                "/api/media-presets",
+                data={
+                    "source": "pan115",
+                    "source_root": str(tmp_path / "mount"),
+                    "import_family": "anime",
+                    "import_scope": "",
+                },
+                files={"tree_file": ("115目录树.txt", fh, "text/plain")},
+            )
+        assert resp.status_code == 200, resp.text
+        preset = next(p for p in list_presets() if p.source == "pan115")
+
+        resp = client.get("/api/openlist/bindable-providers")
+        assert resp.status_code == 200
+        providers = resp.json()["providers"]
+        assert any(
+            p["root_id"] == preset.catalog_root_id
+            and p["provider"] == "pan115"
+            and p["bound"] is False
+            for p in providers
+        ), "bindable-providers 必须包含 TXT 导入建立的 Provider 来源"

@@ -200,9 +200,11 @@ def ensure_provider_source_root(
     if not mount_root:
         raise ValueError("缺少本地挂载根")
     effective_root = Path(mount_root).expanduser()
+    # 归一化后再哈希：尾斜杠/大小写差异不产生第二套 source（与 preset 复用判定一致）
+    norm_key = str(effective_root).strip().rstrip("\\/").casefold()
 
     provider_key = hashlib.sha256(
-        str(effective_root).casefold().encode("utf-8")
+        norm_key.encode("utf-8")
     ).hexdigest()[:16]
     source_id = f"{provider}-{provider_key}"
     catalog_store.create_source(
@@ -250,10 +252,14 @@ def ensure_provider_source_root(
         if root is None:
             raise ValueError("来源根解析失败，请重新导入")
         if resolution.action == "reuse_ancestor":
+            # 只在显式提供了非空语义时更新元数据——空 scope 不得清空共享
+            # 祖先 root 的既有 scope（季节/子目录导入最后写入者不得胜出）
+            family = (import_family or "anime").strip()
+            scope = (import_scope or "").strip()
             catalog_store.update_root_metadata(
                 root.root_id,
-                import_family=(import_family or "anime").strip(),
-                import_scope=(import_scope or "").strip(),
+                import_family=family,
+                import_scope=scope,
             )
     return root.root_id
 def preset_to_dict(preset: MediaLibraryPreset) -> dict:
