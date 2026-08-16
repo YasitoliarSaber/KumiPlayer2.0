@@ -614,6 +614,43 @@ def list_all_directories(root_id: str) -> list[dict]:
         (root_id,),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def source_catalog_baseline_stats(root_id: str) -> dict:
+    """RWK-23：Provider root 的 Source Catalog 本地基线统计。
+
+    返回 {baseline_ready, baseline_directory_count, baseline_node_count}：
+    - baseline_ready：存在至少一个 complete 的 source_directories
+      （TXT snapshot discovery 完成过，不是空 root）；
+    - baseline_directory_count：complete 目录数；
+    - baseline_node_count：非 tombstone 的 source_nodes 数。
+    """
+    conn = get_connection()
+    dirs = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM source_directories
+            WHERE root_id = ? AND state = 'complete'
+            """,
+            (root_id,),
+        ).fetchone()["c"]
+    )
+    nodes = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM source_nodes
+            WHERE root_id = ? AND tombstone = ''
+            """,
+            (root_id,),
+        ).fetchone()["c"]
+    )
+    return {
+        "baseline_ready": dirs > 0,
+        "baseline_directory_count": dirs,
+        "baseline_node_count": nodes,
+    }
+
+
 def remote_baseline_coverage(root_id: str) -> dict:
     """HYB-3：远端基线覆盖率统计。
 

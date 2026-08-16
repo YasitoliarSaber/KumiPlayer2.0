@@ -157,6 +157,12 @@ class TestRealUserFlow:
         root = catalog_store.get_source_root(root_id)
         assert root is not None and root.source_id == source_id
 
+        # 2.5 从 bindable-providers 确认 baseline 状态（TXT 导入后未执行 baseline 前不可绑定）
+        bp_resp = client.get("/api/openlist/bindable-providers")
+        providers0 = bp_resp.json()["providers"]
+        entry0 = next(p for p in providers0 if p["root_id"] == root_id)
+        assert entry0["baseline_ready"] is False, "TXT 导入后未执行 baseline 前必须不可绑定"
+
         # 3. 配置 OpenList + route → bind（preset 已关联 root_id，UI 免手填）
         resp = client.post(
             "/api/openlist/config",
@@ -182,6 +188,27 @@ class TestRealUserFlow:
             },
         )
         assert resp.status_code == 200, resp.text
+        # 执行 TXT baseline discovery（从 job store 找到该 root 的 snapshot job）
+        from app.jobs import store as job_store
+        from app.pipeline.discovery_handler import handle_discovery_scan
+
+        jobs = job_store.list_jobs(job_type="discovery_scan", status="queued", limit=100)
+        snapshot_job = next(
+            (j for j in jobs
+             if j.payload.get("root_id") == root_id
+             and j.payload.get("scan_channel", "").startswith("snapshot_")),
+            None,
+        )
+        assert snapshot_job is not None, "TXT 导入必须产生 snapshot baseline job"
+        result = handle_discovery_scan(snapshot_job.payload)
+        assert result["summary"].get("failed_count", 0) == 0
+
+        # baseline 就绪后 bindable-providers 显示 ready
+        bp_resp2 = client.get("/api/openlist/bindable-providers")
+        entry1 = next(p for p in bp_resp2.json()["providers"] if p["root_id"] == root_id)
+        assert entry1["baseline_ready"] is True, "TXT baseline 完成后必须可绑定"
+        assert entry1["baseline_node_count"] > 0
+
         bind = client.post(
             "/api/openlist/bind-root",
             json={"root_id": root_id, "remote_locator": "/115网盘/动画"},

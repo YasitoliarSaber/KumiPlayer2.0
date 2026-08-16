@@ -175,6 +175,10 @@ export default function OpenListSettingsPanel({
     if (next) loadBindProviders();
   };
 
+  const selectedProviderBaselineReady = bindProviders.find(
+    (item) => item.root_id === bindRootId
+  )?.baseline_ready ?? false;
+
   const runBindRoot = async () => {
     if (!bindRootId.trim() || !bindLocator.trim()) {
       setBindMessage('请填写来源根 ID 与 OpenList 远端目录');
@@ -363,6 +367,9 @@ export default function OpenListSettingsPanel({
                   {bindProviders.map((item) => (
                     <option key={item.root_id} value={item.root_id}>
                       {item.name}（{item.provider}）{item.bound ? ' · 已绑定' : ' · 未绑定'}
+                      {item.baseline_ready
+                        ? ` · 基线 ${item.baseline_directory_count} 目录 / ${item.baseline_node_count} 节点`
+                        : ' · 尚未建立本地基线'}
                     </option>
                   ))}
                 </select>
@@ -377,8 +384,8 @@ export default function OpenListSettingsPanel({
               <input type="text" value={bindLocator} onChange={(event) => setBindLocator(event.target.value)} className="settings-input" placeholder="/115网盘/动画" />
             </label>
             <div className="sources-openlist-actions">
-              <Button appearance="secondary" size="small" onClick={runBindRoot} className="settings-ghost-btn fluent-settings-btn" disabled={bindBusy}>
-                绑定 OpenList 增量
+              <Button appearance="secondary" size="small" onClick={runBindRoot} className="settings-ghost-btn fluent-settings-btn" disabled={bindBusy || !selectedProviderBaselineReady}>
+                {selectedProviderBaselineReady ? '绑定 OpenList 增量' : '先完成本地基线'}
               </Button>
               <Button appearance="secondary" size="small" onClick={runBoundRescan} className="settings-ghost-btn fluent-settings-btn" disabled={bindBusy}>
                 增量扫描

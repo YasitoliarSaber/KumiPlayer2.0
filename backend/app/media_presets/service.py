@@ -262,6 +262,61 @@ def ensure_provider_source_root(
                 import_scope=scope,
             )
     return root.root_id
+
+
+def bootstrap_provider_catalog_from_tree(
+    *,
+    provider: str,
+    tree_archive: str,
+    local_mount_root: str,
+    import_family: str,
+    import_scope: str = "",
+    remote_locator: str = "",
+) -> dict:
+    """RWK-21：把已归档的目录树 TXT 建立为 Provider SourceRoot 的完整 Source Catalog baseline。
+
+    语义（路线 A）：TXT → Provider Source Catalog 全量基线，0 OpenList 请求。
+    - ensure/复用 Provider source + root（幂等，同一挂载根不产生第二套）；
+    - enqueue durable discovery job（scan_channel=snapshot_{provider}, full）——
+      source_nodes / source_directories（complete frontier）/
+      media_units / revisions 由 durable handler 从归档 TXT 建立；
+    - 返回 {"root_id", "job_id", "generation", "source_id"}。
+
+    调用方（multipart create / import-local-tree）负责 preset.catalog_root_id 关联。
+    归档 TXT 已落在 KumiPlayer 数据目录（MediaTreeVersion 承载），restart 可恢复。
+    """
+    from app.catalog import store as catalog_store
+    from app.db.database import init_db
+    from app.pipeline import orchestrator
+
+    init_db()
+    root_id = ensure_provider_source_root(
+        provider=provider,
+        local_mount_root=local_mount_root,
+        import_family=import_family,
+        import_scope=import_scope,
+        remote_locator=remote_locator,
+    )
+    root = catalog_store.get_source_root(root_id)
+    if root is None:
+        raise ValueError("来源根建立失败")
+    generation = catalog_store.bump_generation(root_id)
+    job_id = orchestrator.enqueue_scan(
+        root_id,
+        generation,
+        root.source_id,
+        input_path=tree_archive,
+        scan_mode="full",
+        scan_channel=f"snapshot_{provider}",
+    )
+    return {
+        "root_id": root_id,
+        "job_id": job_id,
+        "generation": generation,
+        "source_id": root.source_id,
+    }
+
+
 def preset_to_dict(preset: MediaLibraryPreset) -> dict:
     data = asdict(preset)
     data["is_library_indexed"] = preset.lifecycle_status == "ready"

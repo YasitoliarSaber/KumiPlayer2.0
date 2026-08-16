@@ -1417,6 +1417,16 @@ def bind_provider_root_to_openlist(req: BindRootRequest):
     if not normalized or normalized == "/":
         raise HTTPException(status_code=400, detail="请选择 OpenList 远端媒体目录（不能是根目录）")
 
+    # RWK-23：绑定保护——只有真正完成 Source Catalog 本地基线（TXT 快照
+    # discovery 产生过 complete 目录）的 Provider root 才允许绑定 OpenList；
+    # 否则首次增量会退化成无意中的全网远端扫描。
+    baseline = catalog_store.source_catalog_baseline_stats(root_id)
+    if not baseline["baseline_ready"]:
+        raise HTTPException(
+            status_code=400,
+            detail="该来源尚未建立 Source Catalog 本地基线，"
+                   "请先通过目录树 TXT 完成安全初始化（本地索引）后再绑定 OpenList 增量",
+        )
     # RWK-14：binding 安全契约（0 请求 / 0 mutation 校验）——
     # ①root 必须是 pan115/baidu Provider；②binding locator 必须位于当前
     # remote_root 内；③必须命中启用路由；④route.provider_id == root provider。
@@ -1492,6 +1502,9 @@ def list_bindable_providers():
             (getattr(root, "openlist_conn_hash", "") or "")
             and (getattr(root, "openlist_remote_locator", "") or "")
         )
+        # RWK-23：Source Catalog 本地基线状态——只有 baseline_ready=true 的来源
+        # 才允许绑定 OpenList（否则首次增量会退化成全网扫描）。
+        baseline = catalog_store.source_catalog_baseline_stats(root_id)
         providers.append({
             "preset_id": preset.preset_id,
             "name": preset.name or preset.source,
@@ -1503,6 +1516,9 @@ def list_bindable_providers():
             "openlist_remote_locator": (
                 getattr(root, "openlist_remote_locator", "") or ""
             ),
+            "baseline_ready": baseline["baseline_ready"],
+            "baseline_directory_count": baseline["baseline_directory_count"],
+            "baseline_node_count": baseline["baseline_node_count"],
         })
     return {"providers": providers}
 

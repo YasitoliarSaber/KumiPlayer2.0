@@ -192,13 +192,71 @@ def import_local_tree(req: LocalTreeImportRequest):
         version,
         snapshot,
     )
-    return {
+    # RWK-22：原生选择器/拖放 TXT 路径也建立 Provider Source Catalog baseline
+    # （0 网络），preset.catalog_root_id 持久关联——bindable 列表才能出现该来源。
+    baseline = _ensure_tree_baseline(
+        preset, str(archive), source_root,
+        req.import_family, req.import_scope,
+    )
+    result = {
         "preset": preset_to_dict(preset),
         "version": asdict(selected_version),
         "preview": _preview_to_dict(build_preview(plan)),
         "reused_preset": reused,
         "unchanged": unchanged,
     }
+    if baseline:
+        result["baseline"] = baseline
+    return result
+
+
+def _ensure_tree_baseline(
+    preset,
+    tree_archive: str,
+    local_mount_root: str,
+    import_family: str,
+    import_scope: str,
+) -> dict | None:
+    """RWK-21/22：把归档 TXT 建立为 Provider SourceRoot 的 Source Catalog baseline。
+
+    返回 baseline 信息（root_id/job_id/status）或 None（非 pan115/baidu 来源）。
+    失败只记日志不阻塞旧 TXT 导入主流程（兼容保留），但响应暴露 baseline_status，
+    前端据此提示"增量暂不可用"而不是静默缺失。
+    """
+    if not preset or preset.source not in {"pan115", "baidu"}:
+        return None
+    try:
+        from app.media_presets.service import (
+            bootstrap_provider_catalog_from_tree,
+            now_iso,
+        )
+        from app.media_presets.store import save_preset as _save_preset
+
+        info = bootstrap_provider_catalog_from_tree(
+            provider=preset.source,
+            tree_archive=tree_archive,
+            local_mount_root=local_mount_root,
+            import_family=import_family,
+            import_scope=import_scope,
+        )
+        if info["root_id"] and preset.catalog_root_id != info["root_id"]:
+            preset.catalog_root_id = info["root_id"]
+            preset.updated_at = now_iso()
+            _save_preset(preset)
+        return {
+            "root_id": info["root_id"],
+            "job_id": info["job_id"],
+            "status": "baseline_queued",
+        }
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "TXT 导入时 Provider Source Catalog baseline 建立失败（preset=%s）",
+            getattr(preset, "preset_id", ""),
+            exc_info=True,
+        )
+        return {"status": "baseline_failed"}
 
 
 def _discard_temporary_preset(preset_id: str) -> None:
@@ -285,39 +343,22 @@ async def create_media_preset(
         version,
         snapshot,
     )
-    # RWK-17：现有 115/百度 TXT 导入也建立 Provider SourceRoot 并关联 preset，
-    # 来源卡才能出现"启用 OpenList 增量"入口（不要求用户手填内部 root_id）。
-    if preset.source in {"pan115", "baidu"}:
-        try:
-            from app.media_presets.service import ensure_provider_source_root, now_iso
-            from app.media_presets.store import save_preset as _save_preset
-            root_id = ensure_provider_source_root(
-                provider=preset.source,
-                local_mount_root=preset.source_root or source_root,
-                import_family=preset.import_family,
-                import_scope=preset.import_scope,
-            )
-            if root_id and preset.catalog_root_id != root_id:
-                preset.catalog_root_id = root_id
-                preset.updated_at = now_iso()
-                _save_preset(preset)
-        except Exception:
-            # Provider root 建立失败不阻塞 TXT 导入主流程（旧路径继续可用），
-            # 但必须留痕，避免来源卡静默缺失"增量入口"且用户无提示。
-            import logging
-
-            logging.getLogger(__name__).warning(
-                "TXT 导入时 Provider SourceRoot 关联失败（preset=%s）",
-                getattr(preset, "preset_id", ""),
-                exc_info=True,
-            )
-    return {
+    # RWK-21/22：multipart TXT 导入与 import-local-tree 共用同一 baseline 服务
+    # （真正把 TXT 快照写入 Source Catalog：source_nodes/directories/media_units）。
+    baseline = _ensure_tree_baseline(
+        preset, str(archive), preset.source_root or source_root,
+        import_family, import_scope,
+    )
+    result = {
         "preset": preset_to_dict(preset),
         "version": asdict(selected_version),
         "preview": _preview_to_dict(build_preview(plan)),
         "reused_preset": reused,
         "unchanged": unchanged,
     }
+    if baseline:
+        result["baseline"] = baseline
+    return result
 
 
 def _activate_or_reuse_tree(provisional, version, snapshot):
