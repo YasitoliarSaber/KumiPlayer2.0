@@ -26,6 +26,20 @@ from app.jobs.models import JobCancelledError, JobDeferredError
 from app.jobs.registry import register
 from app.pipeline import orchestrator
 
+
+class _RootProxy:
+    """把 scanner root dict 包装为 binding validator 需要的 SourceRootRecord 形状。"""
+
+    def __init__(self, root: dict):
+        self.source_id = str(root.get("source_id") or "")
+        self.openlist_conn_hash = str(root.get("openlist_conn_hash") or "")
+        self.openlist_remote_locator = str(root.get("openlist_remote_locator") or "")
+        self.remote_locator = str(root.get("remote_locator") or "")
+
+
+def _root_proxy(root: dict) -> _RootProxy:
+    return _RootProxy(root)
+
 #: 扫描过程中必须整棵中止并转 JobDeferredError 的来源级安全错误
 _RISK_ABORT_TYPES = (
     OpenListRiskControlError,
@@ -123,10 +137,15 @@ def _build_openlist_scanner(root: dict):
     入参/返回在双 namespace 间映射，保证 node identity 与 TXT snapshot 一致。
     """
     from app.catalog.scanner import SourceCatalogScanner
-    from app.integrations.openlist.client import get_openlist_client
+    from app.integrations.openlist.client import (
+        get_openlist_client,
+        normalize_remote_path,
+    )
     from app.integrations.openlist.governor import governor_connection_key
     from app.core.config import load_config, resolve_openlist_credentials
 
+    # 函数内 import（避免模块级循环）：与 api 层同一 routes 来源
+    from app.api.openlist import _routes_from_config
     # runtime 凭据统一走 resolver（REWORK）：后台扫描恢复后无需重启。
     # store 不可读/未配置 → 抛受控错误，由 job 失败处理（不清凭据）。
     config = load_config()
@@ -135,18 +154,31 @@ def _build_openlist_scanner(root: dict):
         raise ValueError("本机凭据管理器暂时不可用，OpenList 扫描已暂停，请稍后重试")
     if not username or not password:
         raise ValueError("OpenList 尚未配置，无法执行扫描")
-
     bound_conn_hash = str(root.get("openlist_conn_hash") or "")
+    bound_locator = str(root.get("openlist_remote_locator") or "")
     if bound_conn_hash:
+        # RWK-15：job 真正执行时完整复核 binding 契约（0 请求 / 0 mutation）——
+        # 连接身份 + 当前 remote_root scope + 当前 route/provider。bind 后用户
+        # 修改 remote_root / 路由 / provider，或连接变更，这里都会拒绝。
+        from app.catalog.binding import validate_runtime_binding
+
         current_hash = governor_connection_key(
             config.openlist_server_url, username
         )
-        if current_hash != bound_conn_hash:
-            raise ValueError(
-                "OpenList 连接已变更（服务器或账号与绑定不一致），"
-                "已拒绝在本来源根上继续扫描，请重新绑定"
+        try:
+            validate_runtime_binding(
+                root=_root_proxy(root),
+                bound_conn_hash=bound_conn_hash,
+                current_conn_hash=current_hash,
+                routes=_routes_from_config(config),
+                remote_root=(
+                    normalize_remote_path(config.openlist_remote_root)
+                    if config.openlist_remote_root
+                    else "/"
+                ),
             )
-
+        except ValueError as exc:
+            raise ValueError(str(exc)) from None
     client = get_openlist_client(
         config.openlist_server_url,
         username,

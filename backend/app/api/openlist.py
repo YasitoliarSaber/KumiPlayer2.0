@@ -1440,6 +1440,25 @@ def bind_provider_root_to_openlist(req: BindRootRequest):
     if not normalized or normalized == "/":
         raise HTTPException(status_code=400, detail="请选择 OpenList 远端媒体目录（不能是根目录）")
 
+    # RWK-14：binding 安全契约（0 请求 / 0 mutation 校验）——
+    # ①root 必须是 pan115/baidu Provider；②binding locator 必须位于当前
+    # remote_root 内；③必须命中启用路由；④route.provider_id == root provider。
+    from app.catalog.binding import validate_binding_contract
+
+    try:
+        validate_binding_contract(
+            root=root,
+            remote_locator=normalized,
+            routes=_routes_from_config(config),
+            remote_root=(
+                normalize_remote_path(config.openlist_remote_root)
+                if config.openlist_remote_root
+                else "/"
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
     # 错绑预检：构建临时 OpenList scanner 做一次有界 root list（1 次请求）。
     from app.integrations.openlist.client import get_openlist_client
 
@@ -1509,7 +1528,9 @@ def rescan_bound_provider_root(req: BoundRootRescanRequest):
             detail="该来源根尚未绑定 OpenList 增量通道，请先绑定",
         )
 
-    # 连接身份约束：可信 resolver 对比当前 conn hash 与绑定值
+    # RWK-15：运行时完整复核（bump/enqueue 之前）——可信 resolver 身份 +
+    # 当前 remote_root scope + 当前 route/provider。server+username 不变但
+    # 用户修改 remote_root / 禁用或改 provider 路由时，这里会拦截。
     username, password, state = resolve_openlist_credentials()
     if state == "unavailable":
         raise HTTPException(
@@ -1522,13 +1543,24 @@ def rescan_bound_provider_root(req: BoundRootRescanRequest):
             detail="尚未配置 OpenList 连接，请先到设置页完成配置",
         )
     config = load_config()
-    current_hash = governor_connection_key(config.openlist_server_url, username)
-    if current_hash != bound_conn_hash:
-        raise HTTPException(
-            status_code=409,
-            detail="OpenList 连接已变更（服务器或账号与绑定不一致），"
-                   "已拒绝扫描，请重新绑定",
+    from app.catalog.binding import validate_runtime_binding
+
+    try:
+        validate_runtime_binding(
+            root=root,
+            bound_conn_hash=bound_conn_hash,
+            current_conn_hash=governor_connection_key(
+                config.openlist_server_url, username
+            ),
+            routes=_routes_from_config(config),
+            remote_root=(
+                normalize_remote_path(config.openlist_remote_root)
+                if config.openlist_remote_root
+                else "/"
+            ),
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
 
     generation = catalog_store.bump_generation(root_id)
     job_id = orchestrator.enqueue_scan(

@@ -115,7 +115,7 @@ def fake_client(monkeypatch):
     yield
 
 
-def _configure_openlist(client, tmp_path):
+def _configure_openlist(client, tmp_path, *, provider: str = "pan115"):
     resp = client.post(
         "/api/openlist/config",
         json={
@@ -127,6 +127,22 @@ def _configure_openlist(client, tmp_path):
         },
     )
     assert resp.status_code == 200, resp.text
+    # RWK-14：binding 契约要求命中启用路由且 provider 与 root 一致
+    resp2 = client.put(
+        "/api/openlist/routes",
+        json={
+            "routes": [
+                {
+                    "route_id": "route-115-anime",
+                    "label": "115",
+                    "remote_prefix": "/115网盘/动画",
+                    "provider_id": provider,
+                    "enabled": True,
+                }
+            ]
+        },
+    )
+    assert resp2.status_code == 200, resp2.text
 
 
 class TestBindRoot:
@@ -177,6 +193,22 @@ class TestBindRoot:
 
         body = _bootstrap_provider(client, tmp_path)
         _configure_openlist(client, tmp_path)
+        # 为电影目录配一条 pan115 route（过 binding 契约校验，才能到 preflight）
+        resp = client.put(
+            "/api/openlist/routes",
+            json={
+                "routes": [
+                    {
+                        "route_id": "route-115-movie",
+                        "label": "115 电影",
+                        "remote_prefix": "/115网盘/电影",
+                        "provider_id": "pan115",
+                        "enabled": True,
+                    }
+                ]
+            },
+        )
+        assert resp.status_code == 200, resp.text
         FakeClient.tree = {
             "/115网盘/电影": [("电影A", True, None, 5.0)],
         }

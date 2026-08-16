@@ -147,6 +147,22 @@ def _configure_openlist(client, tmp_path):
         },
     )
     assert resp.status_code == 200, resp.text
+    # RWK-14：binding 契约要求命中启用路由且 provider 与 root 一致
+    resp2 = client.put(
+        "/api/openlist/routes",
+        json={
+            "routes": [
+                {
+                    "route_id": "route-115-anime",
+                    "label": "115",
+                    "remote_prefix": "/115网盘/动画",
+                    "provider_id": "pan115",
+                    "enabled": True,
+                }
+            ]
+        },
+    )
+    assert resp2.status_code == 200, resp2.text
 
 
 class TestBoundEndToEnd:
