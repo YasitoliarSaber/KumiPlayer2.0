@@ -1552,3 +1552,207 @@ class TestAtomicConfigCommit:
         assert real_store.values.get("openlist_username") == "quark-user"
         assert real_store.values.get("openlist_password") == "p@ssw0rd"
 
+    def test_import_batch_store_unavailable_zero_mutation(self, client, tmp_path, monkeypatch):
+        """身份回归 1：Credential Store unavailable → import-batch 503 且 0 durable mutation。
+
+        断言 SQLite 中 sources / source_roots / import_batches / jobs 均无新增，
+        credential 无 write / delete。
+        """
+        from app.core import config as config_module
+        from app.core.credential_store import CredentialStoreError
+
+        class RealStore:
+            available = True
+
+            def __init__(self):
+                self.values: dict[str, str] = {}
+
+            def read(self, name):
+                return self.values.get(name, "")
+
+            def write(self, name, value):
+                self.values[name] = value
+
+            def delete(self, name):
+                self.values.pop(name, None)
+
+        real_store = RealStore()
+        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", real_store)
+        monkeypatch.setattr(config_module, "_credential_storage_enabled", lambda: True)
+        config_module.invalidate_config_cache()
+        resp = client.post(
+            "/api/openlist/config",
+            json={
+                "server_url": "https://ol.example.com:5244",
+                "remote_root": REMOTE_ROOT,
+                "mount_root": str(tmp_path / "quark"),
+                "username": "quark-user",
+                "password": "p@ssw0rd",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+        # 记录 DB 快照
+        from app.db.database import get_connection
+
+        conn = get_connection()
+        before = {
+            "sources": conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0],
+            "roots": conn.execute("SELECT COUNT(*) FROM source_roots").fetchone()[0],
+            "batches": conn.execute("SELECT COUNT(*) FROM import_batches").fetchone()[0],
+            "jobs": conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0],
+        }
+
+        class UnavailableStore:
+            available = True
+
+            def read(self, name):
+                raise CredentialStoreError("temporary")
+
+            def write(self, name, value):
+                pass
+
+            def delete(self, name):
+                pass
+
+        # store 不可读（cold cache：不 invalidate 也行，直接替换后 load 缓存仍旧；
+        # 但 import-batch 现在强制 resolver，resolver 对 cached 有值会 fast-path……
+        # 因此这里同时 invalidate，确保 resolver 走 store 读 → unavailable）
+        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", UnavailableStore())
+        config_module.invalidate_config_cache()
+        try:
+            config_module.load_config(force_reload=True)
+        except Exception:
+            pass
+
+        resp = client.post(
+            "/api/openlist/import-batch",
+            json={"remote_paths": [REMOTE_ROOT + "/动画"], "import_family": "anime"},
+        )
+        assert resp.status_code == 503, resp.text
+
+        conn = get_connection()
+        assert conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0] == before["sources"]
+        assert conn.execute("SELECT COUNT(*) FROM source_roots").fetchone()[0] == before["roots"]
+        assert conn.execute("SELECT COUNT(*) FROM import_batches").fetchone()[0] == before["batches"]
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == before["jobs"]
+        # credential 无 write / delete
+        assert real_store.values.get("openlist_username") == "quark-user"
+        assert real_store.values.get("openlist_password") == "p@ssw0rd"
+
+    def test_import_batch_recovers_identity_after_store_failure(self, client, tmp_path, monkeypatch):
+        """身份回归 2：hydrate 失败 → store 恢复 → 直接 import-batch（不 restart /
+        不 invalidate / 不先行 test/save）→ source_id 必须基于 recovered username，
+        且不存在 blank-username 派生的错误 source_id。"""
+        from app.core import config as config_module
+        from app.core.credential_store import CredentialStoreError
+
+        class RealStore:
+            available = True
+
+            def __init__(self):
+                self.values: dict[str, str] = {}
+
+            def read(self, name):
+                return self.values.get(name, "")
+
+            def write(self, name, value):
+                self.values[name] = value
+
+            def delete(self, name):
+                self.values.pop(name, None)
+
+        real_store = RealStore()
+        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", real_store)
+        monkeypatch.setattr(config_module, "_credential_storage_enabled", lambda: True)
+        config_module.invalidate_config_cache()
+        resp = client.post(
+            "/api/openlist/config",
+            json={
+                "server_url": "https://ol.example.com:5244",
+                "remote_root": REMOTE_ROOT,
+                "mount_root": str(tmp_path / "quark"),
+                "username": "quark-user",
+                "password": "p@ssw0rd",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+        class FailingOnceStore:
+            available = True
+            failed = False
+
+            def __init__(self, real):
+                self.real = real
+
+            def read(self, name):
+                if name == "openlist_username" and not self.failed:
+                    self.failed = True
+                    raise CredentialStoreError("temporary")
+                return self.real.read(name)
+
+            def write(self, name, value):
+                return self.real.write(name, value)
+
+            def delete(self, name):
+                return self.real.delete(name)
+
+        # hydrate 中途失败 → stale cache（username 留空）
+        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", FailingOnceStore(real_store))
+        config_module.invalidate_config_cache()
+        try:
+            config_module.load_config(force_reload=True)
+        except Exception:
+            pass
+        assert config_module.load_config().openlist_username == ""
+
+        # 配置 provider route（import-batch 前置校验要求）
+        r = client.put(
+            "/api/openlist/routes",
+            json={
+                "routes": [
+                    {
+                        "route_id": "route-anime",
+                        "label": "动画",
+                        "remote_prefix": REMOTE_ROOT + "/动画",
+                        "provider_id": "quark",
+                        "enabled": True,
+                    }
+                ]
+            },
+        )
+        assert r.status_code == 200, r.text
+
+        # store 已自愈恢复；不 invalidate / 不 restart → 直接 import-batch
+        from app.integrations.openlist.cache import connection_key
+
+        resp = client.post(
+            "/api/openlist/import-batch",
+            json={"remote_paths": [REMOTE_ROOT + "/动画"], "import_family": "anime"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+
+        expected_source_id = "openlist-" + connection_key(
+            "https://ol.example.com:5244", "quark-user", REMOTE_ROOT
+        )
+        # 根与 job 的 source_id 都必须是 recovered username 派生的正确身份
+        for root in body["roots"]:
+            from app.catalog import store as catalog_store
+
+            root_row = catalog_store.get_source_root(root["root_id"])
+            assert root_row is not None
+            assert root_row.source_id == expected_source_id
+        # 不存在 blank-username 派生的错误 source_id
+        from app.db.database import get_connection
+
+        conn = get_connection()
+        blank_id = "openlist-" + connection_key(
+            "https://ol.example.com:5244", "", REMOTE_ROOT
+        )
+        rows = conn.execute(
+            "SELECT source_id FROM sources WHERE source_id = ?", (blank_id,)
+        ).fetchall()
+        assert rows == []
+
+

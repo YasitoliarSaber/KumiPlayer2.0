@@ -134,8 +134,8 @@ def _create_preset(preset_id: str = "preset-ol-1") -> str:
 def _source_id() -> str:
     from app.api.openlist import _openlist_source_id
 
-    return _openlist_source_id(load_config())
-
+    config = load_config()
+    return _openlist_source_id(config, username=config.openlist_username or "")
 
 def _discovery_job(root_id: str):
     from app.jobs import store as job_store
