@@ -422,21 +422,21 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
               await loadConfig();
               report(result.message);
             }}
-            onTestConnection={async () => {
-              const result = await openlistApi.testConnection({
-                server_url: openlistDraft.server_url,
-                remote_root: openlistDraft.remote_root,
-                username: openlistDraft.username,
-                password: openlistDraft.password,
-                allow_insecure_http: true,
-              });
+            onTestConnection={async (payload) => {
+              // REWORK P0：allow_insecure_http 由面板风险确认状态决定，
+              // 不在父级 hardcode true；返回后端 machine status code
+              const result = await openlistApi.testConnection(payload);
               setOpenlistNoticeKind(result.ok ? 'success' : 'error');
               setOpenlistNotice(result.message);
-              if (!result.ok) throw new Error(result.message);
+              return result;
             }}
             notice={openlistNotice}
             noticeKind={openlistNoticeKind}
-            busy={activeAction}
+            onNotice={(message, kind) => {
+              setOpenlistNoticeKind(kind);
+              setOpenlistNotice(message);
+            }}
+            externalBusy={activeAction}
           />
         </SettingsSection>
       )}

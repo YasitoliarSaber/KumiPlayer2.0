@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@fluentui/react-components';
-import { openlistApi, type OpenListConfigPayload } from '../../api/openlist';
+import type { OpenListConfigPayload, OpenListTestResult } from '../../api/openlist';
 import type { PublicConfig } from '../../api/config';
 
 /**
@@ -77,11 +77,46 @@ interface OpenListSettingsPanelProps {
   config: PublicConfig;
   draft: OpenListDraft;
   onChangeDraft: (key: keyof OpenListDraft, value: string) => void;
+  /** 保存连接：resolve 表示成功；reject 会被面板收口为可见错误 */
   onSaveConnection: (payload: OpenListConfigPayload) => Promise<void>;
-  onTestConnection: () => Promise<void>;
+  /** 测试连接：返回后端 machine status code（不 throw 分类错误；网络异常才 reject） */
+  onTestConnection: (payload: OpenListConfigPayload) => Promise<OpenListTestResult>;
   notice: string;
   noticeKind: 'success' | 'error' | 'info';
-  busy?: string | null;
+  /** 面板内部操作触发的提示（错误收口用）；外部 busy 锁 */
+  onNotice?: (message: string, kind: 'success' | 'error' | 'info') => void;
+  externalBusy?: string | null;
+}
+
+/** 后端 machine status code → 面板状态映射（REWORK：不得全部折叠为 network_unavailable） */
+export function mapProbeCode(code: string): OpenListConnectionState {
+  switch (code) {
+    case 'connected':
+      return 'connected';
+    case 'credential_rejected':
+      return 'credential_rejected';
+    case 'root_permission_denied':
+      return 'root_permission_denied';
+    case 'root_not_found':
+      return 'root_not_found';
+    case 'rate_limited':
+      return 'rate_limited';
+    case 'risk_control':
+    case 'cooling_down':
+      return 'risk_control';
+    case 'timeout':
+    case 'network_unavailable':
+    case 'server_unavailable':
+      return 'network_unavailable';
+    case 'invalid_configuration':
+    case 'not_configured':
+    case 'credential_store_unavailable':
+      return 'unconfigured';
+    case 'redirect_rejected':
+    case 'unexpected_error':
+    default:
+      return 'network_unavailable';
+  }
 }
 
 export interface OpenListDraft {
@@ -105,12 +140,17 @@ export default function OpenListSettingsPanel({
   onTestConnection,
   notice,
   noticeKind,
-  busy,
+  onNotice,
+  externalBusy,
 }: OpenListSettingsPanelProps) {
   const [editorOpen, setEditorOpen] = useState(false);
   const [credentialsOpen, setCredentialsOpen] = useState(false);
   const [allowOpenlistHttp, setAllowOpenlistHttp] = useState(false);
-  const [probeState, setProbeState] = useState<OpenListConnectionState>('unconfigured');
+  const [actionLock, setActionLock] = useState<string | null>(null);
+  // saved credential 初始状态必须是 saved_unverified，而不是 unconfigured（REWORK）
+  const [probeState, setProbeState] = useState<OpenListConnectionState>(() =>
+    config.openlist_configured ? 'saved_unverified' : 'unconfigured'
+  );
 
   const saved = config.openlist_configured;
   const webdav = buildOpenListWebdavAddress(draft.server_url);
@@ -137,28 +177,49 @@ export default function OpenListSettingsPanel({
     if (!saved) setCredentialsOpen(true);
   }, [saved]);
 
+  const busy = actionLock !== null || Boolean(externalBusy);
+
   const buildPayload = (): OpenListConfigPayload => ({
     server_url: draft.server_url,
     remote_root: draft.remote_root,
     mount_root: draft.mount_root,
     username: draft.username,
     password: draft.password,
+    // 非回环 HTTP 未确认时不得悄悄放行（REWORK P0：allow_insecure_http 必须来自风险确认）
     allow_insecure_http: allowOpenlistHttp || isNonLoopbackHttp(draft.server_url) === false,
     cache_ttl_minutes: Math.max(1, Number(draft.cache_ttl) || 1440),
     prefetch_limit: Math.max(0, Math.min(50, Number(draft.prefetch_limit) || 12)),
   });
 
-  const handleSave = () => {
-    void onSaveConnection(buildPayload());
+  const handleSave = async () => {
+    if (actionLock) return; // 单操作锁：双击不产生并发
+    setActionLock('save');
+    try {
+      await onSaveConnection(buildPayload());
+      // remote-affecting「验证并保存」成功后，后端已 Fresh Probe 成功 → connected；
+      // local-only 保存不能凭空宣称连接正常（保持 saved_unverified）
+      setProbeState(remoteAffectingDirty ? 'connected' : saved ? 'saved_unverified' : 'unconfigured');
+    } catch (error) {
+      setProbeState(remoteAffectingDirty ? 'unconfigured' : saved ? 'saved_unverified' : 'unconfigured');
+      const message = (error as Error)?.message || 'OpenList 配置保存失败';
+      onNotice?.(message, 'error');
+    } finally {
+      setActionLock(null);
+    }
   };
 
   const handleTest = async () => {
+    if (actionLock) return;
+    setActionLock('test');
     setProbeState('checking');
     try {
-      await onTestConnection();
-      setProbeState('connected');
+      const result = await onTestConnection(buildPayload());
+      // 真实 machine status code 映射，不得全部折叠为 network_unavailable
+      setProbeState(result.ok ? 'connected' : mapProbeCode(result.code));
     } catch {
       setProbeState('network_unavailable');
+    } finally {
+      setActionLock(null);
     }
   };
 

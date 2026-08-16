@@ -44,8 +44,11 @@ export default function OpenListSourceRoutes({
 }: OpenListSourceRoutesProps) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [dirtyPrefixes, setDirtyPrefixes] = useState<Record<string, boolean>>({});
+  const [actionLock, setActionLock] = useState<string | null>(null);
+  const [localError, setLocalError] = useState('');
 
   const dirtyCount = Object.values(dirtyPrefixes).filter(Boolean).length;
+  const isBusy = actionLock !== null || Boolean(busy);
 
   const toggleEdit = (prefix: string) => {
     setExpanded((current) => ({ ...current, [prefix]: !current[prefix] }));
@@ -56,9 +59,31 @@ export default function OpenListSourceRoutes({
     setDirtyPrefixes((current) => ({ ...current, [prefix]: true }));
   };
 
+  const handleDiscover = async () => {
+    if (actionLock) return; // 单操作锁：双击不产生并发
+    setActionLock('refresh');
+    setLocalError('');
+    try {
+      await onDiscover();
+    } catch (error) {
+      setLocalError((error as Error)?.message || '刷新来源目录失败');
+    } finally {
+      setActionLock(null);
+    }
+  };
+
   const handleSave = async () => {
-    await onSave();
-    setDirtyPrefixes({});
+    if (actionLock) return;
+    setActionLock('save');
+    setLocalError('');
+    try {
+      await onSave();
+      setDirtyPrefixes({});
+    } catch (error) {
+      setLocalError((error as Error)?.message || '保存来源目录失败');
+    } finally {
+      setActionLock(null);
+    }
   };
 
   const localPathFor = (prefix: string) =>
@@ -76,17 +101,16 @@ export default function OpenListSourceRoutes({
       ) : (
         <>
           <div className="sources-openlist-actions">
-            <Button appearance="secondary" size="small" onClick={() => void onDiscover()} className="settings-ghost-btn fluent-settings-btn" disabled={Boolean(busy)}>
-              {busy === '刷新来源目录' ? '处理中…' : '刷新来源目录'}
+            <Button appearance="secondary" size="small" onClick={() => void handleDiscover()} className="settings-ghost-btn fluent-settings-btn" disabled={isBusy}>
+              {actionLock === 'refresh' ? '处理中…' : '刷新来源目录'}
             </Button>
-            <Button appearance="primary" size="small" onClick={() => void handleSave()} className="settings-primary-btn fluent-settings-btn" disabled={dirtyCount === 0 || Boolean(busy)}>
-              {busy === '保存来源目录' ? '处理中…' : '保存更改'}
+            <Button appearance="primary" size="small" onClick={() => void handleSave()} className="settings-primary-btn fluent-settings-btn" disabled={dirtyCount === 0 || isBusy}>
+              {actionLock === 'save' ? '处理中…' : '保存更改'}
             </Button>
             {dirtyCount > 0 && <span className="sources-dirty-hint">有 {dirtyCount} 项更改尚未保存。</span>}
           </div>
 
-          {notice && <p className="settings-openlist-notice">{notice}</p>}
-
+          {(notice || localError) && <p className={`settings-openlist-notice${localError ? ' error' : ''}`}>{localError || notice}</p>}
           {draft.length === 0 && discoverItems.length === 0 && (
             <p className="settings-openlist-notice">尚未读取来源目录。点击「刷新来源目录」从 OpenList 顶层读取。</p>
           )}

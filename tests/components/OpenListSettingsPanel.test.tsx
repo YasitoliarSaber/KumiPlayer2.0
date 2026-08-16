@@ -41,12 +41,17 @@ function renderPanel(props: Partial<Parameters<typeof OpenListSettingsPanel>[0]>
     draft: baseDraft(),
     onChangeDraft: vi.fn(),
     onSaveConnection: vi.fn(async () => undefined),
-    onTestConnection: vi.fn(async () => undefined),
+    onTestConnection: vi.fn(async () => ({ ok: true, code: 'connected', phase: 'root', message: '连接成功' })),
     notice: '',
     noticeKind: 'info' as const,
-    busy: null,
+    onNotice: vi.fn(),
+    externalBusy: null,
   };
-  return render(<OpenListSettingsPanel {...defaults} {...props} />);
+  const merged = { ...defaults, ...props };
+  return {
+    ...merged,
+    ...render(<OpenListSettingsPanel {...merged} />),
+  };
 }
 
 describe('OpenListSettingsPanel', () => {
@@ -112,5 +117,111 @@ describe('OpenListSettingsPanel', () => {
     fireEvent.click(screen.getByText('管理连接'));
     expect(screen.getByText('OpenList 地址', { exact: false })).toBeTruthy();
     expect(screen.getByText('WebDAV：', { exact: false })).toBeTruthy();
+  });
+});
+
+describe('REWORK：状态与安全语义', () => {
+  test('saved config 初始显示 saved_unverified（登录信息已保存，尚未检查当前连接）', async () => {
+    renderPanel();
+    expect(await screen.findByText(/尚未检查当前连接/)).toBeTruthy();
+    expect(screen.queryByText('尚未配置')).toBeNull();
+  });
+
+  test('unconfigured 初始显示尚未配置', () => {
+    renderPanel({ config: baseConfig({ openlist_configured: false, openlist_server_url: '' }) });
+    expect(screen.getByText('尚未配置')).toBeTruthy();
+  });
+
+  test('credential_rejected → 显示凭据被拒，不是 network_unavailable', async () => {
+    const { onTestConnection } = renderPanel({
+      onTestConnection: vi.fn(async () => ({ ok: false, code: 'credential_rejected', phase: 'credential', message: '拒绝' })),
+    });
+    fireEvent.click(screen.getByText('检查连接'));
+    expect(await screen.findByText(/拒绝了当前登录信息/)).toBeTruthy();
+    expect(screen.queryByText(/暂时无法访问 OpenList 服务/)).toBeNull();
+    expect(onTestConnection).toHaveBeenCalledTimes(1);
+  });
+
+  test('root_permission_denied → 对应状态', async () => {
+    renderPanel({
+      onTestConnection: vi.fn(async () => ({ ok: false, code: 'root_permission_denied', phase: 'root', message: '权限' })),
+    });
+    fireEvent.click(screen.getByText('检查连接'));
+    expect(await screen.findByText(/没有读取权限/)).toBeTruthy();
+  });
+
+  test('rate_limited → 对应状态', async () => {
+    renderPanel({
+      onTestConnection: vi.fn(async () => ({ ok: false, code: 'rate_limited', phase: 'credential', message: '频繁' })),
+    });
+    fireEvent.click(screen.getByText('检查连接'));
+    expect(await screen.findByText(/请求过于频繁/)).toBeTruthy();
+  });
+
+  test('非回环 HTTP 未勾选 → Test Connection 不得以 allow_insecure_http=true 发出', () => {
+    const { onTestConnection } = renderPanel({
+      config: baseConfig({ openlist_server_url: 'http://192.168.1.10:5244' }),
+      draft: baseDraft({ server_url: 'http://192.168.1.10:5244' }),
+    });
+    fireEvent.click(screen.getByText('管理连接'));
+    // 未勾选 → payload allow_insecure_http 必须为 false
+    fireEvent.click(screen.getByText('检查连接'));
+    expect(onTestConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ allow_insecure_http: false })
+    );
+  });
+
+  test('勾选风险确认 → Test Connection 才允许 allow_insecure_http=true', () => {
+    const { onTestConnection } = renderPanel({
+      config: baseConfig({ openlist_server_url: 'http://192.168.1.10:5244' }),
+      draft: baseDraft({ server_url: 'http://192.168.1.10:5244' }),
+    });
+    fireEvent.click(screen.getByText('管理连接'));
+    fireEvent.click(screen.getByRole('checkbox', { name: /明文传输/ }));
+    fireEvent.click(screen.getByText('检查连接'));
+    expect(onTestConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ allow_insecure_http: true })
+    );
+  });
+
+  test('快速双击检查连接 → 只有 1 个 in-flight action', async () => {
+    let release!: (result: { ok: boolean; code: string; phase: string; message: string }) => void;
+    const pending = new Promise<{ ok: boolean; code: string; phase: string; message: string }>((resolve) => { release = resolve; });
+    const { onTestConnection } = renderPanel({ onTestConnection: vi.fn(() => pending) });
+    fireEvent.click(screen.getByText('检查连接'));
+    // 操作锁生效：第二次点击被抑制（按钮显示处理中且 actionLock 拒绝并发）
+    fireEvent.click(screen.getByText('处理中…'));
+    fireEvent.click(screen.getByText('处理中…'));
+    release({ ok: true, code: 'connected', phase: 'root', message: 'ok' });
+    await pending;
+    expect(onTestConnection).toHaveBeenCalledTimes(1);
+  });
+
+  test('Save reject → busy 恢复 + 可见错误 + 无未处理 rejection', async () => {
+    const { onSaveConnection, onNotice } = renderPanel({
+      draft: baseDraft({ remote_root: '/new-root' }),
+      onSaveConnection: vi.fn(async () => { throw new Error('保存失败：后端拒绝'); }),
+    });
+    fireEvent.click(screen.getByText('验证并保存'));
+    // await 微任务让 promise 链完成
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onNotice).toHaveBeenCalledWith('保存失败：后端拒绝', 'error');
+    // busy 已恢复：按钮重新可用（显示「验证并保存」而非「处理中…」）
+    expect(screen.getByText('验证并保存')).toBeTruthy();
+  });
+
+  test('remote-affecting 保存成功 → connected；local-only 保存不宣称连接', async () => {
+    renderPanel({ draft: baseDraft({ remote_root: '/new-root' }) });
+    fireEvent.click(screen.getByText('验证并保存'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await screen.findByText(/连接正常/)).toBeTruthy();
+  });
+
+  test('local-only 保存成功 → 保持 saved_unverified，不宣称 connected', async () => {
+    renderPanel({ draft: baseDraft({ cache_ttl: '720' }) });
+    fireEvent.click(screen.getByText('保存设置'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText('OpenList 连接正常')).toBeNull();
+    expect(await screen.findByText(/尚未检查当前连接/)).toBeTruthy();
   });
 });
