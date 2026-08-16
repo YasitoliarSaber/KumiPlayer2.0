@@ -139,6 +139,7 @@ def _build_txt_scanner(root: dict, provider: str):
     风格远端绝对路径前缀（后续切 OpenList 通道时 remote_path 对齐），
     local root 是本地挂载根（拼 logical_locator/real_path）。
     """
+    from app.catalog.scanner import SourceCatalogScanner
     from app.sources.registry import get_source_adapter
 
     input_path = str(root.get("input_path") or "")

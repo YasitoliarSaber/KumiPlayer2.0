@@ -20,11 +20,12 @@ POST   /api/openlist/presets/{id}/rescan   按预设保存的远端定位增量�
 import copy
 import ipaddress
 import threading
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict
 
 from app.catalog import source_health
@@ -1128,6 +1129,200 @@ def rescan_openlist_preset(preset_id: str):
     }
 
 
+
+# ============================================================
+# HYB-2：OpenList SourceRoot 的 TXT Zero-API Bootstrap
+# ============================================================
+
+@router.post("/bootstrap-tree")
+@_admitted_import_endpoint
+async def bootstrap_openlist_with_tree(
+    remote_locator: str = Form(...),
+    local_mount_root: str = Form(""),
+    import_family: str = Form("anime"),
+    import_scope: str = Form(""),
+    tree_file: UploadFile = File(...),
+):
+    """用 115 目录树 TXT 对 OpenList SourceRoot 做零请求 bootstrap（HYB-2）。
+
+    与 rescan 的区别：
+    - 不构造 OpenList 客户端、不发任何网络请求（OpenList list count = 0）；
+    - 以本地 TXT 快照建立完整 Source Catalog（scan_channel=snapshot_pan115）；
+    - 来源身份与 root 身份都是 canonical OpenList 身份（openlist-{hash}），
+      后续切回 OpenList 增量扫描时 root_id 不变，media_units 不重复。
+
+    流程：校验远端定位 → 校验路由归属 → TXT 归档（MediaTreeVersion）→
+    解析 TXT 建立 Source Catalog 树 → resolve/create canonical root →
+    enqueue scan(scan_channel=snapshot_pan115, scan_mode=full)。
+    """
+    from app.catalog import lifecycle
+    from app.catalog import store as catalog_store
+    from app.db.database import init_db
+    from app.media_presets.service import (
+        _ALLOWED_SUFFIXES,
+        _MAX_UPLOAD_BYTES,
+        _archive_tree_bytes,
+        create_preset_record,
+        find_openlist_preset_by_root,
+        save_preset,
+    )
+    from app.media_presets.store import list_presets
+    from app.pipeline import orchestrator
+    from app.sources.registry import get_source_adapter
+
+    init_db()
+    config = load_config()
+
+    # —— 身份：bootstrap 不要求 OpenList 可用（不发请求），但 source identity
+    # 需要 server_url + username 构成稳定的 openlist-{hash}；未配置时拒绝，
+    # 提示走纯 TXT 链路（media_presets 的 115/百度目录树导入）或先配置 OpenList。
+    username = (config.openlist_username or "").strip()
+    if not config.openlist_server_url.strip() or not username:
+        raise HTTPException(
+            status_code=400,
+            detail="TXT 安全初始化需要已配置的 OpenList 连接身份；"
+                   "未配置 OpenList 时请直接使用 115/百度目录树导入",
+        )
+    source_id = _openlist_source_id(config, username=username)
+    _ensure_openlist_source(catalog_store, source_id)
+
+    # —— 远端定位与路由归属（纯本地校验，无网络）
+    remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
+    normalized = normalize_remote_path(remote_locator)
+    if not normalized or normalized == "/":
+        raise HTTPException(status_code=400, detail="请选择 OpenList 远端媒体目录（不能是根目录）")
+    _ensure_within_remote_root(remote_root, normalized)
+    _require_route_for_import(config, normalized)
+
+    # —— TXT 归档（KumiPlayer 数据目录 + MediaTreeVersion 承载，不指向用户临时文件）
+    original_name = Path(tree_file.filename or "目录树.txt").name
+    if Path(original_name).suffix.lower() not in _ALLOWED_SUFFIXES:
+        raise HTTPException(status_code=400, detail="仅支持 .txt、.tree 或 .log 目录树文件")
+    data = await tree_file.read(_MAX_UPLOAD_BYTES + 1)
+    if not data:
+        raise HTTPException(status_code=400, detail="目录树文件为空")
+    if len(data) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="目录树文件超过 64 MB")
+
+    # —— canonical OpenList preset：复用已有关卡或创建新卡（不制造第二来源身份）
+    preset = find_openlist_preset_by_root("", normalized)
+    if preset is None:
+        preset = create_preset_record(
+            "openlist",
+            local_mount_root or normalized,
+            (import_family or "anime").strip(),
+            (import_scope or "").strip(),
+            update_mode="openlist_scan",
+            provider_id="pan115",
+            ingest_method="directory_tree",
+            source_route_id="",
+            catalog_root_id="",
+        )
+        preset.remote_locator = normalized
+        preset.name = normalized.rsplit("/", 1)[-1] or "OpenList 媒体库"
+        save_preset(preset)
+
+    version, archive = _archive_tree_bytes(
+        preset.preset_id,
+        original_name,
+        data,
+        source_tree_path=local_mount_root or "",
+        provider_id="pan115",
+        ingest_method="directory_tree",
+    )
+    version.remote_locator = normalized
+    version.input_type = "directory_tree"
+    version.source_route_id = ""
+    preset.versions.append(version)
+    preset.version_count += 1
+    preset.updated_at = datetime.now(timezone(timedelta(hours=8))).isoformat()
+    save_preset(preset)
+
+    # —— 解析 TXT 建立 Source Catalog 树（本地解析，0 网络）
+    try:
+        adapter = get_source_adapter("pan115")
+        mount_root = local_mount_root or config.openlist_mount_root or ""
+        if not mount_root:
+            raise ValueError("缺少本地挂载根：请填写 115 挂载盘符路径（如 K:\\115网盘）")
+        effective_root = Path(mount_root).expanduser()
+        snapshot = adapter.parse(str(archive), str(effective_root))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"目录树解析失败: {exc}") from None
+
+    # —— resolve/create canonical OpenList root（同一 root，后续 OpenList 增量复用）
+    resolution = lifecycle.resolve_root_for_import(
+        source_id,
+        normalized,
+        import_family=(import_family or "anime").strip(),
+        import_scope=(import_scope or "").strip(),
+        local_locator=str(effective_root),
+    )
+    scan_mode = "full"
+    if resolution.action == "create":
+        try:
+            root = catalog_store.create_source_root(
+                source_id=source_id,
+                remote_locator=normalized,
+                local_locator=str(effective_root),
+                import_family=(import_family or "anime").strip(),
+                import_scope=(import_scope or "").strip(),
+                scan_policy="standard",
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"预设远端定位与既有来源根重叠，拒绝扩大扫描范围：{exc}",
+            ) from None
+    elif resolution.action == "promote_parent":
+        resolution = lifecycle.promote_parent_root(
+            source_id,
+            normalized,
+            local_locator=str(effective_root),
+            import_family=(import_family or "anime").strip(),
+            import_scope=(import_scope or "").strip(),
+            child_root_ids=resolution.covered_root_ids,
+        )
+        root = catalog_store.get_source_root(resolution.canonical_root_id)
+        if root is None:
+            raise HTTPException(status_code=409, detail="来源根归并失败，请重试")
+        scan_mode = "full"
+    else:
+        # reuse_exact / reuse_ancestor：复用既有 root
+        root = catalog_store.get_source_root(resolution.canonical_root_id)
+        if root is None:
+            raise HTTPException(status_code=409, detail="来源根解析失败，请重新导入")
+        if resolution.action == "reuse_ancestor":
+            catalog_store.update_root_metadata(
+                root.root_id,
+                import_family=(import_family or "anime").strip(),
+                import_scope=(import_scope or "").strip(),
+            )
+
+    # —— enqueue TXT snapshot 扫描（显式 scan_channel，0 OpenList 请求）
+    root_id = root.root_id
+    generation = catalog_store.bump_generation(root_id)
+    job_id = orchestrator.enqueue_scan(
+        root_id,
+        generation,
+        source_id,
+        input_path=str(archive),
+        scan_mode=scan_mode,
+        scan_channel="snapshot_pan115",
+    )
+    return {
+        "task_id": job_id,
+        "root_id": root_id,
+        "generation": generation,
+        "preset_id": preset.preset_id,
+        "execution_mode": "durable",
+        "scan_channel": "snapshot_pan115",
+        "scan_mode": scan_mode,
+        "resolution": lifecycle.resolution_api_label(resolution.action),
+        "requested_locator": normalized,
+        "canonical_locator": resolution.canonical_locator,
+        "tree_file_count": snapshot.file_count,
+        "tree_video_count": snapshot.video_count,
+    }
 # ============================================================
 # Durable batch API（v2：import-batch → discovery job → SQLite revision）
 # ============================================================
