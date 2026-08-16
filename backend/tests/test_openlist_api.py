@@ -1211,4 +1211,4 @@ class TestAtomicConfigCommit:
         assert saved["openlist_cache_ttl_minutes"] == 1440
         assert real_store.values.get("openlist_username") == "quark-user"
         assert real_store.values.get("openlist_password") == "p@ssw0rd"
-
+
