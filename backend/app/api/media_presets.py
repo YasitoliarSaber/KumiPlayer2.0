@@ -1,8 +1,11 @@
 from dataclasses import asdict
+from pathlib import Path
 from threading import Lock
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
+
+from app.core.paths import get_data_dir
 
 from app.api.imports import _diff_to_dict, _preview_to_dict
 from app.import_plan.service import build_preview
@@ -194,9 +197,17 @@ def import_local_tree(req: LocalTreeImportRequest):
     )
     # RWK-22：原生选择器/拖放 TXT 路径也建立 Provider Source Catalog baseline
     # （0 网络），preset.catalog_root_id 持久关联——bindable 列表才能出现该来源。
+    # 注意：_activate_or_reuse_tree 可能 discard/move 归档文件（reused/unchanged/
+    # 新版本路径），必须用 version.archive_path 重取实际存在的归档，否则 job
+    # input_path 悬空必然失败（审查 HIGH）。
     baseline = _ensure_tree_baseline(
-        preset, str(archive), source_root,
-        req.import_family, req.import_scope,
+        preset,
+        str(Path(get_data_dir()) / version.archive_path) if version.archive_path else "",
+        source_root,
+        req.import_family,
+        req.import_scope,
+        reused=reused,
+        unchanged=unchanged,
     )
     result = {
         "preset": preset_to_dict(preset),
@@ -216,15 +227,29 @@ def _ensure_tree_baseline(
     local_mount_root: str,
     import_family: str,
     import_scope: str,
+    *,
+    reused: bool = False,
+    unchanged: bool = False,
 ) -> dict | None:
     """RWK-21/22：把归档 TXT 建立为 Provider SourceRoot 的 Source Catalog baseline。
 
     返回 baseline 信息（root_id/job_id/status）或 None（非 pan115/baidu 来源）。
     失败只记日志不阻塞旧 TXT 导入主流程（兼容保留），但响应暴露 baseline_status，
     前端据此提示"增量暂不可用"而不是静默缺失。
+
+    ``reused/unchanged``：_activate_or_reuse_tree 判定为复用既有卡片/内容无变化时，
+    归档文件可能已被 discard（删除）或 move（搬走），且该 root 已有历史 baseline——
+    此时跳过重新入队（避免悬空 input_path；既有 Source Catalog 数据保持）。
     """
     if not preset or preset.source not in {"pan115", "baidu"}:
         return None
+    if reused or unchanged:
+        # 复用路径：既有 preset 已关联过 baseline（或归档已失效），不重复入队
+        root_id = (preset.catalog_root_id or "").strip()
+        if root_id:
+            return {"root_id": root_id, "job_id": "", "status": "baseline_reused"}
+    if not tree_archive:
+        return {"status": "baseline_failed"}
     try:
         from app.media_presets.service import (
             bootstrap_provider_catalog_from_tree,
@@ -346,8 +371,13 @@ async def create_media_preset(
     # RWK-21/22：multipart TXT 导入与 import-local-tree 共用同一 baseline 服务
     # （真正把 TXT 快照写入 Source Catalog：source_nodes/directories/media_units）。
     baseline = _ensure_tree_baseline(
-        preset, str(archive), preset.source_root or source_root,
-        import_family, import_scope,
+        preset,
+        str(Path(get_data_dir()) / version.archive_path) if version.archive_path else "",
+        source_root,
+        import_family,
+        import_scope,
+        reused=reused,
+        unchanged=unchanged,
     )
     result = {
         "preset": preset_to_dict(preset),

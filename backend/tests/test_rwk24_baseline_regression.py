@@ -99,6 +99,7 @@ def fake_client(monkeypatch):
     FakeOpenListClient.instances = []
     FakeOpenListClient.list_calls = 0
     FakeOpenListClient.requested_paths = []
+    FakeOpenListClient.tree = {}
     monkeypatch.setattr("app.api.openlist.OpenListClient", FakeOpenListClient)
     monkeypatch.setattr("app.integrations.openlist.client.OpenListClient", FakeOpenListClient)
     monkeypatch.setattr("app.integrations.openlist.connection.OpenListClient", FakeOpenListClient)
@@ -347,21 +348,131 @@ class TestFirstIncrementalNotFullTraversal:
         result = handle_discovery_scan(job.payload)
         assert result["summary"].get("failed_count", 0) == 0
 
-        # 4. 关键断言：请求量 ≪ 全树目录数（不重新枚举已知 subtree）
+        # 4. 关键断言：请求量 ≪ 全树目录数（不重新枚举已知 subtree）。
+        # 精确上界：preflight(1) + root(1) + BASELINE_VERIFY_BUDGET(50) 未验证目录。
+        # 若增量退化为全树遍历，请求会接近 total_dirs（122），此处必须 ≪。
+        from app.catalog import store as catalog_store
+
         requested = FakeOpenListClient.list_calls
+        budget = catalog_store.BASELINE_VERIFY_BUDGET
         assert requested > 0, "必须真实请求 OpenList"
+        assert requested <= 2 + budget, (
+            f"第一次 incremental 请求量 {requested} 必须 ≤ preflight+root+baseline 预算"
+            f"（2+{budget}）；全树已知目录 {total_dirs} 不应被重扫"
+        )
         assert requested < total_dirs // 2, (
             f"第一次 incremental 请求量 {requested} 应远小于 TXT 已知目录数 {total_dirs}"
         )
 
-        # 5. canonical identity 不变、无重复 media unit
-        units = get_connection().execute(
-            "SELECT unit_id, COUNT(*) AS c FROM media_units WHERE root_id = ? GROUP BY unit_id HAVING c > 1",
-            (root_id,),
-        ).fetchall()
-        assert len(units) == 0, "media unit_id 不得重复"
+        # 5. canonical identity 不变、media unit 总量不因增量翻倍
+        units_before = int(get_connection().execute(
+            "SELECT COUNT(*) AS c FROM media_units WHERE root_id = ?", (root_id,),
+        ).fetchone()["c"])
         nodes = get_connection().execute(
             "SELECT COUNT(*) AS c FROM source_nodes WHERE root_id = ? AND tombstone = ''",
             (root_id,),
         ).fetchone()["c"]
         assert int(nodes) > 0
+        assert units_before > 0, "TXT baseline 必须已产生 media_units"
+        # 再跑一轮 incremental，unit 总量不得因 namespace 分裂翻倍
+        FakeOpenListClient.list_calls = 0
+        rescan2 = client.post(
+            "/api/openlist/bound-roots/rescan",
+            json={"root_id": root_id},
+        )
+        assert rescan2.status_code == 200, rescan2.text
+        job2 = job_store.get_job(rescan2.json()["task_id"])
+        result2 = handle_discovery_scan(job2.payload)
+        assert result2["summary"].get("failed_count", 0) == 0
+        units_after = int(get_connection().execute(
+            "SELECT COUNT(*) AS c FROM media_units WHERE root_id = ?", (root_id,),
+        ).fetchone()["c"])
+        assert units_after <= units_before, (
+            f"增量后 media_units 不得翻倍（{units_before} → {units_after}）"
+        )
+
+
+class TestBaselineReuseSafety:
+    def test_reimport_same_tree_does_not_requeue_stale_archive(self, client, tmp_path):
+        """复用/同媒体路径：不重新入队悬空归档（审查 HIGH 修复）。"""
+        from app.jobs import store as job_store
+
+        tree = _write_tree(tmp_path, _big_tree())
+        resp1 = client.post(
+            "/api/media-presets/import-local-tree",
+            json={"tree_path": str(tree), "import_family": "anime", "import_scope": ""},
+        )
+        assert resp1.status_code == 200, resp1.text
+        assert resp1.json().get("baseline", {}).get("status") == "baseline_queued"
+
+        # 再次导入同一 TXT（同媒体 → unchanged/reused 路径）
+        resp2 = client.post(
+            "/api/media-presets/import-local-tree",
+            json={"tree_path": str(tree), "import_family": "anime", "import_scope": ""},
+        )
+        assert resp2.status_code == 200, resp2.text
+        baseline2 = resp2.json().get("baseline", {})
+        assert baseline2.get("status") == "baseline_reused", (
+            f"同媒体重复导入必须走复用路径（不重新入队），实际 {baseline2}"
+        )
+        # 不得产生悬空 input_path 的 snapshot job
+        jobs = job_store.list_jobs(job_type="discovery_scan", status="queued", limit=100)
+        snapshot_jobs = [
+            j for j in jobs
+            if j.payload.get("scan_channel", "").startswith("snapshot_")
+        ]
+        for j in snapshot_jobs:
+            inp = j.payload.get("input_path") or ""
+            assert inp and Path(inp).exists(), (
+                f"snapshot job 的 input_path 必须指向现存归档: {inp}"
+            )
+
+
+class TestBindBaselineGuard:
+    def test_bind_rejected_before_baseline(self, client, tmp_path):
+        """RWK-23：baseline 未就绪时 bind-root 必须拒绝（400，不写 binding）。"""
+        from app.catalog import store as catalog_store
+
+        tree = _write_tree(tmp_path, _big_tree())
+        resp = client.post(
+            "/api/media-presets/import-local-tree",
+            json={"tree_path": str(tree), "import_family": "anime", "import_scope": ""},
+        )
+        assert resp.status_code == 200, resp.text
+        preset = next(p for p in list_presets() if p.source == "pan115")
+        root_id = preset.catalog_root_id
+
+        # 配置 OpenList + route，但**不执行** snapshot baseline job
+        resp = client.post(
+            "/api/openlist/config",
+            json={
+                "server_url": "http://127.0.0.1:5244",
+                "remote_root": "/115网盘",
+                "mount_root": str(tmp_path / "mount"),
+                "username": "test-user",
+                "password": "p@ssw0rd",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        resp = client.put(
+            "/api/openlist/routes",
+            json={
+                "routes": [
+                    {
+                        "route_id": "r-115", "label": "115",
+                        "remote_prefix": "/115网盘/动画1",
+                        "provider_id": "pan115", "enabled": True,
+                    }
+                ]
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+        bind = client.post(
+            "/api/openlist/bind-root",
+            json={"root_id": root_id, "remote_locator": "/115网盘/动画1"},
+        )
+        assert bind.status_code == 400, bind.text
+        assert "尚未建立 Source Catalog 本地基线" in bind.json()["detail"]
+        root = catalog_store.get_source_root(root_id)
+        assert root.openlist_conn_hash == "", "拒绝时不得写 binding"
