@@ -77,9 +77,10 @@ def _build_openlist_client(source_id: str):
 def _build_scanner(root: dict):
     """按来源构造统一扫描器（补完 5：115/百度/本地接入 Source Catalog）。
 
-    - openlist：OpenList 客户端分页枚举；
-    - local：本地分页枚举（adapter 直通）；
-    - pan115 / baidu：目录树 TXT 一次性快照（adapter.snapshot_entries）。
+    HYB-1：优先使用 root 内显式 scan_channel（openlist / snapshot_pan115 /
+    snapshot_baidu / local）；无显式通道时按 source_id 前缀 fallback，
+    保证旧 durable job（不带 scan_channel）行为不变。签名保持单参数，
+    兼容既有 monkeypatch 测试。
     """
     from app.catalog.scanner import SourceCatalogScanner
     from app.core.config import load_config
@@ -87,36 +88,70 @@ def _build_scanner(root: dict):
     from app.sources.registry import get_source_adapter
 
     source = str(root.get("source_id") or "")
+    channel = str(root.get("scan_channel") or "")
+    # HYB-1：显式通道优先（同一 root 首轮 TXT bootstrap → 后续 OpenList）。
+    if channel == "snapshot_pan115":
+        return _build_txt_scanner(root, "pan115")
+    if channel == "snapshot_baidu":
+        return _build_txt_scanner(root, "baidu")
+    if channel == "openlist":
+        return _build_openlist_scanner(root)
+    if channel == "local":
+        adapter = get_source_adapter("local")
+        return SourceCatalogScanner(source="local", adapter=adapter, source_root=root.get("remote_locator") or "/")
+    # fallback：旧 job 无显式通道 → 按 source_id 前缀分派（历史行为）。
     if source.startswith("openlist") or source == "openlist":
-        # runtime 凭据统一走 resolver（REWORK）：后台扫描恢复后无需重启。
-        # store 不可读/未配置 → 抛受控错误，由 job 失败处理（不清凭据）。
-        from app.core.config import resolve_openlist_credentials
-
-        config = load_config()
-        username, password, state = resolve_openlist_credentials()
-        if state == "unavailable":
-            raise ValueError("本机凭据管理器暂时不可用，OpenList 扫描已暂停，请稍后重试")
-        if not username or not password:
-            raise ValueError("OpenList 尚未配置，无法执行扫描")
-        client = get_openlist_client(
-            config.openlist_server_url,
-            username,
-            password,
-        )
-        return SourceCatalogScanner(source="openlist", client=client)
+        return _build_openlist_scanner(root)
     if source.startswith("local"):
         adapter = get_source_adapter("local")
         return SourceCatalogScanner(source="local", adapter=adapter, source_root=root.get("remote_locator") or "/")
     # pan115 / baidu：目录树 TXT 输入文件必须从 job payload 显式传入
+    provider = "pan115" if source.startswith("pan115") else "baidu"
+    return _build_txt_scanner(root, provider)
+
+
+def _build_openlist_scanner(root: dict):
+    """OpenList 通道：runtime 凭据统一走 resolver，构造分页枚举扫描器。"""
+    from app.catalog.scanner import SourceCatalogScanner
+    from app.integrations.openlist.client import get_openlist_client
+    from app.core.config import load_config, resolve_openlist_credentials
+
+    # runtime 凭据统一走 resolver（REWORK）：后台扫描恢复后无需重启。
+    # store 不可读/未配置 → 抛受控错误，由 job 失败处理（不清凭据）。
+    config = load_config()
+    username, password, state = resolve_openlist_credentials()
+    if state == "unavailable":
+        raise ValueError("本机凭据管理器暂时不可用，OpenList 扫描已暂停，请稍后重试")
+    if not username or not password:
+        raise ValueError("OpenList 尚未配置，无法执行扫描")
+    client = get_openlist_client(
+        config.openlist_server_url,
+        username,
+        password,
+    )
+    return SourceCatalogScanner(source="openlist", client=client)
+
+
+def _build_txt_scanner(root: dict, provider: str):
+    """TXT 快照通道（snapshot_pan115 / snapshot_baidu）。
+
+    HYB-1：remote root 与 local root 正式拆开——remote root 是 OpenList
+    风格远端绝对路径前缀（后续切 OpenList 通道时 remote_path 对齐），
+    local root 是本地挂载根（拼 logical_locator/real_path）。
+    """
+    from app.sources.registry import get_source_adapter
+
     input_path = str(root.get("input_path") or "")
     if not input_path:
         raise ValueError(
-            f"{source} 来源的 discovery job 缺少 input_path（目录树 TXT 路径）"
+            f"{provider} 来源的 discovery job 缺少 input_path（目录树 TXT 路径）"
         )
-    adapter = get_source_adapter("pan115" if source.startswith("pan115") else "baidu")
+    adapter = get_source_adapter(provider)
     return SourceCatalogScanner(
-        source="pan115" if source.startswith("pan115") else "baidu",
-        adapter=adapter, input_path=input_path, source_root=root.get("remote_locator") or "/",
+        source=provider,
+        adapter=adapter, input_path=input_path,
+        source_root=root.get("remote_locator") or "/",
+        local_root=root.get("local_locator") or "",
     )
 
 
@@ -169,6 +204,7 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
             "import_family": root.import_family,
             "import_scope": root.import_scope,
             "input_path": str(payload.get("input_path") or ""),
+            "scan_channel": str(payload.get("scan_channel") or ""),
         }
     )
     engine = DiscoveryEngine(

@@ -19,19 +19,24 @@ class SourceCatalogScanner:
     115/百度 TXT 快照的 relative_path 已是相对路径，这里以 root 为前缀拼接。
     """
 
-    def __init__(self, source: str, adapter=None, client=None, input_path: str = "", source_root: str = "/"):
+    def __init__(self, source: str, adapter=None, client=None, input_path: str = "", source_root: str = "/", local_root: str = ""):
         self.source = source
         self._adapter = adapter
         self._input_path = input_path
+        # HYB-1：remote root（OpenList 风格绝对路径前缀）与 local root（TXT
+        # 挂载根，用于拼 logical_locator/real_path）正式拆开，禁止同一个
+        # source_root 同时承担两种语义。local_root 缺省回退 source_root，
+        # 兼容旧调用（纯 TXT 链路 remote 前缀 == 本地挂载根）。
+        # local 来源：枚举以 remote_path 为准，local root 仅在快照语义下
+        # 回退 remote 前缀（历史行为保持）。
         self._source_root = source_root
+        self._local_root = (local_root or source_root) if source != "local" else ""
         self._snapshot: list[SourceNodeInput] | None = None
         self._dir_index: dict[str, list[SourceNodeInput]] = {}
-        self._local_root = source_root if source == "local" else ""
         if source == "openlist" and client is not None:
             self._openlist = OpenListDirectoryScanner(client)
         else:
             self._openlist = None
-
     # -- 快照加载（115/百度 one-shot） ---------------------------------
 
     def _ensure_snapshot(self) -> None:
@@ -39,7 +44,9 @@ class SourceCatalogScanner:
             return
         if self._adapter is None or not self._input_path:
             raise RuntimeError(f"{self.source} 需要目录树 TXT 输入（adapter + input_path）")
-        entries = self._adapter.snapshot_entries(self._input_path, self._source_root)
+        # HYB-1：adapter 使用 local root 生成 logical_locator/real_path；
+        # remote_path 规范化仍以 remote root（_source_root）为前缀。
+        entries = self._adapter.snapshot_entries(self._input_path, self._local_root)
         self._snapshot = list(entries)
         # 按父目录聚合：remote_path 以 root 前缀规范化
         root = self._source_root.rstrip("/") or ""
