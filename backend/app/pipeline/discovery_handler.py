@@ -163,6 +163,49 @@ def _wait_for_backpressure(should_cancel) -> None:
             raise DiscoveryCancelled("取消请求：背压等待中")
         time.sleep(1.0)
 
+def _needs_first_remote_reconcile(root_id: str) -> bool:
+    """HYB-5：是否需要首次远端对账保护。
+
+    当 root 存在 snapshot-only 目录（TXT bootstrap 遗留、从未被 OpenList
+    验证过，last_remote_verified_at=''）且 root 自身也未验证时，说明这是
+    bootstrap 后第一次走 OpenList 通道——需要先做一次错绑 preflight。
+    """
+    stats = catalog_store.remote_baseline_coverage(root_id)
+    if stats["total_directories"] == 0:
+        return False
+    return stats["remote_verified_count"] == 0
+
+
+def _reconcile_preflight(scanner, root_id: str, remote_locator: str):
+    """HYB-5：首次 TXT→OpenList 对账保护（bootstrap compatibility preflight）。
+
+    只 list 选定 root 的直接成员（1 次请求），与 TXT 快照的直接成员对比：
+    - 双方均非空但完全无重叠 → invalid_snapshot_mapping：中止任务，
+      0 tombstone、不生成大量 revisions（用户可能把 TXT 与错误的远端
+      目录绑定了）；
+    - 正常/轻微差异（TXT 是旧快照，允许增减）→ 放行进入 baseline learning。
+    """
+    from app.catalog import store as catalog_store
+
+    snapshot_children = {
+        row["name"]
+        for row in catalog_store.list_current_children(root_id, remote_locator)
+    }
+    # 只取第一页（root 直接成员通常远小于分页上限）；有界读取，不递归。
+    page = scanner.enumerate_directory(remote_locator, page=1, per_page=100)
+    remote_children = {entry.name for entry in page.entries}
+    snapshot_children.discard("")
+    remote_children.discard("")
+    if (
+        snapshot_children
+        and remote_children
+        and not (snapshot_children & remote_children)
+    ):
+        raise ValueError(
+            "invalid_snapshot_mapping: 目录树快照与所选 OpenList 远端目录"
+            "直接成员完全无重叠，可能绑定错误；已中止，未删除任何数据"
+        )
+
 
 def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=None) -> dict:
     """扫描一个 source root，逐作品单元生成 revision 并即时入队 mirror。"""
@@ -197,6 +240,7 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
                 message=_DEFER_MESSAGE,
             )
 
+    scan_channel = str(payload.get("scan_channel") or "")
     scanner = _build_scanner(
         {
             "source_id": root.source_id,
@@ -205,9 +249,17 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
             "import_family": root.import_family,
             "import_scope": root.import_scope,
             "input_path": str(payload.get("input_path") or ""),
-            "scan_channel": str(payload.get("scan_channel") or ""),
+            "scan_channel": scan_channel,
         }
     )
+    # HYB-5：首次 TXT→OpenList 对账保护——TXT bootstrap 后第一次走
+    # OpenList 通道时，先校验快照与远端 root 是否错绑（1 次 list）；
+    # 错绑则中止，0 tombstone、不生成 revisions。
+    if (
+        scan_channel == "openlist"
+        and _needs_first_remote_reconcile(root_id)
+    ):
+        _reconcile_preflight(scanner, root_id, root.remote_locator)
     engine = DiscoveryEngine(
         scanner,
         source_id=root.source_id,

@@ -24,6 +24,15 @@ BATCH_WRITE_LIMIT = 500
 MAX_DIRECTORY_DEPTH = 128
 #: 无原生 delta 的来源完成一次目录验证后，24 小时后进入滚动完整校验候选。
 VERIFY_INTERVAL = timedelta(hours=24)
+#: HYB-5：单轮 rolling verification 预算（命名常量，非官方配额）——
+#: snapshot-only 未远端验证的目录每轮只取有限数量入队，避免一轮把
+#: TXT bootstrap 留下的全部目录一次性扫完（变相全扫）。后续 HYB-6
+#: 可把该值可视化/配置化，这里初版用保守固定预算。
+BASELINE_VERIFY_BUDGET = 50
+#: HYB-5：滚动验证到期时间抖动窗口（0 ~ 24h），叠加在 VERIFY_INTERVAL 上，
+#: 用 stable hash(remote_path) 确定性分散，避免 TXT 导入次日全部目录
+#: 同时到期（“滚动验证其实又是一次全扫”）。
+ROLLING_JITTER_WINDOW = timedelta(hours=24)
 
 
 def now_iso() -> str:
@@ -669,6 +678,26 @@ def prepare_scan(root_id: str, *, generation: int, mode: str = "incremental") ->
             """,
             (root_id, timestamp),
         )
+        # HYB-5：rolling baseline learning 预算——snapshot-only（TXT bootstrap
+        # 遗留、从未被 OpenList 验证过）的 complete 目录每轮只取有限数量入队，
+        # 选“最久未验证 + stable hash jitter”而非全部同时到期，避免一轮
+        # 变相全扫。TXT 提交的目录 next_verify_at 已带 jitter 分散，这里
+        # 再按 last_verified_at 升序取预算内最旧的一批做基线学习。
+        tx.execute(
+            """
+            UPDATE source_directories SET state = 'queued'
+            WHERE root_id = ? AND state = 'complete'
+              AND last_remote_verified_at = ''
+              AND remote_path IN (
+                  SELECT remote_path FROM source_directories
+                  WHERE root_id = ? AND state = 'complete'
+                    AND last_remote_verified_at = ''
+                  ORDER BY last_verified_at ASC, remote_path ASC
+                  LIMIT ?
+              )
+            """,
+            (root_id, root_id, BASELINE_VERIFY_BUDGET),
+        )
 
 
 def recover_interrupted_directories(root_id: str) -> int:
@@ -977,7 +1006,15 @@ def commit_directory(
 
         tx.execute("DELETE FROM source_stage_entries WHERE run_id = ?", (run_id,))
         tx.execute("DELETE FROM source_stage_runs WHERE run_id = ?", (run_id,))
-        next_verify_at = (datetime.now(timezone(timedelta(hours=8))) + VERIFY_INTERVAL).isoformat()
+        # HYB-5：滚动验证到期时间按 stable hash(remote_path) 确定性抖动
+        # （0~24h 叠加在 24h 上），把目录分散到不同到期时刻——避免 TXT
+        # bootstrap 导入的目录在同一时刻全部到期（“滚动验证又是全扫”）。
+        jitter_seconds = int(hashlib.md5(str(remote_path).encode("utf-8")).hexdigest(), 16) % int(ROLLING_JITTER_WINDOW.total_seconds())
+        next_verify_at = (
+            datetime.now(timezone(timedelta(hours=8)))
+            + VERIFY_INTERVAL
+            + timedelta(seconds=jitter_seconds)
+        ).isoformat()
         # HYB-3：区分「TXT 快照见过」与「OpenList 真正 list 验证过」。
         # OpenList 通道提交成功 → last_remote_verified_at=now；
         # snapshot 通道（TXT）提交 → 置空（远端未验证）。
