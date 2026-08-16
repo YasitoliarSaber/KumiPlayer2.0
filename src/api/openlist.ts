@@ -234,22 +234,37 @@ export const openlistApi = {
       `/api/openlist/import-batches/${batchId}/units/${unitId}/retry`, {}),
   rescanPreset: (presetId: string) =>
     api.post<OpenListTaskResult>(`/api/openlist/presets/${presetId}/rescan`, {}),
-  // HYB-2：目录树 TXT 安全初始化（零 OpenList 请求）
+  // HYB-2/RWK-11：目录树 TXT 安全初始化（Provider 身份，零 OpenList 请求）。
+  // provider：pan115 / baidu；remoteLocator 可选（纯 TXT 模式不要求）。
   bootstrapTree: (params: {
-    remoteLocator: string
+    provider?: 'pan115' | 'baidu'
+    remoteLocator?: string
     localMountRoot: string
     importFamily?: string
     importScope?: string
     treeFile: File
   }) => {
     const body = new FormData()
-    body.append('remote_locator', params.remoteLocator)
+    if (params.provider) body.append('provider', params.provider)
+    if (params.remoteLocator) body.append('remote_locator', params.remoteLocator)
     body.append('local_mount_root', params.localMountRoot)
     if (params.importFamily) body.append('import_family', params.importFamily)
     if (params.importScope) body.append('import_scope', params.importScope)
     body.append('tree_file', params.treeFile)
     return api.form<OpenListBootstrapResult>('/api/openlist/bootstrap-tree', 'POST', body)
   },
+  // RWK-3：给已存在的 Provider root 绑定可选 OpenList 增量通道
+  bindRoot: (rootId: string, remoteLocator: string) =>
+    api.post<{ root_id: string; bound: boolean; openlist_remote_locator: string; source_id: string }>(
+      '/api/openlist/bind-root',
+      { root_id: rootId, remote_locator: remoteLocator },
+    ),
+  // RWK-10：Bound Provider root 的真实 durable OpenList 增量扫描入口
+  rescanBoundRoot: (rootId: string) =>
+    api.post<OpenListTaskResult & { scan_channel: string; scan_mode: string }>(
+      '/api/openlist/bound-roots/rescan',
+      { root_id: rootId },
+    ),
   // HYB-6：今日 KumiPlayer → OpenList 请求成本遥测（只读）
   getTelemetryToday: () =>
     api.get<OpenListTelemetrySummary>('/api/openlist/telemetry/today'),

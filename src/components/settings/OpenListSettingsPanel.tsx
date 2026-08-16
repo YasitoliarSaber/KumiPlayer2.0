@@ -148,6 +148,47 @@ export default function OpenListSettingsPanel({
   const [allowOpenlistHttp, setAllowOpenlistHttp] = useState(false);
   const [actionLock, setActionLock] = useState<string | null>(null);
   const [telemetry, setTelemetry] = useState<OpenListTelemetrySummary | null>(null);
+  // RWK-11：Provider root 绑定 OpenList 增量通道（最小可用入口）
+  const [bindOpen, setBindOpen] = useState(false);
+  const [bindRootId, setBindRootId] = useState('');
+  const [bindLocator, setBindLocator] = useState('');
+  const [bindBusy, setBindBusy] = useState(false);
+  const [bindMessage, setBindMessage] = useState('');
+
+  const runBindRoot = async () => {
+    if (!bindRootId.trim() || !bindLocator.trim()) {
+      setBindMessage('请填写来源根 ID 与 OpenList 远端目录');
+      return;
+    }
+    setBindBusy(true);
+    setBindMessage('');
+    try {
+      await openlistApi.bindRoot(bindRootId.trim(), bindLocator.trim());
+      setBindMessage('绑定成功：该来源根现在可通过 OpenList 增量扫描');
+    } catch (err) {
+      setBindMessage('绑定失败：' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setBindBusy(false);
+    }
+  };
+
+  const runBoundRescan = async () => {
+    if (!bindRootId.trim()) {
+      setBindMessage('请填写已绑定的来源根 ID');
+      return;
+    }
+    setBindBusy(true);
+    setBindMessage('');
+    try {
+      const result = await openlistApi.rescanBoundRoot(bindRootId.trim());
+      setBindMessage('增量扫描已排队（任务 ' + result.task_id + '），请到任务中心查看进度');
+    } catch (err) {
+      setBindMessage('增量扫描失败：' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setBindBusy(false);
+    }
+  };
+
 
   useEffect(() => {
     let alive = true;
@@ -284,6 +325,36 @@ export default function OpenListSettingsPanel({
           <span className="sources-route-hint">{telemetry.disclaimer}</span>
         </div>
       )}
+
+      <div className="sources-openlist-binding">
+        <Button appearance="secondary" size="small" onClick={() => setBindOpen((v) => !v)} className="settings-ghost-btn fluent-settings-btn">
+          {bindOpen ? '收起 Provider 增量绑定' : 'Provider 增量绑定（可选）'}
+        </Button>
+        {bindOpen && (
+          <div className="sources-openlist-binding-editor">
+            <span className="sources-route-hint">
+              纯 TXT 建立的 115/百度来源根可绑定 OpenList 作为增量检测通道（root 身份不变）。
+            </span>
+            <label className="settings-config-row">
+              <span>来源根 ID（root_id）</span>
+              <input type="text" value={bindRootId} onChange={(event) => setBindRootId(event.target.value)} className="settings-input" placeholder="bootstrap 返回的 root_id" />
+            </label>
+            <label className="settings-config-row">
+              <span>OpenList 远端目录</span>
+              <input type="text" value={bindLocator} onChange={(event) => setBindLocator(event.target.value)} className="settings-input" placeholder="/115网盘/动画" />
+            </label>
+            <div className="sources-openlist-actions">
+              <Button appearance="secondary" size="small" onClick={runBindRoot} className="settings-ghost-btn fluent-settings-btn" disabled={bindBusy}>
+                绑定 OpenList 增量
+              </Button>
+              <Button appearance="secondary" size="small" onClick={runBoundRescan} className="settings-ghost-btn fluent-settings-btn" disabled={bindBusy}>
+                增量扫描
+              </Button>
+            </div>
+            {bindMessage && <span className="sources-route-hint">{bindMessage}</span>}
+          </div>
+        )}
+      </div>
 
       <div className="sources-openlist-actions">
         <Button appearance="secondary" size="small" onClick={() => setEditorOpen((v) => !v)} className="settings-ghost-btn fluent-settings-btn">

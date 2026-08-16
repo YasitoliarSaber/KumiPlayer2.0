@@ -1363,6 +1363,13 @@ async def bootstrap_provider_with_tree(
         scan_mode=scan_mode,
         scan_channel=channel,
     )
+    # RWK-10：bootstrap 后把 Provider preset 与 SourceRoot 持久关联——
+    # 进程重启/页面刷新后媒体来源卡仍能定位该 Provider root，
+    # 不依赖 bootstrap HTTP 响应当时返回的 root_id。
+    if preset.catalog_root_id != root_id:
+        preset.catalog_root_id = root_id
+        preset.updated_at = datetime.now(timezone(timedelta(hours=8))).isoformat()
+        save_preset(preset)
     return {
         "task_id": job_id,
         "root_id": root_id,
@@ -1460,6 +1467,86 @@ def bind_provider_root_to_openlist(req: BindRootRequest):
         "bound": True,
         "openlist_remote_locator": normalized,
         "source_id": root.source_id,
+    }
+
+
+class BoundRootRescanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    root_id: str
+
+
+@router.post("/bound-roots/rescan")
+@_admitted_import_endpoint
+def rescan_bound_provider_root(req: BoundRootRescanRequest):
+    """RWK-10：Bound Provider root 的真实 durable OpenList 增量扫描入口。
+
+    读取 Provider root → 校验 binding 存在 → 可信 resolver 校验连接身份
+    （conn hash 一致）→ bump generation → enqueue scan(scan_channel=openlist)。
+    source_id / root_id 不变；扫描运行时（discovery_handler）还会做
+    bound 路径映射与连接身份复核，双保险。
+
+    未绑定 → 400；连接已变更 → 409（0 mutation）；成功 → durable job_id。
+    """
+    from app.catalog import store as catalog_store
+    from app.db.database import init_db
+    from app.integrations.openlist.governor import governor_connection_key
+    from app.pipeline import orchestrator
+
+    init_db()
+    root_id = (req.root_id or "").strip()
+    if not root_id:
+        raise HTTPException(status_code=400, detail="缺少 root_id")
+    root = catalog_store.get_source_root(root_id)
+    if root is None:
+        raise HTTPException(status_code=404, detail="来源根不存在")
+
+    bound_conn_hash = getattr(root, "openlist_conn_hash", "") or ""
+    bound_locator = getattr(root, "openlist_remote_locator", "") or ""
+    if not bound_conn_hash or not bound_locator:
+        raise HTTPException(
+            status_code=400,
+            detail="该来源根尚未绑定 OpenList 增量通道，请先绑定",
+        )
+
+    # 连接身份约束：可信 resolver 对比当前 conn hash 与绑定值
+    username, password, state = resolve_openlist_credentials()
+    if state == "unavailable":
+        raise HTTPException(
+            status_code=503,
+            detail="本机凭据管理器暂时不可用，请稍后重试",
+        )
+    if not username or not password:
+        raise HTTPException(
+            status_code=400,
+            detail="尚未配置 OpenList 连接，请先到设置页完成配置",
+        )
+    config = load_config()
+    current_hash = governor_connection_key(config.openlist_server_url, username)
+    if current_hash != bound_conn_hash:
+        raise HTTPException(
+            status_code=409,
+            detail="OpenList 连接已变更（服务器或账号与绑定不一致），"
+                   "已拒绝扫描，请重新绑定",
+        )
+
+    generation = catalog_store.bump_generation(root_id)
+    job_id = orchestrator.enqueue_scan(
+        root_id,
+        generation,
+        root.source_id,
+        scan_mode="incremental",
+        scan_channel="openlist",
+    )
+    return {
+        "task_id": job_id,
+        "root_id": root_id,
+        "generation": generation,
+        "execution_mode": "durable",
+        "scan_channel": "openlist",
+        "scan_mode": "incremental",
+        "source_id": root.source_id,
+        "openlist_remote_locator": bound_locator,
     }
 
 

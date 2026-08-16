@@ -17,9 +17,26 @@ class SourceCatalogScanner:
 
     目录语义：remote_path 使用与 OpenList 一致的绝对路径（/ 开头）；
     115/百度 TXT 快照的 relative_path 已是相对路径，这里以 root 为前缀拼接。
+
+    RWK-8（Bound OpenList）：当 Provider root 绑定了 OpenList 增量通道
+    （openlist_root != canonical_root 且均非空）时，enumerate 的入参
+    （frontier 中的 canonical path）先映射为 OpenList 物理路径再请求；
+    返回的物理条目再映射回 canonical namespace 写入 source_nodes——
+    保证 TXT snapshot 与 OpenList 增量看到同一套 node identity，
+    不会因双 namespace 产生重复 media unit 或错误 tombstone。
     """
 
-    def __init__(self, source: str, adapter=None, client=None, input_path: str = "", source_root: str = "/", local_root: str = ""):
+    def __init__(
+        self,
+        source: str,
+        adapter=None,
+        client=None,
+        input_path: str = "",
+        source_root: str = "/",
+        local_root: str = "",
+        canonical_root: str = "",
+        openlist_root: str = "",
+    ):
         self.source = source
         self._adapter = adapter
         self._input_path = input_path
@@ -31,12 +48,16 @@ class SourceCatalogScanner:
         # 回退 remote 前缀（历史行为保持）。
         self._source_root = source_root
         self._local_root = (local_root or source_root) if source != "local" else ""
+        # RWK-8：bound 映射层（canonical Provider namespace ↔ OpenList physical）
+        self._canonical_root = (canonical_root or source_root).rstrip("/") or "/"
+        self._openlist_root = (openlist_root or "").rstrip("/")
         self._snapshot: list[SourceNodeInput] | None = None
         self._dir_index: dict[str, list[SourceNodeInput]] = {}
         if source == "openlist" and client is not None:
             self._openlist = OpenListDirectoryScanner(client)
         else:
             self._openlist = None
+
     # -- 快照加载（115/百度 one-shot） ---------------------------------
 
     def _ensure_snapshot(self) -> None:
@@ -78,9 +99,52 @@ class SourceCatalogScanner:
 
     # -- 契约 ----------------------------------------------------------
 
+    def _bound(self) -> bool:
+        """是否处于 bound 模式：OpenList 通道 + 双 namespace 均已配置且不同。"""
+        return (
+            self.source == "openlist"
+            and self._openlist_root
+            and self._canonical_root
+            and self._openlist_root != self._canonical_root
+        )
+
+    def _to_physical(self, canonical_path: str) -> str:
+        """canonical（frontier 存证）→ OpenList 物理路径（请求用）。"""
+        if not self._bound():
+            return canonical_path
+        base = self._canonical_root.rstrip("/")
+        path = canonical_path.rstrip("/") or "/"
+        if base and (path == base or path.startswith(base + "/")):
+            return self._openlist_root + path[len(base):]
+        return canonical_path
+
+    def _to_canonical(self, physical_path: str) -> str:
+        """OpenList 物理路径（返回）→ canonical namespace（落库用）。"""
+        if not self._bound():
+            return physical_path
+        base = self._openlist_root.rstrip("/")
+        path = physical_path.rstrip("/") or "/"
+        if base and (path == base or path.startswith(base + "/")):
+            return self._canonical_root + path[len(base):]
+        return physical_path
+
     def enumerate_directory(self, remote_path: str, page: int = 1, per_page: int = 100) -> DirectoryPage:
         if self._openlist is not None:
-            return self._openlist.enumerate_directory(remote_path, page=page, per_page=per_page)
+            physical_path = self._to_physical(remote_path)
+            page_result = self._openlist.enumerate_directory(
+                physical_path, page=page, per_page=per_page
+            )
+            if not self._bound():
+                return page_result
+            # bound 模式：返回条目映射回 canonical namespace（parent 同步）
+            entries = []
+            for entry in page_result.entries:
+                canonical = self._to_canonical(entry.remote_path)
+                parent = self._to_canonical(entry.parent_path)
+                from dataclasses import replace
+
+                entries.append(replace(entry, remote_path=canonical, parent_path=parent))
+            return DirectoryPage(entries=entries, total=page_result.total)
         if self.source == "local" and self._adapter is not None:
             return self._adapter.enumerate_directory(remote_path, page=page, per_page=per_page)
         self._ensure_snapshot()

@@ -111,9 +111,20 @@ def _build_scanner(root: dict):
 
 
 def _build_openlist_scanner(root: dict):
-    """OpenList 通道：runtime 凭据统一走 resolver，构造分页枚举扫描器。"""
+    """OpenList 通道：runtime 凭据统一走 resolver，构造分页枚举扫描器。
+
+    RWK-9（连接身份约束）：若 root 绑定了 OpenList（openlist_conn_hash 非空），
+    扫描前用可信 resolver 重新计算当前 conn hash 并与绑定值对比——
+    不一致（用户切换了 OpenList 服务器/账号）→ 受控拒绝，0 mutation，
+    绝不把旧 Provider root 悄悄扫到另一个网盘。
+
+    RWK-8（bound 映射）：bound 模式下 scanner 携带 canonical_root（Provider
+    remote_locator）与 openlist_root（binding remote locator），枚举时
+    入参/返回在双 namespace 间映射，保证 node identity 与 TXT snapshot 一致。
+    """
     from app.catalog.scanner import SourceCatalogScanner
     from app.integrations.openlist.client import get_openlist_client
+    from app.integrations.openlist.governor import governor_connection_key
     from app.core.config import load_config, resolve_openlist_credentials
 
     # runtime 凭据统一走 resolver（REWORK）：后台扫描恢复后无需重启。
@@ -124,13 +135,29 @@ def _build_openlist_scanner(root: dict):
         raise ValueError("本机凭据管理器暂时不可用，OpenList 扫描已暂停，请稍后重试")
     if not username or not password:
         raise ValueError("OpenList 尚未配置，无法执行扫描")
+
+    bound_conn_hash = str(root.get("openlist_conn_hash") or "")
+    if bound_conn_hash:
+        current_hash = governor_connection_key(
+            config.openlist_server_url, username
+        )
+        if current_hash != bound_conn_hash:
+            raise ValueError(
+                "OpenList 连接已变更（服务器或账号与绑定不一致），"
+                "已拒绝在本来源根上继续扫描，请重新绑定"
+            )
+
     client = get_openlist_client(
         config.openlist_server_url,
         username,
         password,
     )
-    return SourceCatalogScanner(source="openlist", client=client)
-
+    return SourceCatalogScanner(
+        source="openlist",
+        client=client,
+        canonical_root=root.get("remote_locator") or "",
+        openlist_root=root.get("openlist_remote_locator") or "",
+    )
 
 def _build_txt_scanner(root: dict, provider: str):
     """TXT 快照通道（snapshot_pan115 / snapshot_baidu）。
@@ -269,16 +296,25 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
             "import_scope": root.import_scope,
             "input_path": str(payload.get("input_path") or ""),
             "scan_channel": scan_channel,
+            # RWK-8/9：Provider root 的 OpenList binding（bound 映射 + 连接身份约束）
+            "openlist_conn_hash": getattr(root, "openlist_conn_hash", "") or "",
+            "openlist_remote_locator": getattr(root, "openlist_remote_locator", "") or "",
         }
     )
     # HYB-5：首次 TXT→OpenList 对账保护——TXT bootstrap 后第一次走
     # OpenList 通道时，先校验快照与远端 root 是否错绑（1 次 list）；
-    # 错绑则中止，0 tombstone、不生成 revisions。
+    # 错绑则中止，0 tombstone、不生成 revisions。bound 模式下以 binding
+    # 远端定位为物理基准，快照直接成员以 Provider canonical locator 为基准。
     if (
         scan_channel == "openlist"
         and _needs_first_remote_reconcile(root_id)
     ):
-        _reconcile_preflight(scanner, root_id, root.remote_locator)
+        _reconcile_preflight(
+            scanner,
+            root_id,
+            getattr(root, "openlist_remote_locator", "") or root.remote_locator,
+            snapshot_locator=root.remote_locator,
+        )
     engine = DiscoveryEngine(
         scanner,
         source_id=root.source_id,
