@@ -514,8 +514,18 @@ _EXTRA_TABLES: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_stage_runs_root ON source_stage_runs(root_id)",
+    # HYB-6：OpenList 请求成本遥测（本地计数，KumiPlayer → OpenList 方向）。
+    # 只统计本应用实际发出的请求数，不冒充上游网盘真实配额消耗。
+    """
+    CREATE TABLE IF NOT EXISTS openlist_telemetry (
+        conn_hash TEXT NOT NULL,
+        day TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (conn_hash, day, operation)
+    )
+    """,
 )
-
 
 def ensure_source_health_table(conn) -> None:
     """幂等补齐 source_health 及轻量扩展表（已有 v3 库的轻量迁移，不重置数据库）。"""

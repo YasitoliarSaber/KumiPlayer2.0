@@ -365,6 +365,16 @@ class OpenListClient:
             try:
                 with self._client() as client:
                     response = client.post(path, json=payload, headers=self._headers())
+                    # HYB-6：KumiPlayer → OpenList 物理请求遥测（尽力而为）。
+                    # 已真实发出请求（无论成败）即计数一次，不冒充上游配额。
+                    from app.integrations.openlist.telemetry import (
+                        OP_FS_LIST,
+                        OP_LOGIN,
+                        record_request,
+                    )
+
+                    op = OP_LOGIN if "/login" in path else OP_FS_LIST
+                    record_request(self._conn_key, op)
             except httpx.TimeoutException:
                 last_error = OpenListTimeoutError()
                 if attempt + 1 < self.max_attempts:

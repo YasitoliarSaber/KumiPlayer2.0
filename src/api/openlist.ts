@@ -64,6 +64,31 @@ export interface OpenListTaskResult {
   task_status: string
 }
 
+/** HYB-2：TXT 目录树安全初始化（bootstrap）结果 */
+export interface OpenListBootstrapResult {
+  task_id: string
+  root_id: string
+  generation: number
+  preset_id: string
+  execution_mode: string
+  scan_channel: string
+  scan_mode: string
+  resolution: string
+  requested_locator: string
+  canonical_locator: string
+  tree_file_count: number
+  tree_video_count: number
+}
+
+/** HYB-6：KumiPlayer → OpenList 请求成本遥测摘要 */
+export interface OpenListTelemetrySummary {
+  fs_list: number
+  login: number
+  total: number
+  disclaimer: string
+}
+
+
 export interface OpenListConfigPayload {
   server_url: string
   remote_root: string
@@ -209,4 +234,23 @@ export const openlistApi = {
       `/api/openlist/import-batches/${batchId}/units/${unitId}/retry`, {}),
   rescanPreset: (presetId: string) =>
     api.post<OpenListTaskResult>(`/api/openlist/presets/${presetId}/rescan`, {}),
+  // HYB-2：目录树 TXT 安全初始化（零 OpenList 请求）
+  bootstrapTree: (params: {
+    remoteLocator: string
+    localMountRoot: string
+    importFamily?: string
+    importScope?: string
+    treeFile: File
+  }) => {
+    const body = new FormData()
+    body.append('remote_locator', params.remoteLocator)
+    body.append('local_mount_root', params.localMountRoot)
+    if (params.importFamily) body.append('import_family', params.importFamily)
+    if (params.importScope) body.append('import_scope', params.importScope)
+    body.append('tree_file', params.treeFile)
+    return api.form<OpenListBootstrapResult>('/api/openlist/bootstrap-tree', 'POST', body)
+  },
+  // HYB-6：今日 KumiPlayer → OpenList 请求成本遥测（只读）
+  getTelemetryToday: () =>
+    api.get<OpenListTelemetrySummary>('/api/openlist/telemetry/today'),
 }

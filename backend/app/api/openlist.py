@@ -953,6 +953,33 @@ def get_routes():
     return {"routes": [_route_public(route, config) for route in routes]}
 
 
+@router.get("/telemetry/today")
+def openlist_telemetry_today():
+    """HYB-6：今日 KumiPlayer → OpenList 请求成本遥测（只读）。
+
+    返回 fs_list / login / total 与固定免责文案。这是「KumiPlayer →
+    OpenList 方向」的本地计数，**不代表上游网盘真实配额消耗**
+    （OpenList 可能命中自身缓存）。未配置连接时返回零值摘要。
+    """
+    from app.integrations.openlist.governor import governor_connection_key
+    from app.integrations.openlist.telemetry import daily_summary
+
+    config = load_config()
+    username = (config.openlist_username or "").strip()
+    if not config.openlist_server_url.strip() or not username:
+        return {
+            "fs_list": 0,
+            "login": 0,
+            "total": 0,
+            "disclaimer": (
+                "这是 KumiPlayer → OpenList 的请求次数（访问风险参考值）；"
+                "OpenList 可能命中自身缓存，因此实际网盘上游请求可能更少。"
+            ),
+        }
+    conn_hash = governor_connection_key(
+        config.openlist_server_url, username or ""
+    )
+    return daily_summary(conn_hash)
 @router.post("/routes/discover")
 def discover_routes():
     """从远端总根读取直接子目录（仅一层），按目录名给出提供商建议。
