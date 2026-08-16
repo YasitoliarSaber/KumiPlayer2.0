@@ -1411,4 +1411,144 @@ class TestAtomicConfigCommit:
         assert last_username == "quark-user"
         assert last_password == "p@ssw0rd"
 
+    def test_prefetch_uses_recovered_credentials(self, client, tmp_path, monkeypatch):
+        """runtime 缺口补强：hydrate 失败 → store 恢复 → prefetch 使用恢复凭据。"""
+        from app.core import config as config_module
+        from app.core.credential_store import CredentialStoreError
+
+        class RealStore:
+            available = True
+
+            def __init__(self):
+                self.values: dict[str, str] = {}
+
+            def read(self, name):
+                return self.values.get(name, "")
+
+            def write(self, name, value):
+                self.values[name] = value
+
+            def delete(self, name):
+                self.values.pop(name, None)
+
+        real_store = RealStore()
+        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", real_store)
+        monkeypatch.setattr(config_module, "_credential_storage_enabled", lambda: True)
+        config_module.invalidate_config_cache()
+        resp = client.post(
+            "/api/openlist/config",
+            json={
+                "server_url": "https://ol.example.com:5244",
+                "remote_root": REMOTE_ROOT,
+                "mount_root": str(tmp_path / "quark"),
+                "username": "quark-user",
+                "password": "p@ssw0rd",
+                "prefetch_limit": 12,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+        captured: list[tuple[str, str]] = []
+        original_init = FakeOpenListClient.__init__
+
+        def capturing_init(self, server_url, username, password, **kwargs):
+            captured.append((username, password))
+            original_init(self, server_url, username, password, **kwargs)
+
+        FakeOpenListClient.__init__ = capturing_init
+
+        class FailingOnceStore:
+            available = True
+            failed = False
+
+            def __init__(self, real):
+                self.real = real
+
+            def read(self, name):
+                if name == "openlist_username" and not self.failed:
+                    self.failed = True
+                    raise CredentialStoreError("temporary")
+                return self.real.read(name)
+
+            def write(self, name, value):
+                return self.real.write(name, value)
+
+            def delete(self, name):
+                return self.real.delete(name)
+
+        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", FailingOnceStore(real_store))
+        config_module.invalidate_config_cache()
+        try:
+            config_module.load_config(force_reload=True)
+        except Exception:
+            pass
+        assert config_module.load_config().openlist_username == ""
+
+        # 恢复后直接 prefetch（不 invalidate / 不先行 save）
+        resp = client.post(
+            "/api/openlist/prefetch",
+            json={"paths": [REMOTE_ROOT + "/动画"]},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["prefetched"] >= 0
+        assert captured, "prefetch 必须构造 runtime client"
+        assert captured[-1] == ("quark-user", "p@ssw0rd")
+        assert real_store.values.get("openlist_password") == "p@ssw0rd"
+
+    def test_browse_store_down_returns_503(self, client, tmp_path, monkeypatch):
+        """runtime 缺口补强：store 不可读时 browse 返回受控 503（不清凭据）。"""
+        from app.core import config as config_module
+        from app.core.credential_store import CredentialStoreError
+
+        class RealStore:
+            available = True
+
+            def __init__(self):
+                self.values: dict[str, str] = {}
+
+            def read(self, name):
+                return self.values.get(name, "")
+
+            def write(self, name, value):
+                self.values[name] = value
+
+            def delete(self, name):
+                self.values.pop(name, None)
+
+        real_store = RealStore()
+        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", real_store)
+        monkeypatch.setattr(config_module, "_credential_storage_enabled", lambda: True)
+        config_module.invalidate_config_cache()
+        resp = client.post(
+            "/api/openlist/config",
+            json={
+                "server_url": "https://ol.example.com:5244",
+                "remote_root": REMOTE_ROOT,
+                "mount_root": str(tmp_path / "quark"),
+                "username": "quark-user",
+                "password": "p@ssw0rd",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+        class UnavailableStore:
+            available = True
+
+            def read(self, name):
+                raise CredentialStoreError("temporary")
+
+            def write(self, name, value):
+                pass
+
+            def delete(self, name):
+                pass
+
+        # store 不可读 + 缓存被清（cold cache）→ browse 受控 503
+        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", UnavailableStore())
+        config_module.invalidate_config_cache()
+        resp = client.get("/api/openlist/browse", params={"path": REMOTE_ROOT})
+        assert resp.status_code == 503
+        # 凭据未被误删
+        assert real_store.values.get("openlist_username") == "quark-user"
+        assert real_store.values.get("openlist_password") == "p@ssw0rd"
 

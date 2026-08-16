@@ -50,15 +50,27 @@ _DEFER_MESSAGE = "远端网盘疑似触发访问保护，KumiPlayer 已暂停该
 
 
 def _build_openlist_client(source_id: str):
-    """按 source 记录构造 OpenList 客户端（凭据只存内存，不进 payload）。"""
-    from app.core.config import load_config
+    """按 source 记录构造 OpenList 客户端（凭据只存内存，不进 payload）。
+
+    runtime 凭据统一走 ``resolve_openlist_credentials``（REWORK）：后台扫描
+    是真正 authenticated runtime 路径——cached 为空但 Credential Store 已
+    恢复时回源读取真实凭据，不依赖进程重启或先行 Test Connection / Save。
+    store 不可读时返回 None，由调用方按受控错误处理（不清凭据、不创建
+    错误 pool identity）。
+    """
+    from app.core.config import load_config, resolve_openlist_credentials
     from app.integrations.openlist.client import get_openlist_client
 
     config = load_config()
+    username, password, state = resolve_openlist_credentials()
+    if state == "unavailable":
+        return None
+    if not username or not password:
+        return None
     return get_openlist_client(
         config.openlist_server_url,
-        config.openlist_username,
-        config.openlist_password,
+        username,
+        password,
     )
 
 
@@ -76,11 +88,20 @@ def _build_scanner(root: dict):
 
     source = str(root.get("source_id") or "")
     if source.startswith("openlist") or source == "openlist":
+        # runtime 凭据统一走 resolver（REWORK）：后台扫描恢复后无需重启。
+        # store 不可读/未配置 → 抛受控错误，由 job 失败处理（不清凭据）。
+        from app.core.config import resolve_openlist_credentials
+
         config = load_config()
+        username, password, state = resolve_openlist_credentials()
+        if state == "unavailable":
+            raise ValueError("本机凭据管理器暂时不可用，OpenList 扫描已暂停，请稍后重试")
+        if not username or not password:
+            raise ValueError("OpenList 尚未配置，无法执行扫描")
         client = get_openlist_client(
             config.openlist_server_url,
-            config.openlist_username,
-            config.openlist_password,
+            username,
+            password,
         )
         return SourceCatalogScanner(source="openlist", client=client)
     if source.startswith("local"):
@@ -123,12 +144,13 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
     health_key = ""
     source = str(root.source_id or "")
     if source.startswith("openlist") or source == "openlist":
-        from app.core.config import load_config
+        from app.core.config import load_config, resolve_openlist_credentials
         from app.integrations.openlist.governor import governor_connection_key
 
         config = load_config()
+        username, _password, _state = resolve_openlist_credentials()
         health_key = governor_connection_key(
-            config.openlist_server_url, config.openlist_username
+            config.openlist_server_url, username or config.openlist_username or ""
         )
         allowed, record = source_health.peek_request_allowed(health_key)
         if not allowed:
