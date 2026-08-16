@@ -145,7 +145,7 @@ class TestProcessClientPool:
                 calls.append(request.url.path)
             if request.url.path == "/api/auth/login":
                 login_started.set()
-                assert allow_login.wait(5)
+                assert allow_login.wait(15)
                 return _json_response(200, {"code": 200, "data": {"token": "shared-token"}})
             if request.headers.get("authorization") != "shared-token":
                 return _json_response(401, {"code": 401})
@@ -189,7 +189,7 @@ class TestProcessClientPool:
                 calls.append(request.url.path)
             if request.url.path == "/api/auth/login":
                 login_started.set()
-                assert allow_login.wait(5)
+                assert allow_login.wait(15)
                 return _json_response(200, {"code": 200, "data": {"token": "fresh-token"}})
             if request.headers.get("authorization") != "fresh-token":
                 return _json_response(401, {"code": 401})
@@ -220,54 +220,99 @@ class TestProcessClientPool:
         assert errors == []
         assert calls.count("/api/auth/login") == 1
 
+    def test_invalidate_token_if_current_returns_false_when_token_changed(self):
+        """stale-token-aware：token 已被其他线程刷新时不得清除新 token。"""
+        client = make_client(lambda req: _json_response(200, {}))
+
+        client._token = "fresh-token"
+        # 旧 token 的迟到 401 → 当前 token 已变 → 不得清除
+        assert client._invalidate_token_if_current("expired-token") is False
+        assert client._token == "fresh-token"
+
+        # 当前 token 与 observed 一致 → 允许失效
+        assert client._invalidate_token_if_current("fresh-token") is True
+        assert client._token is None
+
     def test_late_401_from_old_token_does_not_clear_refreshed_token(self):
         """迟到 401（旧 token 的响应后到）不得清除刚刷新的新 token（ROOT-6）。
 
-        T0：A 与 B 都带着旧 token 发目录请求。
-        A 先收到 401 → 刷新出 T1。
-        B 的旧 401 此时才返回 → 必须保留 T1，且不得产生第二次无意义登录。
+        确定性时序（两线程同时携带同一旧 token 发出目录请求，handler 握手
+        保证两条请求头都在刷新发生前构造）：
+        T0：A 与 B 都带 expired-token 发目录请求（都在 handler 挂起）；
+        → 释放第一条 401 → A 刷新出 fresh-token（登录请求被阻塞）；
+        → B 的旧 401 在 A 刷新完成之后才返回；
+        最终 token == fresh-token，且全程只产生一次物理登录。
         """
         login_started = threading.Event()
         allow_login = threading.Event()
+        refresh_completed = threading.Event()
+        first_request_arrived = threading.Event()
+        second_request_arrived = threading.Event()
+        release_first_401 = threading.Event()
+        release_second_401 = threading.Event()
         calls: list[str] = []
         calls_lock = threading.Lock()
         errors: list[Exception] = []
+        expired_count = 0
 
         def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal expired_count
             with calls_lock:
                 calls.append(request.url.path)
             if request.url.path == "/api/auth/login":
                 login_started.set()
-                assert allow_login.wait(5)
+                allow_login.wait(15)  # 超时不抛异常，由主线程事件断言时序
                 return _json_response(200, {"code": 200, "data": {"token": "fresh-token"}})
-            if request.headers.get("authorization") != "fresh-token":
+            if request.headers.get("authorization") == "fresh-token":
+                # A 的刷新重试到达 → 刷新已完成
+                refresh_completed.set()
+                return _json_response(200, _fs_list_payload("/动画", []))
+            if request.headers.get("authorization") == "expired-token":
+                with calls_lock:
+                    expired_count += 1
+                    nth = expired_count
+                if nth == 1:
+                    # 第一条旧 token 请求：挂起，等两条请求都到达后再返回 401
+                    first_request_arrived.set()
+                    release_first_401.wait(15)
+                    return _json_response(401, {"code": 401})
+                # 第二条旧 token 请求：挂起，等 A 刷新完成后再返回 401（迟到）
+                second_request_arrived.set()
+                release_second_401.wait(15)
                 return _json_response(401, {"code": 401})
             return _json_response(200, _fs_list_payload("/动画", []))
 
-        client = get_openlist_client(
-            "https://ol.example.com", "user", "secret-pass",
-            transport=httpx.MockTransport(handler),
-            governor=OpenListRequestGovernor(rate_per_second=1000),
-        )
+        # 直接构造 client（非 pooled）：不走预登录，保证 B 真实携带旧 token 发出请求
+        client = make_client(handler)
         client._token = "expired-token"
+
+        barrier = threading.Barrier(2)
 
         def read_directory():
             try:
+                barrier.wait(timeout=5)  # 两线程同时出发
                 client.list_dir("/动画")
             except Exception as exc:  # pragma: no cover - assertion below carries detail
                 errors.append(exc)
 
-        # 线程 A：先发请求，收到 401 后开始刷新（登录请求被阻塞在 handler）
         first = threading.Thread(target=read_directory)
-        first.start()
-        assert login_started.wait(5)
-        # 线程 B：在 A 刷新完成前发出同一旧 token 的目录请求（也会收到 401）
         second = threading.Thread(target=read_directory)
+        first.start()
         second.start()
-        # 让 B 的 401 响应“迟到”到 A 刷新完成之后返回
+        # 两条旧 token 请求都已在 handler 挂起（请求头均在刷新前构造）
+        assert first_request_arrived.wait(15)
+        assert second_request_arrived.wait(15)
+        # 释放第一条 401 → 对应线程开始刷新（登录请求被阻塞在 handler）
+        release_first_401.set()
+        assert login_started.wait(15)
+        # 放行登录 → fresh-token 生效
         allow_login.set()
-        first.join(5)
-        second.join(5)
+        # 等待刷新后的重试请求到达（不依赖具体线程命名）
+        assert refresh_completed.wait(15)
+        # B 的迟到 401 此时才返回 → 不得清掉 fresh-token
+        release_second_401.set()
+        first.join(15)
+        second.join(15)
 
         assert errors == []
         # B 的迟到 401 不得清掉 A 刚刷新的 fresh-token

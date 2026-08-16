@@ -790,9 +790,63 @@ class TestAtomicConfigCommit:
         assert resp.status_code == 200, resp.text
         saved = self._config_json(tmp_path)
         assert saved["openlist_remote_root"] == "/new-root"
-        # 旧 routes 已清空（身份变化后不可信）
+        # 旧 routes 已清空（身份变化后不可见）
         assert client.get("/api/openlist/routes").json()["routes"] == []
 
+    def test_remote_identity_change_clears_runtime_pool(self, client, tmp_path):
+        """身份/密码变化成功后 runtime client pool 必须被清空（替换旧会话）。"""
+        from app.integrations.openlist.client import (
+            _CLIENT_POOL,
+            clear_openlist_client_pool,
+        )
+
+        _save_config(client, tmp_path)
+        clear_openlist_client_pool()
+        # 预置一个 pooled client（模拟运行时已有会话）
+        from app.integrations.openlist.client import get_openlist_client
+
+        get_openlist_client(
+            "https://ol.example.com:5244", "quark-user", "p@ssw0rd",
+            client_factory=FakeOpenListClient,
+        )
+        assert _CLIENT_POOL  # 池非空
+
+        # 显式更新 password（同 user 新密码 → 清 pool；routes 保留）
+        _save_routes(client)
+        resp = client.post(
+            "/api/openlist/config",
+            json={
+                "server_url": "https://ol.example.com:5244",
+                "remote_root": REMOTE_ROOT,
+                "mount_root": str(tmp_path / "quark"),
+                "username": "quark-user",
+                "password": "new-pass-123",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        # 池被清空（旧会话已替换；下次请求按新密码重建）
+        assert _CLIENT_POOL == {}
+        # password-only 变更不清 routes（身份未变）
+        assert client.get("/api/openlist/routes").json()["routes"]
+
+    def test_config_save_new_username_requires_password(self, client, tmp_path):
+        """config-save 路径：新 username + 空密码 → 400（禁止套用旧账号密码）。"""
+        _save_config(client, tmp_path)
+        resp = client.post(
+            "/api/openlist/config",
+            json={
+                "server_url": "https://ol.example.com:5244",
+                "remote_root": REMOTE_ROOT,
+                "mount_root": str(tmp_path / "quark"),
+                "username": "another-user",
+                "password": "",
+            },
+        )
+        assert resp.status_code == 400
+        assert "密码" in resp.json()["detail"]
+        # 0 mutation：配置保持旧值
+        saved = self._config_json(tmp_path)
+        assert saved["openlist_username"] == "quark-user"
     def test_local_only_edit_while_openlist_offline(self, client, tmp_path):
         """OpenList 完全不可达时，仅 local-only 字段（缓存 TTL）也能保存。"""
         _save_config(client, tmp_path)

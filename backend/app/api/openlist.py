@@ -427,11 +427,14 @@ def test_connection(req: TestConnectionRequest):
     """
     config = load_config()
     server_url = (req.server_url or config.openlist_server_url).strip()
-    username = req.username if req.username else config.openlist_username
+    # username 统一 strip，与 save 端点语义一致（审计 L2：带首尾空格的
+    # username 不得被误判为「新账号」而要求密码）
+    req_username = req.username.strip() if req.username else ""
+    username = req_username if req_username else config.openlist_username
     password = req.password if req.password else config.openlist_password
 
     # 修改 username 但未提供新密码：禁止把旧账号密码套给新账号
-    if req.username and req.username != config.openlist_username and not req.password:
+    if req_username and req_username != config.openlist_username and not req.password:
         return {
             "ok": False,
             "code": "invalid_configuration",
@@ -568,40 +571,44 @@ def save_connection_config(req: SaveConfigRequest):
                 message += "（请确认风险后重试）"
             raise HTTPException(status_code=400, detail=message)
 
-    # atomic commit：凭据写入失败 / JSON 写失败都会补偿回滚（config._persist_config_payload）
-    try:
-        save_config(candidate)
-    except CredentialStoreError:
-        # 补偿失败场景：明确告知用户凭据状态需要人工检查
-        raise HTTPException(
-            status_code=500,
-            detail="OpenList 配置保存失败，且本机凭据恢复异常，请重新检查连接设置",
-        ) from None
-    except OSError:
-        raise HTTPException(status_code=500, detail="OpenList 配置保存失败，请稍后重试") from None
-
-    # durable save 成功之后才更新 runtime 状态
+    # connection_changed：身份（server/username/remote_root）任一变化
     connection_changed = (
         new_server != old_server
         or effective_username != old_username
         or remote_root != old_remote_root
     )
+
+    # probe + durable save 全部成功之后才能清 route（失败时 routes unchanged）。
+    # routes 清空并入 candidate 一次性原子提交，避免「新身份 + 旧路由」的
+    # 二次写窗口与冗余的第二次凭据往返（审计 M3）。
+    old_routes_existed = bool(config.openlist_routes)
+    if connection_changed and old_routes_existed:
+        candidate.openlist_routes = []
+
+    # atomic commit：凭据写入失败 / JSON 写失败都会补偿回滚（config._persist_config_payload）
+    try:
+        save_config(candidate)
+    except CredentialStoreError:
+        # 区分两类失败：
+        # - 凭据存储读失败中止（0 mutation，无需恢复，只是暂时不可用）；
+        # - 凭据写入失败且补偿回滚失败（本机凭据可能不一致）。
+        # 这里统一按写入失败处理，但消息不再误导「凭据已损坏」。
+        raise HTTPException(
+            status_code=500,
+            detail="OpenList 配置保存失败，本机凭据服务异常，请稍后重试",
+        ) from None
+    except OSError:
+        raise HTTPException(status_code=500, detail="OpenList 配置保存失败，请稍后重试") from None
+
+    # durable save 成功之后才更新 runtime 状态
     if connection_changed or password_changed:
         # 密码不参与匿名会话键；用户重新填写密码时也必须丢弃旧内存 Token，
         # 避免新配置仍携带旧会话继续请求。
         clear_openlist_client_pool()
 
     message = "OpenList 连接配置已保存"
-    if connection_changed and config.openlist_routes:
-        # probe + durable save 全部成功之后才能清 route（失败时 routes unchanged）
+    if connection_changed and old_routes_existed:
         message = "OpenList 连接已保存；连接身份已变化，旧来源目录路由已清空，请重新发现并确认"
-        # 清空路由（第二个原子写；失败保持旧状态并提示）
-        try:
-            final = load_config(force_reload=True)
-            final.openlist_routes = []
-            save_config(final)
-        except (CredentialStoreError, OSError):
-            message = "OpenList 连接已保存，但旧来源目录路由清理失败，请稍后重试清理"
     return {"ok": True, "message": message}
 
 
