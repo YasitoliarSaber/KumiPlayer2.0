@@ -206,6 +206,8 @@ class TestBoundEndToEnd:
         assert root_bound.source_id == source_id
 
         # 4. bound durable rescan（真实产品入口）
+        # 清空 config probe / bind preflight 产生的请求，只验证 rescan 后的物理请求
+        FakeOpenListClient.requested_paths = []
         revisions_before = len(revision_store.list_revisions(root_id))
         rescan_resp = client.post(
             "/api/openlist/bound-roots/rescan",
@@ -222,9 +224,9 @@ class TestBoundEndToEnd:
         # 5. Fake OpenList 收到的物理路径 = binding locator
         assert FakeOpenListClient.requested_paths, "必须真实请求 OpenList"
         assert all(
-            p == "/115网盘" or p.startswith("/115网盘/")
+            p == "/115网盘/动画" or p.startswith("/115网盘/动画/")
             for p in FakeOpenListClient.requested_paths
-        ), f"物理请求必须在 OpenList binding namespace 内，实际: {FakeOpenListClient.requested_paths}"
+        ), f"物理请求必须严格用 binding locator（/115网盘/动画），实际: {FakeOpenListClient.requested_paths}"
         # root 的 canonical locator 是本地 POSIX 路径；物理请求绝不含它
         assert all(
             str(tmp_path).replace("\\", "/") not in p

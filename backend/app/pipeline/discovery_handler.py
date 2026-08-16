@@ -193,14 +193,19 @@ def _wait_for_backpressure(should_cancel) -> None:
 def _needs_first_remote_reconcile(root_id: str) -> bool:
     """HYB-5：是否需要首次远端对账保护。
 
-    当 root 存在 snapshot-only 目录（TXT bootstrap 遗留、从未被 OpenList
-    验证过，last_remote_verified_at=''）且 root 自身也未验证时，说明这是
-    bootstrap 后第一次走 OpenList 通道——需要先做一次错绑 preflight。
+    仅当存在「TXT bootstrap 完成过扫描」留下的 complete 目录（从未被
+    OpenList 验证过，last_remote_verified_at='' 且 state='complete'）时，
+    说明这是 bootstrap 后第一次走 OpenList 通道——需要先做错绑 preflight。
+    纯 OpenList 首次扫描（root 目录只是 queued，无 complete 快照）不触发。
     """
-    stats = catalog_store.remote_baseline_coverage(root_id)
-    if stats["total_directories"] == 0:
-        return False
-    return stats["remote_verified_count"] == 0
+    row = catalog_store.get_connection().execute(
+        """
+        SELECT COUNT(*) AS c FROM source_directories
+        WHERE root_id = ? AND state = 'complete' AND last_remote_verified_at = ''
+        """,
+        (root_id,),
+    ).fetchone()
+    return int(row["c"] if row else 0) > 0
 
 
 def _reconcile_preflight(
@@ -305,16 +310,10 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
     # OpenList 通道时，先校验快照与远端 root 是否错绑（1 次 list）；
     # 错绑则中止，0 tombstone、不生成 revisions。bound 模式下以 binding
     # 远端定位为物理基准，快照直接成员以 Provider canonical locator 为基准。
-    if (
+    needs_first_reconcile = (
         scan_channel == "openlist"
         and _needs_first_remote_reconcile(root_id)
-    ):
-        _reconcile_preflight(
-            scanner,
-            root_id,
-            getattr(root, "openlist_remote_locator", "") or root.remote_locator,
-            snapshot_locator=root.remote_locator,
-        )
+    )
     engine = DiscoveryEngine(
         scanner,
         source_id=root.source_id,
@@ -352,6 +351,16 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
         _wait_for_backpressure(should_cancel)
 
     try:
+        # REWORK-fix（MEDIUM）：首次对账 preflight 也置于风控异常保护内——
+        # preflight 的 list 若触发 429/风控/冷却，与 engine.run 一致转
+        # JobDeferredError（延后等待冷却），而不是直接 failed 消耗 attempt。
+        if needs_first_reconcile:
+            _reconcile_preflight(
+                scanner,
+                root_id,
+                getattr(root, "openlist_remote_locator", "") or root.remote_locator,
+                snapshot_locator=root.remote_locator,
+            )
         results = engine.run(
             should_cancel=should_cancel,
             progress_callback=progress_callback,

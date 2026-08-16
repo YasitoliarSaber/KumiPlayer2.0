@@ -8,6 +8,8 @@ DiscoveryEngine 只依赖 enumerate_directory，不再绑定 OpenList client。
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from app.catalog.models import DirectoryPage, SourceNodeInput
 from app.integrations.openlist.scanner import OpenListDirectoryScanner
 
@@ -49,8 +51,8 @@ class SourceCatalogScanner:
         self._source_root = source_root
         self._local_root = (local_root or source_root) if source != "local" else ""
         # RWK-8：bound 映射层（canonical Provider namespace ↔ OpenList physical）
-        self._canonical_root = (canonical_root or source_root).rstrip("/") or "/"
-        self._openlist_root = (openlist_root or "").rstrip("/")
+        self._canonical_root = self._norm_root(canonical_root or source_root)
+        self._openlist_root = self._norm_root(openlist_root)
         self._snapshot: list[SourceNodeInput] | None = None
         self._dir_index: dict[str, list[SourceNodeInput]] = {}
         if source == "openlist" and client is not None:
@@ -108,24 +110,50 @@ class SourceCatalogScanner:
             and self._openlist_root != self._canonical_root
         )
 
+    @staticmethod
+    def _norm_root(value: str) -> str:
+        """规范化 namespace 根：去尾部斜杠。
+
+        - 空输入 → 空串（未配置，bound 不生效）；
+        - 显式 "/" → "/"（根）；其余去尾斜杠。
+        """
+        value = (value or "").strip()
+        if not value:
+            return ""
+        stripped = value.rstrip("/")
+        return stripped or "/"
+
+    def _join(self, root: str, rest: str) -> str:
+        """root + rest 拼接，杜绝双斜杠（rest 以 / 开头时去重）。"""
+        rest = rest or ""
+        if root == "/":
+            return "/" + rest.lstrip("/")
+        return (root.rstrip("/") + "/" + rest.lstrip("/")).rstrip("/") or "/"
+
     def _to_physical(self, canonical_path: str) -> str:
         """canonical（frontier 存证）→ OpenList 物理路径（请求用）。"""
         if not self._bound():
             return canonical_path
-        base = self._canonical_root.rstrip("/")
+        base = self._norm_root(self._canonical_root)
         path = canonical_path.rstrip("/") or "/"
-        if base and (path == base or path.startswith(base + "/")):
-            return self._openlist_root + path[len(base):]
+        if base == "/":
+            # canonical 根即 "/"：任何绝对路径都在其下
+            return self._join(self._openlist_root, path)
+        if path == base or path.startswith(base + "/"):
+            return self._join(self._openlist_root, path[len(base):])
         return canonical_path
 
     def _to_canonical(self, physical_path: str) -> str:
         """OpenList 物理路径（返回）→ canonical namespace（落库用）。"""
         if not self._bound():
             return physical_path
-        base = self._openlist_root.rstrip("/")
+        base = self._norm_root(self._openlist_root)
         path = physical_path.rstrip("/") or "/"
-        if base and (path == base or path.startswith(base + "/")):
-            return self._canonical_root + path[len(base):]
+        if base == "/":
+            # OpenList 根即 "/"：返回路径原样映射到 canonical 根下
+            return self._join(self._canonical_root, path)
+        if path == base or path.startswith(base + "/"):
+            return self._join(self._canonical_root, path[len(base):])
         return physical_path
 
     def enumerate_directory(self, remote_path: str, page: int = 1, per_page: int = 100) -> DirectoryPage:
@@ -141,8 +169,6 @@ class SourceCatalogScanner:
             for entry in page_result.entries:
                 canonical = self._to_canonical(entry.remote_path)
                 parent = self._to_canonical(entry.parent_path)
-                from dataclasses import replace
-
                 entries.append(replace(entry, remote_path=canonical, parent_path=parent))
             return DirectoryPage(entries=entries, total=page_result.total)
         if self.source == "local" and self._adapter is not None:

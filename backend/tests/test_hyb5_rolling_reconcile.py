@@ -213,16 +213,20 @@ class TestFirstReconcilePreflight:
         _reconcile_preflight(scanner, root.root_id, "/根")  # 不抛错
 
     def test_no_preflight_after_remote_verified(self):
-        """root 已有 OpenList 验证（coverage>0）→ 不再需要 preflight。"""
+        """所有 complete 目录都已被 OpenList 验证 → 不再需要 preflight。"""
         root = _make_root()
         catalog_store.bump_generation(root.root_id)
         _seed_snapshot_only_dirs(root.root_id, ["/根/冰菓"], 1)
-        # 模拟一次 OpenList 成功提交 root（verified）
+        # 模拟 OpenList 成功提交 root 与全部子目录（verified）
         scanner = TrackingScanner()
         scanner.seed("/根", [("冰菓", True, 100.0)])
         scan_directory_paginated(
             scanner, root.root_id, "/根", 2,
             parent_path="", depth=0, per_page=100,
+        )
+        scan_directory_paginated(
+            scanner, root.root_id, "/根/冰菓", 2,
+            parent_path="/根", depth=1, per_page=100,
         )
         from app.pipeline.discovery_handler import _needs_first_remote_reconcile
 
