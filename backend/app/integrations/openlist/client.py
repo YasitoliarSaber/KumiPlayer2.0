@@ -532,7 +532,10 @@ class OpenListClient:
             return token
 
     def _login_request(self) -> str:
-        """登录实际请求（不限速、不上报，供 login 包装）。"""
+        """登录实际请求（不限速、不上报，供 login 包装）。
+
+        HYB-6：真实发出登录物理请求后计一次 login 遥测（尽力而为）。
+        """
         with self._client() as client:
             try:
                 response = client.post(
@@ -540,6 +543,12 @@ class OpenListClient:
                     json={"username": self.username, "password": self.password},
                     headers={"accept": "application/json", "content-type": "application/json"},
                 )
+                from app.integrations.openlist.telemetry import (
+                    OP_LOGIN,
+                    record_request,
+                )
+
+                record_request(self._conn_key, OP_LOGIN)
             except httpx.TimeoutException:
                 raise OpenListTimeoutError() from None
             except httpx.HTTPError:

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@fluentui/react-components';
-import type { OpenListConfigPayload, OpenListTestConnectionPayload, OpenListTestResult } from '../../api/openlist';
+import { openlistApi, type OpenListConfigPayload, type OpenListTestConnectionPayload, type OpenListTestResult, type OpenListTelemetrySummary } from '../../api/openlist';
 import type { PublicConfig } from '../../api/config';
 
 /**
@@ -147,6 +147,16 @@ export default function OpenListSettingsPanel({
   const [credentialsOpen, setCredentialsOpen] = useState(false);
   const [allowOpenlistHttp, setAllowOpenlistHttp] = useState(false);
   const [actionLock, setActionLock] = useState<string | null>(null);
+  const [telemetry, setTelemetry] = useState<OpenListTelemetrySummary | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    openlistApi
+      .getTelemetryToday()
+      .then((data) => { if (alive) setTelemetry(data); })
+      .catch(() => { /* 遥测展示尽力而为 */ });
+    return () => { alive = false; };
+  }, []);
   // saved credential 初始状态必须是 saved_unverified，而不是 unconfigured（REWORK）
   const [probeState, setProbeState] = useState<OpenListConnectionState>(() =>
     config.openlist_configured ? 'saved_unverified' : 'unconfigured'
@@ -264,6 +274,16 @@ export default function OpenListSettingsPanel({
         {config.openlist_mount_root && <span>本地挂载：<code>{config.openlist_mount_root}</code></span>}
         {saved && <span>账号与密码已保存（仅存本机凭据管理器）</span>}
       </div>
+
+      {telemetry && (
+        <div className="sources-openlist-telemetry">
+          <span className="sources-route-summary">
+            今日 KumiPlayer → OpenList 请求：目录 {telemetry.fs_list} 次 / 登录 {telemetry.login} 次
+            （共 {telemetry.total} 次）
+          </span>
+          <span className="sources-route-hint">{telemetry.disclaimer}</span>
+        </div>
+      )}
 
       <div className="sources-openlist-actions">
         <Button appearance="secondary" size="small" onClick={() => setEditorOpen((v) => !v)} className="settings-ghost-btn fluent-settings-btn">

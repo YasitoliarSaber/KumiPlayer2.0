@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from app.integrations.openlist.telemetry import (
     OP_FS_LIST,
     OP_LOGIN,
+    daily_counts,
     daily_summary,
     record_request,
 )
@@ -65,6 +66,29 @@ class TestTelemetryRecord:
         record_request("", OP_FS_LIST)  # 空 conn → 静默
         record_request("hash", "")  # 空 op → 静默
         record_request("hash", "unknown-op")  # 任意 op 可计数
+
+
+class TestLoginTelemetry:
+    def test_login_request_records_login_telemetry(self, monkeypatch):
+        """_login_request 真实发出物理请求后 login 计数 +1（REWORK 修复）。"""
+        import httpx
+
+        from app.integrations.openlist.client import OpenListClient
+        from app.integrations.openlist.governor import governor_connection_key
+
+        def handler(request):
+            return httpx.Response(200, json={"code": 200, "data": {"token": "t-1"}})
+
+        client = OpenListClient(
+            "http://127.0.0.1:5244", "user-login", "p",
+            transport=httpx.MockTransport(handler),
+            max_attempts=1,
+        )
+        token = client.login()
+        assert token == "t-1"
+        conn_hash = governor_connection_key("http://127.0.0.1:5244", "user-login")
+        counts = daily_counts(conn_hash)
+        assert counts.get(OP_LOGIN, 0) >= 1
 
 
 class TestTelemetryApi:
