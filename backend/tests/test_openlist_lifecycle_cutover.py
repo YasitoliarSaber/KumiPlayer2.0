@@ -435,19 +435,25 @@ class TestPrepareScanIncrementalFull:
         return root
 
     def test_incremental_only_requeues_root_failed_due(self):
-        """incremental：root/B/C queued；A/D 保持 complete；绝不整棵全 queued。"""
+        """incremental：root/B/C queued；A 进入基线学习；D 保持 complete；绝不整棵全 queued。
+
+        HYB-5 起：从未被 OpenList 验证（last_remote_verified_at=''）且没有
+        未来到期安排（next_verify_at=''）的 complete 目录会按 budget 渐进
+        进入 baseline learning——A 从未安排验证故被学习；D 已有未来到期
+        安排（next_verify_at=future）保持 complete，不被提前拉取。
+        """
         from app.catalog import store as catalog_store
 
         root = self._setup_known_tree()
         catalog_store.prepare_scan(root.root_id, generation=1, mode="incremental")
         states = _dirs_state(root.root_id)
         assert states["/动画"] == "queued"          # root 总是重扫
-        assert states["/动画/A"] == "complete"      # 完整且未到期：不重扫
+        assert states["/动画/A"] == "queued"        # 未验证且无到期安排 → 基线学习
         assert states["/动画/B"] == "queued"        # failed 滚动重试
         assert states["/动画/C"] == "queued"        # complete-but-due
         assert states["/动画/D"] == "complete"      # complete-and-not-due 保持
         assert sorted(p for p, s in states.items() if s == "queued") == [
-            "/动画", "/动画/B", "/动画/C",
+            "/动画", "/动画/A", "/动画/B", "/动画/C",
         ]
 
     def test_full_requeues_whole_known_tree(self):
