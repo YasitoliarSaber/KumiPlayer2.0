@@ -248,3 +248,32 @@ describe('REWORK：Test Connection payload 契约', () => {
     expect(payload).not.toHaveProperty('prefetch_limit');
   });
 });
+
+describe('REWORK-FINAL：候选保存失败后的状态真实性', () => {
+  test('saved=true + remote-affecting 保存失败 → saved_unverified，不显示“尚未配置”', async () => {
+    const { onNotice } = renderPanel({
+      draft: baseDraft({ remote_root: '/new-root' }),
+      onSaveConnection: vi.fn(async () => { throw new Error('root_permission_denied'); }),
+    });
+    fireEvent.click(screen.getByText('验证并保存'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // 旧保存配置仍在 → 退回 saved_unverified，绝不低于此
+    expect(screen.getByText(/尚未检查当前连接/)).toBeTruthy();
+    expect(screen.queryByText('尚未配置')).toBeNull();
+    expect(screen.queryByText(/连接正常/)).toBeNull();
+    // 错误 notice 可见
+    expect(onNotice).toHaveBeenCalledWith('root_permission_denied', 'error');
+  });
+
+  test('saved=false 首次保存失败 → 仍为 unconfigured', async () => {
+    const { onNotice } = renderPanel({
+      config: baseConfig({ openlist_configured: false, openlist_server_url: '' }),
+      draft: baseDraft({ server_url: 'http://192.168.1.10:5244' }),
+      onSaveConnection: vi.fn(async () => { throw new Error('保存失败'); }),
+    });
+    fireEvent.click(screen.getByText('验证并保存'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByText('尚未配置')).toBeTruthy();
+    expect(onNotice).toHaveBeenCalledWith('保存失败', 'error');
+  });
+});

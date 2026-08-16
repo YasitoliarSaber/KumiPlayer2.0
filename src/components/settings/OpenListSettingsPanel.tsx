@@ -213,7 +213,9 @@ export default function OpenListSettingsPanel({
       // local-only 保存不能凭空宣称连接正常（保持 saved_unverified）
       setProbeState(remoteAffectingDirty ? 'connected' : saved ? 'saved_unverified' : 'unconfigured');
     } catch (error) {
-      setProbeState(remoteAffectingDirty ? 'unconfigured' : saved ? 'saved_unverified' : 'unconfigured');
+      // 候选保存失败：后端保持旧提交状态。已有保存配置 → saved_unverified
+      // （不得显示 unconfigured 让用户误以为旧连接丢失）；首次配置失败 → unconfigured
+      setProbeState(saved ? 'saved_unverified' : 'unconfigured');
       const message = (error as Error)?.message || 'OpenList 配置保存失败';
       onNotice?.(message, 'error');
     } finally {
