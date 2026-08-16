@@ -404,7 +404,7 @@ class TestRequestDiagnostics:
     def _fake_httpx(self, monkeypatch, statuses: list[int]):
         """按顺序返回给定 HTTP 状态的 Fake httpx.Client。"""
         import httpx
-        from app.integrations import bangumi as bg
+
 
         class FakeResponse:
             def __init__(self, status_code: int):
@@ -452,9 +452,10 @@ class TestRequestDiagnostics:
     def test_request_log_redacts_token_on_failure(self, monkeypatch):
         """401 失败日志：含 status/error_code/retry_after/purpose，绝不含 Token。"""
         import pytest
+
         from app.integrations import bangumi as bg
 
-        fake = self._fake_httpx(monkeypatch, [401])
+        self._fake_httpx(monkeypatch, [401])
         client = bg.BangumiClient(
             access_token="SECRET-TOKEN-12345", base_url="https://api.bgm.tv"
         )
@@ -680,6 +681,7 @@ class TestRuntimeCredentialResolver:
         """config cache 空 + CM 先不可读后恢复 → 同一进程 BangumiClient()
         发起正常业务请求直接携带 recovered token 且成功。"""
         import httpx
+
         import app.core.config as core_config
         from app.core.credential_store import CredentialStoreError
         from app.integrations import bangumi as bg
