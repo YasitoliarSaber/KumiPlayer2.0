@@ -100,6 +100,7 @@ def fake_client(monkeypatch):
     # discovery handler 通过 get_openlist_client 构造扫描器（不经 api 层），
     # 因此必须替换集成层工厂，而不是 app.api.openlist.OpenListClient。
     monkeypatch.setattr("app.api.openlist.OpenListClient", FakeOpenListClient)
+    monkeypatch.setattr("app.integrations.openlist.connection.OpenListClient", FakeOpenListClient)
     monkeypatch.setattr(
         "app.integrations.openlist.client.get_openlist_client",
         lambda *args, **kwargs: FakeOpenListClient(*args, **kwargs),

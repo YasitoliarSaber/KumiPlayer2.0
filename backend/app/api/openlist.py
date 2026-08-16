@@ -17,7 +17,7 @@ POST   /api/openlist/presets/{id}/rescan   按预设保存的远端定位增量�
 - 导入路径必须位于配置的映射根路径之下，并归属启用的提供商路由（或 other）；
 - 普通浏览绝不递归扫描，预取有预算、单并发、可取消且不递归后代；
 """
-
+import copy
 import ipaddress
 import threading
 from functools import wraps
@@ -28,7 +28,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 from app.catalog import source_health
-from app.core.config import load_config, save_config
+from app.core.config import load_config, openlist_credential_state, save_config
+from app.core.credential_store import CredentialStoreError
 from app.integrations.openlist.cache import (
     connection_key,
     read_cache,
@@ -472,10 +473,17 @@ def test_connection(req: TestConnectionRequest):
 
 @router.post("/config")
 def save_connection_config(req: SaveConfigRequest):
-    """保存 OpenList 连接配置（单实例）；用户名/密码进入 Windows Credential Manager。
+    """保存 OpenList 连接配置（validate-before-commit，preflight + 补偿回滚）。
 
-    连接级字段：服务地址、远端总根、本地总挂载根、浏览缓存 TTL、预取数量。
-    不保存凭据到配置文件；保存后不返回任何凭据。
+    Remote-affecting（首次配置 / server_url / username / 显式 password /
+    remote_root 变化）：
+        candidate → fresh probe → success → atomic commit
+    Local-only（mount_root / cache TTL / prefetch 等）：
+        不要求 OpenList 在线，直接保存。
+
+    任何 probe / 凭据读写 / 配置写失败都保持旧状态（0 mutation）；路由与
+    runtime client pool 只在 probe + durable save 全部成功之后才更新。
+    用户名/密码进入 Windows Credential Manager；保存后不返回任何凭据。
     """
     ok, reason = validate_server_url(req.server_url)
     if not ok:
@@ -493,46 +501,107 @@ def save_connection_config(req: SaveConfigRequest):
         mount_root += "\\"
     if not mount_root:
         raise HTTPException(status_code=400, detail="请填写 OpenList 对应的本地挂载根路径")
-    config = load_config()
-    username = req.username.strip() or config.openlist_username
-    if not username:
-        raise HTTPException(status_code=400, detail="请填写 OpenList 用户名")
 
-    # 连接身份（地址/账号/远端总根）变化时，旧 provider 路由不得静默沿用
-    old_identity = (
-        config.openlist_server_url,
-        config.openlist_username,
-        normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/",
-    )
+    config = load_config()
+    old_server = normalize_openlist_server_url(config.openlist_server_url) if config.openlist_server_url else ""
+    old_username = config.openlist_username or ""
+    old_password = config.openlist_password or ""
+    old_remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
     new_server = normalize_openlist_server_url(req.server_url)
-    new_identity = (
-        new_server,
-        username,
-        remote_root,
+    username = req.username.strip()
+    password = req.password or ""
+
+    # 更换 username 但未提供新密码：禁止把旧账号密码套给新账号
+    if username and username != old_username and not password:
+        raise HTTPException(status_code=400, detail="请输入新 OpenList 账号对应的密码")
+
+    # 凭据存储暂时不可读：不能安全提交（防止通用持久化把空字段解释成 delete）
+    if openlist_credential_state() == "unavailable":
+        raise HTTPException(
+            status_code=503,
+            detail="本机凭据管理器暂时不可用，无法安全保存 OpenList 配置，请稍后重试",
+        )
+
+    # 有效凭据解析（KEEP SAVED 语义）
+    effective_username = username or old_username
+    effective_password = password or old_password
+
+    # Remote-affecting 判定（首次配置也算 remote-affecting；显式 password
+    # 只有与已保存值不同才算更新，相同内容重复保存保持幂等）
+    password_changed = bool(password) and password != old_password
+    remote_affecting = (
+        not config.openlist_server_url
+        or new_server != old_server
+        or effective_username != old_username
+        or password_changed
+        or remote_root != old_remote_root
     )
-    connection_changed = old_identity != new_identity
-    if connection_changed and config.openlist_routes:
-        config.openlist_routes = []
-    # 密码不参与匿名会话键；用户重新填写密码时也必须丢弃旧内存 Token，避免
-    # 新配置仍携带旧会话继续请求。
-    if connection_changed or req.password:
+
+    # candidate 构建（禁止原地修改 cached AppConfig）
+    candidate = copy.deepcopy(config)
+    candidate.openlist_server_url = new_server
+    candidate.openlist_remote_root = remote_root
+    candidate.openlist_mount_root = mount_root
+    if effective_username:
+        candidate.openlist_username = effective_username
+    if password:
+        candidate.openlist_password = password
+    if req.cache_ttl_minutes is not None:
+        candidate.openlist_cache_ttl_minutes = max(1, min(int(req.cache_ttl_minutes), 60 * 24 * 30))
+    if req.prefetch_limit is not None:
+        candidate.openlist_prefetch_limit = max(0, min(int(req.prefetch_limit), _PREFETCH_MAX))
+
+    # validate-before-commit：remote-affecting 必须先真实 probe 成功
+    if remote_affecting:
+        if not effective_username or not effective_password:
+            raise HTTPException(status_code=400, detail=_NOT_CONFIGURED_MESSAGE)
+        probe = probe_openlist_connection(
+            server_url=new_server,
+            remote_root=remote_root,
+            username=effective_username,
+            password=effective_password,
+            allow_insecure_http=req.allow_insecure_http,
+        )
+        if not probe.ok:
+            message = probe.message
+            if probe.code == "invalid_configuration" and "明文传输密码" in message:
+                message += "（请确认风险后重试）"
+            raise HTTPException(status_code=400, detail=message)
+
+    # atomic commit：凭据写入失败 / JSON 写失败都会补偿回滚（config._persist_config_payload）
+    try:
+        save_config(candidate)
+    except CredentialStoreError:
+        # 补偿失败场景：明确告知用户凭据状态需要人工检查
+        raise HTTPException(
+            status_code=500,
+            detail="OpenList 配置保存失败，且本机凭据恢复异常，请重新检查连接设置",
+        ) from None
+    except OSError:
+        raise HTTPException(status_code=500, detail="OpenList 配置保存失败，请稍后重试") from None
+
+    # durable save 成功之后才更新 runtime 状态
+    connection_changed = (
+        new_server != old_server
+        or effective_username != old_username
+        or remote_root != old_remote_root
+    )
+    if connection_changed or password_changed:
+        # 密码不参与匿名会话键；用户重新填写密码时也必须丢弃旧内存 Token，
+        # 避免新配置仍携带旧会话继续请求。
         clear_openlist_client_pool()
 
-    config.openlist_server_url = new_server
-    config.openlist_remote_root = remote_root
-    config.openlist_mount_root = mount_root
-    if username:
-        config.openlist_username = username
-    if req.password:
-        config.openlist_password = req.password
-    if req.cache_ttl_minutes is not None:
-        config.openlist_cache_ttl_minutes = max(1, min(int(req.cache_ttl_minutes), 60 * 24 * 30))
-    if req.prefetch_limit is not None:
-        config.openlist_prefetch_limit = max(0, min(int(req.prefetch_limit), _PREFETCH_MAX))
-    save_config(config)
     message = "OpenList 连接配置已保存"
-    if connection_changed and not config.openlist_routes:
+    if connection_changed and config.openlist_routes:
+        # probe + durable save 全部成功之后才能清 route（失败时 routes unchanged）
         message = "OpenList 连接已保存；连接身份已变化，旧来源目录路由已清空，请重新发现并确认"
+        # 清空路由（第二个原子写；失败保持旧状态并提示）
+        try:
+            final = load_config(force_reload=True)
+            final.openlist_routes = []
+            save_config(final)
+        except (CredentialStoreError, OSError):
+            message = "OpenList 连接已保存，但旧来源目录路由清理失败，请稍后重试清理"
     return {"ok": True, "message": message}
 
 

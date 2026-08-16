@@ -485,6 +485,7 @@ class TestTestConnection:
     def test_connection_new_username_requires_password(self, client, tmp_path):
         """修改 username 但 password 为空 → 禁止把旧账号密码套给新账号。"""
         _save_config(client, tmp_path)
+        instances_before = len(FakeOpenListClient.instances)
         resp = client.post(
             "/api/openlist/test-connection",
             json={"username": "another-user", "password": ""},
@@ -493,8 +494,8 @@ class TestTestConnection:
         assert body["ok"] is False
         assert body["code"] == "invalid_configuration"
         assert "密码" in body["message"]
-        # 未发起任何探测
-        assert FakeOpenListClient.instances == []
+        # 本次请求未发起任何探测（_save_config 的实例数保持不变）
+        assert len(FakeOpenListClient.instances) == instances_before
 
     def test_connection_permission_error_is_not_auth_error(self, client, tmp_path):
         """登录成功但 root 403 → root_permission_denied，不是 credential_rejected。"""
@@ -716,3 +717,164 @@ class TestCooldownNetworkAdmission:
         resp = client.post("/api/openlist/routes/discover")
         assert resp.status_code == 400  # MockTransport 固定 404 → 归一化为错误
         assert real_client_factory["transport_calls"] >= 1
+
+# ============================================================
+# OL-3：Validated Candidate + Secure Credential Atomic Commit 回归
+# ============================================================
+
+
+class TestAtomicConfigCommit:
+    """validate-before-commit：probe 失败 / 凭据失败 / 写失败都保持旧状态。
+
+    （credential read/write/JSON 失败的三态回归见 test_credential_storage.py）
+    """
+
+    def _config_json(self, tmp_path):
+        from app.core import config as core_config
+
+        path = core_config.get_config_file()
+        import json
+
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_probe_failure_preserves_old_state(self, client, tmp_path):
+        """候选密码无效 → probe 失败 → config/credential/routes/runtime 全部保持。"""
+        _save_config(client, tmp_path)
+        _save_routes(client)
+        routes_before = client.get("/api/openlist/routes").json()["routes"]
+        assert routes_before
+
+        # 候选密码无效（登录失败）
+        FakeOpenListClient.login_user = "quark-user"
+        resp = client.post(
+            "/api/openlist/config",
+            json={
+                "server_url": "https://ol.example.com:5244",
+                "remote_root": REMOTE_ROOT,
+                "mount_root": str(tmp_path / "quark"),
+                "username": "quark-user",
+                "password": "wrong-pass",
+            },
+        )
+        assert resp.status_code == 400
+        body = resp.json()
+        assert "拒绝" in body["detail"] or "登录信息" in body["detail"]
+
+        # 配置 JSON 保持旧值（server/username 未变）
+        saved = self._config_json(tmp_path)
+        assert saved["openlist_server_url"] == "https://ol.example.com:5244"
+        assert saved["openlist_remote_root"] == REMOTE_ROOT
+        # 路由保持（失败不能清 routes）
+        routes_after = client.get("/api/openlist/routes").json()["routes"]
+        assert [r["route_id"] for r in routes_after] == [r["route_id"] for r in routes_before]
+        # runtime client 未被替换（仍可正常浏览）
+        assert client.get("/api/openlist/browse", params={"path": REMOTE_ROOT}).status_code == 200
+
+    def test_remote_identity_change_success_clears_routes_and_replaces_client(self, client, tmp_path):
+        """probe + durable save 全部成功之后才清 routes、替换 runtime client。"""
+        _save_config(client, tmp_path)
+        _save_routes(client, prefix=REMOTE_ROOT + "/动画")
+        assert client.get("/api/openlist/routes").json()["routes"]
+
+        # 更换 remote_root（remote-affecting）
+        resp = client.post(
+            "/api/openlist/config",
+            json={
+                "server_url": "https://ol.example.com:5244",
+                "remote_root": "/new-root",
+                "mount_root": str(tmp_path / "quark"),
+                "username": "quark-user",
+                "password": "",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        saved = self._config_json(tmp_path)
+        assert saved["openlist_remote_root"] == "/new-root"
+        # 旧 routes 已清空（身份变化后不可信）
+        assert client.get("/api/openlist/routes").json()["routes"] == []
+
+    def test_local_only_edit_while_openlist_offline(self, client, tmp_path):
+        """OpenList 完全不可达时，仅 local-only 字段（缓存 TTL）也能保存。"""
+        _save_config(client, tmp_path)
+        # 模拟 OpenList 离线：登录失败
+        FakeOpenListClient.login_user = "quark-user"
+        resp = client.post(
+            "/api/openlist/config",
+            json={
+                "server_url": "https://ol.example.com:5244",
+                "remote_root": REMOTE_ROOT,
+                "mount_root": str(tmp_path / "quark"),
+                "username": "quark-user",
+                "password": "",
+                "cache_ttl_minutes": 720,
+            },
+        )
+        # local-only：不要求在线，保存成功
+        assert resp.status_code == 200, resp.text
+        assert self._config_json(tmp_path)["openlist_cache_ttl_minutes"] == 720
+
+    def test_same_remote_config_idempotent_save(self, client, tmp_path):
+        """相同内容保存两次：不清 route、不重建 client、不产生额外秘密操作。"""
+        _save_config(client, tmp_path)
+        _save_routes(client)
+        # 先制造一个 pooled client（记录实例数）
+        from app.integrations.openlist.client import clear_openlist_client_pool
+
+        clear_openlist_client_pool()
+        instances_before = len(FakeOpenListClient.instances)
+        routes_before = client.get("/api/openlist/routes").json()["routes"]
+
+        resp = client.post(
+            "/api/openlist/config",
+            json={
+                "server_url": "https://ol.example.com:5244",
+                "remote_root": REMOTE_ROOT,
+                "mount_root": str(tmp_path / "quark"),
+                "username": "quark-user",
+                "password": "p@ssw0rd",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        # 未清 routes
+        assert client.get("/api/openlist/routes").json()["routes"] == routes_before
+        # 未产生额外 client（幂等保存不重建 pool）
+        assert len(FakeOpenListClient.instances) == instances_before
+
+    def test_credential_store_unavailable_rejects_save(self, client, tmp_path, monkeypatch):
+        """凭据存储不可读 → POST /config 返回 503 且 0 mutation（防止误删凭据）。"""
+        from app.core import config as config_module
+        from app.core.credential_store import CredentialStoreError
+
+        _save_config(client, tmp_path)
+
+        class UnavailableStore:
+            available = True
+
+            def read(self, name):
+                raise CredentialStoreError("temporary")
+
+            def write(self, name, value):
+                pass
+
+            def delete(self, name):
+                pass
+
+        monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", UnavailableStore())
+        monkeypatch.setattr(config_module, "_credential_storage_enabled", lambda: True)
+        config_module.invalidate_config_cache()
+
+        resp = client.post(
+            "/api/openlist/config",
+            json={
+                "server_url": "https://ol.example.com:5244",
+                "remote_root": REMOTE_ROOT,
+                "mount_root": str(tmp_path / "quark"),
+                "username": "quark-user",
+                "password": "",
+                "cache_ttl_minutes": 720,
+            },
+        )
+        assert resp.status_code == 503
+        # 配置未被修改（0 mutation）
+        saved = self._config_json(tmp_path)
+        assert saved["openlist_cache_ttl_minutes"] == 1440

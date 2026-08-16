@@ -30,6 +30,38 @@ REMOTE_ROOT = "/夸克网盘"
 PRESET_LOCATOR = "/夸克网盘/动画/冰菓"
 
 
+class FakeOpenListClient:
+    """替换 OpenListClient（含 connection 模块）的假客户端：全程离线。"""
+
+    instances: list["FakeOpenListClient"] = []
+
+    def __init__(self, server_url, username, password, **kwargs):
+        self.server_url = server_url
+        self.username = username
+        self.password = password
+        FakeOpenListClient.instances.append(self)
+
+    def login(self):
+        return "fake-token"
+
+    def list_dir(self, path, page=1, per_page=100, refresh=False):
+        from app.integrations.openlist.models import OpenListEntry
+
+        return type(
+            "Page", (), {"entries": [OpenListEntry(name="动画", is_dir=True)], "total": 1}
+        )()
+
+
+@pytest.fixture(autouse=True)
+def fake_openlist_client(monkeypatch):
+    FakeOpenListClient.instances = []
+    monkeypatch.setattr("app.api.openlist.OpenListClient", FakeOpenListClient)
+    monkeypatch.setattr(
+        "app.integrations.openlist.connection.OpenListClient", FakeOpenListClient
+    )
+    yield
+
+
 @pytest.fixture(autouse=True)
 def db(tmp_path, monkeypatch):
     """catalog + jobs 共用同一个临时 SQLite（app.db.database 单库）。"""

@@ -1,6 +1,7 @@
 """配置模型与敏感字段脱敏"""
 
 import json
+import logging
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -9,6 +10,8 @@ from app.core.atomic_json import write_json_atomic
 from app.core.credential_store import SECURE_CREDENTIAL_STORE, CredentialStoreError
 from app.core.data_lock import DATA_WRITE_LOCK
 from app.core.paths import get_data_dir
+
+_logger = logging.getLogger(__name__)
 
 # 测试和诊断工具可临时覆盖；生产环境始终跟随统一数据目录。
 CONFIG_FILE: Path | None = None
@@ -127,18 +130,80 @@ def _credential_storage_enabled() -> bool:
     return CONFIG_FILE is None and SECURE_CREDENTIAL_STORE.available
 
 
+def openlist_credential_state() -> str:
+    """OpenList 凭据三态：``found`` / ``missing`` / ``unavailable``。
+
+    - ``found``：用户名与密码都存在；
+    - ``missing``：尚未配置（凭据存储可读但字段为空）；
+    - ``unavailable``：凭据存储本身暂时不可读（读取抛错）——调用方
+      绝不能把该状态当作「没有凭据」进而触发删除。
+    """
+    if not _credential_storage_enabled():
+        cfg = load_config()
+        return "found" if (cfg.openlist_username and cfg.openlist_password) else "missing"
+    try:
+        username = SECURE_CREDENTIAL_STORE.read("openlist_username")
+        password = SECURE_CREDENTIAL_STORE.read("openlist_password")
+    except CredentialStoreError:
+        return "unavailable"
+    return "found" if (username and password) else "missing"
+
+
 def _persist_config_payload(config: AppConfig) -> None:
+    """持久化配置；凭据写入带补偿回滚（ROOT-7 / OL-3）。
+
+    - 凭据先于 JSON 写入；任一凭据写入失败 → 恢复已写入的旧凭据后抛出；
+    - JSON 原子写失败 → 恢复全部本次写入的凭据后抛出；
+    - 凭据读取失败（``CredentialStoreError``）→ 该字段跳过：**既不写入也不
+      delete**，绝不允许把「存储暂时不可读」当作「清除凭据」。
+    """
     with DATA_WRITE_LOCK:
         payload = asdict(config)
+        written: list[tuple[str, str]] = []  # (key, 旧值)
         if _credential_storage_enabled():
-            for key in _CREDENTIAL_FIELDS:
-                value = str(payload.get(key, "") or "")
-                if value:
-                    SECURE_CREDENTIAL_STORE.write(key, value)
-                else:
-                    SECURE_CREDENTIAL_STORE.delete(key)
-                payload[key] = ""
-        write_json_atomic(get_config_file(), payload)
+            try:
+                for key in _CREDENTIAL_FIELDS:
+                    value = str(payload.get(key, "") or "")
+                    try:
+                        old = SECURE_CREDENTIAL_STORE.read(key)
+                    except CredentialStoreError:
+                        # 存储暂时不可读：绝不能继续保存——否则要么把「不可读」
+                        # 当作「清除凭据」，要么把未脱敏明文写进 config.json。
+                        # 直接中止本次保存（0 mutation：store / JSON / 内存全保持）。
+                        raise
+                    written.append((key, old or ""))
+                    if value:
+                        SECURE_CREDENTIAL_STORE.write(key, value)
+                    else:
+                        SECURE_CREDENTIAL_STORE.delete(key)
+                    payload[key] = ""
+            except Exception:
+                _rollback_credentials(written)
+                raise
+        try:
+            write_json_atomic(get_config_file(), payload)
+        except Exception:
+            if _credential_storage_enabled():
+                _rollback_credentials(written)
+            raise
+
+
+def _rollback_credentials(written: list[tuple[str, str]]) -> None:
+    """补偿回滚：把本次已写入的凭据恢复为旧值（尽力而为，失败记录高等级错误）。
+
+    注意：只有能读到旧值的字段才会进入 ``written``，因此这里不会误删
+    那些「读取失败被跳过」的凭据。
+    """
+    for key, old in reversed(written):
+        try:
+            if old:
+                SECURE_CREDENTIAL_STORE.write(key, old)
+            else:
+                SECURE_CREDENTIAL_STORE.delete(key)
+        except Exception:
+            _logger.critical(
+                "凭据补偿回滚失败（key=%s），本机凭据可能处于不一致状态", key
+            )
 
 
 def _hydrate_secure_credentials(config: AppConfig, file_data: dict) -> bool:
