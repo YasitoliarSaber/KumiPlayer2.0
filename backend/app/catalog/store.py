@@ -886,18 +886,31 @@ def commit_directory(
                 # 目录 frontier 是持久状态：父目录一次完整提交后，把每个直属
                 # 子目录写成 queued。进程中断后 worker 从这里继续，不重建内存树。
                 if row["kind"] == "dir":
-                    # 阶段C（mtime 精准下钻）：已知 child 目录的直属 node mtime
-                    # 与上次入库不同（metadata 变化）→ 立即把 checkpoint 置回
-                    # queued，不等 24h rolling；UPDATE 未命中（目录曾消失、
-                    # checkpoint 已被级联删除）时回退 INSERT 重建 queued。
-                    # mtime 未变 → 保持原状态（complete 继续按 next_verify_at
-                    # 到期验证，24h rolling fallback 不变）。
+                    # HYB-4（mtime 三态下钻）：区分
+                    #   SAME    —— 双方均非 None 且相等 → 不下钻，等 rolling verify
+                    #   CHANGED —— 双方均非 None 且不等 → 立即 requeue 下钻
+                    #   UNKNOWN —— old=None（TXT bootstrap 遗留，无可信远端基线）
+                    #              → 记录 new mtime（node 已更新），但**不**立即
+                    #              全树展开，交给 baseline learning 分批验证；
+                    #              否则第一次 OpenList 增量会退化成全树扫描，
+                    #              吃掉 TXT bootstrap 的收益。
+                    # UPDATE 未命中（目录曾消失、checkpoint 已被级联删除）时
+                    # 回退 INSERT 重建 queued（新目录 → 当轮发现并扫描）。
                     requeued = False
-                    if (
-                        existing is not None
+                    old_mtime = existing["mtime"] if existing is not None else None
+                    new_mtime = row["mtime"]
+                    changed = (
+                        old_mtime is not None
+                        and new_mtime is not None
+                        and old_mtime != new_mtime
+                    )
+                    unknown = (
+                        old_mtime is None
+                        and new_mtime is not None
+                        and existing is not None
                         and existing["kind"] == "dir"
-                        and existing["mtime"] != row["mtime"]
-                    ):
+                    )
+                    if changed:
                         cursor = tx.execute(
                             """
                             UPDATE source_directories
@@ -908,7 +921,7 @@ def commit_directory(
                             (root_id, remote),
                         )
                         requeued = cursor.rowcount > 0
-                    if not requeued:
+                    if not requeued and not unknown:
                         tx.execute(
                             """
                             INSERT OR IGNORE INTO source_directories (
