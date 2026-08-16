@@ -622,10 +622,12 @@ class TestSingleExecutionAuthority:
         ).fetchone()["c"]
         assert int(drafts) == len(revision_ids), "导入后全部 revisions 应为 draft"
 
-        # 用户一次确认（root 级）→ 全部 confirmed + 恰一 mirror job each
+        # 用户一次确认（root 级，带 generation fence）→ 全部 confirmed + 恰一 mirror job each
+        baseline_meta = resp.json().get("baseline", {})
+        gen = baseline_meta.get("confirmation_generation")
         resp_confirm = client.post(
             "/api/imports/pan115/confirm-root",
-            json={"root_id": confirmation_root_id},
+            json={"root_id": confirmation_root_id, "generation": gen},
         )
         assert resp_confirm.status_code == 200, resp_confirm.text
         cbody = resp_confirm.json()
@@ -765,9 +767,13 @@ class TestJobLifecycleOwnership:
         assert baseline.get("status") == "baseline_queued"
 
         # baseline 成功后：confirm-root 是唯一执行权威（无 legacy mirror task）
+        baseline_meta = baseline  # status baseline_queued
+        from app.catalog import store as catalog_store
+        root = catalog_store.get_source_root(root_id)
+        gen = int(getattr(root, "baseline_target_generation", 0) or 0)
         confirm = client.post(
             "/api/imports/pan115/confirm-root",
-            json={"root_id": root_id},
+            json={"root_id": root_id, "generation": gen},
         )
         assert confirm.status_code == 200, confirm.text
         cbody = confirm.json()
@@ -832,3 +838,286 @@ class TestManualPatchHitsRevision:
         assert patched.title == "作品B 修正标题"
         # 该 revision 是作品B 的（relative_path 含 作品B）
         assert "作品B" in (patched.relative_path or "")
+
+
+class TestRwk38ConfirmationAuthority:
+    """RWK-38 验收：TXT 确认身份 = (root_id, generation)，带 fence、可恢复、
+    失败绝不回退 legacy 的单一 durable authority。
+
+    A. stale generation：v1 确认页 → v2 导入 → 用 v1 identity 确认 → 409 + 0 执行
+    B. restart/resume：preset 投影恢复 confirmation 身份 → confirm-root 全部确认
+    C. real baseline failure：强制失败 → baseline_failed 无确认身份 → 无任何执行
+    D. manual confirm：手工确认走 confirmRoot(exact_generation)（legacy plan 未动）
+    E. manual patch：patch 作品 B → 聚合 durable preview 显示新值 → 确认后仍是新值
+    """
+
+    def _import_tree(self, client, tmp_path, text):
+        from app.media_presets.store import list_presets as lp
+
+        tree = _write_tree(tmp_path, text, name="115目录树.txt")
+        resp = client.post(
+            "/api/media-presets/import-local-tree",
+            json={"tree_path": str(tree), "import_family": "anime", "import_scope": ""},
+        )
+        assert resp.status_code == 200, resp.text
+        preset = next(p for p in lp() if p.source == "pan115")
+        return resp.json(), preset
+
+    def test_a_stale_generation_conflict(self, client, tmp_path):
+        """A：v1 确认页 identity 在 v2 导入后确认 → 409 + 0 confirmed + 0 mirror。"""
+        from app.db.database import get_connection
+        from app.jobs import store as job_store
+
+        body1, _ = self._import_tree(
+            client, tmp_path,
+            "|——根目录\n| |-动画1\n| | |-作品A\n| | | |-作品A.S01E01.mkv\n| | |-作品B\n| | | |-作品B.S01E01.mkv\n",
+        )
+        b1 = body1["baseline"]
+        assert b1["status"] == "baseline_queued"
+        root_id = b1["confirmation_root_id"]
+        gen1 = b1["confirmation_generation"]
+
+        # v2 导入（同 root，新增作品C → generation 前进）
+        body2, _ = self._import_tree(
+            client, tmp_path,
+            "|——根目录\n| |-动画1\n| | |-作品A\n| | | |-作品A.S01E01.mkv\n| | |-作品B\n| | | |-作品B.S01E01.mkv\n| | |-作品C\n| | | |-作品C.S01E01.mkv\n",
+        )
+        b2 = body2["baseline"]
+        assert b2["confirmation_root_id"] == root_id, "必须复用同 root"
+        gen2 = b2["confirmation_generation"]
+        assert gen2 > gen1, f"v2 generation 必须前进（{gen1}→{gen2}）"
+
+        # 用 v1 identity 确认 → 409 stale，0 执行
+        before_id = {j.job_id for j in job_store.list_jobs(job_type="mirror_revision", limit=1000)}
+        stale = client.post(
+            "/api/imports/pan115/confirm-root",
+            json={"root_id": root_id, "generation": gen1},
+        )
+        assert stale.status_code == 409, stale.text
+        after_id = {j.job_id for j in job_store.list_jobs(job_type="mirror_revision", limit=1000)}
+        assert len(after_id) == len(before_id), "stale 确认不得 enqueue 任何 mirror job"
+
+        conn = get_connection()
+        # V2 revisions 必须全部保持 draft（stale 确认不得 confirm 任何 revision）
+        v2_drafts = conn.execute(
+            "SELECT COUNT(*) AS c FROM import_revisions WHERE revision_id IN (%s) AND status='draft'"
+            % ",".join("?" * len(b2.get("revision_ids") or [])),
+            list(b2.get("revision_ids") or []),
+        ).fetchone()["c"]
+        assert int(v2_drafts) == len(b2.get("revision_ids") or []), (
+            "stale 确认不得 confirm 任何 V2 revision"
+        )
+
+        # 用 v2 identity 确认 → 成功（v2 全部）
+        ok = client.post(
+            "/api/imports/pan115/confirm-root",
+            json={"root_id": root_id, "generation": gen2},
+        )
+        assert ok.status_code == 200, ok.text
+        assert ok.json()["confirmed_count"] == len(b2.get("revision_ids") or []), ok.text
+
+    def test_b_restart_resume_recovers_identity(self, client, tmp_path):
+        """B：重启/恢复后 confirmation identity 从 preset 投影恢复，不退回 legacy。"""
+        from app.jobs import store as job_store
+
+        body, preset = self._import_tree(
+            client, tmp_path,
+            "|——根目录\n| |-动画1\n| | |-作品A\n| | | |-作品A.S01E01.mkv\n| | |-作品B\n| | | |-作品B.S01E01.mkv\n| | |-作品C\n| | | |-作品C.S01E01.mkv\n",
+        )
+        root_id = body["baseline"]["confirmation_root_id"]
+        gen = body["baseline"]["confirmation_generation"]
+        revision_ids = body["baseline"]["revision_ids"]
+
+        # 模拟恢复：preset 序列化投影含 confirmation 身份（重启后从列表可得）
+        presets_resp = client.get("/api/media-presets")
+        assert presets_resp.status_code == 200, presets_resp.text
+        recovered = next(
+            p for p in presets_resp.json()["presets"]
+            if p.get("preset_id") == preset.preset_id
+        )
+        assert recovered.get("confirmation_root_id") == root_id, (
+            "恢复后必须投影 confirmation_root_id"
+        )
+        assert recovered.get("confirmation_generation") == gen
+        assert recovered.get("confirmation_ready") is True, "基线完成且 drafts 存在 → ready"
+
+        # 用恢复的 identity 确认 → 全部 durable + 恰一 mirror job each + 0 legacy
+        confirm = client.post(
+            "/api/imports/pan115/confirm-root",
+            json={
+                "root_id": recovered["confirmation_root_id"],
+                "generation": recovered["confirmation_generation"],
+            },
+        )
+        assert confirm.status_code == 200, confirm.text
+        cbody = confirm.json()
+        assert cbody["execution_mode"] == "durable"
+        assert cbody["confirmed_count"] == len(revision_ids), cbody
+
+        mirrors = job_store.list_jobs(job_type="mirror_revision", limit=1000)
+        own = [j for j in mirrors if (j.payload or {}).get("revision_id") in revision_ids]
+        assert len(own) == len(revision_ids), (
+            f"每 revision 恰一 mirror job（实际 {len(own)}/{len(revision_ids)}）"
+        )
+        assert all(j.job_type == "mirror_revision" for j in own)
+
+        # 全部 confirm 后 ready=False（避免重复确认）
+        presets_resp2 = client.get("/api/media-presets")
+        recovered2 = next(
+            p for p in presets_resp2.json()["presets"]
+            if p.get("preset_id") == preset.preset_id
+        )
+        assert recovered2.get("confirmation_ready") is False
+
+    def test_c_real_baseline_failure_no_execution(self, client, tmp_path, monkeypatch):
+        """C：强制 baseline 失败 → baseline_failed 无确认身份 → 无 legacy 也无 durable 执行。"""
+        from app.jobs import store as job_store
+
+        import app.media_presets.service as service_mod
+
+        def _fail_sync(provider, tree_archive, local_mount_root, import_family, import_scope):
+            # 模拟部分目录失败（真实 handler failed_count>0 形态）
+            return {
+                "root_id": "deadbeef000000000000000000000000",
+                "generation": 1,
+                "summary": {
+                    "plan_ready": 1, "needs_review": 0, "mirror_enqueued": 0,
+                    "failed_count": 1, "failed_paths": ["001 根目录/动画1/作品C"],
+                },
+                "revision_ids": [],
+            }
+
+        monkeypatch.setattr(service_mod, "bootstrap_provider_catalog_sync", _fail_sync)
+        tree = _write_tree(
+            tmp_path,
+            "|——根目录\n| |-动画1\n| | |-作品A\n| | | |-作品A.S01E01.mkv\n| | |-作品B\n| | | |-作品B.S01E01.mkv\n",
+        )
+        resp = client.post(
+            "/api/media-presets/import-local-tree",
+            json={"tree_path": str(tree), "import_family": "anime", "import_scope": ""},
+        )
+        assert resp.status_code == 200, resp.text
+        baseline = resp.json().get("baseline", {})
+        assert baseline.get("status") == "baseline_failed", baseline
+        assert not baseline.get("confirmation_root_id"), (
+            "baseline_failed 不得提供确认身份（前端据此禁止确认与自动 pipeline）"
+        )
+
+        # 即使强行调用 confirm-root：基线未完成 → 409，0 mirror
+        before_id = {j.job_id for j in job_store.list_jobs(job_type="mirror_revision", limit=1000)}
+        confirm = client.post(
+            "/api/imports/pan115/confirm-root",
+            json={"root_id": "deadbeef000000000000000000000000", "generation": 1},
+        )
+        assert confirm.status_code in (404, 409), confirm.text
+        after_id = {j.job_id for j in job_store.list_jobs(job_type="mirror_revision", limit=1000)}
+        assert len(after_id) == len(before_id), "失败路径不得产生任何 durable mirror job"
+
+    def test_d_manual_confirm_uses_root_identity(self, client, tmp_path):
+        """D：手工显式确认调用 confirmRoot(root, exact_generation)，legacy plan 不被触碰。"""
+        from app.import_plan.store import load_import_plan
+        from app.db.database import get_connection
+
+        body, preset = self._import_tree(
+            client, tmp_path,
+            "|——根目录\n| |-动画1\n| | |-作品A\n| | | |-作品A.S01E01.mkv\n| | |-作品B\n| | | |-作品B.S01E01.mkv\n| | |-作品C\n| | | |-作品C.S01E01.mkv\n",
+        )
+        root_id = body["baseline"]["confirmation_root_id"]
+        gen = body["baseline"]["confirmation_generation"]
+        revision_ids = body["baseline"]["revision_ids"]
+        legacy_plan_id = preset.current_plan_id
+
+        # 手工按钮路径：confirmRoot(root, exact_generation)
+        confirm = client.post(
+            "/api/imports/pan115/confirm-root",
+            json={"root_id": root_id, "generation": gen},
+        )
+        assert confirm.status_code == 200, confirm.text
+        cbody = confirm.json()
+        assert cbody["execution_mode"] == "durable"
+        assert cbody["confirmed_count"] == len(revision_ids), cbody
+
+        # legacy plan 未被 confirm（不执行 legacy 执行链）
+        legacy = load_import_plan(plan_id=legacy_plan_id)
+        assert legacy is not None
+        legacy_status = getattr(legacy, "status", "")
+        assert legacy_status != "executed", "手工确认不得把 legacy plan 标记为 executed"
+
+        # 全部 revisions durable confirmed
+        conn = get_connection()
+        remaining = conn.execute(
+            "SELECT COUNT(*) AS c FROM import_revisions WHERE status='draft'"
+        ).fetchone()["c"]
+        assert int(remaining) == 0, f"手工确认后不得残留 draft（剩余 {remaining}）"
+
+    def test_e_manual_patch_flows_to_confirm(self, client, tmp_path):
+        """E：patch 作品 B → 聚合 durable preview 显示新值 → 确认后仍是新值（generation 未变）。"""
+        from app.jobs import store as job_store
+        from app.import_plan import revision_store
+
+        body, preset = self._import_tree(
+            client, tmp_path,
+            "|——根目录\n| |-动画1\n| | |-作品A\n| | | |-作品A.S01E01.mkv\n| | |-作品B\n| | | |-作品B.S01E01.mkv\n| | |-作品C\n| | | |-作品C.S01E01.mkv\n",
+        )
+        root_id = body["baseline"]["confirmation_root_id"]
+        gen = body["baseline"]["confirmation_generation"]
+        revision_ids = body["baseline"]["revision_ids"]
+        assert len(revision_ids) == 3
+
+        # 聚合 durable preview（确认页唯一真相）
+        preview = client.get(
+            f"/api/imports/pan115/confirm-root-preview?root_id={root_id}&generation={gen}"
+        )
+        assert preview.status_code == 200, preview.text
+        pbody = preview.json()
+        items = pbody.get("items") or []
+        assert len(items) == 3, f"聚合 preview 应含 3 items（实际 {len(items)}）"
+
+        # 作品B 的 item（revision item id）
+        b_item = next(
+            (it for it in items if "作品B" in (it.get("relative_path") or "")),
+            None,
+        )
+        assert b_item is not None
+
+        # patch 作品B（确认页 item 即 revision item id）
+        patch_resp = client.patch(
+            f"/api/imports/pan115/items/{b_item['id']}",
+            json={"plan_id": pbody["plan_id"], "patch": {"title": "作品B 修正标题"}},
+        )
+        assert patch_resp.status_code == 200, patch_resp.text
+        assert patch_resp.json().get("revision_id"), "patch 必须返回命中的 revision_id"
+
+        # 聚合 preview 刷新后显示新值（UI 不再显示旧 legacy 值）
+        preview2 = client.get(
+            f"/api/imports/pan115/confirm-root-preview?root_id={root_id}&generation={gen}"
+        )
+        p2 = preview2.json()
+        b2 = next(
+            (it for it in (p2.get("items") or []) if "作品B" in (it.get("relative_path") or "")),
+            None,
+        )
+        assert b2["title"] == "作品B 修正标题", "聚合 preview 必须反映 durable 修正"
+
+        # generation 未变化（patch 不产生新基线）
+        assert p2["revision_ids"] == pbody["revision_ids"]
+        assert p2["plan_id"] == pbody["plan_id"]
+
+        # root confirm 后执行的是修正后的 B
+        confirm = client.post(
+            "/api/imports/pan115/confirm-root",
+            json={"root_id": root_id, "generation": gen},
+        )
+        assert confirm.status_code == 200, confirm.text
+        confirmed_revs = confirm.json()["revision_ids"]
+        assert len(confirmed_revs) == 3
+
+        # 确认后 B 的 revision item 仍是修正标题（durable 事实未被覆盖）
+        for rid in confirmed_revs:
+            plan = revision_store.load_plan(rid)
+            patched = next(
+                (it for it in (plan.items or []) if "作品B" in (it.relative_path or "")),
+                None,
+            )
+            if patched is not None:
+                assert patched.title == "作品B 修正标题", "确认后修正不得丢失"

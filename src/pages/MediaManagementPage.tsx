@@ -326,49 +326,22 @@ export default function MediaManagementPage() {
     if (step !== 'confirm' || !activeEntry?.planId || !activeEntry.preview || activeTask) return;
     if (activeEntry.pathValidation?.ok === false) return;
     if (activeEntry.preview.issues.some((issue) => issue.level === 'error')) return;
-    const pipelineKey = `${source}:${activeEntry.planId}`;
+    // RWK-38（P0-3）：baseline 失败/未完成 → 自动 pipeline 绝不运行、绝不回退 legacy
+    if (activeEntry.confirmationBlocked) return;
+    const pipelineKey = `${source}:${activeEntry.planId}:${activeEntry.confirmationRootId ?? ''}:${activeEntry.confirmationGeneration ?? ''}`;
     if (autoPipelineEntryRef.current === pipelineKey) return;
     autoPipelineEntryRef.current = pipelineKey;
-    const entryId = activeEntry.id;
-    const planId = activeEntry.planId;
     void (async () => {
       try {
-        setActionError('');
-        // RWK-35：TXT baseline 场景走 root 级批量确认（一次确认全部 revisions）；
-        // 其余（OpenList 等单 revision）走原 confirm（幂等 durable 门面）。
-        if (activeEntry.confirmationRootId) {
-          const rootResult = await importsApi.confirmRoot(source, activeEntry.confirmationRootId);
-          setTask(null);
-          setTaskKind('mirror');
-          setStep('workbench');
-          if (rootResult.job_ids && rootResult.job_ids.length > 0) {
-            setTask(await tasksApi.get(rootResult.job_ids[0]));
-          }
-          return;
-        }
-        // 幂等确认门面：draft → confirm+入队，confirmed → ensure（后端幂等）。
-        // 恢复场景（preview 已 confirmed，如 OpenList batch 恢复/刷新页面）同样
-        // 拿到 durable job_id，避免掉回 legacy mirror 生成造成双轨。
-        const confirmed = await importsApi.confirm(source, planId);
-        const confirmedPreview = await importsApi.getPreview(source, planId);
-        updateEntry(entryId, { preview: confirmedPreview, status: 'parsed' });
-        setTask(null);
-        setTaskKind('mirror');
-        setStep('workbench');
-        if (confirmed.execution_mode === 'durable' && confirmed.job_id) {
-          // V3：镜像 job 已由后端确认/ensure 事务入队（或恢复已有 job），前端不再生成
-          setTask(await tasksApi.get(confirmed.job_id));
-        } else {
-          // legacy：旧 JSON 计划保持原行为，由前端生成镜像
-          const created = await mirrorApi.generate(source, planId);
-          setTask(await tasksApi.get(created.task_id));
-        }
+        // RWK-38：唯一确认入口（durable_root → confirmRoot(root, generation)；
+        // 其余 → 幂等确认门面）。成功会 setStep('workbench')，effect 不再重入。
+        await confirmCurrentImport();
       } catch (error) {
         autoPipelineEntryRef.current = '';
         setActionError(`自动处理未能继续：${(error as Error).message}。你仍可在此页处理识别结果后重试。`);
       }
     })();
-  }, [activeEntry?.id, activeEntry?.pathValidation?.ok, activeEntry?.planId, activeEntry?.preview, activeTask, setStep, source, step]);
+  }, [activeEntry?.confirmationBlocked, activeEntry?.confirmationGeneration, activeEntry?.confirmationRootId, activeEntry?.id, activeEntry?.pathValidation?.ok, activeEntry?.planId, activeEntry?.preview, activeTask, setStep, source, step]);
 
   useEffect(() => {
     if (taskKind !== 'mirror' || !isMirrorTaskReady(task) || !task || !activeEntry?.planId) return;
@@ -440,10 +413,13 @@ export default function MediaManagementPage() {
     }
   };
 
-  /** RWK-32：baseline_failed 用户可见（媒体库已创建但本地增量基线初始化失败）。 */
-  const applyBaselineFailureHint = (result: PresetImportResult) => {
+  /** RWK-38（P0-3）：baseline_failed 用户可见 + 确认身份硬阻断。
+   * baseline 失败/未完成 → confirmationBlocked：确认按钮不可执行、
+   * 自动 pipeline 不运行、绝不回退 legacy mirror 链。 */
+  const applyBaselineFailureHint = (result: PresetImportResult, entry: DirectoryEntry) => {
     if (result.baseline?.status === 'baseline_failed') {
-      setActionError('媒体库已创建，但本地增量基线初始化失败：OpenList 增量暂不可用，可稍后重新导入目录树或检查数据目录权限。');
+      entry.confirmationBlocked = true;
+      setActionError('媒体库已创建，但本地增量基线初始化失败：确认已被禁用，可稍后重新导入目录树或检查数据目录权限；本次不会退回旧版镜像流程。');
     }
   };
 
@@ -489,7 +465,7 @@ export default function MediaManagementPage() {
         : result.reused_preset && result.unchanged
           ? `${getPresetDisplayName(result.preset)} 已存在，内容相同，未创建重复卡片或版本`
           : `${result.preset.name} 已创建，目录树已由 KumiPlayer 保存`);
-      applyBaselineFailureHint(result);
+      applyBaselineFailureHint(result, entry);
       if (action.kind === 'create') setSelectedCloudRoot('');
       await loadPresets();
       setStep('confirm');
@@ -559,7 +535,7 @@ export default function MediaManagementPage() {
         : result.reused_preset && result.unchanged
           ? `${getPresetDisplayName(result.preset)} 已存在，内容相同，未创建重复卡片或版本`
         : `${result.preset.name} 已创建，目录树已由 KumiPlayer 保存`);
-      applyBaselineFailureHint(result);
+      applyBaselineFailureHint(result, entry);
       if (action.kind === 'create') setSelectedCloudRoot('');
       await loadPresets();
       setStep('confirm');
@@ -611,7 +587,7 @@ export default function MediaManagementPage() {
           ? `已识别为${result.preset.source === 'pan115' ? ' 115' : '百度网盘'}目录树，并复用现有${getPresetDisplayName(result.preset)}`
           : `已识别为${result.preset.source === 'pan115' ? ' 115' : '百度网盘'}目录树，${result.preset.name} 已创建`,
       );
-      applyBaselineFailureHint(result);
+      applyBaselineFailureHint(result, entry);
       await loadPresets();
       setStep('confirm');
     } catch (error) {
@@ -1212,6 +1188,17 @@ export default function MediaManagementPage() {
       entry.preview = parsedPreview;
       entry.resolvedRoot = workingPreset.source_root;
       entry.pathValidation = workingVersion?.path_validation;
+      // RWK-38（P0-2）：durable confirmation identity 可恢复——重启/刷新后
+      // 从 preset 投影恢复 (root_id, generation)；confirmation_ready=false
+      // （基线未完成/失败/已确认完）→ confirmationBlocked，禁止确认与
+      // 自动 pipeline，绝不回退 legacy 执行链。
+      if (workingPreset.confirmation_root_id) {
+        entry.confirmationRootId = workingPreset.confirmation_root_id;
+        entry.confirmationGeneration = workingPreset.confirmation_generation;
+        if (!workingPreset.confirmation_ready) {
+          entry.confirmationBlocked = true;
+        }
+      }
       setEntries([entry]);
       setActiveEntryId(entry.id);
       setSource(workingPreset.source);
@@ -1279,6 +1266,7 @@ export default function MediaManagementPage() {
         entry.confirmationRootId = result.baseline.confirmation_root_id;
         entry.confirmationGeneration = result.baseline.confirmation_generation;
       }
+      applyBaselineFailureHint(result, entry);
       setEntries([entry]);
       setActiveEntryId(entry.id);
       setSource(result.preset.source);
@@ -1511,25 +1499,62 @@ export default function MediaManagementPage() {
     })}</div>
   );
 
+  /** RWK-38（P1-2）：唯一确认入口——自动 pipeline 与手工“确认并继续”共用。
+   * 统一决策：
+   *   durable_root    → confirmRoot(root_id, generation)（generation fence）
+   *   durable_revision→ confirm(revision_id)
+   *   legacy          → confirm(legacy_plan_id)
+   * confirmationBlocked（baseline 失败/未完成）→ 拒绝执行，绝不回退 legacy。 */
+  const confirmCurrentImport = async (): Promise<boolean> => {
+    if (!activeEntry?.planId || !preview) return false;
+    if (activeEntry.pathValidation?.ok === false) return false;
+    if (preview.issues.some((issue) => issue.level === 'error')) return false;
+    if (activeEntry.confirmationBlocked) {
+      setActionError('确认已被禁用：本地增量基线未就绪，本次不会退回旧版镜像流程。请重新导入目录树后再试。');
+      return false;
+    }
+    setActionError('');
+    try {
+      if (activeEntry.confirmationRootId && activeEntry.confirmationGeneration != null) {
+        // durable_root：TXT baseline 多作品一次确认全部（root + generation 身份）
+        const rootResult = await importsApi.confirmRoot(
+          source,
+          activeEntry.confirmationRootId,
+          activeEntry.confirmationGeneration,
+        );
+        setTask(null);
+        setTaskKind('mirror');
+        setStep('workbench');
+        if (rootResult.job_ids && rootResult.job_ids.length > 0) {
+          setTask(await tasksApi.get(rootResult.job_ids[0]));
+        }
+        return true;
+      }
+      // durable_revision / legacy：幂等确认门面（draft → confirm+入队；
+      // confirmed → ensure；legacy JSON 计划保持原行为）
+      const confirmed = await importsApi.confirm(source, activeEntry.planId);
+      const confirmedPreview = await importsApi.getPreview(source, activeEntry.planId);
+      updateEntry(activeEntry.id, { preview: confirmedPreview, status: 'parsed' });
+      setTask(null);
+      setTaskKind('mirror');
+      setStep('workbench');
+      if (confirmed.execution_mode === 'durable' && confirmed.job_id) {
+        setTask(await tasksApi.get(confirmed.job_id));
+      } else {
+        const created = await mirrorApi.generate(source, activeEntry.planId);
+        setTask(await tasksApi.get(created.task_id));
+      }
+      return true;
+    } catch (error) {
+      setActionError((error as Error).message);
+      return false;
+    }
+  };
+
   const confirmPlan = async () => {
     if (!activeEntry?.planId || !preview || activeEntry.pathValidation?.ok === false) return;
     if (preview.status !== 'draft' && preview.status !== 'confirmed') return;
-    setActionError('');
-    try {
-      // 幂等确认门面：draft → confirm+入队，confirmed → ensure（后端幂等）；
-      // durable 响应直接挂接已入队/恢复的镜像任务，legacy 进工作台由用户启动镜像。
-      const confirmed = await importsApi.confirm(source, activeEntry.planId);
-      if (confirmed.execution_mode === 'durable' && confirmed.job_id) {
-        // V3：后端已入队（或恢复已有）durable mirror job，工作台直接挂接，不再重复生成
-        setTaskKind('mirror');
-        setTask(await tasksApi.get(confirmed.job_id));
-      }
-      const confirmedPreview = await importsApi.getPreview(source, activeEntry.planId);
-      updateEntry(activeEntry.id, { preview: confirmedPreview });
-      setStep('workbench');
-    } catch (error) {
-      setActionError((error as Error).message);
-    }
+    await confirmCurrentImport();
   };
 
   const saveItem = async () => {
@@ -1544,8 +1569,16 @@ export default function MediaManagementPage() {
     if (editDraft.episode_number.trim()) patch.episode_number = Number(editDraft.episode_number);
     try {
       await importsApi.patchItem(source, editingItem.id, activeEntry.planId, patch);
-      const refreshedPreview = await importsApi.getPreview(source, activeEntry.planId);
-      updateEntry(activeEntry.id, { preview: refreshedPreview });
+      // RWK-38（P1）：patch 后刷新 durable 真相——TXT baseline 场景从
+      // root-generation 聚合 preview 重载（不再读旧 legacy JSON preview，
+      // 避免两份确认事实漂移）；其余场景维持原 legacy preview 刷新。
+      const refreshedPreview = activeEntry.confirmationRootId && activeEntry.confirmationGeneration != null
+        ? await importsApi.getConfirmRootPreview(
+            source,
+            activeEntry.confirmationRootId,
+            activeEntry.confirmationGeneration,
+          )
+        : await importsApi.getPreview(source, activeEntry.planId);
       setEditingItem(null);
     } catch (error) {
       setActionError((error as Error).message);
@@ -1969,7 +2002,7 @@ export default function MediaManagementPage() {
                 : !blockingPreviewIssues.length && <div className="media-confirm-empty"><CheckCircle2 size={19} /><div><strong>可以继续</strong><span>所有作品都已完成识别。</span></div></div>}
               {blockingPreviewIssues.length > 0 && <div className="media-review-blocking-list">{blockingPreviewIssues.map((issue) => <p key={issue.code}><TriangleAlert size={15} /><span>{issue.message}</span></p>)}</div>}
               <div className="media-confirm-decision-action">
-                <Button className="media-primary-command" appearance="primary" icon={<ChevronRight size={16} />} disabled={blockingPreviewIssues.length > 0 || (preview.status !== 'draft' && preview.status !== 'confirmed') || activeEntry?.pathValidation?.ok === false} onClick={() => void confirmPlan()}>{reviewItems.length ? '先确认并继续' : '确认并继续'}</Button>
+                <Button className="media-primary-command" appearance="primary" icon={<ChevronRight size={16} />} disabled={blockingPreviewIssues.length > 0 || (preview.status !== 'draft' && preview.status !== 'confirmed') || activeEntry?.pathValidation?.ok === false || activeEntry?.confirmationBlocked} onClick={() => void confirmPlan()}>{reviewItems.length ? '先确认并继续' : '确认并继续'}</Button>
               </div>
             </section>
           </div>

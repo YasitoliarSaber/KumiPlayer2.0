@@ -47,6 +47,12 @@ export interface MediaLibraryPreset {
   openlist_unit_count?: number;
   /** OpenList 来源卡：SourceRoot 投影出的需处理单元数（draft / failed stage） */
   openlist_attention_count?: number;
+  /** RWK-38：TXT durable confirmation 身份可恢复投影（重启后从 preset 恢复，
+   * 不再依赖会话内临时 entry）。confirmation_ready=false 表示基线未完成/
+   * 失败或已确认完——禁止确认、禁止自动 pipeline、绝不回退 legacy。 */
+  confirmation_root_id?: string;
+  confirmation_generation?: number;
+  confirmation_ready?: boolean;
   scrape_task?: TaskRecord | null;
   review_count?: number;
   versions: MediaTreeVersion[];

@@ -34,7 +34,10 @@ export const importsApi = {
     ),
 
   // RWK-35：root 级批量确认（多作品 TXT baseline 一次确认全部 revisions）
-  confirmRoot: (source: string, rootId: string) =>
+  // RWK-38：root 级批量确认（多作品 TXT baseline 一次确认全部 revisions）
+  // 确认身份 = (root_id, generation)——generation 由导入响应保存、确认时回传，
+  // 后端做 generation fence（TOCTOU 防护：确认页内容与执行内容必须一致）。
+  confirmRoot: (source: string, rootId: string, generation: number) =>
     api.post<{
       root_id: string
       generation: number
@@ -45,7 +48,14 @@ export const importsApi = {
       job_ids: string[]
     }>(
       `/api/imports/${source}/confirm-root`,
-      { root_id: rootId }
+      { root_id: rootId, generation }
+    ),
+
+  // RWK-38（P1）：root-generation 聚合 durable preview（确认页唯一真相来源；
+  // patch 后刷新此端点，不再读旧 legacy JSON preview）
+  getConfirmRootPreview: (source: string, rootId: string, generation: number) =>
+    api.get<ImportPreview & { revision_ids?: string[] }>(
+      `/api/imports/${source}/confirm-root-preview?root_id=${encodeURIComponent(rootId)}&generation=${generation}`
     ),
 
   // 生成 diff

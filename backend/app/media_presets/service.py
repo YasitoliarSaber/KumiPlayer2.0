@@ -404,7 +404,42 @@ def preset_to_dict(preset: MediaLibraryPreset) -> dict:
         data["is_library_indexed"] = state["is_library_indexed"]
         data["openlist_unit_count"] = state["unit_count"]
         data["openlist_attention_count"] = state["attention_count"]
+    # RWK-38（P0-2）：durable confirmation identity 可恢复投影——
+    # 任何关联 Source Catalog root 的 TXT preset（含重启后）都能从 preset
+    # 恢复 (root_id, generation)，不再依赖会话内临时 entry。
+    if preset.catalog_root_id:
+        data["confirmation_root_id"] = preset.catalog_root_id
+        data["confirmation_generation"], data["confirmation_ready"] = (
+            preset_confirmation_state(preset.catalog_root_id)
+        )
     return data
+
+
+def preset_confirmation_state(catalog_root_id: str) -> tuple[int, bool]:
+    """恢复 TXT durable confirmation 身份：(generation, ready)。
+
+    ready = 基线已真实完成（completed == target > 0）且该 generation 仍有
+    draft revisions 可确认。draft 全部确认/执行后 ready=False（避免重复确认）。
+    """
+    from app.catalog import store as catalog_store
+    from app.db.database import get_connection
+
+    root = catalog_store.get_source_root(catalog_root_id)
+    if root is None:
+        return 0, False
+    target = int(getattr(root, "baseline_target_generation", 0) or 0)
+    completed = int(getattr(root, "baseline_completed_generation", 0) or 0)
+    if target <= 0 or completed != target:
+        return target, False
+    row = get_connection().execute(
+        """
+        SELECT COUNT(*) AS c FROM import_revisions r
+        JOIN media_units u ON u.unit_id = r.unit_id
+        WHERE u.root_id = ? AND r.source_generation = ? AND r.status = 'draft'
+        """,
+        (catalog_root_id, target),
+    ).fetchone()
+    return target, bool(row and int(row["c"]) > 0)
 
 
 _LIFECYCLE_ORDER = {

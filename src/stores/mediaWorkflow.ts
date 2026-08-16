@@ -17,6 +17,8 @@ export interface MediaWorkflowEntry {
   /** RWK-35：TXT baseline 的 root 级确认身份（多作品一次确认全部 revisions） */
   confirmationRootId?: string;
   confirmationGeneration?: number;
+  /** RWK-38（P0-3）：baseline 失败/未完成时禁止确认与自动 pipeline（绝不回退 legacy） */
+  confirmationBlocked?: boolean;
   preview?: ImportPreview;
   resolvedRoot?: string;
   pathValidation?: SourcePathValidation;

@@ -260,7 +260,17 @@ def _ensure_tree_baseline(
         # 跳过重新入队（避免悬空 input_path；既有 Source Catalog 数据保持）。
         root_id = (preset.catalog_root_id or "").strip()
         if root_id:
-            return {"root_id": root_id, "job_id": "", "status": "baseline_reused"}
+            from app.catalog import store as catalog_store
+
+            root = catalog_store.get_source_root(root_id)
+            gen = int(getattr(root, "baseline_target_generation", 0) or 0)
+            return {
+                "root_id": root_id,
+                "job_id": "",
+                "status": "baseline_reused",
+                "confirmation_root_id": root_id,
+                "confirmation_generation": gen,
+            }
     # reused（卡片复用）但内容更新（v2 新版本）：仍须重新入队更新同 root
     # 的 Source Catalog baseline（RWK-27）——archive 已 move 到版本目录，用
     # version.archive_path 重取后有效。
