@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
+import time
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -41,6 +43,7 @@ from app.integrations.openlist.models import (
     OpenListValidationError,
 )
 
+_logger = logging.getLogger(__name__)
 #: 探测时读取远端根的页参数（只验证可读性，不拉全量）
 _PROBE_PAGE = 1
 _PROBE_PER_PAGE = 10
@@ -163,7 +166,44 @@ def probe_openlist_connection(
     3. 读取候选 ``remote_root`` 第一页（``phase=root``）。
 
     探测绝不使用 production client pool；产生的临时 Token 随 client 销毁。
+    每次探测记录安全诊断日志（purpose / phase / code / 耗时 / 匿名连接键），
+    不包含 username / password / token / Authorization / 响应体。
     """
+    started = time.monotonic()
+    result = _probe_impl(
+        server_url=server_url,
+        remote_root=remote_root,
+        username=username,
+        password=password,
+        allow_insecure_http=allow_insecure_http,
+    )
+    duration_ms = (time.monotonic() - started) * 1000
+    try:
+        conn_key = governor_connection_key(
+            normalize_openlist_server_url(server_url or ""), username or ""
+        )
+    except Exception:
+        conn_key = "unknown"
+    _logger.info(
+        "openlist probe: purpose=%s phase=%s code=%s duration_ms=%.0f conn_key=%s",
+        "test_connection",
+        result.phase,
+        result.code,
+        duration_ms,
+        conn_key,
+    )
+    return result
+
+
+def _probe_impl(
+    *,
+    server_url: str,
+    remote_root: str,
+    username: str,
+    password: str,
+    allow_insecure_http: bool,
+) -> OpenListConnectionProbeResult:
+    """探测主体（无日志包装，便于单测直接调用）。"""
     url = (server_url or "").strip()
     ok, reason = validate_server_url(url)
     if not ok:

@@ -220,6 +220,60 @@ class TestProcessClientPool:
         assert errors == []
         assert calls.count("/api/auth/login") == 1
 
+    def test_late_401_from_old_token_does_not_clear_refreshed_token(self):
+        """迟到 401（旧 token 的响应后到）不得清除刚刷新的新 token（ROOT-6）。
+
+        T0：A 与 B 都带着旧 token 发目录请求。
+        A 先收到 401 → 刷新出 T1。
+        B 的旧 401 此时才返回 → 必须保留 T1，且不得产生第二次无意义登录。
+        """
+        login_started = threading.Event()
+        allow_login = threading.Event()
+        calls: list[str] = []
+        calls_lock = threading.Lock()
+        errors: list[Exception] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            with calls_lock:
+                calls.append(request.url.path)
+            if request.url.path == "/api/auth/login":
+                login_started.set()
+                assert allow_login.wait(5)
+                return _json_response(200, {"code": 200, "data": {"token": "fresh-token"}})
+            if request.headers.get("authorization") != "fresh-token":
+                return _json_response(401, {"code": 401})
+            return _json_response(200, _fs_list_payload("/动画", []))
+
+        client = get_openlist_client(
+            "https://ol.example.com", "user", "secret-pass",
+            transport=httpx.MockTransport(handler),
+            governor=OpenListRequestGovernor(rate_per_second=1000),
+        )
+        client._token = "expired-token"
+
+        def read_directory():
+            try:
+                client.list_dir("/动画")
+            except Exception as exc:  # pragma: no cover - assertion below carries detail
+                errors.append(exc)
+
+        # 线程 A：先发请求，收到 401 后开始刷新（登录请求被阻塞在 handler）
+        first = threading.Thread(target=read_directory)
+        first.start()
+        assert login_started.wait(5)
+        # 线程 B：在 A 刷新完成前发出同一旧 token 的目录请求（也会收到 401）
+        second = threading.Thread(target=read_directory)
+        second.start()
+        # 让 B 的 401 响应“迟到”到 A 刷新完成之后返回
+        allow_login.set()
+        first.join(5)
+        second.join(5)
+
+        assert errors == []
+        # B 的迟到 401 不得清掉 A 刚刷新的 fresh-token
+        assert client._token == "fresh-token"
+        # 不得产生第二次无意义登录（并发迟到 401 只允许一次刷新）
+        assert calls.count("/api/auth/login") == 1
 
 @pytest.fixture(autouse=True)
 def isolated_db(tmp_path, monkeypatch):

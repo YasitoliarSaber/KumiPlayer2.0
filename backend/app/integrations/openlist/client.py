@@ -346,6 +346,9 @@ class OpenListClient:
         """
         last_error: Exception | None = None
         for attempt in range(self.max_attempts):
+            # 发送 authenticated 请求前记录当前 token：迟到的旧 401 响应
+            # 不得清除其他线程刚刷新的新 token（stale-token-aware）。
+            observed_token = self._token
             # 快速预检（只读、不消费探针）：明确未到期冷却 → 直接拒绝，
             # 不进入限速队列、不发任何请求
             peek_allowed, _ = source_health.peek_request_allowed(self._conn_key)
@@ -412,8 +415,15 @@ class OpenListClient:
             # record_failure("auth") 的 cooling 保护会保留 cooldown，
             # 后续 login() 仍会被 peek_request_allowed 拒绝，不会穿透风控。
             if (status == 401 or code == 401) and retry_on_auth:
-                self._token = None
-                self._report_failure("auth")
+                # stale-token-aware invalidation：仅当当前 token 仍是本次
+                # 请求发出时观察到的 token，本线程才允许使会话失效并重登；
+                # 否则说明另一个线程已经刷新出新的 token，禁止清掉新 token
+                # （ROOT-6：late 401 不得清除刚刷新的 Token）。
+                invalidated = self._invalidate_token_if_current(observed_token)
+                # 仅真正使会话失效的线程上报 auth 失败（迟到 401 的线程
+                # 不应重复污染健康统计）
+                if invalidated:
+                    self._report_failure("auth")
                 self.login()
                 # 同一客户端的首次并发目录请求可能都已拿到旧的空 token。
                 # login() 内部会单飞；等待者返回后不应再各自发送一次 401。
@@ -452,6 +462,23 @@ class OpenListClient:
             return 0.0
 
     # -- 对外接口 ----------------------------------------------------
+
+    def _invalidate_token_if_current(self, observed_token: str | None) -> bool:
+        """仅当当前 token 仍是 ``observed_token`` 时才使会话失效。
+
+        用于 stale-token-aware invalidation（ROOT-6）：
+
+        - 当前 token == observed_token → 本线程确实使 token 失效，返回 True；
+        - 当前 token != observed_token → 另一个线程已经刷新出新 token，
+          禁止清掉新 token，返回 False（用新 token 重试即可）。
+
+        注意：不要在持有 ``_auth_lock`` 时调用（``login()`` 也需要该锁）。
+        """
+        with self._auth_lock:
+            if self._token != observed_token:
+                return False
+            self._token = None
+            return True
 
     def login(self) -> str:
         """登录并返回 Token（进程内缓存，不落盘）。
