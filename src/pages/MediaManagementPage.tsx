@@ -417,10 +417,35 @@ export default function MediaManagementPage() {
    * baseline 失败/未完成 → confirmationBlocked：确认按钮不可执行、
    * 自动 pipeline 不运行、绝不回退 legacy mirror 链。 */
   const applyBaselineFailureHint = (result: PresetImportResult, entry: DirectoryEntry) => {
+    // preset 投影是 restart-safe authority；即使本次 baseline 返回 reused，
+    // 历史 failed/pending 也必须继续 blocked，不能借复用路径掉回 legacy。
+    if (!entry.confirmationRootId && result.preset.confirmation_root_id) {
+      entry.confirmationRootId = result.preset.confirmation_root_id;
+    }
+    if (entry.confirmationGeneration == null && result.preset.confirmation_generation != null) {
+      entry.confirmationGeneration = result.preset.confirmation_generation;
+    }
+    entry.confirmationBlocked = Boolean(result.preset.confirmation_blocked);
     if (result.baseline?.status === 'baseline_failed') {
       entry.confirmationBlocked = true;
       setActionError('媒体库已创建，但本地增量基线初始化失败：确认已被禁用，可稍后重新导入目录树或检查数据目录权限；本次不会退回旧版镜像流程。');
     }
+  };
+
+  /** RWK-39（P0-1）：确认页数据源统一为 durable aggregate preview。
+   * 只要存在 (confirmationRootId, confirmationGeneration)，用户看到、修改、
+   * 确认的就是 Source Catalog durable revisions 的真实内容（legacy preview
+   * 只作兼容存档，绝不充当 durable_root 的确认事实）。 */
+  const resolveTxtEntryPreview = async (
+    source: string,
+    rootId: string | undefined,
+    generation: number | undefined,
+    legacyPreview: ImportPreview,
+  ): Promise<ImportPreview> => {
+    if (rootId && generation != null && generation > 0) {
+      return await importsApi.getConfirmRootPreview(source, rootId, generation);
+    }
+    return legacyPreview;
   };
 
   const importTreePath = async (treePath: string, action: PendingTreeAction) => {
@@ -447,7 +472,6 @@ export default function MediaManagementPage() {
       entry.presetId = result.preset.preset_id;
       entry.status = 'parsed';
       entry.planId = result.preview.plan_id;
-      entry.preview = result.preview;
       entry.resolvedRoot = result.preset.source_root;
       entry.pathValidation = result.version.path_validation;
       // RWK-35：TXT baseline 的 root 级确认身份（若已同步建立）
@@ -455,6 +479,14 @@ export default function MediaManagementPage() {
         entry.confirmationRootId = result.baseline.confirmation_root_id;
         entry.confirmationGeneration = result.baseline.confirmation_generation;
       }
+      // RWK-39（P0-1）：确认页数据源必须是 durable aggregate preview——
+      // legacy preview 只作兼容存档，不充当 durable_root 的确认事实。
+      entry.preview = await resolveTxtEntryPreview(
+        result.preset.source,
+        entry.confirmationRootId || result.preset.confirmation_root_id,
+        entry.confirmationGeneration ?? result.preset.confirmation_generation,
+        result.preview,
+      );
       setEntries([entry]);
       setActiveEntryId(entry.id);
       setSource(result.preset.source);
@@ -517,7 +549,6 @@ export default function MediaManagementPage() {
       entry.presetId = result.preset.preset_id;
       entry.status = 'parsed';
       entry.planId = result.preview.plan_id;
-      entry.preview = result.preview;
       entry.resolvedRoot = result.preset.source_root;
       entry.pathValidation = result.version.path_validation;
       // RWK-35：TXT baseline 的 root 级确认身份（若已同步建立）
@@ -525,6 +556,14 @@ export default function MediaManagementPage() {
         entry.confirmationRootId = result.baseline.confirmation_root_id;
         entry.confirmationGeneration = result.baseline.confirmation_generation;
       }
+      // RWK-39（P0-1）：确认页数据源必须是 durable aggregate preview——
+      // legacy preview 只作兼容存档，不充当 durable_root 的确认事实。
+      entry.preview = await resolveTxtEntryPreview(
+        result.preset.source,
+        entry.confirmationRootId || result.preset.confirmation_root_id,
+        entry.confirmationGeneration ?? result.preset.confirmation_generation,
+        result.preview,
+      );
       setEntries([entry]);
       setActiveEntryId(entry.id);
       setSource(result.preset.source);
@@ -569,7 +608,6 @@ export default function MediaManagementPage() {
       entry.presetId = result.preset.preset_id;
       entry.status = 'parsed';
       entry.planId = result.preview.plan_id;
-      entry.preview = result.preview;
       entry.resolvedRoot = result.preset.source_root;
       entry.pathValidation = result.version.path_validation;
       // RWK-35：TXT baseline 的 root 级确认身份（若已同步建立）
@@ -577,6 +615,14 @@ export default function MediaManagementPage() {
         entry.confirmationRootId = result.baseline.confirmation_root_id;
         entry.confirmationGeneration = result.baseline.confirmation_generation;
       }
+      // RWK-39（P0-1）：确认页数据源必须是 durable aggregate preview——
+      // legacy preview 只作兼容存档，不充当 durable_root 的确认事实。
+      entry.preview = await resolveTxtEntryPreview(
+        result.preset.source,
+        entry.confirmationRootId || result.preset.confirmation_root_id,
+        entry.confirmationGeneration ?? result.preset.confirmation_generation,
+        result.preview,
+      );
       setEntries([entry]);
       setActiveEntryId(entry.id);
       setSource(result.preset.source);
@@ -1176,7 +1222,18 @@ export default function MediaManagementPage() {
         }
         setUploadMessage('实际视频路径已重新验证，可以继续处理导入计划。');
       }
-      if (!parsedPreview) {
+      const restoredRootId = workingPreset.confirmation_root_id;
+      const restoredGeneration = workingPreset.confirmation_generation;
+      // RWK-39（P0-1）：durable_root 恢复时直接读取 aggregate preview，
+      // 不先把 legacy preview 作为确认页数据源；只有没有 durable identity 的
+      // 旧 legacy preset 才读取旧 plan。
+      if (restoredRootId && restoredGeneration != null && restoredGeneration > 0) {
+        parsedPreview = await importsApi.getConfirmRootPreview(
+          workingPreset.source,
+          restoredRootId,
+          restoredGeneration,
+        );
+      } else if (!parsedPreview) {
         parsedPreview = await importsApi.getPreview(workingPreset.source, workingPreset.current_plan_id);
       }
       const entry = makeEntry();
@@ -1195,9 +1252,13 @@ export default function MediaManagementPage() {
       if (workingPreset.confirmation_root_id) {
         entry.confirmationRootId = workingPreset.confirmation_root_id;
         entry.confirmationGeneration = workingPreset.confirmation_generation;
-        if (!workingPreset.confirmation_ready) {
-          entry.confirmationBlocked = true;
-        }
+      }
+      // RWK-39（P0-2）：hard-failure durable authority 持久化投影——
+      // confirmation_blocked（baseline failed / pending）restart 后仍恢复阻断。
+      if (workingPreset.confirmation_blocked || (
+        workingPreset.confirmation_root_id && workingPreset.confirmation_ready === false
+      )) {
+        entry.confirmationBlocked = true;
       }
       setEntries([entry]);
       setActiveEntryId(entry.id);
@@ -1258,7 +1319,6 @@ export default function MediaManagementPage() {
       entry.presetId = result.preset.preset_id;
       entry.status = 'parsed';
       entry.planId = result.preview.plan_id;
-      entry.preview = result.preview;
       entry.resolvedRoot = result.preset.source_root;
       entry.pathValidation = result.version.path_validation;
       // RWK-35：TXT baseline 的 root 级确认身份（若已同步建立）
@@ -1266,6 +1326,14 @@ export default function MediaManagementPage() {
         entry.confirmationRootId = result.baseline.confirmation_root_id;
         entry.confirmationGeneration = result.baseline.confirmation_generation;
       }
+      // RWK-39（P0-1）：确认页数据源必须是 durable aggregate preview——
+      // legacy preview 只作兼容存档，不充当 durable_root 的确认事实。
+      entry.preview = await resolveTxtEntryPreview(
+        result.preset.source,
+        entry.confirmationRootId || result.preset.confirmation_root_id,
+        entry.confirmationGeneration ?? result.preset.confirmation_generation,
+        result.preview,
+      );
       applyBaselineFailureHint(result, entry);
       setEntries([entry]);
       setActiveEntryId(entry.id);
@@ -1568,7 +1636,15 @@ export default function MediaManagementPage() {
     if (editDraft.season_number.trim()) patch.season_number = Number(editDraft.season_number);
     if (editDraft.episode_number.trim()) patch.episode_number = Number(editDraft.episode_number);
     try {
-      await importsApi.patchItem(source, editingItem.id, activeEntry.planId, patch);
+      await importsApi.patchItem(
+        source,
+        editingItem.id,
+        activeEntry.planId,
+        patch,
+        activeEntry.confirmationRootId && activeEntry.confirmationGeneration != null
+          ? { rootId: activeEntry.confirmationRootId, generation: activeEntry.confirmationGeneration }
+          : undefined,
+      );
       // RWK-38（P1）：patch 后刷新 durable 真相——TXT baseline 场景从
       // root-generation 聚合 preview 重载（不再读旧 legacy JSON preview，
       // 避免两份确认事实漂移）；其余场景维持原 legacy preview 刷新。
@@ -1579,6 +1655,9 @@ export default function MediaManagementPage() {
             activeEntry.confirmationGeneration,
           )
         : await importsApi.getPreview(source, activeEntry.planId);
+      // RWK-39（P1-1）：拿到的 durable aggregate preview 必须真正写回确认页
+      // state（否则后端已修正、页面仍显示旧值）。
+      updateEntry(activeEntry.id, { preview: refreshedPreview });
       setEditingItem(null);
     } catch (error) {
       setActionError((error as Error).message);

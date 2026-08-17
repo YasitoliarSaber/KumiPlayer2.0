@@ -5,6 +5,7 @@ import uuid
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import RLock
 
 from fastapi import HTTPException, UploadFile
 
@@ -25,6 +26,11 @@ _BAIDU_TREE_LINE = re.compile(
     r"^(?:(?:│ {2,3})|(?: {3,4}))*[├└]─{1,2}\s?.+$",
     re.MULTILINE,
 )
+
+# Confirmation authority lock：在单进程 FastAPI 生命周期内串行化
+# TXT baseline target 前进与 root-generation confirm，避免 target 在
+# validation 与 mutation 之间前进造成 stale root 部分确认。
+CONFIRMATION_AUTHORITY_LOCK = RLock()
 
 
 def now_iso() -> str:
@@ -404,14 +410,27 @@ def preset_to_dict(preset: MediaLibraryPreset) -> dict:
         data["is_library_indexed"] = state["is_library_indexed"]
         data["openlist_unit_count"] = state["unit_count"]
         data["openlist_attention_count"] = state["attention_count"]
-    # RWK-38（P0-2）：durable confirmation identity 可恢复投影——
-    # 任何关联 Source Catalog root 的 TXT preset（含重启后）都能从 preset
-    # 恢复 (root_id, generation)，不再依赖会话内临时 entry。
-    if preset.catalog_root_id:
-        data["confirmation_root_id"] = preset.catalog_root_id
-        data["confirmation_generation"], data["confirmation_ready"] = (
-            preset_confirmation_state(preset.catalog_root_id)
-        )
+    # RWK-39（P0-2）：durable confirmation identity 可恢复投影——
+    # 一旦 preset 进入 Source Catalog durable authority（catalog_root_id 关联
+    # **或** execution_authority=durable_root——含 baseline 失败且 root 未写入
+    # 的场景），restart 后仍从 preset 恢复身份与阻断状态，绝不重新识别为
+    # legacy-executable。
+    authority = str(preset.execution_authority or "")
+    is_durable = authority == "durable_root" or bool(preset.catalog_root_id)
+    if is_durable:
+        gen, ready = preset_confirmation_state(preset.catalog_root_id or "")
+        data["confirmation_root_id"] = preset.catalog_root_id or None
+        data["confirmation_generation"] = gen
+        data["confirmation_ready"] = ready
+        state = str(preset.confirmation_state or "")
+        if authority == "durable_root" and state in ("failed", "pending"):
+            # hard exception / 未完成基线：身份存在但确认被硬阻断
+            data["confirmation_blocked"] = True
+        elif preset.catalog_root_id and not ready:
+            # 基线未完成/已消费：同样不可确认（legacy 绝不回退）
+            data["confirmation_blocked"] = True
+        else:
+            data["confirmation_blocked"] = not ready
     return data
 
 

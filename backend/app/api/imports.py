@@ -9,6 +9,7 @@ GET  /api/imports/{source}/diff/{diff_id}
 POST /api/imports/{source}/incremental/preview
 """
 
+from functools import wraps
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -22,15 +23,28 @@ from app.import_plan.store import load_import_plan, save_import_plan
 router = APIRouter(prefix="/api/imports", tags=["imports"])
 
 
+def _serialize_confirmation_authority(func):
+    """在单进程 API 内串行化 baseline target 前进、patch 与 root confirm。"""
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        from app.media_presets.service import CONFIRMATION_AUTHORITY_LOCK
+
+        with CONFIRMATION_AUTHORITY_LOCK:
+            return func(*args, **kwargs)
+
+    return wrapped
+
+
 # ============================================================
 # 请求/响应模型
 # ============================================================
 
 class PatchRequest(BaseModel):
-    """修正条目请求"""
+    """修正条目请求；durable_root patch 必须带 root + generation 身份。"""
     plan_id: str
     patch: dict
-
+    root_id: str | None = None
+    generation: int | None = None
 
 class ConfirmRequest(BaseModel):
     """确认计划请求。低置信 warning 默认延后处理，不阻塞确认。"""
@@ -66,6 +80,7 @@ def get_preview(source: str, plan_id: Optional[str] = None):
 
 
 @router.patch("/{source}/items/{item_id}")
+@_serialize_confirmation_authority
 def patch_item(source: str, item_id: str, req: PatchRequest):
     """修正单个 ImportPlanItem
 
@@ -76,8 +91,34 @@ def patch_item(source: str, item_id: str, req: PatchRequest):
     """
     from app.import_plan import revision_store
     from app.db.database import get_connection
+    if req.root_id is not None or req.generation is not None:
+        if not req.root_id or req.generation is None:
+            raise HTTPException(status_code=400, detail="durable patch 必须同时提供 root_id 与 generation")
+        from app.catalog import store as catalog_store
+
+        patch_root = catalog_store.get_source_root(req.root_id)
+        if patch_root is None:
+            raise HTTPException(status_code=404, detail="patch confirmation root 不存在")
+        if not _source_matches((patch_root.source_id or ""), source):
+            raise HTTPException(status_code=400, detail="patch root 与 URL source 不一致")
+        patch_target = int(getattr(patch_root, "baseline_target_generation", 0) or 0)
+        if req.generation != patch_target:
+            raise HTTPException(status_code=409, detail="patch confirmation generation 已过期，请刷新确认页")
+        patch_completed = int(getattr(patch_root, "baseline_completed_generation", 0) or 0)
+        if patch_completed != patch_target:
+            raise HTTPException(status_code=409, detail="baseline 尚未完成，暂不能 patch durable revision")
+        try:
+            return _patch_txt_baseline_item(req.root_id, item_id, req.patch, source)
+        except _TxtBaselinePatchMiss as exc:
+            raise HTTPException(status_code=409, detail="item 不属于该 root-generation 的 durable revisions") from exc
+
     revision = revision_store.load_revision(req.plan_id)
     if revision is not None:
+        if req.root_id is None and req.generation is None and _revision_uses_durable_root(revision, source):
+            raise HTTPException(
+                status_code=409,
+                detail="durable_root patch 必须携带 root_id + generation confirmation context",
+            )
         revision_source = str(revision.get("source") or "")
         if revision_source and revision_source != source:
             raise HTTPException(
@@ -124,7 +165,14 @@ def patch_item(source: str, item_id: str, req: PatchRequest):
 
     # RWK-37（C）：TXT baseline 场景——plan_id 是 legacy 展示计划（preview 用），
     # 但人工修正必须命中对应 durable revision。按 item 的 relative_path 在该
-    # root 的 draft revisions 中定位并 patch（保证确认时用到修正后的事实）。
+    # root-generation context 缺失时，durable TXT 不能借旧客户端回退 legacy patch。
+    if req.root_id is None and req.generation is None and _legacy_plan_uses_durable_authority(req.plan_id, source):
+        raise HTTPException(
+            status_code=409,
+            detail="durable_root patch 必须携带 root_id + generation confirmation context",
+        )
+    # 该路径仅服务未进入 durable authority 的旧 legacy plan。
+    # durable patch 必须走上面的 root-generation 分支。
     preset = _preset_for_legacy_plan(req.plan_id, source)
     if preset is not None and preset.catalog_root_id:
         try:
@@ -172,6 +220,11 @@ def confirm(source: str, req: ConfirmRequest):
                 status_code=400,
                 detail=f"revision.source={revision_source} 与 URL source={source} 不匹配",
             )
+        if _revision_uses_durable_root(revision, source):
+            raise HTTPException(
+                status_code=409,
+                detail="该 TXT revision 属于 durable_root，请使用 root_id + generation confirm-root",
+            )
         if revision["status"] in ("confirmed", "executed"):
             # 重复 confirm：ensure 语义——缺失 mirror job 时自动补出
             # （crash self-healing），已有则复用同一 job 身份
@@ -216,7 +269,12 @@ def confirm(source: str, req: ConfirmRequest):
             "message": "import revision confirmed; mirror job enqueued",
         }
 
-    # ---- legacy JSON 路径（旧行为不变）----
+    if _legacy_plan_uses_durable_authority(req.plan_id, source):
+        raise HTTPException(
+            status_code=409,
+            detail="该 TXT 预设已进入 durable_root 执行权威，禁止回退 legacy confirm",
+        )
+    # ---- legacy JSON 路径（旧行为不变；仅未进入 durable authority 的旧预设）----
     plan = _load_plan_or_404(plan_id=req.plan_id)
     if plan.source != source:
         raise HTTPException(status_code=400, detail=f"plan.source={plan.source} 与 URL source={source} 不匹配")
@@ -260,6 +318,7 @@ class ConfirmRootRequest(BaseModel):
 
 
 @router.post("/{source}/confirm-root")
+@_serialize_confirmation_authority
 def confirm_root(source: str, req: ConfirmRootRequest):
     """RWK-38：一次性确认 Provider root 指定 generation 的全部 draft revisions。
 
@@ -278,6 +337,7 @@ def confirm_root(source: str, req: ConfirmRootRequest):
     from app.db.database import get_connection
     from app.import_plan import revision_store
     from app.pipeline import orchestrator
+    from app.import_plan.service import validate_confirmation
 
     root_id = (req.root_id or "").strip()
     if not root_id:
@@ -319,21 +379,53 @@ def confirm_root(source: str, req: ConfirmRootRequest):
 
     rows = get_connection().execute(
         """
-        SELECT r.revision_id, r.unit_id FROM import_revisions r
+        SELECT r.revision_id, r.unit_id, r.status FROM import_revisions r
         JOIN media_units u ON u.unit_id = r.unit_id
-        WHERE u.root_id = ? AND r.source_generation = ? AND r.status = 'draft'
+        WHERE u.root_id = ? AND r.source_generation = ?
         ORDER BY r.created_at ASC
         """,
         (root_id, req.generation),
     ).fetchall()
     if not rows:
         raise HTTPException(status_code=400, detail="没有可确认的草稿修订")
-
-    confirmed_ids = []
-    job_ids = []
+    # RWK-39（P1-2）：先全量预检再 mutation——root 级确认 all-or-none。
+    # 允许已 confirmed/executed 的 revision 幂等重试，但 failed/superseded/
+    # 其他冲突状态必须在任何 mutation 前拒绝；这样第 N 个无效时前 N-1
+    # 不会已经被本次请求确认或 enqueue mirror。
+    mutation_rows = []
     for row in rows:
         revision_id = str(row["revision_id"])
-        unit_id = str(row["unit_id"])
+        current = revision_store.load_revision(revision_id)
+        if current is None:
+            raise HTTPException(status_code=409, detail=f"修订 {revision_id} 不存在，请刷新后重试")
+        status = str(current.get("status") or "")
+        if status not in ("draft", "confirmed", "executed"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"修订 {revision_id} 已是 {status}（确认集合变更），"
+                    f"root 级确认已阻止：本次未确认任何修订，请刷新后重试"
+                ),
+            )
+        if status == "draft":
+            plan = revision_store.load_plan(revision_id)
+            if plan is None:
+                raise HTTPException(status_code=409, detail=f"修订 {revision_id} 无法装载，请刷新后重试")
+            ok, _preview, validation_error = validate_confirmation(plan, force=req.force)
+            if not ok:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"修订 {revision_id} 确认校验未通过："
+                        f"{validation_error or '请先处理确认页问题'}；本次未确认任何修订"
+                    ),
+                )
+            mutation_rows.append(row)
+    # mutation_rows 为空但 rows 全部 confirmed/executed 时仍允许幂等恢复，
+    # 下面会重新 ensure 全部 durable mirror jobs。
+    confirmed_ids = [str(row["revision_id"]) for row in rows]
+    for row in mutation_rows:
+        revision_id = str(row["revision_id"])
         try:
             revision_store.confirm_revision_manually(revision_id, force=req.force)
         except revision_store.RevisionStatusError:
@@ -342,10 +434,33 @@ def confirm_root(source: str, req: ConfirmRootRequest):
                 raise HTTPException(
                     status_code=409, detail=f"修订 {revision_id} 确认冲突，请刷新后重试"
                 ) from None
-        job_id = orchestrator.enqueue_mirror(revision_id, unit_id)
-        confirmed_ids.append(revision_id)
-        job_ids.append(job_id)
 
+    # 所有 revision 状态转换成功后才 enqueue；get-or-create 使 crash/retry 能补齐
+    # 已 confirmed 但尚未拿到 mirror job 的 revision。
+    job_ids = []
+    for row in rows:
+        revision_id = str(row["revision_id"])
+        unit_id = str(row["unit_id"])
+        current = revision_store.load_revision(revision_id)
+        if current is None or current["status"] not in ("confirmed", "executed"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"修订 {revision_id} 状态未完成，请刷新后重试",
+            )
+        job_ids.append(orchestrator.enqueue_mirror(revision_id, unit_id))
+    # root-generation 确认完成后同步推进 preset 生命周期与 confirmation state，
+    # 这样恢复入口进入 workbench，不会把已消费的 root 再显示成可确认草稿。
+    from app.media_presets.service import mark_preset_lifecycle, now_iso
+    from app.media_presets.store import list_presets, save_preset
+
+    for preset in list_presets():
+        if preset.catalog_root_id != root_id:
+            continue
+        preset.confirmation_state = "consumed"
+        preset.updated_at = now_iso()
+        save_preset(preset)
+        if preset.current_plan_id:
+            mark_preset_lifecycle(preset.current_plan_id, "confirmed")
     return {
         "root_id": root_id,
         "generation": target,
@@ -359,13 +474,14 @@ def confirm_root(source: str, req: ConfirmRootRequest):
 def confirm_root_preview(source: str, root_id: str, generation: int):
     """RWK-38（P1）：root-generation 聚合 durable preview。
 
-    确认页展示的唯一真相来源——从该 (root, generation) 的全部 draft
+    确认页展示的唯一真相来源——从该 (root, generation) 的全部 draft/confirmed/executed
     revisions 聚合 items/issues/groups/summary（合并为一个 plan 后重新
     build_preview，跨作品重复集数等检查自动正确）。patch 后前端刷新此
     端点，而不是重新读旧 legacy JSON preview（避免两份确认事实漂移）。
 
-    前置校验与 confirm_root 相同（source 匹配 + generation == target），
-    只读不 mutation。
+    只读 preview 在 baseline pending/failed 时也允许展示当前 durable 部分事实；
+    是否允许执行仍由 confirm_root 的 completed-generation fence 决定。
+    前置校验：source 匹配 + generation == target，不做 mutation。
     """
     from app.catalog import store as catalog_store
     from app.db.database import get_connection
@@ -392,13 +508,14 @@ def confirm_root_preview(source: str, root_id: str, generation: int):
         """
         SELECT r.revision_id FROM import_revisions r
         JOIN media_units u ON u.unit_id = r.unit_id
-        WHERE u.root_id = ? AND r.source_generation = ? AND r.status = 'draft'
+        WHERE u.root_id = ? AND r.source_generation = ?
+          AND r.status IN ('draft', 'confirmed', 'executed')
         ORDER BY r.created_at ASC
         """,
         (root_id, generation),
     ).fetchall()
     if not rows:
-        raise HTTPException(status_code=400, detail="没有可确认的草稿修订")
+        raise HTTPException(status_code=400, detail="没有可预览的 durable 修订")
 
     merged = ImportPlan()
     merged.items = []
@@ -471,6 +588,34 @@ def _preset_for_legacy_plan(plan_id: str, source: str):
         if preset.current_plan_id == plan_id:
             return preset
     return None
+def _revision_uses_durable_root(revision: dict, source: str) -> bool:
+    """TXT revision 只能由 root-generation authority 确认，不能单 revision 绕过 fence。"""
+    if source not in {"pan115", "baidu"}:
+        return False
+    from app.catalog import store as catalog_store
+    from app.db.database import get_connection
+
+    row = get_connection().execute(
+        "SELECT root_id FROM media_units WHERE unit_id = ?",
+        (revision.get("unit_id") or "",),
+    ).fetchone()
+    if row is None:
+        return False
+    root = catalog_store.get_source_root(str(row["root_id"]))
+    return root is not None and _source_matches((root.source_id or ""), source)
+
+def _legacy_plan_uses_durable_authority(plan_id: str, source: str) -> bool:
+    """阻止 durable TXT preset 的 legacy confirm fallback（含无 root 的 hard failure）。"""
+    from app.media_presets.store import list_presets
+
+    for preset in list_presets():
+        if preset.current_plan_id != plan_id or preset.source != source:
+            continue
+        if preset.execution_authority == "durable_root":
+            return True
+        if source in {"pan115", "baidu"} and preset.catalog_root_id:
+            return True
+    return False
 
 
 def _preset_for_legacy_plan_by_root(root_id: str, source: str):

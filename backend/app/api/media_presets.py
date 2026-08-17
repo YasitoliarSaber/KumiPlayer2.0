@@ -233,6 +233,46 @@ def _bridge_preview_plan_id(preview: dict, baseline: dict | None) -> dict:
     return preview
 
 
+
+def _persist_durable_baseline_failure(preset, local_mount_root: str) -> dict:
+    """RWK-39（P0-2）：持久化 baseline failure 的 durable execution authority。
+
+    该函数必须覆盖 sync hard exception、缺失归档和部分目录失败后的恢复路径：
+    即使 root 只建立到一半，preset 也记录 durable_root + failed，重启后不能
+    再被当作 legacy-executable。ensure_provider_source_root 仅做本地幂等建根，
+    不触发 OpenList 网络请求。
+    """
+    import logging
+
+    from app.media_presets.service import ensure_provider_source_root, now_iso
+
+    try:
+        root_id = ensure_provider_source_root(
+            provider=preset.source,
+            local_mount_root=local_mount_root,
+            import_family=preset.import_family,
+            import_scope=preset.import_scope,
+        )
+        if root_id:
+            preset.catalog_root_id = root_id
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "TXT baseline 失败后重取 root 失败（preset=%s）",
+            getattr(preset, "preset_id", ""),
+            exc_info=True,
+        )
+    preset.execution_authority = "durable_root"
+    preset.confirmation_state = "failed"
+    preset.updated_at = now_iso()
+    save_preset(preset)
+    return {
+        "status": "baseline_failed",
+        "confirmation_root_id": (preset.catalog_root_id or "").strip() or None,
+        "confirmation_generation": 0,
+    }
+
+
+
 def _ensure_tree_baseline(
     preset,
     tree_archive: str,
@@ -275,29 +315,37 @@ def _ensure_tree_baseline(
     # 的 Source Catalog baseline（RWK-27）——archive 已 move 到版本目录，用
     # version.archive_path 重取后有效。
     if not tree_archive:
-        return {"status": "baseline_failed"}
+        return _persist_durable_baseline_failure(preset, local_mount_root)
     try:
         from app.media_presets.service import (
             bootstrap_provider_catalog_sync,
             now_iso,
+            CONFIRMATION_AUTHORITY_LOCK,
         )
         from app.media_presets.store import save_preset as _save_preset
 
         # RWK-34：同步执行（不创建 queued job）——单次 handler 调用，
         # 无 worker 双执行窗口、无重复 draft revision。
-        info = bootstrap_provider_catalog_sync(
-            provider=preset.source,
-            tree_archive=tree_archive,
-            local_mount_root=local_mount_root,
-            import_family=import_family,
-            import_scope=import_scope,
-        )
+        with CONFIRMATION_AUTHORITY_LOCK:
+            info = bootstrap_provider_catalog_sync(
+                provider=preset.source,
+                tree_archive=tree_archive,
+                local_mount_root=local_mount_root,
+                import_family=import_family,
+                import_scope=import_scope,
+            )
         if info["root_id"] and preset.catalog_root_id != info["root_id"]:
             preset.catalog_root_id = info["root_id"]
-            preset.updated_at = now_iso()
-            _save_preset(preset)
+        # RWK-39：执行权威持久化——一旦进入 durable 模式，restart 后也
+        # 绝不重新识别为 legacy-executable。
+        preset.execution_authority = "durable_root"
+        preset.updated_at = now_iso()
+        _save_preset(preset)
         if info["summary"].get("failed_count", 0) > 0:
             # 部分目录失败：baseline 未完整完成 → 不提供确认身份（防错误基线）
+            preset.confirmation_state = "failed"
+            preset.updated_at = now_iso()
+            _save_preset(preset)
             return {
                 "root_id": info["root_id"],
                 "status": "baseline_failed",
@@ -305,6 +353,9 @@ def _ensure_tree_baseline(
             }
         # RWK-35：root 级确认身份——全部 draft revision ids（多作品），
         # 用户一次确认 → 全部 eligible revisions durable confirm。
+        preset.confirmation_state = "ready"
+        preset.updated_at = now_iso()
+        _save_preset(preset)
         return {
             "root_id": info["root_id"],
             "generation": info["generation"],
@@ -321,11 +372,9 @@ def _ensure_tree_baseline(
             getattr(preset, "preset_id", ""),
             exc_info=True,
         )
-        # RWK-36：baseline 已启动（root/事实可能已部分写入）——**不返回可执行
-        # 的 legacy plan_id**（避免双执行权威）；明确 baseline_failed，UI 提示
-        # 用户重新导入，而不是退回 legacy mirror 链。
-        return {"status": "baseline_failed"}
-
+        # RWK-39：hard exception 也持久化 durable_root + failed，restart 后
+        # 不得回退 legacy mirror 链。
+        return _persist_durable_baseline_failure(preset, local_mount_root)
 
 def _discard_temporary_preset(preset_id: str) -> None:
     """清理解析失败/来源不匹配时临时创建的预设与归档目录，避免残留。

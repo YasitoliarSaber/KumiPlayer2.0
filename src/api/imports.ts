@@ -11,10 +11,21 @@ export const importsApi = {
     ),
 
   // 修正条目
-  patchItem: (source: string, itemId: string, planId: string, patch: Record<string, unknown>) =>
+  patchItem: (
+    source: string,
+    itemId: string,
+    planId: string,
+    patch: Record<string, unknown>,
+    confirmation?: { rootId: string; generation: number },
+  ) =>
     api.patch<{ item: ImportPlanItem; summary: Record<string, unknown> }>(
       `/api/imports/${source}/items/${itemId}`,
-      { plan_id: planId, patch }
+      {
+        plan_id: planId,
+        patch,
+        root_id: confirmation?.rootId,
+        generation: confirmation?.generation,
+      }
     ),
 
   // 确认计划

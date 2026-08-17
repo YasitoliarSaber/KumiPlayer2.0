@@ -53,6 +53,10 @@ export interface MediaLibraryPreset {
   confirmation_root_id?: string;
   confirmation_generation?: number;
   confirmation_ready?: boolean;
+  /** RWK-39：durable_root authority / failed state 的重启恢复投影 */
+  execution_authority?: '' | 'durable_root' | 'legacy';
+  confirmation_state?: '' | 'ready' | 'pending' | 'failed' | 'consumed';
+  confirmation_blocked?: boolean;
   scrape_task?: TaskRecord | null;
   review_count?: number;
   versions: MediaTreeVersion[];

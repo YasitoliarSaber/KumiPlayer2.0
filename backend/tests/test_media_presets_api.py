@@ -550,11 +550,14 @@ def test_confirm_plan_updates_preset_lifecycle(tmp_path, monkeypatch):
     with TestClient(app) as client:
         created = _create(client).json()
         preset_id = created["preset"]["preset_id"]
+        baseline = created["baseline"]
         plan_id = created["preset"]["current_plan_id"]
-
         response = client.post(
-            "/api/imports/pan115/confirm",
-            json={"plan_id": plan_id},
+            "/api/imports/pan115/confirm-root",
+            json={
+                "root_id": baseline["confirmation_root_id"],
+                "generation": baseline["confirmation_generation"],
+            },
         )
 
         assert response.status_code == 200, response.text
