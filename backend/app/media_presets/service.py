@@ -1465,6 +1465,11 @@ def resolve_needs_review_unit(root_id: str, unit_id: str, work_title: str) -> di
     root = catalog_store.get_source_root(root_id)
     if root is None:
         raise HTTPException(status_code=404, detail="来源根不存在")
+    source_id = str(root.source_id or "")
+    if not (source_id.startswith("pan115") or source_id.startswith("baidu")):
+        # RWK-40（M1）：needs-review resolve 是 Provider TXT durable 专属处理入口，
+        # 非 pan115/baidu 来源（纯 OpenList）不得走此路径（与 confirm-root 同约束）。
+        raise HTTPException(status_code=409, detail="该来源根不支持人工识别处理")
     conn = get_connection()
     unit = conn.execute(
         "SELECT * FROM media_units WHERE unit_id = ? AND root_id = ?",
@@ -1520,6 +1525,15 @@ def resolve_needs_review_unit(root_id: str, unit_id: str, work_title: str) -> di
                 except Exception:
                     # 单 item patch 失败不阻塞整体（人工确认页仍可逐项修正）
                     pass
+    # RWK-40（M2）：回写 current_revision_id → openlist_preset_state 把该 unit
+    # 视为「有待处理 draft」（attention 可见），而非 needs_review 重复提示；
+    # confirmation_ready 由该 draft revision 提供，与「继续确认」入口衔接。
+    get_connection().execute(
+        "UPDATE media_units SET status='plan_ready', current_revision_id=? "
+        "WHERE unit_id=? AND root_id=?",
+        (new_revision_id, unit_id, root_id),
+    )
+    get_connection().commit()
     return {
         "revision_id": new_revision_id,
         "unit_id": unit_id,

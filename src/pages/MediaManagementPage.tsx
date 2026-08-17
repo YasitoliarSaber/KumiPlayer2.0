@@ -1330,8 +1330,14 @@ export default function MediaManagementPage() {
       const result = await importsApi.resolveNeedsReview(preset.source, rootId, unitId, title);
       setNeedsReviewTitles((value) => ({ ...value, [unitId]: '' }));
       setUploadMessage(`已为「${title}」生成可编辑版本，请继续确认`);
+      setNeedsReviewPreset(null);
+      // RWK-40（P0-2）：resolve 后必须用最新投影的 preset 恢复确认身份——传入
+      // 的 preset 是 resolve 前的 stale 引用（confirmation_ready=false），直接传给
+      // resumePreset 会误设 confirmationBlocked 禁用确认。刷新后取新对象。
       await loadPresets(true);
-      void resumePreset(preset);
+      const listed = await mediaPresetsApi.list();
+      const refreshed = (listed.presets ?? []).find((item) => item.preset_id === preset.preset_id);
+      if (refreshed) void resumePreset(refreshed);
     } catch (error) {
       setActionError(`处理识别结果失败：${(error as Error).message}`);
     } finally {

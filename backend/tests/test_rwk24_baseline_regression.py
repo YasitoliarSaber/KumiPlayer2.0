@@ -279,6 +279,8 @@ class TestRebindDurableSourceRoot:
         assert baseline1.get("status") == "baseline_queued", resp1.text
         root_id = baseline1["confirmation_root_id"]
         source_id_before = catalog_store.get_source_root(root_id).source_id
+        gen_before = int(baseline1.get("confirmation_generation") or 0)
+        assert gen_before >= 1, "v1 必须已有 generation"
         unit_ids_before = {
             row["unit_id"]
             for row in get_connection().execute(
@@ -342,6 +344,11 @@ class TestRebindDurableSourceRoot:
         assert int(rows[0]["c"]) == 1, "同一 source_id 只能有一个 SourceRoot"
         # 7) rebind 后 local_locator 已是新根
         assert root_after.local_locator == str(mount_new)
+        # 8) generation 只在原 root 前进（rebind 与 v2 update 都推进且单调递增）
+        gen_after = int(getattr(root_after, "active_generation", 0) or 0)
+        assert gen_after > gen_before, (
+            f"generation 必须只在原 root 前进: {gen_before} -> {gen_after}"
+        )
 
 
 class TestNativePathBaseline:

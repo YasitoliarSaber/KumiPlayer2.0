@@ -892,6 +892,67 @@ class TestOpenlistSourceCardDurableLifecycle:
         ).fetchone()
         assert row["status"] != "needs_review"
 
+    def test_needs_review_resolve_endpoint_api_layer(self, client, tmp_path):
+        """RWK-40（P0-2）：/needs-review/resolve HTTP 端点（成功 + 400/409 错误分支）。"""
+        from app.db.database import get_connection
+        from app.media_presets.service import ensure_provider_source_root
+
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        root_id = ensure_provider_source_root(
+            provider="pan115",
+            local_mount_root=str(mount),
+            import_family="anime",
+            import_scope="",
+        )
+        from app.catalog import store as catalog_store
+
+        catalog_store.set_baseline_target(root_id, 1)
+        catalog_store.mark_baseline_completed(root_id, 1)
+        _make_unit("card-nr-api", root_id=root_id, boundary="/动画/未识别作品")
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET status='needs_review' WHERE unit_id=?",
+            ("card-nr-api",),
+        )
+        node_locator = str(mount / "未识别作品.S01E01.mkv")
+        conn.execute(
+            """
+            INSERT INTO source_nodes (
+                root_id, remote_path, parent_path, name, kind, size, mtime, etag,
+                content_hash, remote_id, logical_locator, provider_id, route_id,
+                tombstone
+            ) VALUES (?, '/动画/未识别作品/未识别作品.S01E01.mkv', '/动画/未识别作品',
+                '未识别作品.S01E01.mkv', 'file', 100, 1700000000, '', '', '',
+                ?, '', '', '')
+            """,
+            (root_id, node_locator),
+        )
+        conn.commit()
+
+        # 成功路径：pan115 + root + unit → 200 + revision_id
+        resp = client.post(
+            "/api/imports/pan115/needs-review/resolve",
+            json={"root_id": root_id, "unit_id": "card-nr-api", "work_title": "未识别作品"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["revision_id"]
+        assert resp.json()["root_id"] == root_id
+
+        # 缺 root_id → 422（Pydantic 模型缺失字段）
+        resp2 = client.post(
+            "/api/imports/pan115/needs-review/resolve",
+            json={"unit_id": "card-nr-api", "work_title": "x"},
+        )
+        assert resp2.status_code == 422, resp2.text
+
+        # 不存在的 unit → service 层 404（HTTP 包装为 409）
+        resp4 = client.post(
+            "/api/imports/pan115/needs-review/resolve",
+            json={"root_id": root_id, "unit_id": "card-missing", "work_title": "x"},
+        )
+        assert resp4.status_code in (404, 409), resp4.text
+
 
 class TestTerminalRetryBarrierAndNoopSemantics:
     """CP9：terminal retry 的维护屏障与无操作语义。
