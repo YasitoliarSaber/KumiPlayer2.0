@@ -1443,7 +1443,7 @@ def update_preset_from_tree(
     return cumulative, diff
 
 
-def resolve_needs_review_unit(root_id: str, unit_id: str, work_title: str) -> dict:
+def resolve_needs_review_unit(root_id: str, unit_id: str, work_title: str, generation: int = 0) -> dict:
     """RWK-40（P0-2）：为 needs_review 且无 revision 的 MediaUnit 生成可编辑 draft revision。
 
     事故链：TXT baseline 完整成功 → 作品识别失败 → needs_review unit 无 revision
@@ -1486,8 +1486,20 @@ def resolve_needs_review_unit(root_id: str, unit_id: str, work_title: str) -> di
             raise HTTPException(status_code=409, detail="该识别单元已有可处理版本")
 
     target = int(getattr(root, "baseline_target_generation", 0) or 0)
-    if target <= 0:
+    completed = int(getattr(root, "baseline_completed_generation", 0) or 0)
+    # RWK-40（P0-3）：与 confirm-root/patch 同源的 generation fence——resolve 必须
+    # 精确作用在用户看到的 (root, generation) 上。target 已前进（页面陈旧）或基线
+    # 未完成（completed < target，partial/failed 场景）一律 409，0 revision 生成、
+    # 0 unit 变更。baseline 成功但全 needs_review（completed == target == generation，
+    # 无 draft revision）是唯一允许 resolve 的状态。
+    if generation <= 0 or target <= 0:
+        # 与 confirm-root（imports.py）对齐的兜底：target=0（从未跑 baseline）或
+        # generation=0 时三零边界（0==0）不得放行，防止在无基线 root 上生成孤儿 revision。
         raise HTTPException(status_code=409, detail="该来源根没有进行中的目录树基线")
+    if generation != target:
+        raise HTTPException(status_code=409, detail="识别单元已过期，目录树基线已更新，请刷新后重试")
+    if completed != generation:
+        raise HTTPException(status_code=409, detail="目录树基线尚未完成，暂不能人工处理识别单元")
 
     engine = DiscoveryEngine(
         None,

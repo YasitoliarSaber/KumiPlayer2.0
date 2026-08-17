@@ -246,21 +246,28 @@ def _persist_durable_baseline_failure(preset, local_mount_root: str) -> dict:
 
     from app.media_presets.service import ensure_provider_source_root, now_iso
 
-    try:
-        root_id = ensure_provider_source_root(
-            provider=preset.source,
-            local_mount_root=local_mount_root,
-            import_family=preset.import_family,
-            import_scope=preset.import_scope,
-        )
-        if root_id:
-            preset.catalog_root_id = root_id
-    except Exception:
-        logging.getLogger(__name__).warning(
-            "TXT baseline 失败后重取 root 失败（preset=%s）",
-            getattr(preset, "preset_id", ""),
-            exc_info=True,
-        )
+    # RWK-40（P0-2）：root identity 不变量——已有 catalog_root_id 时绝不再
+    # ensure/改绑 root。否则 rebind 后 v2 update/recovery 失败路径会依据「新挂载根」
+    # 重新 hash 派生 source_id 并创建 R2，把 preset 改绑到 R2，破坏「更换本地
+    # playback mount 不能改变 Provider SourceRoot 身份」的不变量（成功路径已
+    # root-scoped，失败路径同样必须保持 R1）。
+    root_id = (preset.catalog_root_id or "").strip()
+    if not root_id:
+        try:
+            root_id = ensure_provider_source_root(
+                provider=preset.source,
+                local_mount_root=local_mount_root,
+                import_family=preset.import_family,
+                import_scope=preset.import_scope,
+            )
+            if root_id:
+                preset.catalog_root_id = root_id
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "TXT baseline 失败后重取 root 失败（preset=%s）",
+                getattr(preset, "preset_id", ""),
+                exc_info=True,
+            )
     preset.execution_authority = "durable_root"
     preset.confirmation_state = "failed"
     preset.updated_at = now_iso()

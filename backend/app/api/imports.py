@@ -320,11 +320,14 @@ class ConfirmRootRequest(BaseModel):
 class ResolveNeedsReviewRequest(BaseModel):
     """RWK-40（P0-2）：为 needs_review 无 revision 的 MediaUnit 人工生成可编辑版本。
 
-    root_id：该 unit 所属的 durable SourceRoot（前端从 preset.confirmation_root_id
-    读取）。work_title：用户人工填写的作品身份；为空时仅生成可编辑 draft
-    revision，由确认页逐项修正。
+    完整 durable identity：(root_id, generation)——generation 是用户当前看到的
+    target generation（前端从 preset.confirmation_generation 读取），后端在任何
+    mutation 前校验与当前 baseline 状态一致（== baseline_target_generation 且
+    == baseline_completed_generation），杜绝「用户看到 A、实际修改 B」的 TOCTOU。
+    work_title：用户人工填写的作品身份；为空时仅生成可编辑 draft revision。
     """
     root_id: str
+    generation: int
     unit_id: str
     work_title: str = ""
 
@@ -342,10 +345,18 @@ def resolve_needs_review_unit(source: str, req: ResolveNeedsReviewRequest):
         raise HTTPException(status_code=400, detail="缺少来源根")
     if not req.unit_id:
         raise HTTPException(status_code=400, detail="缺少识别单元")
+    from app.catalog import store as catalog_store
     from app.media_presets.service import resolve_needs_review_unit as _resolve
 
+    root = catalog_store.get_source_root(req.root_id)
+    if root is None:
+        raise HTTPException(status_code=404, detail="来源根不存在")
+    if not _source_matches(str(root.source_id or ""), source):
+        # RWK-40（P0-3）：URL source 必须与 root.source_id 前缀一致——
+        # 仅验证「pan115 或 baidu」不够（baidu URL + pan115 root 会跨来源修改）。
+        raise HTTPException(status_code=409, detail="来源与来源根不匹配")
     try:
-        result = _resolve(req.root_id, req.unit_id, req.work_title)
+        result = _resolve(req.root_id, req.unit_id, req.work_title, req.generation)
     except HTTPException:
         raise
     except Exception as exc:

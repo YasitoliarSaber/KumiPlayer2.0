@@ -350,6 +350,67 @@ class TestRebindDurableSourceRoot:
             f"generation 必须只在原 root 前进: {gen_before} -> {gen_after}"
         )
 
+    def test_rebind_failure_path_keeps_root_identity(self, client, tmp_path):
+        """RWK-40（P0-2）：rebind 后异常路径不得分裂 root。
+
+        事故链：v1 → R1 → rebind 新 mount（R1.local_locator 切换）→ v2/recovery
+        root-scoped rebuild 抛异常 → _persist_durable_baseline_failure 若按「新挂载根」
+        重新 ensure source/root 会创建 R2 并改绑 catalog_root_id。修复后：已有
+        catalog_root_id 时绝不再 ensure/改绑，只持久化 durable_root + failed。
+        """
+        from app.api.media_presets import _persist_durable_baseline_failure
+        from app.catalog import store as catalog_store
+        from app.db.database import get_connection
+        from app.media_presets.store import get_preset as _gp
+
+        # 1) v1 baseline → R1（与 v2 update 测试相同的前置）
+        mount_old = tmp_path / "mount_old"
+        mount_old.mkdir()
+        tree = _write_tree(mount_old, _big_tree())
+        resp1 = client.post(
+            "/api/media-presets/import-local-tree",
+            json={"tree_path": str(tree), "import_family": "anime", "import_scope": ""},
+        )
+        assert resp1.status_code == 200, resp1.text
+        baseline1 = resp1.json().get("baseline", {})
+        assert baseline1.get("status") == "baseline_queued", resp1.text
+        root_id = baseline1["confirmation_root_id"]
+        source_id_before = catalog_store.get_source_root(root_id).source_id
+        preset = next(p for p in list_presets() if p.catalog_root_id == root_id)
+
+        # 2) rebind 新挂载根 → 仍 R1（local_locator 切换）
+        mount_new = tmp_path / "mount_new"
+        mount_new.mkdir()
+        resp2 = client.post(
+            f"/api/media-presets/{preset.preset_id}/source-root",
+            json={"source_root": str(mount_new)},
+        )
+        assert resp2.status_code == 200, resp2.text
+
+        # 3) 模拟 rebind 后 v2/recovery 的 root-scoped rebuild 抛异常：
+        #    直接调用失败持久化函数（等价于 _ensure_tree_baseline 的 except 分支）
+        p = _gp(preset.preset_id)
+        _persist_durable_baseline_failure(p, str(mount_new))
+
+        # 4) root identity 不变量：catalog_root_id 仍 R1，绝不改绑 R2
+        p_after = _gp(preset.preset_id)
+        assert p_after.catalog_root_id == root_id, (
+            f"失败路径不得改绑 catalog_root_id: {p_after.catalog_root_id} != {root_id}"
+        )
+        root = catalog_store.get_source_root(root_id)
+        assert root is not None
+        assert root.source_id == source_id_before, "source_id 不得分裂"
+        # 5) 全程只有 R1，不出现 R2（同一 source_id 只能一个 SourceRoot）
+        rows = get_connection().execute(
+            "SELECT COUNT(*) AS c FROM source_roots WHERE source_id = ?",
+            (source_id_before,),
+        ).fetchall()
+        assert int(rows[0]["c"]) == 1, "失败路径不得创建 R2"
+        # 6) local_locator 保持新挂载根（rebind 已生效），authority 持久化为 failed
+        assert root.local_locator == str(mount_new)
+        assert p_after.execution_authority == "durable_root"
+        assert p_after.confirmation_state == "failed"
+
 
 class TestNativePathBaseline:
     def test_import_local_tree_creates_full_baseline(self, client, tmp_path):

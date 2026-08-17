@@ -72,7 +72,10 @@ export const importsApi = {
   // RWK-40（P0-2）：needs_review 无 revision 的 MediaUnit 人工 durable 处理入口。
   // 用户填写作品身份后生成可编辑 draft revision，进入 root-generation 确认集合
   // （confirmation_ready=true），不依赖 legacy plan。
-  resolveNeedsReview: (source: string, rootId: string, unitId: string, workTitle: string) =>
+  // RWK-40（P0-3）：必须携带用户当前看到的 generation——后端在任何 mutation 前
+  // 校验 generation == baseline_target_generation 且 completed == generation，
+  // 杜绝「用户看到 A、实际修改 B」的 TOCTOU。
+  resolveNeedsReview: (source: string, rootId: string, generation: number, unitId: string, workTitle: string) =>
     api.post<{
       revision_id: string
       unit_id: string
@@ -81,7 +84,7 @@ export const importsApi = {
       source: string
     }>(
       `/api/imports/${source}/needs-review/resolve`,
-      { root_id: rootId, unit_id: unitId, work_title: workTitle }
+      { root_id: rootId, generation, unit_id: unitId, work_title: workTitle }
     ),
 
   // 生成 diff

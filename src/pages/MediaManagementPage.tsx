@@ -1271,9 +1271,22 @@ export default function MediaManagementPage() {
       setSource(workingPreset.source);
       setFamily(workingPreset.import_family);
       setImportScope(workingPreset.import_scope);
-      setStep(workingPreset.lifecycle_status === 'draft'
-        ? 'confirm'
-        : 'workbench');
+      // RWK-40（P0-1）：durable root 不能再用 legacy lifecycle_status 判页面——
+      // durable draft revision 会让 projector 投影成 needs_attention（非 draft），
+      // 若按 lifecycle 规则会把用户送去 workbench 而非确认页。优先按 durable
+      // confirmation identity：execution_authority==durable_root + root_id +
+      // generation>0 + confirmation_ready=true → confirm；其余（非 durable legacy）
+      // 才沿用原来的 lifecycle 规则。
+      setStep(
+        workingPreset.execution_authority === 'durable_root'
+          && workingPreset.confirmation_root_id
+          && (workingPreset.confirmation_generation ?? 0) > 0
+          && workingPreset.confirmation_ready === true
+          ? 'confirm'
+          : workingPreset.lifecycle_status === 'draft'
+            ? 'confirm'
+            : 'workbench'
+      );
     } catch (error) {
       setActionError(`无法继续处理“${getPresetDisplayName(preset)}”：${(error as Error).message}`);
       setUploadMessage('');
@@ -1324,10 +1337,27 @@ export default function MediaManagementPage() {
       setActionError('该预设尚未关联 durable 来源根，请先重新导入目录树');
       return;
     }
+    const generation = preset.confirmation_generation ?? 0;
+    if (!generation || generation <= 0) {
+      setActionError('该来源根缺少可处理的目录树基线，请重新导入目录树');
+      return;
+    }
+    // RWK-40（P0-3）：failed/pending baseline（completed < target）不得人工处理识别
+    // 单元——后端 completed fence 会 409，前端也不提供 resolve 入口。
+    // 注意：不能用投影的 confirmation_blocked 拦截——P0-2 目标场景（baseline 成功 +
+    // 全部 needs_review 无 draft revision）恰好投影成 confirmation_blocked=true
+    // （state=ready 但 ready=false），若用它会把这个本就该 resolve 的场景也堵死，
+    // 与按钮渲染条件（仅排除 failed/pending）矛盾，导致永久卡住。后端
+    // completed==generation fence 已精确区分：all-needs-review（completed==target）
+    // 允许 resolve，failed/pending（completed<target）409。
+    if (preset.confirmation_state === 'failed' || preset.confirmation_state === 'pending') {
+      setActionError('目录树基线未完成或已过期，暂不能人工处理识别单元');
+      return;
+    }
     setResolvingReviewUnitId(unitId);
     setActionError('');
     try {
-      const result = await importsApi.resolveNeedsReview(preset.source, rootId, unitId, title);
+      const result = await importsApi.resolveNeedsReview(preset.source, rootId, generation, unitId, title);
       setNeedsReviewTitles((value) => ({ ...value, [unitId]: '' }));
       setUploadMessage(`已为「${title}」生成可编辑版本，请继续确认`);
       setNeedsReviewPreset(null);
@@ -1607,7 +1637,7 @@ export default function MediaManagementPage() {
             {/* RWK-40（P0-2）：needs_review 无 revision 单元的人工 durable 处理入口——
                 有 attention 但 confirmation_ready=false（无 draft revision 可确认）时，
                 必须先人工处理识别单元生成可编辑版本，再走「继续确认」。 */}
-            {!scrapeActive && preset.update_mode === 'directory_tree' && preset.execution_authority === 'durable_root' && preset.confirmation_ready !== true && (preset.openlist_attention_count ?? 0) > 0 && (preset.openlist_needs_review_units?.length ?? 0) > 0 && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree || repairingPresetId === preset.preset_id} onClick={() => { setNeedsReviewPreset(preset); setNeedsReviewTitles({}); }}>处理识别结果</Button>}
+            {!scrapeActive && preset.update_mode === 'directory_tree' && preset.execution_authority === 'durable_root' && preset.confirmation_ready !== true && preset.confirmation_state !== 'failed' && preset.confirmation_state !== 'pending' && (preset.openlist_attention_count ?? 0) > 0 && (preset.openlist_needs_review_units?.length ?? 0) > 0 && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree || repairingPresetId === preset.preset_id} onClick={() => { setNeedsReviewPreset(preset); setNeedsReviewTitles({}); }}>处理识别结果</Button>}
             {preset.update_mode === 'local_scan'
               ? <Button className="media-preset-action secondary" appearance="secondary" icon={scanningFolder ? <Spinner size="tiny" /> : <ScanLine size={15} />} disabled={scanningFolder || uploadingTree} onClick={() => void rescanLocalPreset(preset)}>重新扫描本地目录</Button>
               : preset.update_mode === 'openlist_scan'

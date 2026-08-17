@@ -500,7 +500,32 @@ class TestOpenlistSourceCardLifecycle:
         src = Path(__file__).resolve().parents[2] / "src" / "pages" / "MediaManagementPage.tsx"
         text = src.read_text(encoding="utf-8")
         assert "await loadPresets(true)" in text
-        assert "void resumePreset(preset)" in text
+        # resolve 成功后用最新投影的 preset 恢复确认身份（stale preset 会误设
+        # confirmationBlocked），再 resumePreset
+        assert "void resumePreset(refreshed)" in text
+
+    def test_ui_resume_preset_durable_identity_enters_confirm(self):
+        """RWK-40（P0-1）：resumePreset 必须按 durable confirmation identity 进入 confirm。
+
+        事故链：durable draft revision → confirmation_ready=true → attention_count>0 →
+        lifecycle 投影 needs_attention（非 draft）→ 若按 legacy lifecycle_status 判
+        页面会送 workbench。必须：durable_root + confirmation_root_id + generation>0 +
+        confirmation_ready=true → confirm；只有非 durable legacy 才沿用 lifecycle 规则。
+        """
+        src = Path(__file__).resolve().parents[2] / "src" / "pages" / "MediaManagementPage.tsx"
+        text = src.read_text(encoding="utf-8")
+        # durable 优先分支的条件全部存在
+        assert "workingPreset.execution_authority === 'durable_root'" in text
+        assert "workingPreset.confirmation_root_id" in text
+        assert "(workingPreset.confirmation_generation ?? 0) > 0" in text
+        assert "workingPreset.confirmation_ready === true" in text
+        # 进入 confirm 的分支结果
+        assert "? 'confirm'" in text
+        # durable 条件必须优先于 legacy lifecycle 规则（源码出现位置更靠前，
+        # 即「durable 先判断、legacy 兜底」的优先级顺序）
+        idx_durable = text.index("workingPreset.execution_authority === 'durable_root'")
+        idx_legacy = text.index("workingPreset.lifecycle_status === 'draft'")
+        assert idx_durable < idx_legacy, "durable confirmation identity 必须优先于 legacy lifecycle"
 
 class TestMediaLibrariesCanonicalProjection:
     """CP9：media_libraries 是最后一个 SQLite projection——必须按 effective
@@ -877,8 +902,8 @@ class TestOpenlistSourceCardDurableLifecycle:
         )
         conn.commit()
 
-        # resolve：人工提供作品名 → 生成可编辑 draft revision
-        result = resolve_needs_review_unit(root_id, "card-needs-review", "未识别作品")
+        # resolve：人工提供作品名 → 生成可编辑 draft revision（generation fence 通过）
+        result = resolve_needs_review_unit(root_id, "card-needs-review", "未识别作品", generation=1)
         assert result["revision_id"], "must produce draft revision"
         assert result["root_id"] == root_id
 
@@ -930,14 +955,15 @@ class TestOpenlistSourceCardDurableLifecycle:
         )
         conn.commit()
 
-        # 成功路径：pan115 + root + unit → 200 + revision_id
+        # 成功路径：pan115 + root + generation + unit → 200 + revision_id
         resp = client.post(
             "/api/imports/pan115/needs-review/resolve",
-            json={"root_id": root_id, "unit_id": "card-nr-api", "work_title": "未识别作品"},
+            json={"root_id": root_id, "generation": 1, "unit_id": "card-nr-api", "work_title": "未识别作品"},
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["revision_id"]
         assert resp.json()["root_id"] == root_id
+        assert resp.json()["generation"] == 1
 
         # 缺 root_id → 422（Pydantic 模型缺失字段）
         resp2 = client.post(
@@ -949,9 +975,161 @@ class TestOpenlistSourceCardDurableLifecycle:
         # 不存在的 unit → service 层 404（HTTP 包装为 409）
         resp4 = client.post(
             "/api/imports/pan115/needs-review/resolve",
-            json={"root_id": root_id, "unit_id": "card-missing", "work_title": "x"},
+            json={"root_id": root_id, "generation": 1, "unit_id": "card-missing", "work_title": "x"},
         )
         assert resp4.status_code in (404, 409), resp4.text
+
+        # 缺 generation → 422（Pydantic 模型缺失字段）
+        resp5 = client.post(
+            "/api/imports/pan115/needs-review/resolve",
+            json={"root_id": root_id, "unit_id": "card-nr-api", "work_title": "x"},
+        )
+        assert resp5.status_code == 422, resp5.text
+
+    def _make_resolveable_root(self, tmp_path, *, target: int, completed: int) -> tuple[str, str]:
+        """建可 resolve 的 pan115 root + needs_review unit（source_nodes 齐备）。"""
+        from app.catalog import store as catalog_store
+        from app.db.database import get_connection
+        from app.media_presets.service import ensure_provider_source_root
+
+        mount = tmp_path / "mount"
+        mount.mkdir(exist_ok=True)
+        root_id = ensure_provider_source_root(
+            provider="pan115",
+            local_mount_root=str(mount),
+            import_family="anime",
+            import_scope="",
+        )
+        assert root_id, "must create root"
+        catalog_store.set_baseline_target(root_id, target)
+        catalog_store.mark_baseline_completed(root_id, completed)
+        unit_id = f"card-rwk40-{target}-{completed}"
+        _make_unit(unit_id, root_id=root_id, boundary="/动画/未识别作品")
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET status='needs_review' WHERE unit_id=?", (unit_id,)
+        )
+        node_locator = str(mount / "未识别作品.S01E01.mkv")
+        conn.execute(
+            """
+            INSERT INTO source_nodes (
+                root_id, remote_path, parent_path, name, kind, size, mtime, etag,
+                content_hash, remote_id, logical_locator, provider_id, route_id,
+                tombstone
+            ) VALUES (?, '/动画/未识别作品/未识别作品.S01E01.mkv', '/动画/未识别作品',
+                '未识别作品.S01E01.mkv', 'file', 100, 1700000000, '', '', '',
+                ?, '', '', '')
+            """,
+            (root_id, node_locator),
+        )
+        conn.commit()
+        return root_id, unit_id
+
+    def test_resolve_rejects_cross_source(self, client, tmp_path):
+        """RWK-40（P0-3）：pan115 root + /baidu/needs-review/resolve → 409 + 0 mutation。
+
+        service 只验证「pan115 或 baidu」不够——baidu URL + pan115 root 会跨来源
+        修改。URL source 必须与 root.source_id 前缀一致。
+        """
+        from app.db.database import get_connection
+
+        root_id, unit_id = self._make_resolveable_root(tmp_path, target=1, completed=1)
+        resp = client.post(
+            "/api/imports/baidu/needs-review/resolve",
+            json={"root_id": root_id, "generation": 1, "unit_id": unit_id, "work_title": "未识别作品"},
+        )
+        assert resp.status_code == 409, resp.text
+        # 0 mutation：unit 仍 needs_review、无 current_revision_id、无 revision
+        row = get_connection().execute(
+            "SELECT status, current_revision_id FROM media_units WHERE unit_id=?", (unit_id,)
+        ).fetchone()
+        assert row["status"] == "needs_review"
+        assert not row["current_revision_id"]
+        # 0 revision 生成必须落到 import_revisions 表（不只依赖 unit.current_revision_id）
+        rev_count = get_connection().execute(
+            "SELECT COUNT(*) AS c FROM import_revisions WHERE unit_id=?", (unit_id,)
+        ).fetchone()["c"]
+        assert rev_count == 0, "跨来源 resolve 不得生成任何 revision"
+
+    def test_resolve_rejects_stale_generation(self, client, tmp_path):
+        """RWK-40（P0-3）：页面 generation=1 → target 前进到 2 → resolve gen=1 → 409 + 0 revision。
+
+        用户看到 A、期间导入 v2 使 target 前进，仍按旧页面提交 → 必须 409 拒绝。
+        """
+        from app.catalog import store as catalog_store
+        from app.db.database import get_connection
+
+        root_id, unit_id = self._make_resolveable_root(tmp_path, target=1, completed=1)
+        # 期间导入 v2 → target 前进到 2（completed 也推进，模拟成功 v2）
+        catalog_store.set_baseline_target(root_id, 2)
+        catalog_store.mark_baseline_completed(root_id, 2)
+        # 用户仍按页面 generation=1 提交
+        resp = client.post(
+            "/api/imports/pan115/needs-review/resolve",
+            json={"root_id": root_id, "generation": 1, "unit_id": unit_id, "work_title": "未识别作品"},
+        )
+        assert resp.status_code == 409, resp.text
+        # 0 mutation：unit 仍 needs_review、无 current_revision_id
+        row = get_connection().execute(
+            "SELECT status, current_revision_id FROM media_units WHERE unit_id=?", (unit_id,)
+        ).fetchone()
+        assert row["status"] == "needs_review"
+        assert not row["current_revision_id"]
+        # 0 revision 生成必须落到 import_revisions 表
+        rev_count = get_connection().execute(
+            "SELECT COUNT(*) AS c FROM import_revisions WHERE unit_id=?", (unit_id,)
+        ).fetchone()["c"]
+        assert rev_count == 0, "stale generation resolve 不得生成任何 revision"
+
+    def test_resolve_rejects_incomplete_baseline(self, client, tmp_path):
+        """RWK-40（P0-3）：target=2, completed=1 → resolve gen=2 → 409 + 0 revision。
+
+        partial/failed baseline（completed < target）即使恰好有 needs_review units
+        也不得 resolve——否则污染失败 generation、给用户假闭环。
+        """
+        from app.db.database import get_connection
+
+        root_id, unit_id = self._make_resolveable_root(tmp_path, target=2, completed=1)
+        resp = client.post(
+            "/api/imports/pan115/needs-review/resolve",
+            json={"root_id": root_id, "generation": 2, "unit_id": unit_id, "work_title": "未识别作品"},
+        )
+        assert resp.status_code == 409, resp.text
+        # 0 mutation
+        row = get_connection().execute(
+            "SELECT status, current_revision_id FROM media_units WHERE unit_id=?", (unit_id,)
+        ).fetchone()
+        assert row["status"] == "needs_review"
+        assert not row["current_revision_id"]
+        # 0 revision 生成必须落到 import_revisions 表
+        rev_count = get_connection().execute(
+            "SELECT COUNT(*) AS c FROM import_revisions WHERE unit_id=?", (unit_id,)
+        ).fetchone()["c"]
+        assert rev_count == 0, "incomplete baseline resolve 不得生成任何 revision"
+
+    def test_resolve_rejects_zero_generation(self, client, tmp_path):
+        """RWK-40（P0-3）：target=0（从未跑 baseline）→ resolve gen=0 → 409 + 0 mutation。
+
+        三零边界（generation=0, target=0, completed=0）不得因 0==0 放行——
+        否则在无基线 root 上生成孤儿 revision，confirm-root 无法确认它。
+        """
+        from app.db.database import get_connection
+
+        root_id, unit_id = self._make_resolveable_root(tmp_path, target=0, completed=0)
+        resp = client.post(
+            "/api/imports/pan115/needs-review/resolve",
+            json={"root_id": root_id, "generation": 0, "unit_id": unit_id, "work_title": "未识别作品"},
+        )
+        assert resp.status_code == 409, resp.text
+        row = get_connection().execute(
+            "SELECT status, current_revision_id FROM media_units WHERE unit_id=?", (unit_id,)
+        ).fetchone()
+        assert row["status"] == "needs_review"
+        assert not row["current_revision_id"]
+        rev_count = get_connection().execute(
+            "SELECT COUNT(*) AS c FROM import_revisions WHERE unit_id=?", (unit_id,)
+        ).fetchone()["c"]
+        assert rev_count == 0, "零基线 resolve 不得生成任何 revision"
 
 
 class TestTerminalRetryBarrierAndNoopSemantics:
