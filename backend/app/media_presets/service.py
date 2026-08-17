@@ -864,8 +864,84 @@ def build_plan_for_snapshot(snapshot):
     return plan
 
 
-def rebind_preset_source_root(preset: MediaLibraryPreset, source_root: str):
-    """用用户选择的精确目录重新解析当前归档，不创建新版本或触碰真实媒体。"""
+def rebuild_durable_baseline_for_rebind(
+    preset: MediaLibraryPreset, new_local_mount_root: str, tree_archive: str
+) -> dict:
+    """RWK-39（P0-2）：rebind 实际视频文件夹时在同一 SourceRoot 上重建 durable baseline。
+
+    保持 root_id / source_id / media_unit identity 不变，仅切换 local_locator、
+    推进 generation、用现有归档 TXT 重新跑 snapshot baseline。返回新
+    (confirmation_root_id, confirmation_generation) + revision_ids；旧 generation
+    的 patch/confirm 由 confirm-root 的 target/completed generation fence 自动 409 stale。
+    不得因更换本地播放挂载根就创建第二套 Provider source/root。
+    """
+    from app.catalog import store as catalog_store
+    from app.db.database import get_connection, init_db
+    from app.pipeline.discovery_handler import handle_discovery_scan
+
+    init_db()
+    root_id = (preset.catalog_root_id or "").strip()
+    if not root_id:
+        raise HTTPException(status_code=409, detail="该预设尚未建立 durable 来源根，无法 rebind")
+    root = catalog_store.get_source_root(root_id)
+    if root is None:
+        raise HTTPException(status_code=409, detail="durable 来源根不存在，请重新导入目录树")
+    if not tree_archive or not Path(tree_archive).is_file():
+        raise HTTPException(status_code=409, detail="当前媒体库的目录树归档不存在，请重新导入")
+    provider = preset.source
+    catalog_store.update_root_local_locator(
+        root_id, str(Path(new_local_mount_root).expanduser())
+    )
+    generation = catalog_store.bump_generation(root_id)
+    catalog_store.set_baseline_target(root_id, generation)
+    catalog_store.prepare_scan(root_id, generation=generation, mode="full")
+    payload = {
+        "root_id": root_id,
+        "generation": generation,
+        "source_id": root.source_id,
+        "input_path": tree_archive,
+        "scan_mode": "full",
+        "scan_channel": f"snapshot_{provider}",
+    }
+    summary = handle_discovery_scan(payload).get("summary", {})
+    rows = get_connection().execute(
+        """
+        SELECT r.revision_id FROM import_revisions r
+        JOIN media_units u ON u.unit_id = r.unit_id
+        WHERE u.root_id = ? AND r.source_generation = ? AND r.status = 'draft'
+        ORDER BY r.created_at ASC
+        """,
+        (root_id, generation),
+    ).fetchall()
+    revision_ids = [str(r["revision_id"]) for r in rows]
+    failed_count = int(summary.get("failed_count", 0) or 0)
+    preset.execution_authority = "durable_root"
+    preset.confirmation_state = "failed" if failed_count > 0 else "ready"
+    preset.updated_at = now_iso()
+    save_preset(preset)
+    return {
+        "root_id": root_id,
+        "generation": generation,
+        "status": "baseline_failed" if failed_count > 0 else "baseline_queued",
+        "revision_ids": revision_ids,
+        "confirmation_root_id": root_id,
+        "confirmation_generation": generation,
+        "summary": summary,
+    }
+
+
+def rebind_preset_source_root(
+    preset: MediaLibraryPreset, source_root: str, *, rebuild_durable: bool = True
+):
+    """用用户选择的精确目录重新解析当前归档，不创建新版本或触碰真实媒体。
+
+    durable TXT preset（execution_authority=durable_root 或已关联 catalog_root_id）
+    在 rebind 新实际视频文件夹时，额外在同一 SourceRoot 上重建 durable baseline：
+    local_locator 切换、generation 前进、旧 generation patch/confirm 自动 409 stale。
+    revalidate（同路径）传 rebuild_durable=False 不重建。
+    返回 (snapshot, plan, version, path_validation, baseline)；baseline 为 None
+    表示非 durable 预设或未重建（revalidate）。
+    """
     if not source_root.strip():
         raise HTTPException(status_code=400, detail="请先选择实际视频文件夹")
     selected_root = Path(source_root).expanduser()
@@ -901,7 +977,16 @@ def rebind_preset_source_root(preset: MediaLibraryPreset, source_root: str):
     preset.lifecycle_status = "draft"
     preset.updated_at = now_iso()
     save_preset(preset)
-    return snapshot, plan, version, path_validation
+    baseline = None
+    if (
+        rebuild_durable
+        and preset.source in {"pan115", "baidu"}
+        and (preset.execution_authority == "durable_root" or preset.catalog_root_id)
+    ):
+        baseline = rebuild_durable_baseline_for_rebind(
+            preset, str(selected_root), str(archive)
+        )
+    return snapshot, plan, version, path_validation, baseline
 
 
 def create_preset_record(

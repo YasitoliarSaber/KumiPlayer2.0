@@ -130,6 +130,89 @@ def _write_tree(tmp_path, text: str, name: str = "115目录树.txt") -> Path:
     return tree
 
 
+class TestRebindDurableSourceRoot:
+    """RWK-39（P0-2）：rebind 实际视频文件夹必须是完整 durable operation。
+
+    事故链：旧 local root → rebind 新 root → root_id 不变 → SourceRoot.local_locator
+    == 新 root → generation 前进 → durable revision item.real_path 全部落在新 root
+    → 旧 generation patch/confirm 409 stale → 新 generation confirm 成功。
+    不得因更换本地播放挂载根就创建第二套 Provider source/root。
+    """
+
+    def test_rebind_keeps_root_advances_generation_updates_locator(self, client, tmp_path):
+        from app.catalog import store as catalog_store
+        from app.db.database import get_connection
+        from app.import_plan import revision_store
+        from app.media_presets.store import list_presets
+
+        # 1) 旧挂载根导入 TXT → durable baseline（root_id, gen=1）
+        mount_old = tmp_path / "mount_old"
+        mount_old.mkdir()
+        tree = _write_tree(mount_old, _big_tree())
+        resp = client.post(
+            "/api/media-presets/import-local-tree",
+            json={"tree_path": str(tree), "import_family": "anime", "import_scope": ""},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        baseline1 = body.get("baseline", {})
+        assert baseline1.get("status") == "baseline_queued", body
+        root_id = baseline1["confirmation_root_id"]
+        gen1 = baseline1["confirmation_generation"]
+        assert gen1 >= 1
+        preset = next(p for p in list_presets() if p.catalog_root_id == root_id)
+        preset_id = preset.preset_id
+
+        # 2) rebind 到新实际视频文件夹
+        mount_new = tmp_path / "mount_new"
+        mount_new.mkdir()
+        resp2 = client.post(
+            f"/api/media-presets/{preset_id}/source-root",
+            json={"source_root": str(mount_new)},
+        )
+        assert resp2.status_code == 200, resp2.text
+        body2 = resp2.json()
+        baseline2 = body2["baseline"]
+        assert baseline2["confirmation_root_id"] == root_id, "rebind 不得创建第二套 root"
+        gen2 = baseline2["confirmation_generation"]
+        assert gen2 > gen1, "rebind 必须 generation 前进"
+
+        # 3) 同一 SourceRoot.local_locator 已切换到新根（root_id 不变）
+        root = catalog_store.get_source_root(root_id)
+        assert root.local_locator == str(mount_new), "local_locator 必须切到新根"
+
+        # 4) 新 generation 的 draft revision item.real_path 全部落在新根
+        conn = get_connection()
+        rev_rows = conn.execute(
+            "SELECT revision_id FROM import_revisions r "
+            "JOIN media_units u ON u.unit_id = r.unit_id "
+            "WHERE u.root_id = ? AND r.source_generation = ? AND r.status = 'draft'",
+            (root_id, gen2),
+        ).fetchall()
+        assert rev_rows, "rebind 后必须有新 generation 的 draft revisions"
+        for row in rev_rows:
+            plan = revision_store.load_plan(row["revision_id"])
+            assert plan is not None
+            for item in plan.items:
+                assert str(item.real_path).startswith(str(mount_new)), (
+                    f"real_path 未落在新根: {item.real_path}"
+                )
+
+        # 5) 旧 generation confirm-root → 409 stale（target 已前进）
+        resp_old = client.post(
+            "/api/imports/pan115/confirm-root",
+            json={"root_id": root_id, "generation": gen1},
+        )
+        assert resp_old.status_code == 409, "旧 generation confirm 必须被 409 stale"
+
+        # 6) 新 generation confirm-root → 200（baseline 已同步完成）
+        resp_new = client.post(
+            "/api/imports/pan115/confirm-root",
+            json={"root_id": root_id, "generation": gen2},
+        )
+        assert resp_new.status_code == 200, resp_new.text
+
+
 class TestNativePathBaseline:
     def test_import_local_tree_creates_full_baseline(self, client, tmp_path):
         """A：原生路径 TXT 导入 → 完整 Source Catalog baseline，0 OpenList 请求。"""

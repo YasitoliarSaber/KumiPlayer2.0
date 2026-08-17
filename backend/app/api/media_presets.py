@@ -534,12 +534,15 @@ def rebind_media_preset_source_root(preset_id: str, req: SourceRootRequest):
     preset = get_preset(preset_id)
     if preset is None:
         raise HTTPException(status_code=404, detail="媒体库预设不存在")
-    _, plan, version, _ = rebind_preset_source_root(preset, req.source_root.strip())
-    return {
+    _, plan, version, _, baseline = rebind_preset_source_root(preset, req.source_root.strip())
+    result = {
         "preset": preset_to_dict(preset),
         "version": asdict(version),
         "preview": _preview_to_dict(build_preview(plan)),
     }
+    if baseline:
+        result["baseline"] = baseline
+    return result
 
 
 @router.post("/{preset_id}/revalidate")
@@ -547,7 +550,11 @@ def revalidate_media_preset_source_root(preset_id: str):
     preset = get_preset(preset_id)
     if preset is None:
         raise HTTPException(status_code=404, detail="媒体库预设不存在")
-    _, plan, version, _ = rebind_preset_source_root(preset, preset.source_root)
+    # revalidate 用同路径重新校验 path_validation，不重建 durable baseline
+    # （baseline 已存在则保持；失败状态走重新导入恢复，见 P1-2）。
+    _, plan, version, _, _ = rebind_preset_source_root(
+        preset, preset.source_root, rebuild_durable=False
+    )
     return {
         "preset": preset_to_dict(preset),
         "version": asdict(version),

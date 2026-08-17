@@ -484,6 +484,25 @@ def update_root_metadata(root_id: str, *, import_family: str = "", import_scope:
     )
     get_connection().commit()
 
+
+def update_root_local_locator(root_id: str, local_locator: str) -> None:
+    """RWK-39（P0-2）：更新既有 SourceRoot 的本地播放挂载根（local_locator）。
+
+    rebind 实际视频文件夹时复用同一 root_id（不创建第二套 Provider source），
+    仅切换本地 playback locator；DiscoveryEngine._derive_real_path 据此拼出
+    新 real_path，generation 前进后旧 durable path 不再可执行（confirm-root
+    的 target/completed generation fence 自动 409 stale）。
+    """
+    if not root_id:
+        return
+    conn = get_connection()
+    conn.execute(
+        "UPDATE source_roots SET local_locator = ?, updated_at = ? WHERE root_id = ?",
+        (local_locator, now_iso(), root_id),
+    )
+    conn.commit()
+
+
 def bind_root_to_openlist(
     root_id: str,
     *,
