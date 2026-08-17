@@ -449,6 +449,23 @@ class TestOpenlistSourceCardLifecycle:
         # 来源卡保留“增量扫描”入口
         assert "rescanOpenlistPreset(preset)" in text
 
+    def test_ui_durable_root_card_keeps_continue_confirm_entry(self):
+        """RWK-39（P0-1）：durable_root TXT 卡重启后必须保留「继续确认」入口。
+
+        事故链：TXT baseline 完成 → durable revisions 仍 draft → 用户退出页面
+        → 重启 → preset 投影 needs_attention → 卡片必须有入口重新进入 durable
+        aggregate 确认页。resumePreset 已是 durable-safe（读 confirmation_root_id
+        + generation，调 getConfirmRootPreview），不得因防 legacy 把 durable 自己
+        的入口也隐藏。"""
+        src = Path(__file__).resolve().parents[2] / "src" / "pages" / "MediaManagementPage.tsx"
+        text = src.read_text(encoding="utf-8")
+        # durable_root + confirmation_ready 专用入口（与 legacy「继续处理」互斥）
+        assert "preset.execution_authority === 'durable_root'" in text
+        assert "preset.confirmation_ready === true" in text
+        assert "继续确认" in text
+        # 该入口必须调用 durable-safe resumePreset
+        assert "resumePreset(preset)" in text
+
 class TestMediaLibrariesCanonicalProjection:
     """CP9：media_libraries 是最后一个 SQLite projection——必须按 effective
     canonical identity 分组，raw work_id 相同但 canonical 不同绝不互相覆盖

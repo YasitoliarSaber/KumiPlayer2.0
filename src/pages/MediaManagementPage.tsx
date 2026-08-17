@@ -1556,6 +1556,11 @@ export default function MediaManagementPage() {
             {scrapeActive && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree} onClick={() => { setTaskKind('scrape'); setTask(scrapeTask); setStep('workbench'); }}>查看进度</Button>}
             {!scrapeActive && !scrapeFailed && preset.lifecycle_status === 'mirrored' && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree} onClick={() => void queuePresetScrape(preset)}>{scrapeStopped ? '继续刮削' : '加入刮削队列'}</Button>}
             {!scrapeActive && !preset.is_library_indexed && preset.execution_authority !== 'durable_root' && preset.lifecycle_status !== 'mirrored' && preset.lifecycle_status !== 'needs_attention' && preset.update_mode !== 'openlist_scan' && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree || repairingPresetId === preset.preset_id} onClick={() => void resumePreset(preset)}>{pathValidation?.ok === false ? '重新验证并继续' : '继续处理'}</Button>}
+            {/* RWK-39（P0-1）：durable_root TXT 卡的重启恢复入口——baseline 完成、
+                draft revisions 仍在时 lifecycle 投影为 needs_attention，不得因此隐藏；
+                confirmation_ready=true 时调 durable-safe resumePreset 进入 aggregate 确认页。
+                路径无效时由上方「选择实际文件夹并重新验证」（rebind）入口承接。 */}
+            {!scrapeActive && preset.update_mode === 'directory_tree' && preset.execution_authority === 'durable_root' && preset.confirmation_ready === true && preset.lifecycle_status !== 'mirrored' && !preset.is_library_indexed && pathValidation?.ok !== false && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree || repairingPresetId === preset.preset_id} onClick={() => void resumePreset(preset)}>继续确认</Button>}
             {preset.update_mode === 'local_scan'
               ? <Button className="media-preset-action secondary" appearance="secondary" icon={scanningFolder ? <Spinner size="tiny" /> : <ScanLine size={15} />} disabled={scanningFolder || uploadingTree} onClick={() => void rescanLocalPreset(preset)}>重新扫描本地目录</Button>
               : preset.update_mode === 'openlist_scan'
