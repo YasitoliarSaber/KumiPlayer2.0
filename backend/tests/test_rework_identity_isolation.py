@@ -479,6 +479,29 @@ class TestOpenlistSourceCardLifecycle:
         assert "preset.update_mode === 'directory_tree' && preset.execution_authority === 'durable_root'" in text
         assert "openlist_attention_count" in text
 
+    def test_ui_durable_txt_card_has_needs_review_resolve_entry(self):
+        """RWK-40（P0-2）：durable TXT 卡 attention 且 confirmation_ready=false 时，
+        必须显示「处理识别结果」入口（needs_review 无 revision 单元的 durable 处理
+        闭环：不能只显示 attention 数字而无处理路径）。"""
+        src = Path(__file__).resolve().parents[2] / "src" / "pages" / "MediaManagementPage.tsx"
+        text = src.read_text(encoding="utf-8")
+        # 入口按钮条件：durable_root + 未 ready + attention>0 + needs_review_units 非空
+        assert "preset.execution_authority === 'durable_root'" in text
+        assert "preset.confirmation_ready !== true" in text
+        assert "preset.openlist_needs_review_units" in text
+        assert "处理识别结果" in text
+        # resolve 必须走 durable 人工入口（生成可编辑版本 → confirmation_ready）
+        assert "resolveNeedsReview" in text
+        assert "importsApi.resolveNeedsReview" in text
+
+    def test_ui_durable_txt_card_resolve_opens_confirmation(self):
+        """RWK-40（P0-2）：resolve 成功后必须进入既有确认流程（resumePreset），
+        保证处理识别结果后能继续确认（与 P0-1 的「继续确认」闭环衔接）。"""
+        src = Path(__file__).resolve().parents[2] / "src" / "pages" / "MediaManagementPage.tsx"
+        text = src.read_text(encoding="utf-8")
+        assert "await loadPresets(true)" in text
+        assert "void resumePreset(preset)" in text
+
 class TestMediaLibrariesCanonicalProjection:
     """CP9：media_libraries 是最后一个 SQLite projection——必须按 effective
     canonical identity 分组，raw work_id 相同但 canonical 不同绝不互相覆盖
@@ -787,6 +810,87 @@ class TestOpenlistSourceCardDurableLifecycle:
         assert state["unit_count"] == 1
         assert state["attention_count"] == 1, "revision 行缺失的 unit 必须计入 attention"
         assert state["is_library_indexed"] is False
+
+    def test_needs_review_resolve_generates_durable_draft_revision(self, tmp_path):
+        """RWK-40（P0-2）：needs_review 无 revision 的 unit 可通过人工入口生成 durable draft revision。
+
+        事故链：TXT baseline 成功 → 识别失败 → needs_review unit 无 revision →
+        confirmation_ready=false → 无「继续确认」入口 → 重导同 TXT baseline_reused →
+        永久卡住。resolve 必须：source_nodes 重建 items → 生成 draft revision →
+        进入 root-generation 确认集合（preset_confirmation_state ready=true）。
+        """
+        from app.db.database import get_connection
+        from app.media_presets.service import (
+            preset_confirmation_state,
+            resolve_needs_review_unit,
+        )
+
+        # 建 root（source_id 前缀 pan115）供 DiscoveryEngine 读
+        from app.media_presets.service import ensure_provider_source_root
+
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        root_id = ensure_provider_source_root(
+            provider="pan115",
+            local_mount_root=str(mount),
+            import_family="anime",
+            import_scope="",
+        )
+        from app.catalog import store as catalog_store
+
+        catalog_store.set_baseline_target(root_id, 1)
+        catalog_store.mark_baseline_completed(root_id, 1)
+        if not root_id:  # pragma: no cover
+            from app.catalog import lifecycle
+            from app.catalog import store as catalog_store
+
+            norm = "/" + str(mount).replace("\\", "/").strip("/")
+            res = lifecycle.resolve_root_for_import(
+                "pan115-x", norm, import_family="anime", import_scope="",
+                local_locator=str(mount),
+            )
+            raise AssertionError(
+                f"root 建立失败: resolution={res.action} canonical={getattr(res, 'canonical_root_id', '')} "
+                f"covered={getattr(res, 'covered_root_ids', [])} mount={mount} norm={norm}"
+            )
+        assert root_id, "must create root"
+        # needs_review unit（无 revision）
+        _make_unit("card-needs-review", root_id=root_id, boundary="/动画/未识别作品")
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET status='needs_review' WHERE unit_id=?",
+            ("card-needs-review",),
+        )
+        # source_nodes：模拟 DiscoveryEngine 持久化过的边界内文件节点
+        node_locator = str(mount / "未识别作品.S01E01.mkv")
+        conn.execute(
+            """
+            INSERT INTO source_nodes (
+                root_id, remote_path, parent_path, name, kind, size, mtime, etag,
+                content_hash, remote_id, logical_locator, provider_id, route_id,
+                tombstone
+            ) VALUES (?, '/动画/未识别作品/未识别作品.S01E01.mkv', '/动画/未识别作品',
+                '未识别作品.S01E01.mkv', 'file', 100, 1700000000, '', '', '',
+                ?, '', '', '')
+            """,
+            (root_id, node_locator),
+        )
+        conn.commit()
+
+        # resolve：人工提供作品名 → 生成可编辑 draft revision
+        result = resolve_needs_review_unit(root_id, "card-needs-review", "未识别作品")
+        assert result["revision_id"], "must produce draft revision"
+        assert result["root_id"] == root_id
+
+        # draft revision 进入 root-generation 确认集合 → confirmation_ready=true
+        gen, ready = preset_confirmation_state(root_id)
+        assert ready is True, "resolve 后必须可确认（不再永久卡住）"
+
+        # unit 状态不再是 needs_review（resolve 内 init_db 可能重建连接，重新取）
+        row = get_connection().execute(
+            "SELECT status FROM media_units WHERE unit_id=?", ("card-needs-review",)
+        ).fetchone()
+        assert row["status"] != "needs_review"
 
 
 class TestTerminalRetryBarrierAndNoopSemantics:

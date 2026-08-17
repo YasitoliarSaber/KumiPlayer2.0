@@ -317,6 +317,48 @@ class ConfirmRootRequest(BaseModel):
     force: bool = False
 
 
+class ResolveNeedsReviewRequest(BaseModel):
+    """RWK-40（P0-2）：为 needs_review 无 revision 的 MediaUnit 人工生成可编辑版本。
+
+    root_id：该 unit 所属的 durable SourceRoot（前端从 preset.confirmation_root_id
+    读取）。work_title：用户人工填写的作品身份；为空时仅生成可编辑 draft
+    revision，由确认页逐项修正。
+    """
+    root_id: str
+    unit_id: str
+    work_title: str = ""
+
+
+@router.post("/{source}/needs-review/resolve")
+@_serialize_confirmation_authority
+def resolve_needs_review_unit(source: str, req: ResolveNeedsReviewRequest):
+    """RWK-40（P0-2）：needs_review 且无 revision 的 MediaUnit 的人工 durable 处理入口。
+
+    用户从来源卡 attention 进入，填写/选择作品身份后调用：服务端在既有
+    SourceRoot 上从 source_nodes 重建 snapshot → 生成可编辑 draft revision
+    → 进入 root-generation 确认集合（confirmation_ready=true）。不依赖 legacy plan。
+    """
+    if not req.root_id:
+        raise HTTPException(status_code=400, detail="缺少来源根")
+    if not req.unit_id:
+        raise HTTPException(status_code=400, detail="缺少识别单元")
+    from app.media_presets.service import resolve_needs_review_unit as _resolve
+
+    try:
+        result = _resolve(req.root_id, req.unit_id, req.work_title)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=f"识别单元处理失败: {exc}") from exc
+    return {
+        "revision_id": result["revision_id"],
+        "unit_id": result["unit_id"],
+        "root_id": result["root_id"],
+        "generation": result["generation"],
+        "source": source,
+    }
+
+
 @router.post("/{source}/confirm-root")
 @_serialize_confirmation_authority
 def confirm_root(source: str, req: ConfirmRootRequest):

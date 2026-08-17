@@ -69,6 +69,21 @@ export const importsApi = {
       `/api/imports/${source}/confirm-root-preview?root_id=${encodeURIComponent(rootId)}&generation=${generation}`
     ),
 
+  // RWK-40（P0-2）：needs_review 无 revision 的 MediaUnit 人工 durable 处理入口。
+  // 用户填写作品身份后生成可编辑 draft revision，进入 root-generation 确认集合
+  // （confirmation_ready=true），不依赖 legacy plan。
+  resolveNeedsReview: (source: string, rootId: string, unitId: string, workTitle: string) =>
+    api.post<{
+      revision_id: string
+      unit_id: string
+      root_id: string
+      generation: number
+      source: string
+    }>(
+      `/api/imports/${source}/needs-review/resolve`,
+      { root_id: rootId, unit_id: unitId, work_title: workTitle }
+    ),
+
   // 生成 diff
   createDiff: (source: string, params?: { old_snapshot_id?: string; new_snapshot_id?: string }) =>
     api.post<{

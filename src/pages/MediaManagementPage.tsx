@@ -148,6 +148,12 @@ export default function MediaManagementPage() {
   const [actionError, setActionError] = useState('');
   const [editingItem, setEditingItem] = useState<ImportPlanItem | null>(null);
   const [editDraft, setEditDraft] = useState({ work_title: '', season_number: '', episode_number: '', group_type: 'season' });
+  // RWK-40（P0-2）：needs_review 无 revision 单元的人工 durable 处理对话框。
+  // needsReviewUnits 来自 preset.openlist_needs_review_units 投影；resolve 后该
+  // unit 生成可编辑 draft revision → confirmation_ready=true → 进入确认页。
+  const [needsReviewPreset, setNeedsReviewPreset] = useState<MediaLibraryPreset | null>(null);
+  const [needsReviewTitles, setNeedsReviewTitles] = useState<Record<string, string>>({});
+  const [resolvingReviewUnitId, setResolvingReviewUnitId] = useState('');
   const refreshedWorkflowTaskRef = useRef('');
   const taskStartInFlightRef = useRef(false);
   const autoAdvanceScrapeRef = useRef('');
@@ -1302,6 +1308,37 @@ export default function MediaManagementPage() {
     }
   };
 
+  /** RWK-40（P0-2）：needs_review 无 revision 单元的人工 durable 处理入口。
+   * 用户填写/确认作品身份后，后端从既有 source_nodes 重建 snapshot 生成可编辑
+   * draft revision，进入 root-generation 确认集合（confirmation_ready=true）。
+   * resolve 成功后刷新预设列表，来源卡出现「继续确认」即可进入确认页。 */
+  const resolveNeedsReview = async (preset: MediaLibraryPreset, unitId: string) => {
+    if (resolvingReviewUnitId) return;
+    const title = (needsReviewTitles[unitId] ?? '').trim();
+    if (!title) {
+      setActionError(`请先填写「${preset.openlist_needs_review_units?.find((u) => u.unit_id === unitId)?.boundary ?? '识别单元'}」的作品名称`);
+      return;
+    }
+    const rootId = preset.confirmation_root_id ?? preset.catalog_root_id ?? '';
+    if (!rootId) {
+      setActionError('该预设尚未关联 durable 来源根，请先重新导入目录树');
+      return;
+    }
+    setResolvingReviewUnitId(unitId);
+    setActionError('');
+    try {
+      const result = await importsApi.resolveNeedsReview(preset.source, rootId, unitId, title);
+      setNeedsReviewTitles((value) => ({ ...value, [unitId]: '' }));
+      setUploadMessage(`已为「${title}」生成可编辑版本，请继续确认`);
+      await loadPresets(true);
+      void resumePreset(preset);
+    } catch (error) {
+      setActionError(`处理识别结果失败：${(error as Error).message}`);
+    } finally {
+      setResolvingReviewUnitId('');
+    }
+  };
+
   const rebindPresetRoot = async (preset: MediaLibraryPreset) => {
     if (repairingPresetId) return;
     const selected = await chooseCloudContentRoot(
@@ -1561,6 +1598,10 @@ export default function MediaManagementPage() {
                 confirmation_ready=true 时调 durable-safe resumePreset 进入 aggregate 确认页。
                 路径无效时由上方「选择实际文件夹并重新验证」（rebind）入口承接。 */}
             {!scrapeActive && preset.update_mode === 'directory_tree' && preset.execution_authority === 'durable_root' && preset.confirmation_ready === true && preset.lifecycle_status !== 'mirrored' && !preset.is_library_indexed && pathValidation?.ok !== false && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree || repairingPresetId === preset.preset_id} onClick={() => void resumePreset(preset)}>继续确认</Button>}
+            {/* RWK-40（P0-2）：needs_review 无 revision 单元的人工 durable 处理入口——
+                有 attention 但 confirmation_ready=false（无 draft revision 可确认）时，
+                必须先人工处理识别单元生成可编辑版本，再走「继续确认」。 */}
+            {!scrapeActive && preset.update_mode === 'directory_tree' && preset.execution_authority === 'durable_root' && preset.confirmation_ready !== true && (preset.openlist_attention_count ?? 0) > 0 && (preset.openlist_needs_review_units?.length ?? 0) > 0 && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree || repairingPresetId === preset.preset_id} onClick={() => { setNeedsReviewPreset(preset); setNeedsReviewTitles({}); }}>处理识别结果</Button>}
             {preset.update_mode === 'local_scan'
               ? <Button className="media-preset-action secondary" appearance="secondary" icon={scanningFolder ? <Spinner size="tiny" /> : <ScanLine size={15} />} disabled={scanningFolder || uploadingTree} onClick={() => void rescanLocalPreset(preset)}>重新扫描本地目录</Button>
               : preset.update_mode === 'openlist_scan'
@@ -2123,6 +2164,31 @@ export default function MediaManagementPage() {
       {step === 'maintenance' && <LibraryMaintenancePanel onCleared={() => loadPresets(true)} />}
 
       {editingItem && <div className="media-edit-backdrop" role="presentation"><section className="media-edit-dialog" role="dialog" aria-modal="true" aria-label="修正导入条目"><header><h2>处理识别结果</h2><Button appearance="subtle" onClick={() => setEditingItem(null)}>关闭</Button></header><label>作品名称<input value={editDraft.work_title} onChange={(event) => setEditDraft((value) => ({ ...value, work_title: event.target.value }))} /></label><div className="media-edit-grid"><label>分组<select value={editDraft.group_type} onChange={(event) => setEditDraft((value) => ({ ...value, group_type: event.target.value }))}><option value="season">季度</option><option value="special">特别篇</option><option value="movie">电影</option><option value="ignored">忽略</option></select></label><label>季度<input type="number" value={editDraft.season_number} onChange={(event) => setEditDraft((value) => ({ ...value, season_number: event.target.value }))} /></label><label>集数<input type="number" value={editDraft.episode_number} onChange={(event) => setEditDraft((value) => ({ ...value, episode_number: event.target.value }))} /></label></div><footer><Button appearance="secondary" onClick={() => setEditingItem(null)}>取消</Button><Button appearance="primary" onClick={() => void saveItem()}>保存处理结果</Button></footer></section></div>}
+      {/* RWK-40（P0-2）：needs_review 无 revision 单元的人工 durable 处理入口——
+          列出识别失败的具体单元（boundary 路径），用户填写作品名称后 resolve 生成
+          可编辑 draft revision，进入 root-generation 确认集合（不依赖 legacy plan）。 */}
+      {needsReviewPreset && (
+        <div className="media-edit-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setNeedsReviewPreset(null); }}>
+          <section className="media-edit-dialog media-needs-review-dialog" role="dialog" aria-modal="true" aria-label="处理识别结果">
+            <header><div><span className="media-import-step-label">人工处理</span><h2>{getPresetDisplayName(needsReviewPreset)}</h2><p>以下识别单元未能自动确认作品身份，请填写作品名称后生成可编辑版本，再进入确认页核对。</p></div><Button appearance="subtle" onClick={() => setNeedsReviewPreset(null)}>关闭</Button></header>
+            <div className="media-needs-review-list">
+              {(needsReviewPreset.openlist_needs_review_units ?? []).map((unit) => (
+                <div key={unit.unit_id} className="media-needs-review-unit">
+                  <label className="media-needs-review-boundary" title={unit.boundary}>{unit.boundary || unit.work_key}</label>
+                  <input
+                    value={needsReviewTitles[unit.unit_id] ?? ''}
+                    placeholder="填写作品名称"
+                    onChange={(event) => setNeedsReviewTitles((value) => ({ ...value, [unit.unit_id]: event.target.value }))}
+                    disabled={Boolean(resolvingReviewUnitId)}
+                  />
+                  <Button appearance="primary" disabled={Boolean(resolvingReviewUnitId)} onClick={() => void resolveNeedsReview(needsReviewPreset, unit.unit_id)}>{resolvingReviewUnitId === unit.unit_id ? '处理中…' : '生成可编辑版本'}</Button>
+                </div>
+              ))}
+            </div>
+            <footer><Button appearance="secondary" onClick={() => setNeedsReviewPreset(null)}>取消</Button></footer>
+          </section>
+        </div>
+      )}
       {pendingSeasonalImport && <div className="media-edit-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPendingSeasonalImport(null); }}>
         <section className="media-edit-dialog media-seasonal-confirm-dialog" role="alertdialog" aria-modal="true" aria-label="确认新番导入">
           <header><div><span className="media-import-step-label">高风险分类</span><h2>确认按新番导入？</h2></div></header>

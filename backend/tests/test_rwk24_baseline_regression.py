@@ -255,6 +255,94 @@ class TestRebindDurableSourceRoot:
         )
         assert resp_new.status_code == 200, resp_new.text
 
+    def test_v2_update_after_rebind_keeps_root_and_media_unit_identity(self, client, tmp_path):
+        """RWK-40（P0-1）：rebind 后下一次 TXT 更新必须仍在原 SourceRoot 上重建。
+
+        事故链：v1 old mount → rebind new mount → v2 TXT update 走 failed recovery
+        → 若再从 local_mount 重新派生 source/root，会创建 R2 并改绑 catalog_root_id，
+        导致 binding/baseline history/media_units 分裂。必须保持 root_id / source_id /
+        catalog_root_id / MediaUnit ids 不变，generation 只在原 root 前进。
+        """
+        from app.catalog import store as catalog_store
+        from app.db.database import get_connection
+
+        # 1) v1 挂载根导入 TXT → durable baseline（root R1, source_id S1）
+        mount_old = tmp_path / "mount_old"
+        mount_old.mkdir()
+        tree = _write_tree(mount_old, _big_tree())
+        resp1 = client.post(
+            "/api/media-presets/import-local-tree",
+            json={"tree_path": str(tree), "import_family": "anime", "import_scope": ""},
+        )
+        assert resp1.status_code == 200, resp1.text
+        baseline1 = resp1.json().get("baseline", {})
+        assert baseline1.get("status") == "baseline_queued", resp1.text
+        root_id = baseline1["confirmation_root_id"]
+        source_id_before = catalog_store.get_source_root(root_id).source_id
+        unit_ids_before = {
+            row["unit_id"]
+            for row in get_connection().execute(
+                "SELECT unit_id FROM media_units WHERE root_id = ?", (root_id,)
+            ).fetchall()
+        }
+        assert unit_ids_before, "v1 必须有 media_units"
+        preset = next(p for p in list_presets() if p.catalog_root_id == root_id)
+        preset_id = preset.preset_id
+
+        # 2) rebind 新挂载根 → 仍 R1，gen 前进
+        mount_new = tmp_path / "mount_new"
+        mount_new.mkdir()
+        resp2 = client.post(
+            f"/api/media-presets/{preset_id}/source-root",
+            json={"source_root": str(mount_new)},
+        )
+        assert resp2.status_code == 200, resp2.text
+        assert resp2.json()["baseline"]["confirmation_root_id"] == root_id
+
+        # 3) 把 preset 打成 failed，模拟 rebind 后 v2 更新触发 recovery
+        from app.media_presets.store import get_preset as _gp, save_preset as _sp
+
+        p = _gp(preset_id)
+        p.confirmation_state = "failed"
+        _sp(p)
+
+        # 4) v2 TXT 更新（同 source，内容变化触发非 unchanged 重建）
+        tree_v2 = _write_tree(tmp_path / "mount_new", _big_tree() + "| | |-额外作品1\n| | | |-额外作品1.S01E01.mkv\n")
+        resp3 = client.post(
+            f"/api/media-presets/{preset_id}/updates-from-path",
+            json={"tree_path": str(tree_v2), "expected_source": "pan115"},
+        )
+        # 响应可能是 baseline_queued / baseline_reused / baseline_failed；核心断言在数据库
+        # 4a) root_id 不变：绝不允许创建 R2
+        assert resp3.status_code in (200, 409), resp3.text
+
+        # 5) catalog_root_id / source_id / media_unit ids 全部不变（不分裂）
+        p_after = _gp(preset_id)
+        assert p_after.catalog_root_id == root_id, (
+            f"v2 update 不得改绑 catalog_root_id: {p_after.catalog_root_id} != {root_id}"
+        )
+        root_after = catalog_store.get_source_root(root_id)
+        assert root_after is not None, "R1 必须仍然存在"
+        assert root_after.source_id == source_id_before, "source_id 不得分裂"
+        # media_units 复用既有 unit（同一 root 下 unit_id 集合不产生新分裂身份）
+        unit_ids_after = {
+            row["unit_id"]
+            for row in get_connection().execute(
+                "SELECT unit_id FROM media_units WHERE root_id = ?", (root_id,)
+            ).fetchall()
+        }
+        assert unit_ids_before == unit_ids_after or unit_ids_before.issubset(unit_ids_after), (
+            "media_units 身份必须复用，不得因换 root 产生新分裂单元"
+        )
+        # 6) 全程只存在一个 SourceRoot（root_id 唯一）
+        rows = get_connection().execute(
+            "SELECT COUNT(*) AS c FROM source_roots WHERE source_id = ?",
+            (source_id_before,),
+        ).fetchall()
+        assert int(rows[0]["c"]) == 1, "同一 source_id 只能有一个 SourceRoot"
+        # 7) rebind 后 local_locator 已是新根
+        assert root_after.local_locator == str(mount_new)
+
 
 class TestNativePathBaseline:
     def test_import_local_tree_creates_full_baseline(self, client, tmp_path):

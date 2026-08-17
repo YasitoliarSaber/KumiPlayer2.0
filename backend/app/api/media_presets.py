@@ -319,23 +319,35 @@ def _ensure_tree_baseline(
     try:
         from app.media_presets.service import (
             bootstrap_provider_catalog_sync,
+            rebuild_provider_catalog_sync,
             now_iso,
             CONFIRMATION_AUTHORITY_LOCK,
         )
         from app.media_presets.store import save_preset as _save_preset
 
-        # RWK-34：同步执行（不创建 queued job）——单次 handler 调用，
-        # 无 worker 双执行窗口、无重复 draft revision。
+        # RWK-40（P0-1）：已有 durable root 的后续 TXT baseline/recovery 必须
+        # 以 preset.catalog_root_id 为权威 root 身份，在既有 SourceRoot 上重建
+        # （rebuild_provider_catalog_sync），绝不从 local_mount_root 重新派生
+        # source/root——否则 rebind 换挂载后 v2 更新会创建第二套 R2 并改绑。
+        # 仅首次导入（无 catalog_root_id）才走 bootstrap 从 local mount 建根。
+        root_id = (preset.catalog_root_id or "").strip()
         with CONFIRMATION_AUTHORITY_LOCK:
-            info = bootstrap_provider_catalog_sync(
-                provider=preset.source,
-                tree_archive=tree_archive,
-                local_mount_root=local_mount_root,
-                import_family=import_family,
-                import_scope=import_scope,
-            )
-        if info["root_id"] and preset.catalog_root_id != info["root_id"]:
-            preset.catalog_root_id = info["root_id"]
+            if root_id:
+                info = rebuild_provider_catalog_sync(
+                    root_id=root_id,
+                    tree_archive=tree_archive,
+                    local_locator=local_mount_root,
+                )
+            else:
+                info = bootstrap_provider_catalog_sync(
+                    provider=preset.source,
+                    tree_archive=tree_archive,
+                    local_mount_root=local_mount_root,
+                    import_family=import_family,
+                    import_scope=import_scope,
+                )
+                if info["root_id"] and preset.catalog_root_id != info["root_id"]:
+                    preset.catalog_root_id = info["root_id"]
         # RWK-39：执行权威持久化——一旦进入 durable 模式，restart 后也
         # 绝不重新识别为 legacy-executable。
         preset.execution_authority = "durable_root"

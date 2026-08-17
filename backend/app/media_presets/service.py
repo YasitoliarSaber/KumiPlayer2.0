@@ -60,7 +60,8 @@ def openlist_preset_state(catalog_root_id: str, *, require_all: bool = False) ->
         return empty
     conn = get_connection()
     units = conn.execute(
-        "SELECT unit_id, current_revision_id, status FROM media_units WHERE root_id = ?",
+        "SELECT unit_id, current_revision_id, status, boundary, work_key "
+        "FROM media_units WHERE root_id = ?",
         (catalog_root_id,),
     ).fetchall()
     if not units:
@@ -117,6 +118,7 @@ def openlist_preset_state(catalog_root_id: str, *, require_all: bool = False) ->
             (f'%"unit_id": "{unit_id}"%',),
         ).fetchone()
 
+    needs_review_units: list[dict] = []
     for unit in units:
         revision_id = str(unit["current_revision_id"] or "")
         unit_id = str(unit["unit_id"] or "")
@@ -124,9 +126,17 @@ def openlist_preset_state(catalog_root_id: str, *, require_all: bool = False) ->
         if not revision_id:
             # needs_review 且无 revision 的 unit 不得静默跳过——boundary 未识别 /
             # evidence 需复核时 DiscoveryEngine 会建 needs_review unit 但不生成
-            # revision，必须计入 attention 让用户知道有需处理项（P1-1）。
+            # revision，必须计入 attention 让用户知道有需处理项（P1-1/P0-2）。
             if unit_status == "needs_review":
                 attention_count += 1
+                needs_review_units.append(
+                    {
+                        "unit_id": unit_id,
+                        "boundary": str(unit["boundary"] or ""),
+                        "work_key": str(unit["work_key"] or ""),
+                        "status": unit_status,
+                    }
+                )
             continue
         rev = conn.execute(
             "SELECT status FROM import_revisions WHERE revision_id = ?", (revision_id,)
@@ -188,6 +198,7 @@ def openlist_preset_state(catalog_root_id: str, *, require_all: bool = False) ->
         "unit_count": unit_count,
         "attention_count": attention_count,
         "is_library_indexed": indexed,
+        "needs_review_units": needs_review_units,
     }
 
 
@@ -430,6 +441,7 @@ def preset_to_dict(preset: MediaLibraryPreset) -> dict:
         data["is_library_indexed"] = state["is_library_indexed"]
         data["openlist_unit_count"] = state["unit_count"]
         data["openlist_attention_count"] = state["attention_count"]
+        data["openlist_needs_review_units"] = state.get("needs_review_units") or []
         if durable_source_card:
             if state["is_library_indexed"]:
                 data["lifecycle_status"] = "ready"
@@ -872,36 +884,45 @@ def build_plan_for_snapshot(snapshot):
     return plan
 
 
-def rebuild_durable_baseline_for_rebind(
-    preset: MediaLibraryPreset, new_local_mount_root: str, tree_archive: str
+def rebuild_provider_catalog_sync(
+    *,
+    root_id: str,
+    tree_archive: str,
+    local_locator: str,
 ) -> dict:
-    """RWK-39（P0-2）：rebind 实际视频文件夹时在同一 SourceRoot 上重建 durable baseline。
+    """RWK-40（P0-1）：在既有 SourceRoot 上重建 Provider TXT baseline（root-scoped）。
 
-    保持 root_id / source_id / media_unit identity 不变，仅切换 local_locator、
-    推进 generation、用现有归档 TXT 重新跑 snapshot baseline。返回新
-    (confirmation_root_id, confirmation_generation) + revision_ids；旧 generation
-    的 patch/confirm 由 confirm-root 的 target/completed generation fence 自动 409 stale。
-    不得因更换本地播放挂载根就创建第二套 Provider source/root。
+    与 ``bootstrap_provider_catalog_sync`` 的区别：**已有 durable preset 的所有
+    后续 TXT baseline（v2 update / same-TXT recovery / rebind）都必须走这里**——
+    以 ``root_id`` 为权威身份，绝不从 local_mount_root 重新推导 source/root 身份
+    （那是首次创建才做的）。保持 root_id / source_id / media_unit identity 不变，
+    仅更新 local_locator、推进 generation、重跑 snapshot baseline。
+
+    返回与 bootstrap 同构的 {"root_id", "generation", "source_id", "summary",
+    "revision_ids"}，供调用方继续统一处理 confirmation state。
     """
     from app.catalog import store as catalog_store
     from app.db.database import get_connection, init_db
     from app.pipeline.discovery_handler import handle_discovery_scan
 
     init_db()
-    root_id = (preset.catalog_root_id or "").strip()
     if not root_id:
-        raise HTTPException(status_code=409, detail="该预设尚未建立 durable 来源根，无法 rebind")
+        raise HTTPException(status_code=409, detail="缺少 durable 来源根")
     root = catalog_store.get_source_root(root_id)
     if root is None:
         raise HTTPException(status_code=409, detail="durable 来源根不存在，请重新导入目录树")
     if not tree_archive or not Path(tree_archive).is_file():
         raise HTTPException(status_code=409, detail="当前媒体库的目录树归档不存在，请重新导入")
-    provider = preset.source
-    # RWK-39：rebind 重建与 import/update 的 baseline 重建共用同一把 authority 锁，
-    # 防止并发 rebind + import 竞态导致 local_locator/generation 相互覆盖。
+    source_id = str(root.source_id or "")
+    if source_id.startswith("pan115"):
+        provider = "pan115"
+    elif source_id.startswith("baidu"):
+        provider = "baidu"
+    else:
+        raise HTTPException(status_code=409, detail="该来源根不是可重扫的 Provider 来源")
     with CONFIRMATION_AUTHORITY_LOCK:
         catalog_store.update_root_local_locator(
-            root_id, str(Path(new_local_mount_root).expanduser())
+            root_id, str(Path(local_locator).expanduser())
         )
         generation = catalog_store.bump_generation(root_id)
         catalog_store.set_baseline_target(root_id, generation)
@@ -909,7 +930,7 @@ def rebuild_durable_baseline_for_rebind(
         payload = {
             "root_id": root_id,
             "generation": generation,
-            "source_id": root.source_id,
+            "source_id": source_id,
             "input_path": tree_archive,
             "scan_mode": "full",
             "scan_channel": f"snapshot_{provider}",
@@ -925,19 +946,44 @@ def rebuild_durable_baseline_for_rebind(
         (root_id, generation),
     ).fetchall()
     revision_ids = [str(r["revision_id"]) for r in rows]
-    failed_count = int(summary.get("failed_count", 0) or 0)
+    return {
+        "root_id": root_id,
+        "generation": generation,
+        "source_id": source_id,
+        "summary": summary,
+        "revision_ids": revision_ids,
+    }
+
+
+def rebuild_durable_baseline_for_rebind(
+    preset: MediaLibraryPreset, new_local_mount_root: str, tree_archive: str
+) -> dict:
+    """RWK-39/40：rebind 实际视频文件夹时在同一 SourceRoot 上重建 durable baseline。
+
+    复用 ``rebuild_provider_catalog_sync``（root-scoped，绝不再派生 root 身份）；
+    在既有 root 上切换 local_locator、推进 generation、用归档 TXT 重跑 baseline。
+    返回新 (confirmation_root_id, confirmation_generation) + revision_ids；旧
+    generation 的 patch/confirm 由 confirm-root 的 generation fence 自动 409 stale。
+    """
+    root_id = (preset.catalog_root_id or "").strip()
+    info = rebuild_provider_catalog_sync(
+        root_id=root_id,
+        tree_archive=tree_archive,
+        local_locator=new_local_mount_root,
+    )
+    failed_count = int(info["summary"].get("failed_count", 0) or 0)
     preset.execution_authority = "durable_root"
     preset.confirmation_state = "failed" if failed_count > 0 else "ready"
     preset.updated_at = now_iso()
     save_preset(preset)
     return {
-        "root_id": root_id,
-        "generation": generation,
+        "root_id": info["root_id"],
+        "generation": info["generation"],
         "status": "baseline_failed" if failed_count > 0 else "baseline_queued",
-        "revision_ids": revision_ids,
-        "confirmation_root_id": root_id,
-        "confirmation_generation": generation,
-        "summary": summary,
+        "revision_ids": info["revision_ids"],
+        "confirmation_root_id": info["root_id"],
+        "confirmation_generation": info["generation"],
+        "summary": info["summary"],
     }
 
 
@@ -1387,4 +1433,89 @@ def update_preset_from_tree(
     version.diff_id = diff.diff_id
     save_preset(preset)
     return cumulative, diff
+
+
+def resolve_needs_review_unit(root_id: str, unit_id: str, work_title: str) -> dict:
+    """RWK-40（P0-2）：为 needs_review 且无 revision 的 MediaUnit 生成可编辑 draft revision。
+
+    事故链：TXT baseline 完整成功 → 作品识别失败 → needs_review unit 无 revision
+    → confirmation_ready=false → durable「继续确认」按钮不存在 → 重导相同 TXT 又
+    baseline_reused → 永久卡住。本函数让这类 unit 通过 DiscoveryEngine 从既有
+    source_nodes 重建 snapshot/items（scanner 为 None 仅读 source_nodes，0 网络），
+    生成 draft revision；用户提供 work_title 时复用 patch 规则强制写回作品身份。
+    生成后该 unit 进入 root-generation 确认集合（confirmation_ready=true），后续
+    确认走 confirm-root，**绝不依赖 legacy plan**。
+    """
+    from app.catalog import store as catalog_store
+    from app.catalog.discovery import DiscoveryEngine
+    from app.db.database import get_connection, init_db
+    from app.import_plan import revision_store
+
+    init_db()
+    if not unit_id:
+        raise HTTPException(status_code=400, detail="缺少识别单元")
+    root = catalog_store.get_source_root(root_id)
+    if root is None:
+        raise HTTPException(status_code=404, detail="来源根不存在")
+    conn = get_connection()
+    unit = conn.execute(
+        "SELECT * FROM media_units WHERE unit_id = ? AND root_id = ?",
+        (unit_id, root_id),
+    ).fetchone()
+    if unit is None:
+        raise HTTPException(status_code=404, detail="识别单元不存在")
+    if str(unit["status"]) != "needs_review":
+        raise HTTPException(status_code=409, detail="该识别单元不在待处理状态")
+    revision_id = str(unit["current_revision_id"] or "")
+    if revision_id:
+        rev = revision_store.load_revision(revision_id)
+        if rev and str(rev.get("status")) in ("draft", "confirmed", "executed"):
+            raise HTTPException(status_code=409, detail="该识别单元已有可处理版本")
+
+    target = int(getattr(root, "baseline_target_generation", 0) or 0)
+    if target <= 0:
+        raise HTTPException(status_code=409, detail="该来源根没有进行中的目录树基线")
+
+    engine = DiscoveryEngine(
+        None,
+        source_id=str(root.source_id or ""),
+        root_id=root_id,
+        generation=target,
+    )
+    boundary = str(unit["boundary"] or "")
+    result = engine._process_unit(
+        {
+            "boundary": boundary,
+            "work_key": str(unit["work_key"] or boundary),
+            "work_title": "",
+        },
+        should_cancel=None,
+    )
+    new_revision_id = str(result.get("revision_id") or "")
+    if not new_revision_id:
+        raise HTTPException(
+            status_code=409,
+            detail="该识别单元下没有可入库视频，无法生成可处理版本",
+        )
+    if work_title and work_title.strip():
+        cleaned_title = work_title.strip()
+        loaded = revision_store.load_plan(new_revision_id)
+        items = loaded.items if loaded else []
+        for item in items:
+            if getattr(item, "resource_type", "") == "video" and getattr(item, "action", "") == "generate_strm":
+                try:
+                    revision_store.patch_draft_revision_item(
+                        new_revision_id,
+                        item.id,
+                        {"work_title": cleaned_title, "needs_review": False, "warnings": []},
+                    )
+                except Exception:
+                    # 单 item patch 失败不阻塞整体（人工确认页仍可逐项修正）
+                    pass
+    return {
+        "revision_id": new_revision_id,
+        "unit_id": unit_id,
+        "root_id": root_id,
+        "generation": target,
+    }
 
