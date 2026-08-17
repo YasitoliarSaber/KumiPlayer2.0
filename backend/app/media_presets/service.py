@@ -60,7 +60,7 @@ def openlist_preset_state(catalog_root_id: str, *, require_all: bool = False) ->
         return empty
     conn = get_connection()
     units = conn.execute(
-        "SELECT unit_id, current_revision_id FROM media_units WHERE root_id = ?",
+        "SELECT unit_id, current_revision_id, status FROM media_units WHERE root_id = ?",
         (catalog_root_id,),
     ).fetchall()
     if not units:
@@ -120,12 +120,20 @@ def openlist_preset_state(catalog_root_id: str, *, require_all: bool = False) ->
     for unit in units:
         revision_id = str(unit["current_revision_id"] or "")
         unit_id = str(unit["unit_id"] or "")
+        unit_status = str(unit["status"] or "")
         if not revision_id:
+            # needs_review 且无 revision 的 unit 不得静默跳过——boundary 未识别 /
+            # evidence 需复核时 DiscoveryEngine 会建 needs_review unit 但不生成
+            # revision，必须计入 attention 让用户知道有需处理项（P1-1）。
+            if unit_status == "needs_review":
+                attention_count += 1
             continue
         rev = conn.execute(
             "SELECT status FROM import_revisions WHERE revision_id = ?", (revision_id,)
         ).fetchone()
         if rev is None:
+            # current_revision_id 指向的 revision 行缺失（数据不一致）→ attention
+            attention_count += 1
             continue
         rev_status = str(rev["status"] or "")
         if rev_status == "draft":

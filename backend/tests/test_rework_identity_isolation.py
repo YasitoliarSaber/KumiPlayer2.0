@@ -466,6 +466,19 @@ class TestOpenlistSourceCardLifecycle:
         # 该入口必须调用 durable-safe resumePreset
         assert "resumePreset(preset)" in text
 
+    def test_ui_durable_txt_card_shows_attention(self):
+        """RWK-39（P1-1）：durable TXT 来源卡必须显示 attention（不只 OpenList 卡）。
+
+        needs_review 无 revision 的 unit 投影成 attention_count 后，TXT 来源卡
+        也必须可见，给用户真实处理入口（继续确认 / 重新导入），而非只有 OpenList 卡
+        才展示 openlist_attention_count。
+        """
+        src = Path(__file__).resolve().parents[2] / "src" / "pages" / "MediaManagementPage.tsx"
+        text = src.read_text(encoding="utf-8")
+        # attention 显示条件必须覆盖 durable directory_tree 卡
+        assert "preset.update_mode === 'directory_tree' && preset.execution_authority === 'durable_root'" in text
+        assert "openlist_attention_count" in text
+
 class TestMediaLibrariesCanonicalProjection:
     """CP9：media_libraries 是最后一个 SQLite projection——必须按 effective
     canonical identity 分组，raw work_id 相同但 canonical 不同绝不互相覆盖
@@ -732,6 +745,48 @@ class TestOpenlistSourceCardDurableLifecycle:
         state = openlist_preset_state("root-x")
         assert state["is_library_indexed"] is False
         assert state["attention_count"] == 1
+
+    def test_needs_review_unit_without_revision_counts_as_attention(self):
+        """RWK-39（P1-1）：needs_review 且无 revision 的 unit 不得被静默跳过。
+
+        boundary 未识别 / evidence 需复核时 DiscoveryEngine 会建 needs_review unit
+        但不生成 revision；projector 必须计入 attention，让用户知道有需处理项，
+        否则会出现 published_count != unit_count 但 attention=0、lifecycle 不变
+        needs_attention、用户不知道哪一项需要处理的 UX 死角。
+        """
+        from app.db.database import get_connection
+        from app.media_presets.service import openlist_preset_state
+
+        _make_unit("card-review", root_id="root-x")  # 默认 discovered + 无 revision
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET status='needs_review', current_revision_id='' "
+            "WHERE unit_id=?",
+            ("card-review",),
+        )
+        conn.commit()
+        state = openlist_preset_state("root-x")
+        assert state["unit_count"] == 1
+        assert state["attention_count"] == 1, "needs_review 无 revision 的 unit 必须计入 attention"
+        assert state["is_library_indexed"] is False
+
+    def test_inconsistent_revision_row_missing_counts_as_attention(self):
+        """RWK-39（P1-1）：current_revision_id 指向的 revision 行缺失（数据不一致）→ attention。"""
+        from app.db.database import get_connection
+        from app.media_presets.service import openlist_preset_state
+
+        _make_unit("card-inconsistent", root_id="root-x")
+        conn = get_connection()
+        # current_revision_id 指向一个不存在的 revision_id（数据不一致）
+        conn.execute(
+            "UPDATE media_units SET current_revision_id='rev-missing' WHERE unit_id=?",
+            ("card-inconsistent",),
+        )
+        conn.commit()
+        state = openlist_preset_state("root-x")
+        assert state["unit_count"] == 1
+        assert state["attention_count"] == 1, "revision 行缺失的 unit 必须计入 attention"
+        assert state["is_library_indexed"] is False
 
 
 class TestTerminalRetryBarrierAndNoopSemantics:
