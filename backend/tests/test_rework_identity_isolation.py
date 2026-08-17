@@ -1260,6 +1260,97 @@ class TestOpenlistSourceCardDurableLifecycle:
         gen, ready = preset_confirmation_state(root_id)
         assert gen == 2 and ready is False
 
+    def test_v1_draft_plus_v2_draft_counts_unit_once(self, tmp_path):
+        """RWK-40（P0 边界）：v1 仍 draft（未确认）+ v2 新 draft（同 unit）→ attention 按 unit 计=1。
+
+        防止 projector 对两代 draft 重复计数：target generation 分支先命中并
+        continue，旧 current_revision_id（v1 draft）不得再计一次。
+        """
+        from app.catalog import store as catalog_store
+        from app.db.database import get_connection
+        from app.import_plan import revision_store
+        from app.media_presets.service import ensure_provider_source_root, openlist_preset_state
+
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        root_id = ensure_provider_source_root(
+            provider="pan115", local_mount_root=str(mount),
+            import_family="anime", import_scope="",
+        )
+        catalog_store.set_baseline_target(root_id, 1)
+        catalog_store.mark_baseline_completed(root_id, 1)
+        # v1 draft（未确认），current_revision_id 指向它
+        rev1 = self._root_with_unit("card-v1d2d", root_id=root_id, rev_status="draft")
+        # v2：target=2，内容变化生成新 draft
+        catalog_store.set_baseline_target(root_id, 2)
+        catalog_store.mark_baseline_completed(root_id, 2)
+        rev2 = revision_store.create_revision(
+            unit_id="card-v1d2d", source_generation=2,
+            items=[_item("card-v1d2d/Season 1/card-v1d2d.mkv"),
+                   _item("card-v1d2d/Season 1/card-v1d2d.EP02.mkv")],
+            status="draft",
+        )
+        assert rev2["revision_id"] != rev1
+        # 投影：target=2 有 draft → attention=1（只计一次，不叠加 v1 draft）
+        state = openlist_preset_state(root_id, require_all=True)
+        assert state["attention_count"] == 1, "两代 draft 同一 unit 只计一次 attention"
+        assert state["is_library_indexed"] is False
+
+    def test_v1_draft_plus_v2_needs_review_resolve_succeeds(self, client, tmp_path):
+        """RWK-40（P0 边界）：v1 仍 draft（旧）+ v2 needs_review → resolve gen=2 仍 200。
+
+        旧 v1 draft（gen1）不得阻止当前 target generation 的人工处理——
+        existing 查询按 source_generation=target 过滤，gen1 draft 不在集合内。
+        """
+        from app.catalog import store as catalog_store
+        from app.db.database import get_connection
+        from app.media_presets.service import ensure_provider_source_root, openlist_preset_state
+
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        root_id = ensure_provider_source_root(
+            provider="pan115", local_mount_root=str(mount),
+            import_family="anime", import_scope="",
+        )
+        catalog_store.set_baseline_target(root_id, 1)
+        catalog_store.mark_baseline_completed(root_id, 1)
+        self._root_with_unit("card-v1d2nr", root_id=root_id, rev_status="draft")
+        # v2：target=2，unit 识别失败 → needs_review（旧 v1 draft 指针仍在）
+        catalog_store.set_baseline_target(root_id, 2)
+        catalog_store.mark_baseline_completed(root_id, 2)
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET status='needs_review', boundary='/动画/未识别作品' "
+            "WHERE unit_id=?",
+            ("card-v1d2nr",),
+        )
+        conn.commit()
+        state = openlist_preset_state(root_id, require_all=True)
+        assert state["attention_count"] == 1
+        assert any(u["unit_id"] == "card-v1d2nr" for u in state["needs_review_units"])
+        # source_nodes（resolve 需要）
+        node_locator = str(mount / "未识别作品.S01E01.mkv")
+        conn.execute(
+            """
+            INSERT INTO source_nodes (
+                root_id, remote_path, parent_path, name, kind, size, mtime, etag,
+                content_hash, remote_id, logical_locator, provider_id, route_id,
+                tombstone
+            ) VALUES (?, '/动画/未识别作品/未识别作品.S01E01.mkv', '/动画/未识别作品',
+                '未识别作品.S01E01.mkv', 'file', 100, 1700000000, '', '', '',
+                ?, '', '', '')
+            """,
+            (root_id, node_locator),
+        )
+        conn.commit()
+        # resolve gen=2 → 200（v1 draft 在 gen1，不阻止）
+        resp = client.post(
+            "/api/imports/pan115/needs-review/resolve",
+            json={"root_id": root_id, "generation": 2, "unit_id": "card-v1d2nr", "work_title": "未识别作品"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["revision_id"]
+
 
 class TestTerminalRetryBarrierAndNoopSemantics:
     """CP9：terminal retry 的维护屏障与无操作语义。
