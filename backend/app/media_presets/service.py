@@ -897,21 +897,24 @@ def rebuild_durable_baseline_for_rebind(
     if not tree_archive or not Path(tree_archive).is_file():
         raise HTTPException(status_code=409, detail="当前媒体库的目录树归档不存在，请重新导入")
     provider = preset.source
-    catalog_store.update_root_local_locator(
-        root_id, str(Path(new_local_mount_root).expanduser())
-    )
-    generation = catalog_store.bump_generation(root_id)
-    catalog_store.set_baseline_target(root_id, generation)
-    catalog_store.prepare_scan(root_id, generation=generation, mode="full")
-    payload = {
-        "root_id": root_id,
-        "generation": generation,
-        "source_id": root.source_id,
-        "input_path": tree_archive,
-        "scan_mode": "full",
-        "scan_channel": f"snapshot_{provider}",
-    }
-    summary = handle_discovery_scan(payload).get("summary", {})
+    # RWK-39：rebind 重建与 import/update 的 baseline 重建共用同一把 authority 锁，
+    # 防止并发 rebind + import 竞态导致 local_locator/generation 相互覆盖。
+    with CONFIRMATION_AUTHORITY_LOCK:
+        catalog_store.update_root_local_locator(
+            root_id, str(Path(new_local_mount_root).expanduser())
+        )
+        generation = catalog_store.bump_generation(root_id)
+        catalog_store.set_baseline_target(root_id, generation)
+        catalog_store.prepare_scan(root_id, generation=generation, mode="full")
+        payload = {
+            "root_id": root_id,
+            "generation": generation,
+            "source_id": root.source_id,
+            "input_path": tree_archive,
+            "scan_mode": "full",
+            "scan_channel": f"snapshot_{provider}",
+        }
+        summary = handle_discovery_scan(payload).get("summary", {})
     rows = get_connection().execute(
         """
         SELECT r.revision_id FROM import_revisions r
