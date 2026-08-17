@@ -130,6 +130,49 @@ def _write_tree(tmp_path, text: str, name: str = "115目录树.txt") -> Path:
     return tree
 
 
+class TestSameTxtRecoveryUsesSurvivingArchive:
+    """RWK-39（P1-2）：same-TXT recovery 必须使用现存 archive，覆盖 create/drag/multipart。
+
+    事故链：failed baseline → 重新拖同一 TXT → _activate_or_reuse_tree discard 本次
+    provisional archive → 必须用 selected_version.archive_path（存活归档）重建 baseline，
+    不得用已删除的 provisional version.archive_path（否则 input_path 悬空 → baseline_failed）。
+    """
+
+    def test_reimport_same_txt_after_failed_baseline_recovers(self, client, tmp_path):
+        from app.media_presets.store import get_preset, save_preset
+
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        tree = _write_tree(mount, _big_tree())
+        # 1) 首次导入 → baseline ready，归档 V1 存活
+        resp1 = client.post(
+            "/api/media-presets/import-local-tree",
+            json={"tree_path": str(tree), "import_family": "anime", "import_scope": ""},
+        )
+        assert resp1.status_code == 200, resp1.text
+        body1 = resp1.json()
+        assert body1["baseline"]["status"] == "baseline_queued", body1
+        preset_id = body1["preset"]["preset_id"]
+
+        # 2) 模拟 baseline 失败（confirmation_state=failed）——recovery 入口的前置条件
+        preset = get_preset(preset_id)
+        preset.confirmation_state = "failed"
+        save_preset(preset)
+
+        # 3) 重新拖同一 TXT（同 SHA）→ _activate_or_reuse_tree discard provisional，
+        #    recovery 必须用存活归档（selected_version.archive_path）重建 baseline
+        resp2 = client.post(
+            "/api/media-presets/import-local-tree",
+            json={"tree_path": str(tree), "import_family": "anime", "import_scope": ""},
+        )
+        assert resp2.status_code == 200, resp2.text
+        body2 = resp2.json()
+        # recovery 成功：baseline 重建为 baseline_queued，不是 baseline_failed
+        assert body2["baseline"]["status"] == "baseline_queued", (
+            f"same-TXT recovery 必须使用存活归档重建 baseline，而非已删除的 provisional：{body2['baseline']}"
+        )
+
+
 class TestRebindDurableSourceRoot:
     """RWK-39（P0-2）：rebind 实际视频文件夹必须是完整 durable operation。
 

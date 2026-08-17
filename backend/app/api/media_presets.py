@@ -197,12 +197,12 @@ def import_local_tree(req: LocalTreeImportRequest):
     )
     # RWK-22：原生选择器/拖放 TXT 路径也建立 Provider Source Catalog baseline
     # （0 网络），preset.catalog_root_id 持久关联——bindable 列表才能出现该来源。
-    # 注意：_activate_or_reuse_tree 可能 discard/move 归档文件（reused/unchanged/
-    # 新版本路径），必须用 version.archive_path 重取实际存在的归档，否则 job
-    # input_path 悬空必然失败（审查 HIGH）。
+    # RWK-39（P1-2）：_activate_or_reuse_tree 在 reused/unchanged 时会 discard 本次
+    # provisional 归档，必须用 selected_version.archive_path（存活归档）重建 baseline，
+    # 不得用已 discard 的 provisional version.archive_path（input_path 悬空 → baseline_failed）。
     baseline = _ensure_tree_baseline(
         preset,
-        str(Path(get_data_dir()) / version.archive_path) if version.archive_path else "",
+        str(Path(get_data_dir()) / selected_version.archive_path) if selected_version.archive_path else "",
         source_root,
         req.import_family,
         req.import_scope,
@@ -462,9 +462,11 @@ async def create_media_preset(
     )
     # RWK-21/22：multipart TXT 导入与 import-local-tree 共用同一 baseline 服务
     # （真正把 TXT 快照写入 Source Catalog：source_nodes/directories/media_units）。
+    # RWK-39（P1-2）：同 import-local-tree，用 selected_version.archive_path（存活归档），
+    # 不用 _activate_or_reuse_tree 已 discard 的 provisional version.archive_path。
     baseline = _ensure_tree_baseline(
         preset,
-        str(Path(get_data_dir()) / version.archive_path) if version.archive_path else "",
+        str(Path(get_data_dir()) / selected_version.archive_path) if selected_version.archive_path else "",
         source_root,
         import_family,
         import_scope,
