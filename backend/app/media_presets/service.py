@@ -1033,16 +1033,24 @@ def rebind_preset_source_root(
     preset.current_plan_id = plan.plan_id
     preset.lifecycle_status = "draft"
     preset.updated_at = now_iso()
-    save_preset(preset)
     baseline = None
     if (
         rebuild_durable
         and preset.source in {"pan115", "baidu"}
         and (preset.execution_authority == "durable_root" or preset.catalog_root_id)
     ):
-        baseline = rebuild_durable_baseline_for_rebind(
-            preset, str(selected_root), str(archive)
-        )
+        # RWK-40（P1 residual）：rebind 的 authority transition 必须全程持同一把
+        # confirmation authority 锁——mark pending → persist preset → local locator
+        # switch → advance target → full rebuild。否则窄窗口里旧 generation 仍是
+        # current target，另一个 confirm-root 请求可能抢先确认旧 generation。
+        with CONFIRMATION_AUTHORITY_LOCK:
+            preset.confirmation_state = "pending"
+            save_preset(preset)
+            baseline = rebuild_durable_baseline_for_rebind(
+                preset, str(selected_root), str(archive)
+            )
+    else:
+        save_preset(preset)
     return snapshot, plan, version, path_validation, baseline
 
 
