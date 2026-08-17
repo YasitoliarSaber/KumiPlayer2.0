@@ -119,24 +119,45 @@ def openlist_preset_state(catalog_root_id: str, *, require_all: bool = False) ->
         ).fetchone()
 
     needs_review_units: list[dict] = []
+    # RWK-40（P0）：media_units.current_revision_id 是「上一次已确认版本」的指针，
+    # 不代表当前 generation 的 draft / needs_review 事实。require_all 的 Provider
+    # TXT 必须让当前 target generation 的可执行状态覆盖旧指针：
+    # - unit 在 target generation 有 draft revision → attention / not indexed；
+    # - unit.status == needs_review → attention（不管旧 current_revision_id）；
+    # - 都没有待处理事实时，才允许沿旧 current_revision_id 的 published pipeline 判断。
+    from app.catalog import store as catalog_store
+
+    _root = catalog_store.get_source_root(catalog_root_id)
+    target = int(getattr(_root, "baseline_target_generation", 0) or 0) if _root else 0
     for unit in units:
-        revision_id = str(unit["current_revision_id"] or "")
         unit_id = str(unit["unit_id"] or "")
         unit_status = str(unit["status"] or "")
-        if not revision_id:
-            # needs_review 且无 revision 的 unit 不得静默跳过——boundary 未识别 /
-            # evidence 需复核时 DiscoveryEngine 会建 needs_review unit 但不生成
-            # revision，必须计入 attention 让用户知道有需处理项（P1-1/P0-2）。
-            if unit_status == "needs_review":
+        if target > 0:
+            draft_row = conn.execute(
+                "SELECT COUNT(*) AS c FROM import_revisions r "
+                "JOIN media_units u ON u.unit_id = r.unit_id "
+                "WHERE u.unit_id = ? AND u.root_id = ? "
+                "AND r.source_generation = ? AND r.status = 'draft'",
+                (unit_id, catalog_root_id, target),
+            ).fetchone()
+            if draft_row and int(draft_row["c"] or 0) > 0:
+                # 当前 generation 有待确认 draft → 不得沿旧指针显示已发布
                 attention_count += 1
-                needs_review_units.append(
-                    {
-                        "unit_id": unit_id,
-                        "boundary": str(unit["boundary"] or ""),
-                        "work_key": str(unit["work_key"] or ""),
-                        "status": unit_status,
-                    }
-                )
+                continue
+        if unit_status == "needs_review":
+            # 当前 generation 需要人工处理，不管旧 current_revision_id 指向什么
+            attention_count += 1
+            needs_review_units.append(
+                {
+                    "unit_id": unit_id,
+                    "boundary": str(unit["boundary"] or ""),
+                    "work_key": str(unit["work_key"] or ""),
+                    "status": unit_status,
+                }
+            )
+            continue
+        revision_id = str(unit["current_revision_id"] or "")
+        if not revision_id:
             continue
         rev = conn.execute(
             "SELECT status FROM import_revisions WHERE revision_id = ?", (revision_id,)
@@ -458,6 +479,15 @@ def preset_to_dict(preset: MediaLibraryPreset) -> dict:
         data["confirmation_root_id"] = preset.catalog_root_id or None
         data["confirmation_generation"] = gen
         data["confirmation_ready"] = ready
+        # RWK-40（P0）：durable TXT 且当前 target generation 仍有 draft
+        # （confirmation_ready=true）→ 不得对用户宣称「已全部正式完成」。
+        # current_revision_id 可能仍指上一代 published 指针，必须被当前 draft 覆盖。
+        # 只把已投影为 ready 的状态拉回 needs_attention；非 ready（如 rebind 后
+        # 的 draft）保持原值，避免过度改写既有 lifecycle 语义。
+        if preset.catalog_root_id and preset.source in {"pan115", "baidu"} and ready:
+            data["is_library_indexed"] = False
+            if data["lifecycle_status"] == "ready":
+                data["lifecycle_status"] = "needs_attention"
         state = str(preset.confirmation_state or "")
         if authority == "durable_root" and state in ("failed", "pending"):
             # hard exception / 未完成基线：身份存在但确认被硬阻断
@@ -1479,11 +1509,6 @@ def resolve_needs_review_unit(root_id: str, unit_id: str, work_title: str, gener
         raise HTTPException(status_code=404, detail="识别单元不存在")
     if str(unit["status"]) != "needs_review":
         raise HTTPException(status_code=409, detail="该识别单元不在待处理状态")
-    revision_id = str(unit["current_revision_id"] or "")
-    if revision_id:
-        rev = revision_store.load_revision(revision_id)
-        if rev and str(rev.get("status")) in ("draft", "confirmed", "executed"):
-            raise HTTPException(status_code=409, detail="该识别单元已有可处理版本")
 
     target = int(getattr(root, "baseline_target_generation", 0) or 0)
     completed = int(getattr(root, "baseline_completed_generation", 0) or 0)
@@ -1500,6 +1525,20 @@ def resolve_needs_review_unit(root_id: str, unit_id: str, work_title: str, gener
         raise HTTPException(status_code=409, detail="识别单元已过期，目录树基线已更新，请刷新后重试")
     if completed != generation:
         raise HTTPException(status_code=409, detail="目录树基线尚未完成，暂不能人工处理识别单元")
+    # RWK-40（P0）：旧的 current_revision_id 是上一代已确认指针（可能 confirmed/
+    # executed/published），不得阻止当前 target generation 人工生成新 draft。
+    # 只拒绝「当前 target generation 已存在 actionable revision」（draft/
+    # confirmed/executed），老的 rev_v1 继续作为已发布事实存在即可。
+    existing = conn.execute(
+        "SELECT revision_id, status FROM import_revisions "
+        "WHERE unit_id = ? AND source_generation = ?",
+        (unit_id, target),
+    ).fetchall()
+    for row in existing:
+        if str(row["status"]) in ("draft", "confirmed", "executed"):
+            raise HTTPException(
+                status_code=409, detail="该识别单元在当前目录树版本已有可处理版本"
+            )
 
     engine = DiscoveryEngine(
         None,

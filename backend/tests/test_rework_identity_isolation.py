@@ -1131,6 +1131,135 @@ class TestOpenlistSourceCardDurableLifecycle:
         ).fetchone()["c"]
         assert rev_count == 0, "零基线 resolve 不得生成任何 revision"
 
+    def _published_root(self, unit_id: str, tmp_path) -> str:
+        """建真实 pan115 root + v1 完整发布链（mirror→scrape→library succeeded）。"""
+        from app.catalog import store as catalog_store
+        from app.media_presets.service import ensure_provider_source_root
+
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        root_id = ensure_provider_source_root(
+            provider="pan115", local_mount_root=str(mount),
+            import_family="anime", import_scope="",
+        )
+        catalog_store.set_baseline_target(root_id, 1)
+        catalog_store.mark_baseline_completed(root_id, 1)
+        rev1 = self._root_with_unit(unit_id, root_id=root_id)
+        self._mirror_job(rev1, unit_id, status="succeeded")
+        self._scrape_job(rev1, unit_id, status="succeeded")
+        self._library_job(unit_id, status="succeeded")
+        return root_id
+
+    def test_v2_draft_overrides_v1_published_pointer(self, tmp_path):
+        """RWK-40（P0-A）：v1 已发布 + v2 新 draft → 来源卡不得沿 v1 旧指针显示 ready。
+
+        media_units.current_revision_id 是上一代已确认指针（仍指 rev_v1=executed），
+        v2 target generation 的新 draft 必须覆盖它：confirmation_ready=true +
+        is_library_indexed=false + attention>0 → 重启后来源卡出现「继续确认」。
+        """
+        from app.catalog import store as catalog_store
+        from app.db.database import get_connection
+        from app.import_plan import revision_store
+        from app.media_presets.service import openlist_preset_state, preset_confirmation_state
+
+        root_id = self._published_root("card-v2draft", tmp_path)
+        # v2 更新：target=2，同 unit 生成新 draft revision（current_revision_id 仍 rev1）
+        catalog_store.set_baseline_target(root_id, 2)
+        catalog_store.mark_baseline_completed(root_id, 2)
+        rev1 = get_connection().execute(
+            "SELECT current_revision_id FROM media_units WHERE unit_id=?",
+            ("card-v2draft",),
+        ).fetchone()["current_revision_id"]
+        # v2 内容有变化（新增一集）→ create_revision 不复用 v1，生成新 draft
+        rev2 = revision_store.create_revision(
+            unit_id="card-v2draft", source_generation=2,
+            items=[_item("card-v2draft/Season 1/card-v2draft.mkv"),
+                   _item("card-v2draft/Season 1/card-v2draft.EP02.mkv")],
+            status="draft",
+        )
+        assert rev2["revision_id"] != rev1
+        # current_revision_id 仍指 v1（DiscoveryEngine 复用时不清指针）
+        row = get_connection().execute(
+            "SELECT current_revision_id FROM media_units WHERE unit_id=?",
+            ("card-v2draft",),
+        ).fetchone()
+        assert row["current_revision_id"] == rev1
+        # 投影：target generation 有 draft → 必须 attention / not indexed
+        state = openlist_preset_state(root_id, require_all=True)
+        assert state["is_library_indexed"] is False
+        assert state["attention_count"] == 1
+        # confirmation identity：gen2 有 draft → ready
+        gen, ready = preset_confirmation_state(root_id)
+        assert gen == 2 and ready is True
+
+    def test_v2_needs_review_overrides_v1_published_and_resolve_succeeds(self, client, tmp_path):
+        """RWK-40（P0-B）：v1 已发布 + v2 needs_review → attention 可见 + resolve 不被旧指针拒绝。
+
+        current_revision_id 仍指 rev_v1（executed/published），unit.status=needs_review：
+        来源卡必须显示 attention（needs_review_units 含该 unit），且 resolve gen=2
+        不得因旧 published 指针 409（老 rev_v1 继续作为已发布事实存在）。
+        """
+        from app.catalog import store as catalog_store
+        from app.db.database import get_connection
+        from app.media_presets.service import openlist_preset_state
+
+        root_id = self._published_root("card-v2nr", tmp_path)
+        catalog_store.set_baseline_target(root_id, 2)
+        catalog_store.mark_baseline_completed(root_id, 2)
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET status='needs_review', boundary='/动画/未识别作品' "
+            "WHERE unit_id=?",
+            ("card-v2nr",),
+        )
+        conn.commit()
+        # 投影：needs_review → attention 可见（不被 rev_v1 published 掩盖）
+        state = openlist_preset_state(root_id, require_all=True)
+        assert state["attention_count"] == 1
+        assert state["is_library_indexed"] is False
+        assert any(u["unit_id"] == "card-v2nr" for u in state["needs_review_units"])
+        # source_nodes：resolve 从既有节点重建 snapshot 需要
+        node_locator = str(tmp_path / "mount" / "未识别作品.S01E01.mkv")
+        conn.execute(
+            """
+            INSERT INTO source_nodes (
+                root_id, remote_path, parent_path, name, kind, size, mtime, etag,
+                content_hash, remote_id, logical_locator, provider_id, route_id,
+                tombstone
+            ) VALUES (?, '/动画/未识别作品/未识别作品.S01E01.mkv', '/动画/未识别作品',
+                '未识别作品.S01E01.mkv', 'file', 100, 1700000000, '', '', '',
+                ?, '', '', '')
+            """,
+            (root_id, node_locator),
+        )
+        conn.commit()
+        # resolve gen=2 → 成功（不因 rev1 confirmed/executed 而 409）
+        resp = client.post(
+            "/api/imports/pan115/needs-review/resolve",
+            json={"root_id": root_id, "generation": 2, "unit_id": "card-v2nr", "work_title": "未识别作品"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["revision_id"]
+
+    def test_unchanged_v2_no_draft_keeps_published(self, tmp_path):
+        """RWK-40（P0-C）：v2 无变化（无新 draft，复用 v1 已确认）→ 不误报 attention。
+
+        不得为修 A/B 把所有 plan_ready 都算 attention：target generation 无 draft、
+        status != needs_review 时，旧 published revision 继续作为有效当前结果。
+        """
+        from app.catalog import store as catalog_store
+        from app.media_presets.service import openlist_preset_state, preset_confirmation_state
+
+        root_id = self._published_root("card-v2same", tmp_path)
+        # v2 unchanged：target=2 但无新 draft（复用 v1）
+        catalog_store.set_baseline_target(root_id, 2)
+        catalog_store.mark_baseline_completed(root_id, 2)
+        state = openlist_preset_state(root_id, require_all=True)
+        assert state["is_library_indexed"] is True
+        assert state["attention_count"] == 0
+        gen, ready = preset_confirmation_state(root_id)
+        assert gen == 2 and ready is False
+
 
 class TestTerminalRetryBarrierAndNoopSemantics:
     """CP9：terminal retry 的维护屏障与无操作语义。

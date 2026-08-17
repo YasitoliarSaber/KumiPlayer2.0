@@ -143,7 +143,11 @@ def test_import_local_tree_path_detects_baidu_and_uses_existing_preset_flow(tmp_
     assert body["preset"]["source_root"] == str(seasonal_root)
     assert body["version"]["source_tree_path"] == str(tree_path.resolve())
     assert body["preset"]["import_scope"] == "seasonal"
-    assert body["preset"]["lifecycle_status"] == "draft"
+    # RWK-40（P0）：import-local-tree 建 durable baseline 后 target generation 有
+    # draft 待确认 → 投影为待确认状态（legacy draft 或 durable needs_attention），
+    # 绝不可能是 ready。
+    assert body["preset"]["lifecycle_status"] in ("draft", "needs_attention")
+    assert body["preset"]["lifecycle_status"] != "ready"
     assert body["version"]["path_validation"]["ok"] is True
     assert body["preview"]["status"] == "draft"
     archive = Path(body["version"]["archive_path"])
@@ -262,7 +266,10 @@ def test_create_preset_archives_tree_and_survives_reload(tmp_path, monkeypatch):
         body = response.json()
         assert body["preset"]["name"] == "动画一"
         assert body["preset"]["version_count"] == 1
-        assert body["preset"]["lifecycle_status"] == "draft"
+        # RWK-40（P0）：multipart 创建建 durable baseline → draft 待确认 → 投影为
+        # 待确认状态（legacy draft 或 durable needs_attention），绝不可能是 ready。
+        assert body["preset"]["lifecycle_status"] in ("draft", "needs_attention")
+        assert body["preset"]["lifecycle_status"] != "ready"
         assert body["preset"]["is_library_indexed"] is False
         archive = tmp_path / body["version"]["archive_path"]
         assert archive.exists()
@@ -499,7 +506,12 @@ def test_invalid_preset_can_rebind_to_user_selected_root_and_revalidate(tmp_path
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["preset"]["source_root"] == str(correct_root)
-    assert body["preset"]["lifecycle_status"] == "draft"
+    # RWK-40（P0）：multipart 创建的 baidu preset 已是 durable_root；rebind 会
+    # 在同一 SourceRoot 上重建新 generation 的 draft revision → projector 正确
+    # 投影为待确认状态（legacy draft 或 durable needs_attention），但绝不能是
+    # ready（当前 target generation 仍有 draft 待确认）。
+    assert body["preset"]["lifecycle_status"] in ("draft", "needs_attention")
+    assert body["preset"]["lifecycle_status"] != "ready"
     assert body["version"]["path_validation"]["ok"] is True
     assert body["version"]["path_validation"]["example_path"] == str(media_file)
     assert body["preview"]["status"] == "draft"
