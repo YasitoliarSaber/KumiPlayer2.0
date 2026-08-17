@@ -53,23 +53,9 @@ def generate_mirror_task(source: str, req: GenerateRequest = GenerateRequest()):
             detail=f"plan.source={plan.source} 与 URL source={source} 不匹配",
         )
 
-    from app.media_presets.store import list_presets
+    from app.api.imports import _legacy_plan_uses_durable_authority
 
-    durable_preset = next(
-        (
-            preset
-            for preset in list_presets()
-            if preset.preset_id
-            and preset.source == source
-            and preset.current_plan_id == plan.plan_id
-            and (
-                preset.execution_authority == "durable_root"
-                or (source in {"pan115", "baidu"} and preset.catalog_root_id)
-            )
-        ),
-        None,
-    )
-    if durable_preset is not None:
+    if _legacy_plan_uses_durable_authority(plan.plan_id, source):
         raise HTTPException(
             status_code=409,
             detail="该 TXT 预设已进入 durable_root 执行权威，禁止 legacy mirror",

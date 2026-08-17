@@ -683,6 +683,15 @@ class TestOpenlistSourceCardDurableLifecycle:
         assert state["is_library_indexed"] is True
         assert state["attention_count"] == 0
 
+    def test_current_revision_failed_is_attention_not_indexed(self):
+        """current revision 自身失败也必须进入 durable attention。"""
+        from app.media_presets.service import openlist_preset_state
+
+        self._root_with_unit("card-a", rev_status="failed")
+        state = openlist_preset_state("root-x", require_all=True)
+        assert state["is_library_indexed"] is False
+        assert state["attention_count"] == 1
+
     def test_needs_review_unit_does_not_block_published_unit(self):
         """一个 unit needs_review（draft）+ 另一个全链成功 → indexed=true 且 attention=1。"""
         from app.media_presets.service import openlist_preset_state

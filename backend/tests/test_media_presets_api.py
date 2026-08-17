@@ -551,7 +551,6 @@ def test_confirm_plan_updates_preset_lifecycle(tmp_path, monkeypatch):
         created = _create(client).json()
         preset_id = created["preset"]["preset_id"]
         baseline = created["baseline"]
-        plan_id = created["preset"]["current_plan_id"]
         response = client.post(
             "/api/imports/pan115/confirm-root",
             json={
@@ -563,13 +562,10 @@ def test_confirm_plan_updates_preset_lifecycle(tmp_path, monkeypatch):
         assert response.status_code == 200, response.text
         preset = client.get(f"/api/media-presets/{preset_id}").json()["preset"]
         assert preset["lifecycle_status"] == "confirmed"
+        assert preset["confirmation_state"] == "consumed"
+        # durable TXT 卡的 indexed 事实来自 SourceRoot pipeline，不能由旧
+        # mark_preset_lifecycle("ready") 伪造；当前没有 mirror/scrape/library job。
         assert preset["is_library_indexed"] is False
-
-        from app.media_presets.service import mark_preset_lifecycle
-        mark_preset_lifecycle(plan_id, "ready")
-        indexed = client.get(f"/api/media-presets/{preset_id}").json()["preset"]
-        assert indexed["lifecycle_status"] == "ready"
-        assert indexed["is_library_indexed"] is True
 
 
 def test_direct_preset_delete_requires_complete_preview(tmp_path, monkeypatch):

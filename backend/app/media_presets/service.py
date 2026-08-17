@@ -37,7 +37,7 @@ def now_iso() -> str:
     return datetime.now(timezone(timedelta(hours=8))).isoformat()
 
 
-def openlist_preset_state(catalog_root_id: str) -> dict:
+def openlist_preset_state(catalog_root_id: str, *, require_all: bool = False) -> dict:
     """OpenList 来源卡状态投影：从 SourceRoot 的 current MediaUnits / revisions /
     durable jobs 投影识别单元数、需处理数与是否已建立媒体库，**绝不依赖不存在
     的 current_plan_id**（来源卡代表 SourceRoot 生命周期，不是单个 ImportPlan）。
@@ -68,6 +68,7 @@ def openlist_preset_state(catalog_root_id: str) -> dict:
     unit_count = len(units)
     attention_count = 0
     indexed = False
+    published_count = 0
 
     def _latest_stage_job(job_type: str, resource_key: str):
         return conn.execute(
@@ -130,6 +131,9 @@ def openlist_preset_state(catalog_root_id: str) -> dict:
         if rev_status == "draft":
             attention_count += 1
             continue
+        if rev_status in ("failed", "cancelled", "superseded"):
+            attention_count += 1
+            continue
         if rev_status not in ("confirmed", "executed"):
             continue
         mirror = _latest_stage_job("mirror_revision", f"mirror:{revision_id}")
@@ -168,7 +172,10 @@ def openlist_preset_state(catalog_root_id: str) -> dict:
             continue
         if library_status == "succeeded":
             # LibraryIndex 已经发布（handle_library_rebuild 完成）
+            published_count += 1
             indexed = True
+    if require_all:
+        indexed = unit_count > 0 and published_count == unit_count and attention_count == 0
     return {
         "unit_count": unit_count,
         "attention_count": attention_count,
@@ -405,17 +412,26 @@ def preset_to_dict(preset: MediaLibraryPreset) -> dict:
     # OpenList 来源卡：is_library_indexed 与识别单元/需处理数来自 SourceRoot 的
     # current MediaUnits/revisions/jobs 投影，不再用目录树 lifecycles 的 ready
     # 判定（来源卡从不经过 directory_tree 的 lifecycle 推进）。
-    if preset.source == "openlist" and preset.catalog_root_id:
-        state = openlist_preset_state(preset.catalog_root_id)
+    authority = str(preset.execution_authority or "")
+    durable_source_card = authority == "durable_root" and preset.source in {"pan115", "baidu"}
+    if preset.catalog_root_id and (preset.source == "openlist" or durable_source_card):
+        state = openlist_preset_state(
+            preset.catalog_root_id,
+            require_all=durable_source_card,
+        )
         data["is_library_indexed"] = state["is_library_indexed"]
         data["openlist_unit_count"] = state["unit_count"]
         data["openlist_attention_count"] = state["attention_count"]
+        if durable_source_card:
+            if state["is_library_indexed"]:
+                data["lifecycle_status"] = "ready"
+            elif state["attention_count"] > 0:
+                data["lifecycle_status"] = "needs_attention"
     # RWK-39（P0-2）：durable confirmation identity 可恢复投影——
     # 一旦 preset 进入 Source Catalog durable authority（catalog_root_id 关联
     # **或** execution_authority=durable_root——含 baseline 失败且 root 未写入
     # 的场景），restart 后仍从 preset 恢复身份与阻断状态，绝不重新识别为
     # legacy-executable。
-    authority = str(preset.execution_authority or "")
     is_durable = authority == "durable_root" or bool(preset.catalog_root_id)
     if is_durable:
         gen, ready = preset_confirmation_state(preset.catalog_root_id or "")
@@ -1208,6 +1224,12 @@ def activate_version(preset: MediaLibraryPreset, version: MediaTreeVersion, snap
     preset.version_count += 1
     preset.work_count = len(preview.groups)
     preset.video_count = int(preview.summary.get("video_count", snapshot.video_count))
+    # RWK-40（P0-2）：TXT preset 在 current_plan 对外可见的同一次 save 中
+    # 先声明 durable_root/pending；baseline 完成后再由 _ensure_tree_baseline
+    # 转为 ready/failed，消除 legacy-visible → durable 的并发窗口。
+    if preset.source in {"pan115", "baidu"}:
+        preset.execution_authority = "durable_root"
+        preset.confirmation_state = "pending"
     # 新目录树仍需重新确认、生成镜像和刮削，不能沿用旧版本的完成状态。
     preset.lifecycle_status = "draft"
     preset.updated_at = now_iso()
@@ -1257,6 +1279,13 @@ def update_preset_from_tree(
         cumulative = merge_incremental_plan(base_plan, delta, diff, status="draft")
     cumulative.import_family = preset.import_family
     cumulative.import_scope = preset.import_scope
+    if preset.source in {"pan115", "baidu"}:
+        # 更新路径先持久化 authority，避免旧 current_plan 在新 plan 写入期间
+        # 仍可被外部 legacy confirm/mirror 使用。
+        preset.execution_authority = "durable_root"
+        preset.confirmation_state = "pending"
+        preset.updated_at = now_iso()
+        save_preset(preset)
     save_import_plan(cumulative, update_latest=False)
     activate_version(preset, version, snapshot, cumulative)
     version.diff_id = diff.diff_id

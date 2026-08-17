@@ -299,7 +299,7 @@ def _ensure_tree_baseline(
         # 内容真正无变化（同 SHA/同媒体）：归档已被 discard，root 已有 baseline——
         # 跳过重新入队（避免悬空 input_path；既有 Source Catalog 数据保持）。
         root_id = (preset.catalog_root_id or "").strip()
-        if root_id:
+        if root_id and preset.confirmation_state not in ("failed", "pending"):
             from app.catalog import store as catalog_store
 
             root = catalog_store.get_source_root(root_id)
@@ -689,10 +689,39 @@ def update_media_preset_from_path(preset_id: str, req: LocalTreeUpdateRequest):
             detail=f"目录树来源不匹配：预期 {expected_source}，但 TXT 正文是 {source} 格式",
         )
 
-    # 相同 SHA-256 去重：不改预设、不新增版本、不创建重复归档
+    # 相同 SHA-256 去重：有效 durable baseline 仍保持旧行为；failed/pending
+    # 则必须复用已有归档执行 recovery，不能把失败状态冻结成 baseline_reused。
     duplicate = find_version_by_sha256(preset, version.sha256)
     if duplicate is not None:
         _cleanup_archived_version()
+        if (
+            preset.execution_authority == "durable_root"
+            and preset.confirmation_state in ("failed", "pending")
+        ):
+            baseline = _ensure_tree_baseline(
+                preset,
+                str(Path(get_data_dir()) / duplicate.archive_path) if duplicate.archive_path else "",
+                preset.source_root or source_root,
+                preset.import_family,
+                preset.import_scope,
+                reused=True,
+                unchanged=True,
+            )
+            duplicate_preview = None
+            if duplicate.plan_id:
+                import_plan = load_import_plan(plan_id=duplicate.plan_id)
+                if import_plan is not None:
+                    duplicate_preview = _preview_to_dict(build_preview(import_plan))
+            result = {
+                "preset": preset_to_dict(preset),
+                "version": asdict(duplicate),
+                "preview": duplicate_preview,
+                "reused_preset": True,
+                "unchanged": True,
+            }
+            if baseline:
+                result["baseline"] = baseline
+            return result
         duplicate_preview = None
         if duplicate.plan_id:
             import_plan = load_import_plan(duplicate.plan_id)

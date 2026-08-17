@@ -338,6 +338,7 @@ def confirm_root(source: str, req: ConfirmRootRequest):
     from app.import_plan import revision_store
     from app.pipeline import orchestrator
     from app.import_plan.service import validate_confirmation
+    from app.import_plan.models import ImportPlan
 
     root_id = (req.root_id or "").strip()
     if not root_id:
@@ -393,6 +394,9 @@ def confirm_root(source: str, req: ConfirmRootRequest):
     # 其他冲突状态必须在任何 mutation 前拒绝；这样第 N 个无效时前 N-1
     # 不会已经被本次请求确认或 enqueue mirror。
     mutation_rows = []
+    aggregate_plan = ImportPlan()
+    aggregate_plan.status = "draft"
+    aggregate_plan.items = []
     for row in rows:
         revision_id = str(row["revision_id"])
         current = revision_store.load_revision(revision_id)
@@ -407,10 +411,11 @@ def confirm_root(source: str, req: ConfirmRootRequest):
                     f"root 级确认已阻止：本次未确认任何修订，请刷新后重试"
                 ),
             )
+        plan = revision_store.load_plan(revision_id)
+        if plan is None:
+            raise HTTPException(status_code=409, detail=f"修订 {revision_id} 无法装载，请刷新后重试")
+        aggregate_plan.items.extend(plan.items)
         if status == "draft":
-            plan = revision_store.load_plan(revision_id)
-            if plan is None:
-                raise HTTPException(status_code=409, detail=f"修订 {revision_id} 无法装载，请刷新后重试")
             ok, _preview, validation_error = validate_confirmation(plan, force=req.force)
             if not ok:
                 raise HTTPException(
@@ -421,6 +426,20 @@ def confirm_root(source: str, req: ConfirmRootRequest):
                     ),
                 )
             mutation_rows.append(row)
+
+    # 用户确认页展示的 aggregate plan 也是服务端最终执行 gate；
+    # 防止每个 unit 单独合法、合并后出现跨 unit duplicate/error 的漂移。
+    aggregate_ok, _aggregate_preview, aggregate_error = validate_confirmation(
+        aggregate_plan, force=req.force
+    )
+    if not aggregate_ok:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"root-generation aggregate 确认校验未通过："
+                f"{aggregate_error or '请先处理确认页问题'}；本次未确认任何修订"
+            ),
+        )
     # mutation_rows 为空但 rows 全部 confirmed/executed 时仍允许幂等恢复，
     # 下面会重新 ensure 全部 durable mirror jobs。
     confirmed_ids = [str(row["revision_id"]) for row in rows]
@@ -583,9 +602,9 @@ def _preset_for_legacy_plan(plan_id: str, source: str):
     for preset in list_presets():
         if preset.source != source:
             continue
-        if not preset.catalog_root_id:
-            continue
-        if preset.current_plan_id == plan_id:
+        plan_ids = {preset.current_plan_id}
+        plan_ids.update(version.plan_id for version in preset.versions if version.plan_id)
+        if plan_id in plan_ids and preset.catalog_root_id:
             return preset
     return None
 def _revision_uses_durable_root(revision: dict, source: str) -> bool:
@@ -609,7 +628,11 @@ def _legacy_plan_uses_durable_authority(plan_id: str, source: str) -> bool:
     from app.media_presets.store import list_presets
 
     for preset in list_presets():
-        if preset.current_plan_id != plan_id or preset.source != source:
+        if preset.source != source:
+            continue
+        plan_ids = {preset.current_plan_id}
+        plan_ids.update(version.plan_id for version in preset.versions if version.plan_id)
+        if plan_id not in plan_ids:
             continue
         if preset.execution_authority == "durable_root":
             return True
