@@ -691,6 +691,31 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
           </GhostButton>
         </div>
       </SettingsSection>
+      <SettingsSection title="构建来源">
+        <div className="settings-support-row">
+          <div>
+            <strong>KumiPlayer 构建标识</strong>
+            <p className="build-provenance">
+              <span className="build-provenance-line">
+                <span className="build-provenance-key">版本</span>
+                <span className="build-provenance-val">{typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'unknown'}</span>
+              </span>
+              <span className="build-provenance-line">
+                <span className="build-provenance-key">提交</span>
+                <span className="build-provenance-val build-provenance-sha">{typeof __BUILD_SHA__ !== 'undefined' ? __BUILD_SHA__ : 'unknown'}</span>
+              </span>
+              <span className="build-provenance-line">
+                <span className="build-provenance-key">分支</span>
+                <span className="build-provenance-val">{typeof __BUILD_BRANCH__ !== 'undefined' ? __BUILD_BRANCH__ : 'unknown'}</span>
+              </span>
+              <span className="build-provenance-line">
+                <span className="build-provenance-key">构建</span>
+                <span className="build-provenance-val">{typeof __BUILD_TIME__ !== 'undefined' ? __BUILD_TIME__.replace('T', ' ').slice(0, 16) : 'unknown'}</span>
+              </span>
+            </p>
+          </div>
+        </div>
+      </SettingsSection>
       <SettingsSection title="支持与赞助">
         <div className="settings-support-row">
           <div>

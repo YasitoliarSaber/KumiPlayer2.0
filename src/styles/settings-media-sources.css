@@ -204,3 +204,37 @@
   font-size: 12.5px;
   color: var(--settings-muted, #8a93a2);
 }
+
+/* ---------- Build Provenance（构建来源） ---------- */
+.build-provenance {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.build-provenance-line {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.build-provenance-key {
+  display: inline-block;
+  min-width: 36px;
+  color: var(--settings-muted, #8a93a2);
+  font-weight: 500;
+}
+
+.build-provenance-val {
+  color: var(--settings-text, inherit);
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+
+.build-provenance-sha {
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+}
