@@ -90,3 +90,44 @@ class TestLocalSource:
         assert len(page.entries) == 2
         page2 = scanner.enumerate_directory("/本地", page=2, per_page=2)
         assert len(page2.entries) == 1
+
+
+class TestBoundPathMapping:
+    """RWK-8 边界：bound 双 namespace 映射（含 "/" 根特例）。"""
+
+    def _scanner(self, canonical: str, openlist: str):
+        class StubClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        return SourceCatalogScanner(
+            source="openlist",
+            client=StubClient(),
+            canonical_root=canonical,
+            openlist_root=openlist,
+        )
+
+    def test_canonical_slash_root_maps_to_openlist(self):
+        """canonical_root="/" 时任何路径都映射到 openlist 根下（无双斜杠）。"""
+        scanner = self._scanner("/", "/115网盘/动画")
+        assert scanner._to_physical("/动画/冰菓") == "/115网盘/动画/动画/冰菓"
+        assert scanner._to_canonical("/115网盘/动画/动画/冰菓") == "/动画/冰菓"
+
+    def test_openlist_slash_root_maps_to_canonical(self):
+        """openlist_root="/" 时物理路径映射回 canonical 根下。"""
+        scanner = self._scanner("/K:/115网盘", "/")
+        assert scanner._to_canonical("/动画/冰菓") == "/K:/115网盘/动画/冰菓"
+        assert scanner._to_physical("/K:/115网盘/动画/冰菓") == "/动画/冰菓"
+
+    def test_same_root_not_bound(self):
+        """双根相同 → 不 bound（identity 透传）。"""
+        scanner = self._scanner("/A", "/A")
+        assert not scanner._bound()
+        assert scanner._to_physical("/A/x") == "/A/x"
+        assert scanner._to_canonical("/A/x") == "/A/x"
+
+    def test_openlist_root_slash_alone_not_bound_with_canonical_slash(self):
+        """两边都是 "/" → 不 bound（无映射）。"""
+        scanner = self._scanner("/", "/")
+        assert not scanner._bound()
+        assert scanner._to_physical("/x") == "/x"

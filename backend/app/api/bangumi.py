@@ -193,10 +193,13 @@ def set_token(req: TokenRequest):
 
 @router.delete("/token")
 def clear_token():
-    """用户主动退出：清除 token 与本地账户快照（唯一允许清理凭据的路径）。"""
+    """用户主动退出：清除 token 与本地账户快照（唯一允许清理凭据的路径）。
+
+    ``cleared_keys`` 显式声明清除意图：空值语义默认是 KEEP，只有这里明确
+    要求删除 ``bangumi_access_token``（REWORK：绝不隐式 CLEAR 其他凭据）。
+    """
     config = load_config()
     config.bangumi_access_token = ""
-    # 显式 CLEAR：只有用户主动退出才允许删除安全存储中的凭据
     save_config(config, cleared_keys={"bangumi_access_token"})
     clear_account_snapshot()
     return {"ok": True}

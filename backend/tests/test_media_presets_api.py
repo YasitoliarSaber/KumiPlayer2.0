@@ -143,7 +143,11 @@ def test_import_local_tree_path_detects_baidu_and_uses_existing_preset_flow(tmp_
     assert body["preset"]["source_root"] == str(seasonal_root)
     assert body["version"]["source_tree_path"] == str(tree_path.resolve())
     assert body["preset"]["import_scope"] == "seasonal"
-    assert body["preset"]["lifecycle_status"] == "draft"
+    # RWK-40（P0）：import-local-tree 建 durable baseline 后 target generation 有
+    # draft 待确认 → 投影为待确认状态（legacy draft 或 durable needs_attention），
+    # 绝不可能是 ready。
+    assert body["preset"]["lifecycle_status"] in ("draft", "needs_attention")
+    assert body["preset"]["lifecycle_status"] != "ready"
     assert body["version"]["path_validation"]["ok"] is True
     assert body["preview"]["status"] == "draft"
     archive = Path(body["version"]["archive_path"])
@@ -262,7 +266,10 @@ def test_create_preset_archives_tree_and_survives_reload(tmp_path, monkeypatch):
         body = response.json()
         assert body["preset"]["name"] == "动画一"
         assert body["preset"]["version_count"] == 1
-        assert body["preset"]["lifecycle_status"] == "draft"
+        # RWK-40（P0）：multipart 创建建 durable baseline → draft 待确认 → 投影为
+        # 待确认状态（legacy draft 或 durable needs_attention），绝不可能是 ready。
+        assert body["preset"]["lifecycle_status"] in ("draft", "needs_attention")
+        assert body["preset"]["lifecycle_status"] != "ready"
         assert body["preset"]["is_library_indexed"] is False
         archive = tmp_path / body["version"]["archive_path"]
         assert archive.exists()
@@ -499,7 +506,12 @@ def test_invalid_preset_can_rebind_to_user_selected_root_and_revalidate(tmp_path
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["preset"]["source_root"] == str(correct_root)
-    assert body["preset"]["lifecycle_status"] == "draft"
+    # RWK-40（P0）：multipart 创建的 baidu preset 已是 durable_root；rebind 会
+    # 在同一 SourceRoot 上重建新 generation 的 draft revision → projector 正确
+    # 投影为待确认状态（legacy draft 或 durable needs_attention），但绝不能是
+    # ready（当前 target generation 仍有 draft 待确认）。
+    assert body["preset"]["lifecycle_status"] in ("draft", "needs_attention")
+    assert body["preset"]["lifecycle_status"] != "ready"
     assert body["version"]["path_validation"]["ok"] is True
     assert body["version"]["path_validation"]["example_path"] == str(media_file)
     assert body["preview"]["status"] == "draft"
@@ -550,23 +562,22 @@ def test_confirm_plan_updates_preset_lifecycle(tmp_path, monkeypatch):
     with TestClient(app) as client:
         created = _create(client).json()
         preset_id = created["preset"]["preset_id"]
-        plan_id = created["preset"]["current_plan_id"]
-
+        baseline = created["baseline"]
         response = client.post(
-            "/api/imports/pan115/confirm",
-            json={"plan_id": plan_id},
+            "/api/imports/pan115/confirm-root",
+            json={
+                "root_id": baseline["confirmation_root_id"],
+                "generation": baseline["confirmation_generation"],
+            },
         )
 
         assert response.status_code == 200, response.text
         preset = client.get(f"/api/media-presets/{preset_id}").json()["preset"]
         assert preset["lifecycle_status"] == "confirmed"
+        assert preset["confirmation_state"] == "consumed"
+        # durable TXT 卡的 indexed 事实来自 SourceRoot pipeline，不能由旧
+        # mark_preset_lifecycle("ready") 伪造；当前没有 mirror/scrape/library job。
         assert preset["is_library_indexed"] is False
-
-        from app.media_presets.service import mark_preset_lifecycle
-        mark_preset_lifecycle(plan_id, "ready")
-        indexed = client.get(f"/api/media-presets/{preset_id}").json()["preset"]
-        assert indexed["lifecycle_status"] == "ready"
-        assert indexed["is_library_indexed"] is True
 
 
 def test_direct_preset_delete_requires_complete_preview(tmp_path, monkeypatch):

@@ -17,18 +17,20 @@ POST   /api/openlist/presets/{id}/rescan   按预设保存的远端定位增量�
 - 导入路径必须位于配置的映射根路径之下，并归属启用的提供商路由（或 other）；
 - 普通浏览绝不递归扫描，预取有预算、单并发、可取消且不递归后代；
 """
-
+import copy
 import ipaddress
 import threading
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict
 
 from app.catalog import source_health
-from app.core.config import load_config, save_config
+from app.core.config import load_config, resolve_openlist_credentials, save_config
+from app.core.credential_store import CredentialStoreError
 from app.integrations.openlist.cache import (
     connection_key,
     read_cache,
@@ -42,6 +44,7 @@ from app.integrations.openlist.client import (
     normalize_remote_path,
     validate_server_url,
 )
+from app.integrations.openlist.connection import probe_openlist_connection
 from app.integrations.openlist.governor import governor_connection_key
 from app.integrations.openlist.models import OpenListError
 from app.integrations.openlist.providers import (
@@ -120,6 +123,7 @@ class TestConnectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     server_url: str = ""
+    remote_root: str = ""
     username: str = ""
     password: str = ""
     allow_insecure_http: bool = False
@@ -170,6 +174,27 @@ class SaveRoutesRequest(BaseModel):
 # 内部工具
 # ============================================================
 
+def _effective_openlist_credentials() -> tuple[str, str]:
+    """解析 runtime 有效 OpenList 凭据（统一 credential source）。
+
+    - 优先走 ``resolve_openlist_credentials()``：cached 有值直接用；
+      cached 为空（hydrate 中途故障）但 Credential Store 已恢复 → 回源读取；
+    - store 不可读（unavailable）且 cached 又不完整 → 受控 503，
+      不猜 missing、不清凭据、不创建错误 pool identity；
+    - 返回 ``(username, password)``，供 browse / prefetch / 后台刷新 /
+      runtime client 统一消费，保证「恢复后无需重启」。
+    """
+    username, password, state = resolve_openlist_credentials()
+    if state == "unavailable":
+        raise HTTPException(
+            status_code=503,
+            detail="本机凭据管理器暂时不可用，OpenList 请求已暂停，请稍后重试",
+        )
+    if not username or not password:
+        raise HTTPException(status_code=400, detail=_NOT_CONFIGURED_MESSAGE)
+    return username, password
+
+
 def _client_from_config(
     config=None,
     *,
@@ -177,26 +202,34 @@ def _client_from_config(
     username: str | None = None,
     password: str | None = None,
 ) -> OpenListClient:
-    """从配置（或显式覆盖）构建客户端。
+    """从配置（或显式覆盖）构建 runtime 客户端。
 
-    凭据在正式环境由 ``load_config`` 从 Windows Credential Manager 水合。
-    ``username`` / ``password`` 为 None 时回落到配置中的值。
+    凭据解析统一走 :func:`_effective_openlist_credentials`：没有显式
+    override 时使用恢复后的真实 saved credential，而不是 stale cached
+    config 中可能为空的字段（REWORK：runtime 恢复不需要重启）。
+
+    ``username`` / ``password`` 为 None 时回落为 resolver 结果。
     """
     config = config or load_config()
     url = server_url or config.openlist_server_url
-    user = username if username is not None else config.openlist_username
-    pwd = password if password is not None else config.openlist_password
-    if not url or not user or not pwd:
+    if username is not None and password is not None:
+        user, pwd = username, password
+    else:
+        user, pwd = _effective_openlist_credentials()
+    if not url:
         raise HTTPException(status_code=400, detail=_NOT_CONFIGURED_MESSAGE)
     try:
         return get_openlist_client(url, user, pwd, client_factory=OpenListClient)
     except OpenListError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
-
 def _routes_from_config(config) -> list[OpenListRouteConfig]:
     routes = config.openlist_routes or []
     return [item for item in routes if isinstance(item, OpenListRouteConfig)]
+
+def _normalized_mount_root(value: str) -> str:
+    """本地挂载根归一化（大小写 + 尾部斜杠），用于 Provider preset 复用判定。"""
+    return str(value or "").strip().rstrip("\\/").casefold()
 
 
 def _ensure_within_remote_root(remote_root: str, path: str) -> None:
@@ -372,14 +405,22 @@ def _schedule_background_refresh(
     def worker() -> None:
         global _refresh_active
         try:
+            # runtime 凭据统一走 resolver：即使 browse 请求时 cached credential
+            # 为空（hydrate 中途故障），后台刷新也使用 Credential Store 恢复后
+            # 的真实凭据（REWORK：runtime 恢复不需要重启）。
+            try:
+                eff_user, eff_password = _effective_openlist_credentials()
+            except HTTPException:
+                # store 不可用或未配置：保留旧缓存，不发请求
+                return
             # 模块 1 冷却拦截：冷却中保留旧缓存，不发任何请求
             allowed, _health = source_health.peek_request_allowed(
-                governor_connection_key(server_url, username)
+                governor_connection_key(server_url, eff_user)
             )
             if not allowed:
                 return
             client = get_openlist_client(
-                server_url, username, password, client_factory=OpenListClient,
+                server_url, eff_user, eff_password, client_factory=OpenListClient,
             )
             page_payload = _fetch_dir_page(
                 client, remote_path, int(page), int(per_page), refresh=False
@@ -410,73 +451,83 @@ def _schedule_background_refresh(
 
 @router.post("/test-connection")
 def test_connection(req: TestConnectionRequest):
-    """连接测试：URL 校验 + 登录 + 目录可读性（只读，不保存任何配置）。
+    """连接测试：对**当前候选**执行 Fresh Probe（只读，不保存任何配置）。
 
-    响应只含结果与安全消息；用户名、密码、Token、Authorization 与
-    服务端原始错误一律不回传前端。
+    凭据解析语义固定：
+    - username / password 都为空 → KEEP SAVED（使用已保存凭据）；
+    - username 与已保存账号相同、password 为空 → 使用已保存密码；
+    - 显式填写新 password → 使用新密码；
+    - 修改 username 但 password 为空 → 拒绝（禁止把旧账号密码套给新账号）。
+
+    探测使用全新 client（不进入 production pool），draft remote_root 会真正
+    参与 ``/api/fs/list`` 请求；响应只含固定 ``code`` / ``phase`` / 安全消息，
+    用户名、密码、Token、Authorization 与服务端原始错误一律不回传前端。
     """
     config = load_config()
     server_url = (req.server_url or config.openlist_server_url).strip()
-    username = req.username if req.username else config.openlist_username
-    password = req.password if req.password else config.openlist_password
+    # 真实 saved credential resolver（REWORK）：cached 为空但 Credential Store
+    # 已恢复时直接回源读取真实凭据，KEEP SAVED 不需要重启即可重新可用。
+    saved_username, saved_password, cred_state = resolve_openlist_credentials()
+    # username 统一 strip，与 save 端点语义一致（审计 L2：带首尾空格的
+    # username 不得被误判为「新账号」而要求密码）
+    req_username = req.username.strip() if req.username else ""
+    username = req_username if req_username else saved_username
+    password = req.password if req.password else saved_password
+
+    # 修改 username 但未提供新密码：禁止把旧账号密码套给新账号
+    if req_username and req_username != saved_username and not req.password:
+        return {
+            "ok": False,
+            "code": "invalid_configuration",
+            "phase": "validation",
+            "message": "请输入新 OpenList 账号对应的密码",
+        }
 
     if not server_url or not username or not password:
-        return {"ok": False, "message": _NOT_CONFIGURED_MESSAGE}
-
-    ok, reason = validate_server_url(server_url)
-    if not ok:
-        if "公网 HTTP" in reason:
-            reason = "该地址是公网 HTTP 明文传输，已拒绝连接；请改用 HTTPS"
-        return {"ok": False, "message": reason}
-    if server_url.startswith("http://") and not _is_loopback_http(server_url) and not req.allow_insecure_http:
         return {
             "ok": False,
-            "message": "本地/局域网 HTTP 将以明文传输密码，请在设置中确认风险后重试",
-            "insecure_http_required": True,
+            "code": "not_configured",
+            "phase": "validation",
+            "message": _NOT_CONFIGURED_MESSAGE,
         }
 
-    # 模块 1：该连接正在冷却时，主动测试也不向远端发请求（用户可见的安全提示）
-    allowed, _health = source_health.peek_request_allowed(
-        governor_connection_key(normalize_openlist_server_url(server_url), username)
+    # draft remote_root 纳入测试契约：页面当前显示什么，就真正读取什么
+    remote_root = (req.remote_root or config.openlist_remote_root or "/").strip()
+
+    result = probe_openlist_connection(
+        server_url=server_url,
+        remote_root=remote_root,
+        username=username,
+        password=password,
+        allow_insecure_http=req.allow_insecure_http,
     )
-    if not allowed:
-        return {
-            "ok": False,
-            "message": "远端网盘疑似触发访问保护，KumiPlayer 已暂停该来源的自动请求，请稍后再试",
-        }
-
-    client = get_openlist_client(
-        server_url, username, password, client_factory=OpenListClient,
-    )
-    try:
-        client.login()
-    except OpenListError as exc:
-        return {"ok": False, "message": str(exc)}
-
-    # 登录成功后验证目录读取权限，返回可操作提示
-    remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
-    try:
-        client.list_dir(remote_root, page=1, per_page=10)
-    except OpenListError as exc:
-        if exc.kind == "permission":
-            return {
-                "ok": False,
-                "message": "认证成功，但没有读取目录的权限；请在 OpenList 为账号开启只读目录权限",
-            }
-        return {"ok": False, "message": str(exc)}
-
-    return {
-        "ok": True,
-        "message": "连接成功，认证与目录读取权限正常",
+    payload = {
+        "ok": result.ok,
+        "code": result.code,
+        "phase": result.phase,
+        "message": result.message,
     }
-
+    if (
+        not result.ok
+        and result.code == "invalid_configuration"
+        and "明文传输密码" in result.message
+    ):
+        payload["insecure_http_required"] = True
+    return payload
 
 @router.post("/config")
 def save_connection_config(req: SaveConfigRequest):
-    """保存 OpenList 连接配置（单实例）；用户名/密码进入 Windows Credential Manager。
+    """保存 OpenList 连接配置（validate-before-commit，preflight + 补偿回滚）。
 
-    连接级字段：服务地址、远端总根、本地总挂载根、浏览缓存 TTL、预取数量。
-    不保存凭据到配置文件；保存后不返回任何凭据。
+    Remote-affecting（首次配置 / server_url / username / 显式 password /
+    remote_root 变化）：
+        candidate → fresh probe → success → atomic commit
+    Local-only（mount_root / cache TTL / prefetch 等）：
+        不要求 OpenList 在线，直接保存。
+
+    任何 probe / 凭据读写 / 配置写失败都保持旧状态（0 mutation）；路由与
+    runtime client pool 只在 probe + durable save 全部成功之后才更新。
+    用户名/密码进入 Windows Credential Manager；保存后不返回任何凭据。
     """
     ok, reason = validate_server_url(req.server_url)
     if not ok:
@@ -494,45 +545,111 @@ def save_connection_config(req: SaveConfigRequest):
         mount_root += "\\"
     if not mount_root:
         raise HTTPException(status_code=400, detail="请填写 OpenList 对应的本地挂载根路径")
-    config = load_config()
-    username = req.username.strip() or config.openlist_username
-    if not username:
-        raise HTTPException(status_code=400, detail="请填写 OpenList 用户名")
 
-    # 连接身份（地址/账号/远端总根）变化时，旧 provider 路由不得静默沿用
-    old_identity = (
-        config.openlist_server_url,
-        config.openlist_username,
-        normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/",
-    )
+    config = load_config()
+    old_server = normalize_openlist_server_url(config.openlist_server_url) if config.openlist_server_url else ""
+    old_remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
     new_server = normalize_openlist_server_url(req.server_url)
-    new_identity = (
-        new_server,
-        username,
-        remote_root,
+    username = req.username.strip()
+    password = req.password or ""
+
+    # 真实 saved credential resolver（REWORK）：cached 为空但 Credential Store
+    # 已恢复时直接回源读取真实凭据，KEEP SAVED 不需要重启即可重新可用。
+    old_username, old_password, cred_state = resolve_openlist_credentials()
+
+    # 凭据存储暂时不可读：不能安全提交（防止通用持久化把空字段解释成 delete）
+    if cred_state == "unavailable":
+        raise HTTPException(
+            status_code=503,
+            detail="本机凭据管理器暂时不可用，无法安全保存 OpenList 配置，请稍后重试",
+        )
+
+    # 更换 username 但未提供新密码：禁止把旧账号密码套给新账号
+    if username and username != old_username and not password:
+        raise HTTPException(status_code=400, detail="请输入新 OpenList 账号对应的密码")
+    # 有效凭据解析（KEEP SAVED 语义）
+    effective_username = username or old_username
+    effective_password = password or old_password
+
+    # Remote-affecting 判定（首次配置也算 remote-affecting；显式 password
+    # 只有与已保存值不同才算更新，相同内容重复保存保持幂等）
+    password_changed = bool(password) and password != old_password
+    remote_affecting = (
+        not config.openlist_server_url
+        or new_server != old_server
+        or effective_username != old_username
+        or password_changed
+        or remote_root != old_remote_root
     )
-    connection_changed = old_identity != new_identity
-    if connection_changed and config.openlist_routes:
-        config.openlist_routes = []
-    # 密码不参与匿名会话键；用户重新填写密码时也必须丢弃旧内存 Token，避免
-    # 新配置仍携带旧会话继续请求。
-    if connection_changed or req.password:
+
+    # candidate 构建（禁止原地修改 cached AppConfig）
+    candidate = copy.deepcopy(config)
+    candidate.openlist_server_url = new_server
+    candidate.openlist_remote_root = remote_root
+    candidate.openlist_mount_root = mount_root
+    if effective_username:
+        candidate.openlist_username = effective_username
+    if password:
+        candidate.openlist_password = password
+    if req.cache_ttl_minutes is not None:
+        candidate.openlist_cache_ttl_minutes = max(1, min(int(req.cache_ttl_minutes), 60 * 24 * 30))
+    if req.prefetch_limit is not None:
+        candidate.openlist_prefetch_limit = max(0, min(int(req.prefetch_limit), _PREFETCH_MAX))
+
+    # validate-before-commit：remote-affecting 必须先真实 probe 成功
+    if remote_affecting:
+        if not effective_username or not effective_password:
+            raise HTTPException(status_code=400, detail=_NOT_CONFIGURED_MESSAGE)
+        probe = probe_openlist_connection(
+            server_url=new_server,
+            remote_root=remote_root,
+            username=effective_username,
+            password=effective_password,
+            allow_insecure_http=req.allow_insecure_http,
+        )
+        if not probe.ok:
+            message = probe.message
+            if probe.code == "invalid_configuration" and "明文传输密码" in message:
+                message += "（请确认风险后重试）"
+            raise HTTPException(status_code=400, detail=message)
+
+    # connection_changed：身份（server/username/remote_root）任一变化
+    connection_changed = (
+        new_server != old_server
+        or effective_username != old_username
+        or remote_root != old_remote_root
+    )
+
+    # probe + durable save 全部成功之后才能清 route（失败时 routes unchanged）。
+    # routes 清空并入 candidate 一次性原子提交，避免「新身份 + 旧路由」的
+    # 二次写窗口与冗余的第二次凭据往返（审计 M3）。
+    old_routes_existed = bool(config.openlist_routes)
+    if connection_changed and old_routes_existed:
+        candidate.openlist_routes = []
+
+    # atomic commit：凭据写入失败 / JSON 写失败都会补偿回滚（config._persist_config_payload）
+    try:
+        save_config(candidate)
+    except CredentialStoreError:
+        # 区分两类失败：
+        # - 凭据存储读失败中止（0 mutation，无需恢复，只是暂时不可用）；
+        # - 凭据写入失败且补偿回滚失败（本机凭据可能不一致）。
+        # 这里统一按写入失败处理，但消息不再误导「凭据已损坏」。
+        raise HTTPException(
+            status_code=500,
+            detail="OpenList 配置保存失败，本机凭据服务异常，请稍后重试",
+        ) from None
+    except OSError:
+        raise HTTPException(status_code=500, detail="OpenList 配置保存失败，请稍后重试") from None
+
+    # durable save 成功之后才更新 runtime 状态
+    if connection_changed or password_changed:
+        # 密码不参与匿名会话键；用户重新填写密码时也必须丢弃旧内存 Token，
+        # 避免新配置仍携带旧会话继续请求。
         clear_openlist_client_pool()
 
-    config.openlist_server_url = new_server
-    config.openlist_remote_root = remote_root
-    config.openlist_mount_root = mount_root
-    if username:
-        config.openlist_username = username
-    if req.password:
-        config.openlist_password = req.password
-    if req.cache_ttl_minutes is not None:
-        config.openlist_cache_ttl_minutes = max(1, min(int(req.cache_ttl_minutes), 60 * 24 * 30))
-    if req.prefetch_limit is not None:
-        config.openlist_prefetch_limit = max(0, min(int(req.prefetch_limit), _PREFETCH_MAX))
-    save_config(config)
     message = "OpenList 连接配置已保存"
-    if connection_changed and not config.openlist_routes:
+    if connection_changed and old_routes_existed:
         message = "OpenList 连接已保存；连接身份已变化，旧来源目录路由已清空，请重新发现并确认"
     return {"ok": True, "message": message}
 
@@ -563,6 +680,11 @@ def browse(path: str = "", page: int = 1, per_page: int = _BROWSE_PER_PAGE, refr
     path = normalize_remote_path(path) if path else remote_root
     _ensure_within_remote_root(remote_root, path)
 
+    # runtime 凭据统一走 resolver（REWORK）：cached 为空但 Credential Store
+    # 已恢复时回源读取真实凭据；store 不可用 → 受控 503（不清凭据、不猜 missing）。
+    # conn_key / governor key / 后台刷新 / runtime client 全部使用同一份身份。
+    eff_username, eff_password = _effective_openlist_credentials()
+
     parent_path = None
     if remote_root != "/" and path != remote_root:
         parent_path = str(PurePosixPath(path).parent)
@@ -570,7 +692,7 @@ def browse(path: str = "", page: int = 1, per_page: int = _BROWSE_PER_PAGE, refr
     ttl_minutes = max(1, int(config.openlist_cache_ttl_minutes or 1440))
     conn_key = connection_key(
         config.openlist_server_url,
-        config.openlist_username,
+        eff_username,
         remote_root,
     )
 
@@ -578,7 +700,7 @@ def browse(path: str = "", page: int = 1, per_page: int = _BROWSE_PER_PAGE, refr
     # 冷却中：fresh 缓存直接返回（标注 health）；无 fresh 缓存则拒绝请求，
     # 不发起任何网络请求。
     allowed, _health = source_health.peek_request_allowed(
-        governor_connection_key(config.openlist_server_url, config.openlist_username)
+        governor_connection_key(config.openlist_server_url, eff_username)
     )
     if not allowed:
         if not refresh:
@@ -615,8 +737,8 @@ def browse(path: str = "", page: int = 1, per_page: int = _BROWSE_PER_PAGE, refr
             _schedule_background_refresh(
                 conn_key, path,
                 config.openlist_server_url,
-                config.openlist_username,
-                config.openlist_password,
+                eff_username,
+                eff_password,
                 ttl_minutes,
                 page=page, per_page=per_page,
             )
@@ -719,7 +841,12 @@ def prefetch(req: PrefetchRequest):
     with _prefetch_generation_guard:
         _prefetch_generation += 1
         my_generation = _prefetch_generation
-    if not (config.openlist_server_url and config.openlist_username and config.openlist_password):
+    # runtime 凭据统一走 resolver（REWORK）：恢复后无需重启即可预取
+    try:
+        eff_username, eff_password = _effective_openlist_credentials()
+    except HTTPException:
+        return {"prefetched": 0, "skipped": 0, "busy": False, "cancelled": True}
+    if not config.openlist_server_url:
         return {"prefetched": 0, "skipped": 0, "busy": False, "cancelled": True}
     limit = max(0, min(int(config.openlist_prefetch_limit if config.openlist_prefetch_limit is not None else 12), _PREFETCH_MAX))
     remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
@@ -743,7 +870,7 @@ def prefetch(req: PrefetchRequest):
 
     # 模块 1 冷却拦截：冷却中不发任何请求，直接返回空结果 + health 标注
     allowed, _health = source_health.peek_request_allowed(
-        governor_connection_key(config.openlist_server_url, config.openlist_username)
+        governor_connection_key(config.openlist_server_url, eff_username)
     )
     if not allowed:
         _prefetch_guard.release()
@@ -755,7 +882,7 @@ def prefetch(req: PrefetchRequest):
     ttl_minutes = max(1, int(config.openlist_cache_ttl_minutes or 1440))
     conn_key = connection_key(
         config.openlist_server_url,
-        config.openlist_username,
+        eff_username,
         remote_root,
     )
     try:
@@ -775,8 +902,8 @@ def prefetch(req: PrefetchRequest):
                 if client is None:
                     client = get_openlist_client(
                         config.openlist_server_url,
-                        config.openlist_username,
-                        config.openlist_password,
+                        eff_username,
+                        eff_password,
                         client_factory=OpenListClient,
                     )
                 # 预取只拉当前层 page 1（有上限、不递归）；继续走 OpenListClient
@@ -830,6 +957,33 @@ def get_routes():
     return {"routes": [_route_public(route, config) for route in routes]}
 
 
+@router.get("/telemetry/today")
+def openlist_telemetry_today():
+    """HYB-6：今日 KumiPlayer → OpenList 请求成本遥测（只读）。
+
+    返回 fs_list / login / total 与固定免责文案。这是「KumiPlayer →
+    OpenList 方向」的本地计数，**不代表上游网盘真实配额消耗**
+    （OpenList 可能命中自身缓存）。未配置连接时返回零值摘要。
+    """
+    from app.integrations.openlist.governor import governor_connection_key
+    from app.integrations.openlist.telemetry import daily_summary
+
+    config = load_config()
+    username = (config.openlist_username or "").strip()
+    if not config.openlist_server_url.strip() or not username:
+        return {
+            "fs_list": 0,
+            "login": 0,
+            "total": 0,
+            "disclaimer": (
+                "这是 KumiPlayer → OpenList 的请求次数（访问风险参考值）；"
+                "OpenList 可能命中自身缓存，因此实际网盘上游请求可能更少。"
+            ),
+        }
+    conn_hash = governor_connection_key(
+        config.openlist_server_url, username or ""
+    )
+    return daily_summary(conn_hash)
 @router.post("/routes/discover")
 def discover_routes():
     """从远端总根读取直接子目录（仅一层），按目录名给出提供商建议。
@@ -933,9 +1087,12 @@ def rescan_openlist_preset(preset_id: str):
         raise HTTPException(status_code=400, detail="该媒体库不是 OpenList 来源")
     if not preset.remote_locator:
         raise HTTPException(status_code=400, detail="该媒体库缺少 OpenList 远端定位，请重新导入")
-    _client_from_config(config)  # 未配置时快速失败
+    # 一次 resolve → 同一份可信 identity（REWORK）：credential resolution 在
+    # 任何 durable mutation 之前；unavailable → 503 / missing → 400，0 mutation。
+    eff_username, eff_password = _effective_openlist_credentials()
+    _client_from_config(config, username=eff_username, password=eff_password)  # client 校验用同一份身份
 
-    source_id = _openlist_source_id(config)
+    source_id = _openlist_source_id(config, username=eff_username)
     remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
     normalized = normalize_remote_path(preset.remote_locator)
     _ensure_within_remote_root(remote_root, normalized)
@@ -1003,15 +1160,480 @@ def rescan_openlist_preset(preset_id: str):
     }
 
 
+
+
+# ============================================================
+# HYB-2（REWORK）：TXT Zero-API Bootstrap —— Provider Source Identity
+# ============================================================
+
+@router.post("/bootstrap-tree")
+@_admitted_import_endpoint
+async def bootstrap_provider_with_tree(
+    provider: str = Form("pan115"),
+    remote_locator: str = Form(""),
+    local_mount_root: str = Form(...),
+    import_family: str = Form("anime"),
+    import_scope: str = Form(""),
+    tree_file: UploadFile = File(...),
+):
+    """用目录树 TXT 对 Provider SourceRoot 做零请求 bootstrap（HYB-2 REWORK）。
+
+    **身份模型（REWORK）**：Provider Identity ≠ Scan Channel。
+    - 来源身份 = Provider（pan115 / baidu）+ 本地挂载根，稳定为
+      ``pan115-{hash}`` / ``baidu-{hash}``——**不依赖 OpenList 配置**；
+    - OpenList 只是可选的后续增量通道（RWK-3 binding）；
+    - 因此：纯 TXT + 本地挂载用户完全不配 OpenList 也能完整建库；
+      以后绑定 OpenList 增量时 root_id / media_units 不变。
+
+    与旧实现（把 OpenList 当长期身份）的区别：
+    - 不再要求 OpenList 凭据/路由/远端根——全部本地校验；
+    - source/root/preset 全部挂在 Provider 身份下；
+    - 0 OpenList 网络请求；OpenList 冷却/凭据故障不影响本通道。
+
+    流程：TXT 归档（MediaTreeVersion）→ 本地解析 → create/reuse Provider
+    root → enqueue scan(scan_channel=snapshot_{provider}, scan_mode=full)。
+    """
+    import hashlib
+
+    from app.catalog import lifecycle
+    from app.catalog import store as catalog_store
+    from app.db.database import init_db
+    from app.media_presets.service import (
+        _ALLOWED_SUFFIXES,
+        _MAX_UPLOAD_BYTES,
+        _archive_tree_bytes,
+        create_preset_record,
+        save_preset,
+    )
+    from app.media_presets.store import list_presets
+    from app.pipeline import orchestrator
+    from app.sources.registry import get_source_adapter
+
+    init_db()
+
+    # —— Provider 通道归一化（不读 OpenList 配置）
+    provider = (provider or "pan115").strip().lower()
+    if provider not in {"pan115", "baidu"}:
+        raise HTTPException(status_code=400, detail="provider 仅支持 pan115 或 baidu")
+    channel = f"snapshot_{provider}"
+
+    # —— 本地挂载根（TXT 相对路径的本地基准，唯一必需的输入）
+    mount_root = (local_mount_root or "").strip()
+    if not mount_root:
+        raise HTTPException(
+            status_code=400,
+            detail="缺少本地挂载根：请填写网盘挂载盘符路径（如 K:\\115网盘）",
+        )
+    effective_root = Path(mount_root).expanduser()
+
+    # —— Provider Source Identity：稳定哈希，与 OpenList 完全解耦
+    provider_key = hashlib.sha256(
+        str(effective_root).casefold().encode("utf-8")
+    ).hexdigest()[:16]
+    source_id = f"{provider}-{provider_key}"
+    catalog_store.create_source(
+        source_id=source_id,
+        source_type=provider,
+        provider_id=provider,
+        ingest_method="directory_tree",
+        connection_key=source_id,
+        display_name="115 目录树" if provider == "pan115" else "百度目录树",
+    )
+
+    # —— remote_locator（可选）：未来 OpenList binding 的远端路径基准。
+    # 未提供时用本地路径的 POSIX 形式（纯 TXT 用户无 OpenList 远端概念）。
+    if remote_locator and remote_locator.strip():
+        normalized = normalize_remote_path(remote_locator)
+    else:
+        normalized = "/" + str(effective_root).replace("\\", "/").strip("/")
+
+    # —— TXT 归档（KumiPlayer 数据目录 + MediaTreeVersion，不指向用户临时文件）
+    original_name = Path(tree_file.filename or "目录树.txt").name
+    if Path(original_name).suffix.lower() not in _ALLOWED_SUFFIXES:
+        raise HTTPException(status_code=400, detail="仅支持 .txt、.tree 或 .log 目录树文件")
+    data = await tree_file.read(_MAX_UPLOAD_BYTES + 1)
+    if not data:
+        raise HTTPException(status_code=400, detail="目录树文件为空")
+    if len(data) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="目录树文件超过 64 MB")
+
+    # —— Provider preset：复用已有关卡或创建新卡（同一 Provider 身份）
+    from app.media_presets.service import find_matching_preset
+
+    preset = next(
+        (
+            p for p in list_presets()
+            if p.source == provider
+            and _normalized_mount_root(p.source_root) == _normalized_mount_root(str(effective_root))
+        ),
+        None,
+    )
+    if preset is None:
+        preset = create_preset_record(
+            provider,
+            str(effective_root),
+            (import_family or "anime").strip(),
+            (import_scope or "").strip(),
+            update_mode="directory_tree",
+            provider_id=provider,
+            ingest_method="directory_tree",
+            catalog_root_id="",
+        )
+        save_preset(preset)
+
+    version, archive = _archive_tree_bytes(
+        preset.preset_id,
+        original_name,
+        data,
+        source_tree_path=str(effective_root),
+        provider_id=provider,
+        ingest_method="directory_tree",
+    )
+    version.input_type = "directory_tree"
+    version.remote_locator = normalized
+    preset.versions.append(version)
+    preset.version_count += 1
+    preset.updated_at = datetime.now(timezone(timedelta(hours=8))).isoformat()
+    save_preset(preset)
+
+    # —— 本地解析 TXT（0 网络）
+    try:
+        adapter = get_source_adapter(provider)
+        snapshot = adapter.parse(str(archive), str(effective_root))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"目录树解析失败: {exc}") from None
+
+    # —— resolve/create Provider root（同一 root，后续 OpenList 增量复用）。
+    # RWK-17：与现有 TXT 导入共用 ensure_provider_source_root（幂等）。
+    from app.media_presets.service import ensure_provider_source_root
+
+    try:
+        root_id = ensure_provider_source_root(
+            provider=provider,
+            local_mount_root=str(effective_root),
+            import_family=(import_family or "anime").strip(),
+            import_scope=(import_scope or "").strip(),
+            remote_locator=normalized,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    root = catalog_store.get_source_root(root_id)
+    if root is None:
+        raise HTTPException(status_code=409, detail="来源根解析失败，请重新导入")
+    resolution = lifecycle.resolve_root_for_import(
+        root.source_id,
+        normalized,
+        import_family=(import_family or "anime").strip(),
+        import_scope=(import_scope or "").strip(),
+        local_locator=str(effective_root),
+    )
+    # —— enqueue TXT snapshot 扫描（显式 scan_channel，0 OpenList 请求；
+    # 冷却门按通道判定，snapshot 通道不查 OpenList health）
+    scan_mode = "full"
+    root_id = root.root_id
+    generation = catalog_store.bump_generation(root_id)
+    # RWK-30：与 bootstrap_provider_catalog_from_tree 一致——snapshot 入队即
+    # 设置 baseline target（pending），旧 completed fact 不再代表当前基线。
+    catalog_store.set_baseline_target(root_id, generation)
+    job_id = orchestrator.enqueue_scan(
+        root_id,
+        generation,
+        source_id,
+        input_path=str(archive),
+        scan_mode=scan_mode,
+        scan_channel=channel,
+    )
+    # RWK-10：bootstrap 后把 Provider preset 与 SourceRoot 持久关联——
+    # 进程重启/页面刷新后媒体来源卡仍能定位该 Provider root，
+    # 不依赖 bootstrap HTTP 响应当时返回的 root_id。
+    if preset.catalog_root_id != root_id:
+        preset.catalog_root_id = root_id
+        preset.updated_at = datetime.now(timezone(timedelta(hours=8))).isoformat()
+        save_preset(preset)
+    return {
+        "task_id": job_id,
+        "root_id": root_id,
+        "generation": generation,
+        "preset_id": preset.preset_id,
+        "execution_mode": "durable",
+        "scan_channel": channel,
+        "scan_mode": scan_mode,
+        "source_id": source_id,
+        "resolution": lifecycle.resolution_api_label(resolution.action),
+        "requested_locator": normalized,
+        "canonical_locator": resolution.canonical_locator,
+        "tree_file_count": snapshot.file_count,
+        "tree_video_count": snapshot.video_count,
+    }
+
+
+class BindRootRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    root_id: str
+    remote_locator: str
+
+
+@router.post("/bind-root")
+@_admitted_import_endpoint
+def bind_provider_root_to_openlist(req: BindRootRequest):
+    """RWK-3：给已存在的 Provider SourceRoot 绑定可选 OpenList 增量通道。
+
+    Provider Identity ≠ Scan Channel 的落地：
+    - root 的长期身份仍是 Provider（pan115/baidu），本端点**不创建新 source/root**；
+    - 只持久化 binding 元数据（openlist_conn_hash + openlist_remote_locator），
+      之后对该 root 的扫描使用 scan_channel=openlist，root_id/media_units 不变；
+    - 要求 OpenList 已配置（可信 resolver，防 stale credential——REWORK）。
+
+    binding 前做一次错绑预检（HYB-5 preflight 同款）：只 list root 直接成员，
+    与 Provider 快照直接成员对比，双方非空但完全无重叠 → 拒绝，0 变更。
+    """
+    from app.catalog import store as catalog_store
+    from app.db.database import init_db
+    from app.integrations.openlist.governor import governor_connection_key
+    from app.pipeline.discovery_handler import _reconcile_preflight
+
+    init_db()
+    root_id = (req.root_id or "").strip()
+    if not root_id:
+        raise HTTPException(status_code=400, detail="缺少 root_id")
+    root = catalog_store.get_source_root(root_id)
+    if root is None:
+        raise HTTPException(status_code=404, detail="来源根不存在")
+
+    # OpenList 凭据必须可用（可信 resolver）：绑定本身就是 OpenList 通道
+    # 的开启动作，禁止用 stale cached username 派生连接身份。
+    username, _password, state = resolve_openlist_credentials()
+    if state == "unavailable":
+        raise HTTPException(
+            status_code=503,
+            detail="本机凭据管理器暂时不可用，请稍后重试",
+        )
+    if not username or not _password:
+        raise HTTPException(
+            status_code=400,
+            detail="尚未配置 OpenList 连接，请先到设置页完成配置",
+        )
+    config = load_config()
+    conn_hash = governor_connection_key(config.openlist_server_url, username)
+    normalized = normalize_remote_path(req.remote_locator)
+    if not normalized or normalized == "/":
+        raise HTTPException(status_code=400, detail="请选择 OpenList 远端媒体目录（不能是根目录）")
+
+    # RWK-23：绑定保护——只有真正完成 Source Catalog 本地基线（TXT 快照
+    # discovery 产生过 complete 目录）的 Provider root 才允许绑定 OpenList；
+    # 否则首次增量会退化成无意中的全网远端扫描。
+    baseline = catalog_store.source_catalog_baseline_stats(root_id)
+    if not baseline["baseline_ready"]:
+        raise HTTPException(
+            status_code=400,
+            detail="该来源尚未建立 Source Catalog 本地基线，"
+                   "请先通过目录树 TXT 完成安全初始化（本地索引）后再绑定 OpenList 增量",
+        )
+    # RWK-14：binding 安全契约（0 请求 / 0 mutation 校验）——
+    # ①root 必须是 pan115/baidu Provider；②binding locator 必须位于当前
+    # remote_root 内；③必须命中启用路由；④route.provider_id == root provider。
+    from app.catalog.binding import validate_binding_contract
+
+    try:
+        validate_binding_contract(
+            root=root,
+            remote_locator=normalized,
+            routes=_routes_from_config(config),
+            remote_root=(
+                normalize_remote_path(config.openlist_remote_root)
+                if config.openlist_remote_root
+                else "/"
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    # 错绑预检：构建临时 OpenList scanner 做一次有界 root list（1 次请求）。
+    from app.integrations.openlist.client import get_openlist_client
+
+    client = get_openlist_client(config.openlist_server_url, username, _password)
+    from app.catalog.scanner import SourceCatalogScanner
+
+    scanner = SourceCatalogScanner(source="openlist", client=client)
+    try:
+        # snapshot_locator=root.remote_locator：快照直接成员挂在 root 实际
+        # locator 下（Provider 模型下可能是本地 POSIX 形式，与绑定远端路径不同）
+        _reconcile_preflight(
+            scanner, root_id, normalized,
+            snapshot_locator=root.remote_locator,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    catalog_store.bind_root_to_openlist(
+        root_id,
+        openlist_conn_hash=conn_hash,
+        openlist_remote_locator=normalized,
+    )
+    return {
+        "root_id": root_id,
+        "bound": True,
+        "openlist_remote_locator": normalized,
+        "source_id": root.source_id,
+    }
+
+@router.get("/bindable-providers")
+def list_bindable_providers():
+    """RWK-18：列出可绑定 OpenList 增量的 Provider 来源（115/百度）。
+
+    从 media presets（TXT 导入/安全初始化建立的）读取 catalog_root_id 关联，
+    返回来源名、provider、root_id、绑定状态——UI 据此做下拉选择，
+    不再要求用户手填内部 root_id。
+    """
+    from app.catalog import store as catalog_store
+    from app.media_presets.store import list_presets
+
+    providers = []
+    seen_roots = set()
+    for preset in list_presets():
+        if preset.source not in {"pan115", "baidu"}:
+            continue
+        root_id = (preset.catalog_root_id or "").strip()
+        if not root_id or root_id in seen_roots:
+            continue
+        root = catalog_store.get_source_root(root_id)
+        if root is None:
+            continue
+        seen_roots.add(root_id)
+        bound = bool(
+            (getattr(root, "openlist_conn_hash", "") or "")
+            and (getattr(root, "openlist_remote_locator", "") or "")
+        )
+        # RWK-23：Source Catalog 本地基线状态——只有 baseline_ready=true 的来源
+        # 才允许绑定 OpenList（否则首次增量会退化成全网扫描）。
+        baseline = catalog_store.source_catalog_baseline_stats(root_id)
+        providers.append({
+            "preset_id": preset.preset_id,
+            "name": preset.name or preset.source,
+            "provider": preset.source,
+            "root_id": root_id,
+            "source_id": root.source_id,
+            "local_locator": root.local_locator,
+            "bound": bound,
+            "openlist_remote_locator": (
+                getattr(root, "openlist_remote_locator", "") or ""
+            ),
+            "baseline_ready": baseline["baseline_ready"],
+            "baseline_directory_count": baseline["baseline_directory_count"],
+            "baseline_node_count": baseline["baseline_node_count"],
+        })
+    return {"providers": providers}
+
+
+class BoundRootRescanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    root_id: str
+@router.post("/bound-roots/rescan")
+@_admitted_import_endpoint
+def rescan_bound_provider_root(req: BoundRootRescanRequest):
+    """RWK-10：Bound Provider root 的真实 durable OpenList 增量扫描入口。
+
+    读取 Provider root → 校验 binding 存在 → 可信 resolver 校验连接身份
+    （conn hash 一致）→ bump generation → enqueue scan(scan_channel=openlist)。
+    source_id / root_id 不变；扫描运行时（discovery_handler）还会做
+    bound 路径映射与连接身份复核，双保险。
+
+    未绑定 → 400；连接已变更 → 409（0 mutation）；成功 → durable job_id。
+    """
+    from app.catalog import store as catalog_store
+    from app.db.database import init_db
+    from app.integrations.openlist.governor import governor_connection_key
+    from app.pipeline import orchestrator
+
+    init_db()
+    root_id = (req.root_id or "").strip()
+    if not root_id:
+        raise HTTPException(status_code=400, detail="缺少 root_id")
+    root = catalog_store.get_source_root(root_id)
+    if root is None:
+        raise HTTPException(status_code=404, detail="来源根不存在")
+
+    bound_conn_hash = getattr(root, "openlist_conn_hash", "") or ""
+    bound_locator = getattr(root, "openlist_remote_locator", "") or ""
+    if not bound_conn_hash or not bound_locator:
+        raise HTTPException(
+            status_code=400,
+            detail="该来源根尚未绑定 OpenList 增量通道，请先绑定",
+        )
+
+    # RWK-15：运行时完整复核（bump/enqueue 之前）——可信 resolver 身份 +
+    # 当前 remote_root scope + 当前 route/provider。server+username 不变但
+    # 用户修改 remote_root / 禁用或改 provider 路由时，这里会拦截。
+    username, password, state = resolve_openlist_credentials()
+    if state == "unavailable":
+        raise HTTPException(
+            status_code=503,
+            detail="本机凭据管理器暂时不可用，请稍后重试",
+        )
+    if not username or not password:
+        raise HTTPException(
+            status_code=400,
+            detail="尚未配置 OpenList 连接，请先到设置页完成配置",
+        )
+    config = load_config()
+    from app.catalog.binding import validate_runtime_binding
+
+    try:
+        validate_runtime_binding(
+            root=root,
+            bound_conn_hash=bound_conn_hash,
+            current_conn_hash=governor_connection_key(
+                config.openlist_server_url, username
+            ),
+            routes=_routes_from_config(config),
+            remote_root=(
+                normalize_remote_path(config.openlist_remote_root)
+                if config.openlist_remote_root
+                else "/"
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    generation = catalog_store.bump_generation(root_id)
+    job_id = orchestrator.enqueue_scan(
+        root_id,
+        generation,
+        root.source_id,
+        scan_mode="incremental",
+        scan_channel="openlist",
+    )
+    return {
+        "task_id": job_id,
+        "root_id": root_id,
+        "generation": generation,
+        "execution_mode": "durable",
+        "scan_channel": "openlist",
+        "scan_mode": "incremental",
+        "source_id": root.source_id,
+        "openlist_remote_locator": bound_locator,
+    }
+
+
 # ============================================================
 # Durable batch API（v2：import-batch → discovery job → SQLite revision）
 # ============================================================
 
-def _openlist_source_id(config) -> str:
+def _openlist_source_id(config, *, username: str) -> str:
+    """OpenList 来源身份键（纯函数，只接受**已解析的可信 identity**）。
+
+    关键原则（REWORK）：身份函数不自己 catch credential failure、不猜
+    fallback——``username`` 必须由调用方在 durable DB mutation 之前通过
+    resolver 解析完成（unavailable → 503 / missing → 400，0 mutation）。
+    这保证同一真实 OpenList 连接永远只产生一个稳定的 source identity，
+    不会因 stale cached 空凭据产生 ``blank-user`` 错误身份。
+    """
     remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
     identity = connection_key(
         config.openlist_server_url,
-        config.openlist_username,
+        username,
         remote_root,
     )
     return f"openlist-{identity}"
@@ -1107,9 +1729,14 @@ def create_openlist_import_batch(req: BatchImportRequest):
     from app.pipeline import orchestrator
 
     config = load_config()
+    # credential resolution 必须发生在第一次 durable DB mutation 之前
+    # （REWORK）：unavailable → 503 / missing → 400，0 mutation；
+    # 同一份可信 username 用于 source identity，杜绝 blank-user 错误身份。
+    eff_username, eff_password = _effective_openlist_credentials()
+    _client_from_config(config, username=eff_username, password=eff_password)  # 快速失败 + 同一身份
     normalized = _validate_batch_paths(config, req.remote_paths)
     remote_root = normalize_remote_path(config.openlist_remote_root) if config.openlist_remote_root else "/"
-    source_id = _openlist_source_id(config)
+    source_id = _openlist_source_id(config, username=eff_username)
     _ensure_openlist_source(catalog_store, source_id)
     family = (req.import_family or "anime").strip()
     scope = (req.import_scope or "").strip()

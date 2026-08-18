@@ -22,7 +22,7 @@ import { sourcesApi } from '../api/sources';
 import { configApi } from '../api/config';
 import { openlistApi, type BackgroundImportUnit, type OpenListCacheMeta, type OpenListEntry, type OpenListImportBatch } from '../api/openlist';
 import type { OpenListRoute, ProviderId } from '../api/types';
-import { mediaPresetsApi, type MediaLibraryPreset, type PresetDeletePreview } from '../api/mediaPresets';
+import { mediaPresetsApi, type MediaLibraryPreset, type PresetDeletePreview, type PresetImportResult } from '../api/mediaPresets';
 import { importsApi } from '../api/imports';
 import { mirrorApi } from '../api/mirror';
 import { scrapeApi, type ReviewQueueItem, type ScrapeCandidate } from '../api/scrape';
@@ -148,6 +148,12 @@ export default function MediaManagementPage() {
   const [actionError, setActionError] = useState('');
   const [editingItem, setEditingItem] = useState<ImportPlanItem | null>(null);
   const [editDraft, setEditDraft] = useState({ work_title: '', season_number: '', episode_number: '', group_type: 'season' });
+  // RWK-40（P0-2）：needs_review 无 revision 单元的人工 durable 处理对话框。
+  // needsReviewUnits 来自 preset.openlist_needs_review_units 投影；resolve 后该
+  // unit 生成可编辑 draft revision → confirmation_ready=true → 进入确认页。
+  const [needsReviewPreset, setNeedsReviewPreset] = useState<MediaLibraryPreset | null>(null);
+  const [needsReviewTitles, setNeedsReviewTitles] = useState<Record<string, string>>({});
+  const [resolvingReviewUnitId, setResolvingReviewUnitId] = useState('');
   const refreshedWorkflowTaskRef = useRef('');
   const taskStartInFlightRef = useRef(false);
   const autoAdvanceScrapeRef = useRef('');
@@ -326,37 +332,22 @@ export default function MediaManagementPage() {
     if (step !== 'confirm' || !activeEntry?.planId || !activeEntry.preview || activeTask) return;
     if (activeEntry.pathValidation?.ok === false) return;
     if (activeEntry.preview.issues.some((issue) => issue.level === 'error')) return;
-    const pipelineKey = `${source}:${activeEntry.planId}`;
+    // RWK-38（P0-3）：baseline 失败/未完成 → 自动 pipeline 绝不运行、绝不回退 legacy
+    if (activeEntry.confirmationBlocked) return;
+    const pipelineKey = `${source}:${activeEntry.planId}:${activeEntry.confirmationRootId ?? ''}:${activeEntry.confirmationGeneration ?? ''}`;
     if (autoPipelineEntryRef.current === pipelineKey) return;
     autoPipelineEntryRef.current = pipelineKey;
-    const entryId = activeEntry.id;
-    const planId = activeEntry.planId;
     void (async () => {
       try {
-        setActionError('');
-        // 幂等确认门面：draft → confirm+入队，confirmed → ensure（后端幂等）。
-        // 恢复场景（preview 已 confirmed，如 OpenList batch 恢复/刷新页面）同样
-        // 拿到 durable job_id，避免掉回 legacy mirror 生成造成双轨。
-        const confirmed = await importsApi.confirm(source, planId);
-        const confirmedPreview = await importsApi.getPreview(source, planId);
-        updateEntry(entryId, { preview: confirmedPreview, status: 'parsed' });
-        setTask(null);
-        setTaskKind('mirror');
-        setStep('workbench');
-        if (confirmed.execution_mode === 'durable' && confirmed.job_id) {
-          // V3：镜像 job 已由后端确认/ensure 事务入队（或恢复已有 job），前端不再生成
-          setTask(await tasksApi.get(confirmed.job_id));
-        } else {
-          // legacy：旧 JSON 计划保持原行为，由前端生成镜像
-          const created = await mirrorApi.generate(source, planId);
-          setTask(await tasksApi.get(created.task_id));
-        }
+        // RWK-38：唯一确认入口（durable_root → confirmRoot(root, generation)；
+        // 其余 → 幂等确认门面）。成功会 setStep('workbench')，effect 不再重入。
+        await confirmCurrentImport();
       } catch (error) {
         autoPipelineEntryRef.current = '';
         setActionError(`自动处理未能继续：${(error as Error).message}。你仍可在此页处理识别结果后重试。`);
       }
     })();
-  }, [activeEntry?.id, activeEntry?.pathValidation?.ok, activeEntry?.planId, activeEntry?.preview, activeTask, setStep, source, step]);
+  }, [activeEntry?.confirmationBlocked, activeEntry?.confirmationGeneration, activeEntry?.confirmationRootId, activeEntry?.id, activeEntry?.pathValidation?.ok, activeEntry?.planId, activeEntry?.preview, activeTask, setStep, source, step]);
 
   useEffect(() => {
     if (taskKind !== 'mirror' || !isMirrorTaskReady(task) || !task || !activeEntry?.planId) return;
@@ -428,6 +419,41 @@ export default function MediaManagementPage() {
     }
   };
 
+  /** RWK-38（P0-3）：baseline_failed 用户可见 + 确认身份硬阻断。
+   * baseline 失败/未完成 → confirmationBlocked：确认按钮不可执行、
+   * 自动 pipeline 不运行、绝不回退 legacy mirror 链。 */
+  const applyBaselineFailureHint = (result: PresetImportResult, entry: DirectoryEntry) => {
+    // preset 投影是 restart-safe authority；即使本次 baseline 返回 reused，
+    // 历史 failed/pending 也必须继续 blocked，不能借复用路径掉回 legacy。
+    if (!entry.confirmationRootId && result.preset.confirmation_root_id) {
+      entry.confirmationRootId = result.preset.confirmation_root_id;
+    }
+    if (entry.confirmationGeneration == null && result.preset.confirmation_generation != null) {
+      entry.confirmationGeneration = result.preset.confirmation_generation;
+    }
+    entry.confirmationBlocked = Boolean(result.preset.confirmation_blocked);
+    if (result.baseline?.status === 'baseline_failed') {
+      entry.confirmationBlocked = true;
+      setActionError('媒体库已创建，但本地增量基线初始化失败：确认已被禁用，可稍后重新导入目录树或检查数据目录权限；本次不会退回旧版镜像流程。');
+    }
+  };
+
+  /** RWK-39（P0-1）：确认页数据源统一为 durable aggregate preview。
+   * 只要存在 (confirmationRootId, confirmationGeneration)，用户看到、修改、
+   * 确认的就是 Source Catalog durable revisions 的真实内容（legacy preview
+   * 只作兼容存档，绝不充当 durable_root 的确认事实）。 */
+  const resolveTxtEntryPreview = async (
+    source: string,
+    rootId: string | undefined,
+    generation: number | undefined,
+    legacyPreview: ImportPreview,
+  ): Promise<ImportPreview> => {
+    if (rootId && generation != null && generation > 0) {
+      return await importsApi.getConfirmRootPreview(source, rootId, generation);
+    }
+    return legacyPreview;
+  };
+
   const importTreePath = async (treePath: string, action: PendingTreeAction) => {
     // 创建导入要求页面全局来源不是本地目录；更新导入不依赖全局 source，
     // 必须按目标预设自身的 source（action.presetSource）执行，
@@ -452,9 +478,21 @@ export default function MediaManagementPage() {
       entry.presetId = result.preset.preset_id;
       entry.status = 'parsed';
       entry.planId = result.preview.plan_id;
-      entry.preview = result.preview;
       entry.resolvedRoot = result.preset.source_root;
       entry.pathValidation = result.version.path_validation;
+      // RWK-35：TXT baseline 的 root 级确认身份（若已同步建立）
+      if (result.baseline?.confirmation_root_id) {
+        entry.confirmationRootId = result.baseline.confirmation_root_id;
+        entry.confirmationGeneration = result.baseline.confirmation_generation;
+      }
+      // RWK-39（P0-1）：确认页数据源必须是 durable aggregate preview——
+      // legacy preview 只作兼容存档，不充当 durable_root 的确认事实。
+      entry.preview = await resolveTxtEntryPreview(
+        result.preset.source,
+        entry.confirmationRootId || result.preset.confirmation_root_id,
+        entry.confirmationGeneration ?? result.preset.confirmation_generation,
+        result.preview,
+      );
       setEntries([entry]);
       setActiveEntryId(entry.id);
       setSource(result.preset.source);
@@ -465,6 +503,7 @@ export default function MediaManagementPage() {
         : result.reused_preset && result.unchanged
           ? `${getPresetDisplayName(result.preset)} 已存在，内容相同，未创建重复卡片或版本`
           : `${result.preset.name} 已创建，目录树已由 KumiPlayer 保存`);
+      applyBaselineFailureHint(result, entry);
       if (action.kind === 'create') setSelectedCloudRoot('');
       await loadPresets();
       setStep('confirm');
@@ -516,9 +555,21 @@ export default function MediaManagementPage() {
       entry.presetId = result.preset.preset_id;
       entry.status = 'parsed';
       entry.planId = result.preview.plan_id;
-      entry.preview = result.preview;
       entry.resolvedRoot = result.preset.source_root;
       entry.pathValidation = result.version.path_validation;
+      // RWK-35：TXT baseline 的 root 级确认身份（若已同步建立）
+      if (result.baseline?.confirmation_root_id) {
+        entry.confirmationRootId = result.baseline.confirmation_root_id;
+        entry.confirmationGeneration = result.baseline.confirmation_generation;
+      }
+      // RWK-39（P0-1）：确认页数据源必须是 durable aggregate preview——
+      // legacy preview 只作兼容存档，不充当 durable_root 的确认事实。
+      entry.preview = await resolveTxtEntryPreview(
+        result.preset.source,
+        entry.confirmationRootId || result.preset.confirmation_root_id,
+        entry.confirmationGeneration ?? result.preset.confirmation_generation,
+        result.preview,
+      );
       setEntries([entry]);
       setActiveEntryId(entry.id);
       setSource(result.preset.source);
@@ -529,6 +580,7 @@ export default function MediaManagementPage() {
         : result.reused_preset && result.unchanged
           ? `${getPresetDisplayName(result.preset)} 已存在，内容相同，未创建重复卡片或版本`
         : `${result.preset.name} 已创建，目录树已由 KumiPlayer 保存`);
+      applyBaselineFailureHint(result, entry);
       if (action.kind === 'create') setSelectedCloudRoot('');
       await loadPresets();
       setStep('confirm');
@@ -562,9 +614,21 @@ export default function MediaManagementPage() {
       entry.presetId = result.preset.preset_id;
       entry.status = 'parsed';
       entry.planId = result.preview.plan_id;
-      entry.preview = result.preview;
       entry.resolvedRoot = result.preset.source_root;
       entry.pathValidation = result.version.path_validation;
+      // RWK-35：TXT baseline 的 root 级确认身份（若已同步建立）
+      if (result.baseline?.confirmation_root_id) {
+        entry.confirmationRootId = result.baseline.confirmation_root_id;
+        entry.confirmationGeneration = result.baseline.confirmation_generation;
+      }
+      // RWK-39（P0-1）：确认页数据源必须是 durable aggregate preview——
+      // legacy preview 只作兼容存档，不充当 durable_root 的确认事实。
+      entry.preview = await resolveTxtEntryPreview(
+        result.preset.source,
+        entry.confirmationRootId || result.preset.confirmation_root_id,
+        entry.confirmationGeneration ?? result.preset.confirmation_generation,
+        result.preview,
+      );
       setEntries([entry]);
       setActiveEntryId(entry.id);
       setSource(result.preset.source);
@@ -575,6 +639,7 @@ export default function MediaManagementPage() {
           ? `已识别为${result.preset.source === 'pan115' ? ' 115' : '百度网盘'}目录树，并复用现有${getPresetDisplayName(result.preset)}`
           : `已识别为${result.preset.source === 'pan115' ? ' 115' : '百度网盘'}目录树，${result.preset.name} 已创建`,
       );
+      applyBaselineFailureHint(result, entry);
       await loadPresets();
       setStep('confirm');
     } catch (error) {
@@ -1163,7 +1228,18 @@ export default function MediaManagementPage() {
         }
         setUploadMessage('实际视频路径已重新验证，可以继续处理导入计划。');
       }
-      if (!parsedPreview) {
+      const restoredRootId = workingPreset.confirmation_root_id;
+      const restoredGeneration = workingPreset.confirmation_generation;
+      // RWK-39（P0-1）：durable_root 恢复时直接读取 aggregate preview，
+      // 不先把 legacy preview 作为确认页数据源；只有没有 durable identity 的
+      // 旧 legacy preset 才读取旧 plan。
+      if (restoredRootId && restoredGeneration != null && restoredGeneration > 0) {
+        parsedPreview = await importsApi.getConfirmRootPreview(
+          workingPreset.source,
+          restoredRootId,
+          restoredGeneration,
+        );
+      } else if (!parsedPreview) {
         parsedPreview = await importsApi.getPreview(workingPreset.source, workingPreset.current_plan_id);
       }
       const entry = makeEntry();
@@ -1175,14 +1251,42 @@ export default function MediaManagementPage() {
       entry.preview = parsedPreview;
       entry.resolvedRoot = workingPreset.source_root;
       entry.pathValidation = workingVersion?.path_validation;
+      // RWK-38（P0-2）：durable confirmation identity 可恢复——重启/刷新后
+      // 从 preset 投影恢复 (root_id, generation)；confirmation_ready=false
+      // （基线未完成/失败/已确认完）→ confirmationBlocked，禁止确认与
+      // 自动 pipeline，绝不回退 legacy 执行链。
+      if (workingPreset.confirmation_root_id) {
+        entry.confirmationRootId = workingPreset.confirmation_root_id;
+        entry.confirmationGeneration = workingPreset.confirmation_generation;
+      }
+      // RWK-39（P0-2）：hard-failure durable authority 持久化投影——
+      // confirmation_blocked（baseline failed / pending）restart 后仍恢复阻断。
+      if (workingPreset.confirmation_blocked || (
+        workingPreset.confirmation_root_id && workingPreset.confirmation_ready === false
+      )) {
+        entry.confirmationBlocked = true;
+      }
       setEntries([entry]);
       setActiveEntryId(entry.id);
       setSource(workingPreset.source);
       setFamily(workingPreset.import_family);
       setImportScope(workingPreset.import_scope);
-      setStep(workingPreset.lifecycle_status === 'draft'
-        ? 'confirm'
-        : 'workbench');
+      // RWK-40（P0-1）：durable root 不能再用 legacy lifecycle_status 判页面——
+      // durable draft revision 会让 projector 投影成 needs_attention（非 draft），
+      // 若按 lifecycle 规则会把用户送去 workbench 而非确认页。优先按 durable
+      // confirmation identity：execution_authority==durable_root + root_id +
+      // generation>0 + confirmation_ready=true → confirm；其余（非 durable legacy）
+      // 才沿用原来的 lifecycle 规则。
+      setStep(
+        workingPreset.execution_authority === 'durable_root'
+          && workingPreset.confirmation_root_id
+          && (workingPreset.confirmation_generation ?? 0) > 0
+          && workingPreset.confirmation_ready === true
+          ? 'confirm'
+          : workingPreset.lifecycle_status === 'draft'
+            ? 'confirm'
+            : 'workbench'
+      );
     } catch (error) {
       setActionError(`无法继续处理“${getPresetDisplayName(preset)}”：${(error as Error).message}`);
       setUploadMessage('');
@@ -1217,6 +1321,60 @@ export default function MediaManagementPage() {
     }
   };
 
+  /** RWK-40（P0-2）：needs_review 无 revision 单元的人工 durable 处理入口。
+   * 用户填写/确认作品身份后，后端从既有 source_nodes 重建 snapshot 生成可编辑
+   * draft revision，进入 root-generation 确认集合（confirmation_ready=true）。
+   * resolve 成功后刷新预设列表，来源卡出现「继续确认」即可进入确认页。 */
+  const resolveNeedsReview = async (preset: MediaLibraryPreset, unitId: string) => {
+    if (resolvingReviewUnitId) return;
+    const title = (needsReviewTitles[unitId] ?? '').trim();
+    if (!title) {
+      setActionError(`请先填写「${preset.openlist_needs_review_units?.find((u) => u.unit_id === unitId)?.boundary ?? '识别单元'}」的作品名称`);
+      return;
+    }
+    const rootId = preset.confirmation_root_id ?? preset.catalog_root_id ?? '';
+    if (!rootId) {
+      setActionError('该预设尚未关联 durable 来源根，请先重新导入目录树');
+      return;
+    }
+    const generation = preset.confirmation_generation ?? 0;
+    if (!generation || generation <= 0) {
+      setActionError('该来源根缺少可处理的目录树基线，请重新导入目录树');
+      return;
+    }
+    // RWK-40（P0-3）：failed/pending baseline（completed < target）不得人工处理识别
+    // 单元——后端 completed fence 会 409，前端也不提供 resolve 入口。
+    // 注意：不能用投影的 confirmation_blocked 拦截——P0-2 目标场景（baseline 成功 +
+    // 全部 needs_review 无 draft revision）恰好投影成 confirmation_blocked=true
+    // （state=ready 但 ready=false），若用它会把这个本就该 resolve 的场景也堵死，
+    // 与按钮渲染条件（仅排除 failed/pending）矛盾，导致永久卡住。后端
+    // completed==generation fence 已精确区分：all-needs-review（completed==target）
+    // 允许 resolve，failed/pending（completed<target）409。
+    if (preset.confirmation_state === 'failed' || preset.confirmation_state === 'pending') {
+      setActionError('目录树基线未完成或已过期，暂不能人工处理识别单元');
+      return;
+    }
+    setResolvingReviewUnitId(unitId);
+    setActionError('');
+    try {
+      const result = await importsApi.resolveNeedsReview(preset.source, rootId, generation, unitId, title);
+      setNeedsReviewTitles((value) => ({ ...value, [unitId]: '' }));
+      setUploadMessage(`已为「${title}」生成可编辑版本，请继续确认`);
+      setNeedsReviewPreset(null);
+      // RWK-40（P0-2）：resolve 后必须用最新投影的 preset 恢复确认身份——传入
+      // 的 preset 是 resolve 前的 stale 引用（confirmation_ready=false），直接传给
+      // resumePreset 会误设 confirmationBlocked 禁用确认。刷新后取新对象。
+      await loadPresets(true);
+      const listed = await mediaPresetsApi.list();
+      const refreshed = (listed.presets ?? []).find((item) => item.preset_id === preset.preset_id);
+      if (refreshed) void resumePreset(refreshed);
+    } catch (error) {
+      setActionError(`处理识别结果失败：${(error as Error).message}`);
+    } finally {
+      setResolvingReviewUnitId('');
+    }
+  };
+
   const rebindPresetRoot = async (preset: MediaLibraryPreset) => {
     if (repairingPresetId) return;
     const selected = await chooseCloudContentRoot(
@@ -1234,9 +1392,22 @@ export default function MediaManagementPage() {
       entry.presetId = result.preset.preset_id;
       entry.status = 'parsed';
       entry.planId = result.preview.plan_id;
-      entry.preview = result.preview;
       entry.resolvedRoot = result.preset.source_root;
       entry.pathValidation = result.version.path_validation;
+      // RWK-35：TXT baseline 的 root 级确认身份（若已同步建立）
+      if (result.baseline?.confirmation_root_id) {
+        entry.confirmationRootId = result.baseline.confirmation_root_id;
+        entry.confirmationGeneration = result.baseline.confirmation_generation;
+      }
+      // RWK-39（P0-1）：确认页数据源必须是 durable aggregate preview——
+      // legacy preview 只作兼容存档，不充当 durable_root 的确认事实。
+      entry.preview = await resolveTxtEntryPreview(
+        result.preset.source,
+        entry.confirmationRootId || result.preset.confirmation_root_id,
+        entry.confirmationGeneration ?? result.preset.confirmation_generation,
+        result.preview,
+      );
+      applyBaselineFailureHint(result, entry);
       setEntries([entry]);
       setActiveEntryId(entry.id);
       setSource(result.preset.source);
@@ -1449,7 +1620,7 @@ export default function MediaManagementPage() {
           <span className={`media-preset-lifecycle ${preset.lifecycle_status}`}>{getPresetLifecycleLabel(preset.lifecycle_status)}</span>
           {taskLabel && <div className={`media-preset-task-state ${scrapeActive ? 'active' : scrapeStopped ? 'stopped' : 'attention'}`}>{scrapeActive && <Spinner size="tiny" />}<span>{taskLabel}</span></div>}
           <div className="media-preset-stats"><span><strong>{preset.update_mode === 'openlist_scan' ? (preset.openlist_unit_count ?? 0) : preset.work_count}</strong> {preset.update_mode === 'openlist_scan' ? '识别单元' : '识别作品'}</span><span><strong>{preset.video_count}</strong> 个视频</span><span><strong>{preset.version_count}</strong> {preset.update_mode === 'local_scan' ? '次扫描' : '个版本'}</span></div>
-          {(preset.update_mode === 'openlist_scan' && (preset.openlist_attention_count ?? 0) > 0) && <div className="media-preset-task-state attention"><TriangleAlert size={13} /><span>{preset.openlist_attention_count} 个识别单元需处理，可在后台导入中处理或重试</span></div>}
+          {((preset.update_mode === 'openlist_scan' || (preset.update_mode === 'directory_tree' && preset.execution_authority === 'durable_root')) && (preset.openlist_attention_count ?? 0) > 0) && <div className="media-preset-task-state attention"><TriangleAlert size={13} /><span>{preset.openlist_attention_count} 个识别单元需处理，可在后台导入中处理或重试</span></div>}
           <small>上次更新：{new Date(preset.updated_at).toLocaleString()}</small>
           <div className="media-preset-card-actions">
             {preset.update_mode === 'directory_tree' && pathValidation?.ok === false && <Button className="media-preset-action repair" appearance="secondary" icon={<FolderOpen size={15} />} disabled={Boolean(repairingPresetId) || uploadingTree} onClick={() => void rebindPresetRoot(preset)}>选择实际文件夹并重新验证</Button>}
@@ -1457,7 +1628,16 @@ export default function MediaManagementPage() {
             {!scrapeActive && scrapeFailed && !hasManualReview && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree} onClick={() => void queuePresetScrape(preset)}>重新刮削</Button>}
             {scrapeActive && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree} onClick={() => { setTaskKind('scrape'); setTask(scrapeTask); setStep('workbench'); }}>查看进度</Button>}
             {!scrapeActive && !scrapeFailed && preset.lifecycle_status === 'mirrored' && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree} onClick={() => void queuePresetScrape(preset)}>{scrapeStopped ? '继续刮削' : '加入刮削队列'}</Button>}
-            {!scrapeActive && !preset.is_library_indexed && preset.lifecycle_status !== 'mirrored' && preset.lifecycle_status !== 'needs_attention' && preset.update_mode !== 'openlist_scan' && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree || repairingPresetId === preset.preset_id} onClick={() => void resumePreset(preset)}>{pathValidation?.ok === false ? '重新验证并继续' : '继续处理'}</Button>}
+            {!scrapeActive && !preset.is_library_indexed && preset.execution_authority !== 'durable_root' && preset.lifecycle_status !== 'mirrored' && preset.lifecycle_status !== 'needs_attention' && preset.update_mode !== 'openlist_scan' && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree || repairingPresetId === preset.preset_id} onClick={() => void resumePreset(preset)}>{pathValidation?.ok === false ? '重新验证并继续' : '继续处理'}</Button>}
+            {/* RWK-39（P0-1）：durable_root TXT 卡的重启恢复入口——baseline 完成、
+                draft revisions 仍在时 lifecycle 投影为 needs_attention，不得因此隐藏；
+                confirmation_ready=true 时调 durable-safe resumePreset 进入 aggregate 确认页。
+                路径无效时由上方「选择实际文件夹并重新验证」（rebind）入口承接。 */}
+            {!scrapeActive && preset.update_mode === 'directory_tree' && preset.execution_authority === 'durable_root' && preset.confirmation_ready === true && preset.lifecycle_status !== 'mirrored' && !preset.is_library_indexed && pathValidation?.ok !== false && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree || repairingPresetId === preset.preset_id} onClick={() => void resumePreset(preset)}>继续确认</Button>}
+            {/* RWK-40（P0-2）：needs_review 无 revision 单元的人工 durable 处理入口——
+                有 attention 但 confirmation_ready=false（无 draft revision 可确认）时，
+                必须先人工处理识别单元生成可编辑版本，再走「继续确认」。 */}
+            {!scrapeActive && preset.update_mode === 'directory_tree' && preset.execution_authority === 'durable_root' && preset.confirmation_ready !== true && preset.confirmation_state !== 'failed' && preset.confirmation_state !== 'pending' && (preset.openlist_attention_count ?? 0) > 0 && (preset.openlist_needs_review_units?.length ?? 0) > 0 && <Button className="media-preset-action primary" appearance="primary" disabled={uploadingTree || repairingPresetId === preset.preset_id} onClick={() => { setNeedsReviewPreset(preset); setNeedsReviewTitles({}); }}>处理识别结果</Button>}
             {preset.update_mode === 'local_scan'
               ? <Button className="media-preset-action secondary" appearance="secondary" icon={scanningFolder ? <Spinner size="tiny" /> : <ScanLine size={15} />} disabled={scanningFolder || uploadingTree} onClick={() => void rescanLocalPreset(preset)}>重新扫描本地目录</Button>
               : preset.update_mode === 'openlist_scan'
@@ -1469,25 +1649,62 @@ export default function MediaManagementPage() {
     })}</div>
   );
 
+  /** RWK-38（P1-2）：唯一确认入口——自动 pipeline 与手工“确认并继续”共用。
+   * 统一决策：
+   *   durable_root    → confirmRoot(root_id, generation)（generation fence）
+   *   durable_revision→ confirm(revision_id)
+   *   legacy          → confirm(legacy_plan_id)
+   * confirmationBlocked（baseline 失败/未完成）→ 拒绝执行，绝不回退 legacy。 */
+  const confirmCurrentImport = async (): Promise<boolean> => {
+    if (!activeEntry?.planId || !preview) return false;
+    if (activeEntry.pathValidation?.ok === false) return false;
+    if (preview.issues.some((issue) => issue.level === 'error')) return false;
+    if (activeEntry.confirmationBlocked) {
+      setActionError('确认已被禁用：本地增量基线未就绪，本次不会退回旧版镜像流程。请重新导入目录树后再试。');
+      return false;
+    }
+    setActionError('');
+    try {
+      if (activeEntry.confirmationRootId && activeEntry.confirmationGeneration != null) {
+        // durable_root：TXT baseline 多作品一次确认全部（root + generation 身份）
+        const rootResult = await importsApi.confirmRoot(
+          source,
+          activeEntry.confirmationRootId,
+          activeEntry.confirmationGeneration,
+        );
+        setTask(null);
+        setTaskKind('mirror');
+        setStep('workbench');
+        if (rootResult.job_ids && rootResult.job_ids.length > 0) {
+          setTask(await tasksApi.get(rootResult.job_ids[0]));
+        }
+        return true;
+      }
+      // durable_revision / legacy：幂等确认门面（draft → confirm+入队；
+      // confirmed → ensure；legacy JSON 计划保持原行为）
+      const confirmed = await importsApi.confirm(source, activeEntry.planId);
+      const confirmedPreview = await importsApi.getPreview(source, activeEntry.planId);
+      updateEntry(activeEntry.id, { preview: confirmedPreview, status: 'parsed' });
+      setTask(null);
+      setTaskKind('mirror');
+      setStep('workbench');
+      if (confirmed.execution_mode === 'durable' && confirmed.job_id) {
+        setTask(await tasksApi.get(confirmed.job_id));
+      } else {
+        const created = await mirrorApi.generate(source, activeEntry.planId);
+        setTask(await tasksApi.get(created.task_id));
+      }
+      return true;
+    } catch (error) {
+      setActionError((error as Error).message);
+      return false;
+    }
+  };
+
   const confirmPlan = async () => {
     if (!activeEntry?.planId || !preview || activeEntry.pathValidation?.ok === false) return;
     if (preview.status !== 'draft' && preview.status !== 'confirmed') return;
-    setActionError('');
-    try {
-      // 幂等确认门面：draft → confirm+入队，confirmed → ensure（后端幂等）；
-      // durable 响应直接挂接已入队/恢复的镜像任务，legacy 进工作台由用户启动镜像。
-      const confirmed = await importsApi.confirm(source, activeEntry.planId);
-      if (confirmed.execution_mode === 'durable' && confirmed.job_id) {
-        // V3：后端已入队（或恢复已有）durable mirror job，工作台直接挂接，不再重复生成
-        setTaskKind('mirror');
-        setTask(await tasksApi.get(confirmed.job_id));
-      }
-      const confirmedPreview = await importsApi.getPreview(source, activeEntry.planId);
-      updateEntry(activeEntry.id, { preview: confirmedPreview });
-      setStep('workbench');
-    } catch (error) {
-      setActionError((error as Error).message);
-    }
+    await confirmCurrentImport();
   };
 
   const saveItem = async () => {
@@ -1501,8 +1718,27 @@ export default function MediaManagementPage() {
     if (editDraft.season_number.trim()) patch.season_number = Number(editDraft.season_number);
     if (editDraft.episode_number.trim()) patch.episode_number = Number(editDraft.episode_number);
     try {
-      await importsApi.patchItem(source, editingItem.id, activeEntry.planId, patch);
-      const refreshedPreview = await importsApi.getPreview(source, activeEntry.planId);
+      await importsApi.patchItem(
+        source,
+        editingItem.id,
+        activeEntry.planId,
+        patch,
+        activeEntry.confirmationRootId && activeEntry.confirmationGeneration != null
+          ? { rootId: activeEntry.confirmationRootId, generation: activeEntry.confirmationGeneration }
+          : undefined,
+      );
+      // RWK-38（P1）：patch 后刷新 durable 真相——TXT baseline 场景从
+      // root-generation 聚合 preview 重载（不再读旧 legacy JSON preview，
+      // 避免两份确认事实漂移）；其余场景维持原 legacy preview 刷新。
+      const refreshedPreview = activeEntry.confirmationRootId && activeEntry.confirmationGeneration != null
+        ? await importsApi.getConfirmRootPreview(
+            source,
+            activeEntry.confirmationRootId,
+            activeEntry.confirmationGeneration,
+          )
+        : await importsApi.getPreview(source, activeEntry.planId);
+      // RWK-39（P1-1）：拿到的 durable aggregate preview 必须真正写回确认页
+      // state（否则后端已修正、页面仍显示旧值）。
       updateEntry(activeEntry.id, { preview: refreshedPreview });
       setEditingItem(null);
     } catch (error) {
@@ -1927,7 +2163,7 @@ export default function MediaManagementPage() {
                 : !blockingPreviewIssues.length && <div className="media-confirm-empty"><CheckCircle2 size={19} /><div><strong>可以继续</strong><span>所有作品都已完成识别。</span></div></div>}
               {blockingPreviewIssues.length > 0 && <div className="media-review-blocking-list">{blockingPreviewIssues.map((issue) => <p key={issue.code}><TriangleAlert size={15} /><span>{issue.message}</span></p>)}</div>}
               <div className="media-confirm-decision-action">
-                <Button className="media-primary-command" appearance="primary" icon={<ChevronRight size={16} />} disabled={blockingPreviewIssues.length > 0 || (preview.status !== 'draft' && preview.status !== 'confirmed') || activeEntry?.pathValidation?.ok === false} onClick={() => void confirmPlan()}>{reviewItems.length ? '先确认并继续' : '确认并继续'}</Button>
+                <Button className="media-primary-command" appearance="primary" icon={<ChevronRight size={16} />} disabled={blockingPreviewIssues.length > 0 || (preview.status !== 'draft' && preview.status !== 'confirmed') || activeEntry?.pathValidation?.ok === false || activeEntry?.confirmationBlocked} onClick={() => void confirmPlan()}>{reviewItems.length ? '先确认并继续' : '确认并继续'}</Button>
               </div>
             </section>
           </div>
@@ -1964,6 +2200,31 @@ export default function MediaManagementPage() {
       {step === 'maintenance' && <LibraryMaintenancePanel onCleared={() => loadPresets(true)} />}
 
       {editingItem && <div className="media-edit-backdrop" role="presentation"><section className="media-edit-dialog" role="dialog" aria-modal="true" aria-label="修正导入条目"><header><h2>处理识别结果</h2><Button appearance="subtle" onClick={() => setEditingItem(null)}>关闭</Button></header><label>作品名称<input value={editDraft.work_title} onChange={(event) => setEditDraft((value) => ({ ...value, work_title: event.target.value }))} /></label><div className="media-edit-grid"><label>分组<select value={editDraft.group_type} onChange={(event) => setEditDraft((value) => ({ ...value, group_type: event.target.value }))}><option value="season">季度</option><option value="special">特别篇</option><option value="movie">电影</option><option value="ignored">忽略</option></select></label><label>季度<input type="number" value={editDraft.season_number} onChange={(event) => setEditDraft((value) => ({ ...value, season_number: event.target.value }))} /></label><label>集数<input type="number" value={editDraft.episode_number} onChange={(event) => setEditDraft((value) => ({ ...value, episode_number: event.target.value }))} /></label></div><footer><Button appearance="secondary" onClick={() => setEditingItem(null)}>取消</Button><Button appearance="primary" onClick={() => void saveItem()}>保存处理结果</Button></footer></section></div>}
+      {/* RWK-40（P0-2）：needs_review 无 revision 单元的人工 durable 处理入口——
+          列出识别失败的具体单元（boundary 路径），用户填写作品名称后 resolve 生成
+          可编辑 draft revision，进入 root-generation 确认集合（不依赖 legacy plan）。 */}
+      {needsReviewPreset && (
+        <div className="media-edit-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setNeedsReviewPreset(null); }}>
+          <section className="media-edit-dialog media-needs-review-dialog" role="dialog" aria-modal="true" aria-label="处理识别结果">
+            <header><div><span className="media-import-step-label">人工处理</span><h2>{getPresetDisplayName(needsReviewPreset)}</h2><p>以下识别单元未能自动确认作品身份，请填写作品名称后生成可编辑版本，再进入确认页核对。</p></div><Button appearance="subtle" onClick={() => setNeedsReviewPreset(null)}>关闭</Button></header>
+            <div className="media-needs-review-list">
+              {(needsReviewPreset.openlist_needs_review_units ?? []).map((unit) => (
+                <div key={unit.unit_id} className="media-needs-review-unit">
+                  <label className="media-needs-review-boundary" title={unit.boundary}>{unit.boundary || unit.work_key}</label>
+                  <input
+                    value={needsReviewTitles[unit.unit_id] ?? ''}
+                    placeholder="填写作品名称"
+                    onChange={(event) => setNeedsReviewTitles((value) => ({ ...value, [unit.unit_id]: event.target.value }))}
+                    disabled={Boolean(resolvingReviewUnitId)}
+                  />
+                  <Button appearance="primary" disabled={Boolean(resolvingReviewUnitId)} onClick={() => void resolveNeedsReview(needsReviewPreset, unit.unit_id)}>{resolvingReviewUnitId === unit.unit_id ? '处理中…' : '生成可编辑版本'}</Button>
+                </div>
+              ))}
+            </div>
+            <footer><Button appearance="secondary" onClick={() => setNeedsReviewPreset(null)}>取消</Button></footer>
+          </section>
+        </div>
+      )}
       {pendingSeasonalImport && <div className="media-edit-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPendingSeasonalImport(null); }}>
         <section className="media-edit-dialog media-seasonal-confirm-dialog" role="alertdialog" aria-modal="true" aria-label="确认新番导入">
           <header><div><span className="media-import-step-label">高风险分类</span><h2>确认按新番导入？</h2></div></header>

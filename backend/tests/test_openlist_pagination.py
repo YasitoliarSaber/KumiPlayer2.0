@@ -67,6 +67,7 @@ def fake_client(monkeypatch):
     FakeOpenListClient.instances = []
     FakeOpenListClient.tree = {}
     monkeypatch.setattr("app.api.openlist.OpenListClient", FakeOpenListClient)
+    monkeypatch.setattr("app.integrations.openlist.connection.OpenListClient", FakeOpenListClient)
     yield
 
 
@@ -87,6 +88,8 @@ def _save_config(client: TestClient, tmp_path: Path) -> None:
         },
     )
     assert resp.status_code == 200, resp.text
+    # 保存时的 fresh probe 会创建 Fake 实例；浏览计数从保存后重新开始
+    FakeOpenListClient.instances = []
 
 
 def _all_calls():

@@ -37,9 +37,19 @@ export interface OpenListBrowseResult {
   refresh_requested?: boolean
   cache: OpenListCacheMeta
 }
+//: 连接测试请求契约：候选配置（KEEP SAVED / 显式新值语义由后端解析）
+export interface OpenListTestConnectionPayload {
+  server_url: string
+  remote_root: string
+  username: string
+  password: string
+  allow_insecure_http?: boolean
+}
 
 export interface OpenListTestResult {
   ok: boolean
+  code: string
+  phase: string
   message: string
   insecure_http_required?: boolean
 }
@@ -53,6 +63,46 @@ export interface OpenListTaskResult {
   task_id: string
   task_status: string
 }
+
+/** HYB-2：TXT 目录树安全初始化（bootstrap）结果 */
+export interface OpenListBootstrapResult {
+  task_id: string
+  root_id: string
+  generation: number
+  preset_id: string
+  execution_mode: string
+  scan_channel: string
+  scan_mode: string
+  resolution: string
+  requested_locator: string
+  canonical_locator: string
+  tree_file_count: number
+  tree_video_count: number
+}
+
+/** RWK-18/23：可绑定 OpenList 增量的 115/百度 Provider 来源 */
+export interface BindableProvider {
+  preset_id: string
+  name: string
+  provider: string
+  root_id: string
+  source_id: string
+  local_locator: string
+  bound: boolean
+  openlist_remote_locator: string
+  baseline_ready: boolean
+  baseline_directory_count: number
+  baseline_node_count: number
+}
+
+/** HYB-6：KumiPlayer → OpenList 请求成本遥测摘要 */
+export interface OpenListTelemetrySummary {
+  fs_list: number
+  login: number
+  total: number
+  disclaimer: string
+}
+
 
 export interface OpenListConfigPayload {
   server_url: string
@@ -173,7 +223,7 @@ export interface OpenListImportBatch {
 }
 
 export const openlistApi = {
-  testConnection: (payload: Partial<OpenListConfigPayload>) =>
+  testConnection: (payload: OpenListTestConnectionPayload) =>
     api.post<OpenListTestResult>('/api/openlist/test-connection', payload),
   saveConfig: (payload: OpenListConfigPayload) =>
     api.post<OpenListSaveResult>('/api/openlist/config', payload),
@@ -199,4 +249,41 @@ export const openlistApi = {
       `/api/openlist/import-batches/${batchId}/units/${unitId}/retry`, {}),
   rescanPreset: (presetId: string) =>
     api.post<OpenListTaskResult>(`/api/openlist/presets/${presetId}/rescan`, {}),
+  // HYB-2/RWK-11：目录树 TXT 安全初始化（Provider 身份，零 OpenList 请求）。
+  // provider：pan115 / baidu；remoteLocator 可选（纯 TXT 模式不要求）。
+  bootstrapTree: (params: {
+    provider?: 'pan115' | 'baidu'
+    remoteLocator?: string
+    localMountRoot: string
+    importFamily?: string
+    importScope?: string
+    treeFile: File
+  }) => {
+    const body = new FormData()
+    if (params.provider) body.append('provider', params.provider)
+    if (params.remoteLocator) body.append('remote_locator', params.remoteLocator)
+    body.append('local_mount_root', params.localMountRoot)
+    if (params.importFamily) body.append('import_family', params.importFamily)
+    if (params.importScope) body.append('import_scope', params.importScope)
+    body.append('tree_file', params.treeFile)
+    return api.form<OpenListBootstrapResult>('/api/openlist/bootstrap-tree', 'POST', body)
+  },
+  // RWK-18/23：列出可绑定 OpenList 增量的 115/百度 Provider 来源（含本地基线状态）
+  getBindableProviders: () =>
+    api.get<{ providers: BindableProvider[] }>('/api/openlist/bindable-providers'),
+  // RWK-3：给已存在的 Provider root 绑定可选 OpenList 增量通道
+  bindRoot: (rootId: string, remoteLocator: string) =>
+    api.post<{ root_id: string; bound: boolean; openlist_remote_locator: string; source_id: string }>(
+      '/api/openlist/bind-root',
+      { root_id: rootId, remote_locator: remoteLocator },
+    ),
+  // RWK-10：Bound Provider root 的真实 durable OpenList 增量扫描入口
+  rescanBoundRoot: (rootId: string) =>
+    api.post<OpenListTaskResult & { scan_channel: string; scan_mode: string }>(
+      '/api/openlist/bound-roots/rescan',
+      { root_id: rootId },
+    ),
+  // HYB-6：今日 KumiPlayer → OpenList 请求成本遥测（只读）
+  getTelemetryToday: () =>
+    api.get<OpenListTelemetrySummary>('/api/openlist/telemetry/today'),
 }

@@ -90,6 +90,7 @@ def fake_client(monkeypatch):
     FakeOpenListClient.login_user = ""
     FakeOpenListClient.tree = TREE
     monkeypatch.setattr("app.api.openlist.OpenListClient", FakeOpenListClient)
+    monkeypatch.setattr("app.integrations.openlist.connection.OpenListClient", FakeOpenListClient)
     yield
 
 

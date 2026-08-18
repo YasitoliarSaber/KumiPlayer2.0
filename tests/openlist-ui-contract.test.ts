@@ -91,27 +91,32 @@ test('OpenList 导入层不使用 WebDAV 或直链播放文案', () => {
   assert.match(backendClient, /_LOGIN_PATH = "\/api\/auth\/login"/);
 });
 
-test('设置页用一组字段保存 OpenList 连接，并派生 WebDAV 挂载地址', () => {
-  assert.match(settingsPage, /OpenList 连接</);
-  assert.match(settingsPage, /OpenList 是取得目录的连接\/导入方式，不是内容提供商/);
-  assert.match(settingsPage, /OpenList 地址/);
-  assert.match(settingsPage, /buildOpenListWebdavAddress/);
-  assert.match(settingsPage, /挂载地址/);
-  assert.match(settingsPage, /远端总根路径/);
-  assert.match(settingsPage, /本地总挂载根路径/);
-  assert.match(settingsPage, /浏览缓存时长（分钟）/);
-  assert.match(settingsPage, /预取直接子目录数（上限 50）/);
-  assert.match(settingsPage, /OpenList 用户名/);
-  assert.match(settingsPage, /OpenList 密码/);
-  assert.match(settingsPage, /保存连接/);
-  assert.doesNotMatch(settingsPage, /ConfigRow label="OpenList/);
-  assert.match(settingsPage, /openlist_configured/);
-  assert.match(settingsPage, /已保存；留空即可继续使用/);
-  assert.match(settingsPage, />测试连接</);
+test('设置页用一组字段保存 OpenList 连接，并派生 WebDAV 挂载地址（OL-4 组件化后）', () => {
+  const panel = readFileSync(new URL('../src/components/settings/OpenListSettingsPanel.tsx', import.meta.url), 'utf8');
+  assert.match(settingsPage, /OpenListSettingsPanel/);
   assert.match(settingsPage, /openlistApi\.saveConfig/);
-  assert.match(settingsPage, /\.\.\.openlistDraft/);
-  assert.match(settingsPage, /openlistApi\.testConnection\(\{[\s\S]*server_url: openlistDraft\.server_url/);
-  assert.doesNotMatch(settingsPage, /testConnection\(\{\s*\.\.\.openlistDraft/);
+  assert.match(settingsPage, /openlistApi\.testConnection/);
+  // 组件内：连接字段 + WebDAV 派生 + 凭据 + 高级设置
+  assert.match(panel, /OpenList 地址/);
+  assert.match(panel, /buildOpenListWebdavAddress/);
+  assert.match(panel, /远端根目录/);
+  assert.match(panel, /本地挂载位置/);
+  assert.match(panel, /目录浏览缓存（分钟）/);
+  assert.match(panel, /提前加载子目录（上限 50）/);
+  assert.match(panel, /OpenList 用户名/);
+  assert.match(panel, /OpenList 密码/);
+  assert.match(panel, /检查连接/);
+  assert.match(panel, /验证并保存/);
+  assert.match(panel, /openlist_configured/);
+  assert.match(panel, /账号与密码已保存/);
+  // 无显式 ConfigRow label="OpenList"（不再使用 ConfigRow 包装连接级字段）
+  assert.doesNotMatch(panel, /ConfigRow label="OpenList/);
+  // 连接字段直接来自 draft，不通过 spread 进 testConnection
+  assert.match(panel, /buildPayload[\s\S]{0,200}server_url: draft\.server_url/);
+  assert.match(panel, /allow_insecure_http: allowOpenlistHttp \|\| isNonLoopbackHttp\(draft\.server_url\) === false/);
+  assert.doesNotMatch(panel, /testConnection\(\{\s*\.\.\.draft/);
+
+  // 媒体管理页 OpenList 扫描失败信号（原有断言保留）
   assert.match(mediaPage, /openlistScanTask\?\.status === 'failed'/);
   assert.match(mediaPage, /OpenList 扫描失败<\/strong>/);
   assert.match(mediaPage, /openlistScanTask\.error \|\| openlistScanTask\.message/);
@@ -120,16 +125,21 @@ test('设置页用一组字段保存 OpenList 连接，并派生 WebDAV 挂载�
   assert.doesNotMatch(settingsPage, /config\.openlist_password/);
 });
 
-test('设置页来源目录路由不重复要求填写连接字段与挂载根', () => {
-  assert.match(settingsPage, /来源目录路由/);
-  assert.match(settingsPage, /readOnly className="settings-input"/);
-  assert.match(settingsPage, /推导本地路径（只读）/);
-  assert.match(settingsPage, /不作为媒体来源时取消勾选/);
+test('设置页来源目录路由不重复要求填写连接字段与挂载根（OL-4 组件化后）', () => {
+  // 路由 UI 已拆入 OpenListSourceRoutes 组件，SettingsPage 只保留组合
+  const sourceRoutes = readFileSync(new URL('../src/components/settings/OpenListSourceRoutes.tsx', import.meta.url), 'utf8');
+  assert.match(settingsPage, /OpenListSourceRoutes/);
   assert.match(settingsPage, /openlistApi\.discoverRoutes/);
   assert.match(settingsPage, /openlistApi\.saveRoutes/);
-  // 路由区只读预览：不重复出现连接级字段输入
-  assert.doesNotMatch(settingsPage, /<strong>来源目录路由<\/strong>[\s\S]*value=\{openlistDraft\.server_url\}/);
-  assert.doesNotMatch(settingsPage, /<strong>来源目录路由<\/strong>[\s\S]*openlistApi\.testConnection/);
+  // 组件内：来源目录紧凑卡片 + 只读远端路径 + 可作为媒体来源开关
+  assert.match(sourceRoutes, /来源目录/);
+  assert.match(sourceRoutes, /远端目录：<code>/);
+  assert.match(sourceRoutes, /可作为媒体来源/);
+  assert.match(sourceRoutes, /远端路径（只读）/);
+  assert.match(sourceRoutes, /推导路径（只读）/);
+  // 路由区不重复出现连接级字段输入与 Test Connection
+  assert.doesNotMatch(sourceRoutes, /openlistDraft\.server_url/);
+  assert.doesNotMatch(sourceRoutes, /openlistApi\.testConnection/);
 });
 
 test('公共配置类型只暴露 openlist_configured，不携带凭据字段', () => {

@@ -163,6 +163,9 @@ def fake_client(monkeypatch):
     FakeOpenListClient.login_user = ""
     FakeOpenListClient.tree = TREE
     monkeypatch.setattr("app.api.openlist.OpenListClient", FakeOpenListClient)
+    monkeypatch.setattr(
+        "app.integrations.openlist.connection.OpenListClient", FakeOpenListClient
+    )
     yield
 
 
@@ -446,6 +449,84 @@ class TestOpenlistSourceCardLifecycle:
         # 来源卡保留“增量扫描”入口
         assert "rescanOpenlistPreset(preset)" in text
 
+    def test_ui_durable_root_card_keeps_continue_confirm_entry(self):
+        """RWK-39（P0-1）：durable_root TXT 卡重启后必须保留「继续确认」入口。
+
+        事故链：TXT baseline 完成 → durable revisions 仍 draft → 用户退出页面
+        → 重启 → preset 投影 needs_attention → 卡片必须有入口重新进入 durable
+        aggregate 确认页。resumePreset 已是 durable-safe（读 confirmation_root_id
+        + generation，调 getConfirmRootPreview），不得因防 legacy 把 durable 自己
+        的入口也隐藏。"""
+        src = Path(__file__).resolve().parents[2] / "src" / "pages" / "MediaManagementPage.tsx"
+        text = src.read_text(encoding="utf-8")
+        # durable_root + confirmation_ready 专用入口（与 legacy「继续处理」互斥）
+        assert "preset.execution_authority === 'durable_root'" in text
+        assert "preset.confirmation_ready === true" in text
+        assert "继续确认" in text
+        # 该入口必须调用 durable-safe resumePreset
+        assert "resumePreset(preset)" in text
+
+    def test_ui_durable_txt_card_shows_attention(self):
+        """RWK-39（P1-1）：durable TXT 来源卡必须显示 attention（不只 OpenList 卡）。
+
+        needs_review 无 revision 的 unit 投影成 attention_count 后，TXT 来源卡
+        也必须可见，给用户真实处理入口（继续确认 / 重新导入），而非只有 OpenList 卡
+        才展示 openlist_attention_count。
+        """
+        src = Path(__file__).resolve().parents[2] / "src" / "pages" / "MediaManagementPage.tsx"
+        text = src.read_text(encoding="utf-8")
+        # attention 显示条件必须覆盖 durable directory_tree 卡
+        assert "preset.update_mode === 'directory_tree' && preset.execution_authority === 'durable_root'" in text
+        assert "openlist_attention_count" in text
+
+    def test_ui_durable_txt_card_has_needs_review_resolve_entry(self):
+        """RWK-40（P0-2）：durable TXT 卡 attention 且 confirmation_ready=false 时，
+        必须显示「处理识别结果」入口（needs_review 无 revision 单元的 durable 处理
+        闭环：不能只显示 attention 数字而无处理路径）。"""
+        src = Path(__file__).resolve().parents[2] / "src" / "pages" / "MediaManagementPage.tsx"
+        text = src.read_text(encoding="utf-8")
+        # 入口按钮条件：durable_root + 未 ready + attention>0 + needs_review_units 非空
+        assert "preset.execution_authority === 'durable_root'" in text
+        assert "preset.confirmation_ready !== true" in text
+        assert "preset.openlist_needs_review_units" in text
+        assert "处理识别结果" in text
+        # resolve 必须走 durable 人工入口（生成可编辑版本 → confirmation_ready）
+        assert "resolveNeedsReview" in text
+        assert "importsApi.resolveNeedsReview" in text
+
+    def test_ui_durable_txt_card_resolve_opens_confirmation(self):
+        """RWK-40（P0-2）：resolve 成功后必须进入既有确认流程（resumePreset），
+        保证处理识别结果后能继续确认（与 P0-1 的「继续确认」闭环衔接）。"""
+        src = Path(__file__).resolve().parents[2] / "src" / "pages" / "MediaManagementPage.tsx"
+        text = src.read_text(encoding="utf-8")
+        assert "await loadPresets(true)" in text
+        # resolve 成功后用最新投影的 preset 恢复确认身份（stale preset 会误设
+        # confirmationBlocked），再 resumePreset
+        assert "void resumePreset(refreshed)" in text
+
+    def test_ui_resume_preset_durable_identity_enters_confirm(self):
+        """RWK-40（P0-1）：resumePreset 必须按 durable confirmation identity 进入 confirm。
+
+        事故链：durable draft revision → confirmation_ready=true → attention_count>0 →
+        lifecycle 投影 needs_attention（非 draft）→ 若按 legacy lifecycle_status 判
+        页面会送 workbench。必须：durable_root + confirmation_root_id + generation>0 +
+        confirmation_ready=true → confirm；只有非 durable legacy 才沿用 lifecycle 规则。
+        """
+        src = Path(__file__).resolve().parents[2] / "src" / "pages" / "MediaManagementPage.tsx"
+        text = src.read_text(encoding="utf-8")
+        # durable 优先分支的条件全部存在
+        assert "workingPreset.execution_authority === 'durable_root'" in text
+        assert "workingPreset.confirmation_root_id" in text
+        assert "(workingPreset.confirmation_generation ?? 0) > 0" in text
+        assert "workingPreset.confirmation_ready === true" in text
+        # 进入 confirm 的分支结果
+        assert "? 'confirm'" in text
+        # durable 条件必须优先于 legacy lifecycle 规则（源码出现位置更靠前，
+        # 即「durable 先判断、legacy 兜底」的优先级顺序）
+        idx_durable = text.index("workingPreset.execution_authority === 'durable_root'")
+        idx_legacy = text.index("workingPreset.lifecycle_status === 'draft'")
+        assert idx_durable < idx_legacy, "durable confirmation identity 必须优先于 legacy lifecycle"
+
 class TestMediaLibrariesCanonicalProjection:
     """CP9：media_libraries 是最后一个 SQLite projection——必须按 effective
     canonical identity 分组，raw work_id 相同但 canonical 不同绝不互相覆盖
@@ -680,6 +761,15 @@ class TestOpenlistSourceCardDurableLifecycle:
         assert state["is_library_indexed"] is True
         assert state["attention_count"] == 0
 
+    def test_current_revision_failed_is_attention_not_indexed(self):
+        """current revision 自身失败也必须进入 durable attention。"""
+        from app.media_presets.service import openlist_preset_state
+
+        self._root_with_unit("card-a", rev_status="failed")
+        state = openlist_preset_state("root-x", require_all=True)
+        assert state["is_library_indexed"] is False
+        assert state["attention_count"] == 1
+
     def test_needs_review_unit_does_not_block_published_unit(self):
         """一个 unit needs_review（draft）+ 另一个全链成功 → indexed=true 且 attention=1。"""
         from app.media_presets.service import openlist_preset_state
@@ -703,6 +793,563 @@ class TestOpenlistSourceCardDurableLifecycle:
         state = openlist_preset_state("root-x")
         assert state["is_library_indexed"] is False
         assert state["attention_count"] == 1
+
+    def test_needs_review_unit_without_revision_counts_as_attention(self):
+        """RWK-39（P1-1）：needs_review 且无 revision 的 unit 不得被静默跳过。
+
+        boundary 未识别 / evidence 需复核时 DiscoveryEngine 会建 needs_review unit
+        但不生成 revision；projector 必须计入 attention，让用户知道有需处理项，
+        否则会出现 published_count != unit_count 但 attention=0、lifecycle 不变
+        needs_attention、用户不知道哪一项需要处理的 UX 死角。
+        """
+        from app.db.database import get_connection
+        from app.media_presets.service import openlist_preset_state
+
+        _make_unit("card-review", root_id="root-x")  # 默认 discovered + 无 revision
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET status='needs_review', current_revision_id='' "
+            "WHERE unit_id=?",
+            ("card-review",),
+        )
+        conn.commit()
+        state = openlist_preset_state("root-x")
+        assert state["unit_count"] == 1
+        assert state["attention_count"] == 1, "needs_review 无 revision 的 unit 必须计入 attention"
+        assert state["is_library_indexed"] is False
+
+    def test_inconsistent_revision_row_missing_counts_as_attention(self):
+        """RWK-39（P1-1）：current_revision_id 指向的 revision 行缺失（数据不一致）→ attention。"""
+        from app.db.database import get_connection
+        from app.media_presets.service import openlist_preset_state
+
+        _make_unit("card-inconsistent", root_id="root-x")
+        conn = get_connection()
+        # current_revision_id 指向一个不存在的 revision_id（数据不一致）
+        conn.execute(
+            "UPDATE media_units SET current_revision_id='rev-missing' WHERE unit_id=?",
+            ("card-inconsistent",),
+        )
+        conn.commit()
+        state = openlist_preset_state("root-x")
+        assert state["unit_count"] == 1
+        assert state["attention_count"] == 1, "revision 行缺失的 unit 必须计入 attention"
+        assert state["is_library_indexed"] is False
+
+    def test_needs_review_resolve_generates_durable_draft_revision(self, tmp_path):
+        """RWK-40（P0-2）：needs_review 无 revision 的 unit 可通过人工入口生成 durable draft revision。
+
+        事故链：TXT baseline 成功 → 识别失败 → needs_review unit 无 revision →
+        confirmation_ready=false → 无「继续确认」入口 → 重导同 TXT baseline_reused →
+        永久卡住。resolve 必须：source_nodes 重建 items → 生成 draft revision →
+        进入 root-generation 确认集合（preset_confirmation_state ready=true）。
+        """
+        from app.db.database import get_connection
+        from app.media_presets.service import (
+            preset_confirmation_state,
+            resolve_needs_review_unit,
+        )
+
+        # 建 root（source_id 前缀 pan115）供 DiscoveryEngine 读
+        from app.media_presets.service import ensure_provider_source_root
+
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        root_id = ensure_provider_source_root(
+            provider="pan115",
+            local_mount_root=str(mount),
+            import_family="anime",
+            import_scope="",
+        )
+        from app.catalog import store as catalog_store
+
+        catalog_store.set_baseline_target(root_id, 1)
+        catalog_store.mark_baseline_completed(root_id, 1)
+        if not root_id:  # pragma: no cover
+            from app.catalog import lifecycle
+            from app.catalog import store as catalog_store
+
+            norm = "/" + str(mount).replace("\\", "/").strip("/")
+            res = lifecycle.resolve_root_for_import(
+                "pan115-x", norm, import_family="anime", import_scope="",
+                local_locator=str(mount),
+            )
+            raise AssertionError(
+                f"root 建立失败: resolution={res.action} canonical={getattr(res, 'canonical_root_id', '')} "
+                f"covered={getattr(res, 'covered_root_ids', [])} mount={mount} norm={norm}"
+            )
+        assert root_id, "must create root"
+        # needs_review unit（无 revision）
+        _make_unit("card-needs-review", root_id=root_id, boundary="/动画/未识别作品")
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET status='needs_review' WHERE unit_id=?",
+            ("card-needs-review",),
+        )
+        # source_nodes：模拟 DiscoveryEngine 持久化过的边界内文件节点
+        node_locator = str(mount / "未识别作品.S01E01.mkv")
+        conn.execute(
+            """
+            INSERT INTO source_nodes (
+                root_id, remote_path, parent_path, name, kind, size, mtime, etag,
+                content_hash, remote_id, logical_locator, provider_id, route_id,
+                tombstone
+            ) VALUES (?, '/动画/未识别作品/未识别作品.S01E01.mkv', '/动画/未识别作品',
+                '未识别作品.S01E01.mkv', 'file', 100, 1700000000, '', '', '',
+                ?, '', '', '')
+            """,
+            (root_id, node_locator),
+        )
+        conn.commit()
+
+        # resolve：人工提供作品名 → 生成可编辑 draft revision（generation fence 通过）
+        result = resolve_needs_review_unit(root_id, "card-needs-review", "未识别作品", generation=1)
+        assert result["revision_id"], "must produce draft revision"
+        assert result["root_id"] == root_id
+
+        # draft revision 进入 root-generation 确认集合 → confirmation_ready=true
+        gen, ready = preset_confirmation_state(root_id)
+        assert ready is True, "resolve 后必须可确认（不再永久卡住）"
+
+        # unit 状态不再是 needs_review（resolve 内 init_db 可能重建连接，重新取）
+        row = get_connection().execute(
+            "SELECT status FROM media_units WHERE unit_id=?", ("card-needs-review",)
+        ).fetchone()
+        assert row["status"] != "needs_review"
+
+    def test_needs_review_resolve_endpoint_api_layer(self, client, tmp_path):
+        """RWK-40（P0-2）：/needs-review/resolve HTTP 端点（成功 + 400/409 错误分支）。"""
+        from app.db.database import get_connection
+        from app.media_presets.service import ensure_provider_source_root
+
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        root_id = ensure_provider_source_root(
+            provider="pan115",
+            local_mount_root=str(mount),
+            import_family="anime",
+            import_scope="",
+        )
+        from app.catalog import store as catalog_store
+
+        catalog_store.set_baseline_target(root_id, 1)
+        catalog_store.mark_baseline_completed(root_id, 1)
+        _make_unit("card-nr-api", root_id=root_id, boundary="/动画/未识别作品")
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET status='needs_review' WHERE unit_id=?",
+            ("card-nr-api",),
+        )
+        node_locator = str(mount / "未识别作品.S01E01.mkv")
+        conn.execute(
+            """
+            INSERT INTO source_nodes (
+                root_id, remote_path, parent_path, name, kind, size, mtime, etag,
+                content_hash, remote_id, logical_locator, provider_id, route_id,
+                tombstone
+            ) VALUES (?, '/动画/未识别作品/未识别作品.S01E01.mkv', '/动画/未识别作品',
+                '未识别作品.S01E01.mkv', 'file', 100, 1700000000, '', '', '',
+                ?, '', '', '')
+            """,
+            (root_id, node_locator),
+        )
+        conn.commit()
+
+        # 成功路径：pan115 + root + generation + unit → 200 + revision_id
+        resp = client.post(
+            "/api/imports/pan115/needs-review/resolve",
+            json={"root_id": root_id, "generation": 1, "unit_id": "card-nr-api", "work_title": "未识别作品"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["revision_id"]
+        assert resp.json()["root_id"] == root_id
+        assert resp.json()["generation"] == 1
+
+        # 缺 root_id → 422（Pydantic 模型缺失字段）
+        resp2 = client.post(
+            "/api/imports/pan115/needs-review/resolve",
+            json={"unit_id": "card-nr-api", "work_title": "x"},
+        )
+        assert resp2.status_code == 422, resp2.text
+
+        # 不存在的 unit → service 层 404（HTTP 包装为 409）
+        resp4 = client.post(
+            "/api/imports/pan115/needs-review/resolve",
+            json={"root_id": root_id, "generation": 1, "unit_id": "card-missing", "work_title": "x"},
+        )
+        assert resp4.status_code in (404, 409), resp4.text
+
+        # 缺 generation → 422（Pydantic 模型缺失字段）
+        resp5 = client.post(
+            "/api/imports/pan115/needs-review/resolve",
+            json={"root_id": root_id, "unit_id": "card-nr-api", "work_title": "x"},
+        )
+        assert resp5.status_code == 422, resp5.text
+
+    def _make_resolveable_root(self, tmp_path, *, target: int, completed: int) -> tuple[str, str]:
+        """建可 resolve 的 pan115 root + needs_review unit（source_nodes 齐备）。"""
+        from app.catalog import store as catalog_store
+        from app.db.database import get_connection
+        from app.media_presets.service import ensure_provider_source_root
+
+        mount = tmp_path / "mount"
+        mount.mkdir(exist_ok=True)
+        root_id = ensure_provider_source_root(
+            provider="pan115",
+            local_mount_root=str(mount),
+            import_family="anime",
+            import_scope="",
+        )
+        assert root_id, "must create root"
+        catalog_store.set_baseline_target(root_id, target)
+        catalog_store.mark_baseline_completed(root_id, completed)
+        unit_id = f"card-rwk40-{target}-{completed}"
+        _make_unit(unit_id, root_id=root_id, boundary="/动画/未识别作品")
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET status='needs_review' WHERE unit_id=?", (unit_id,)
+        )
+        node_locator = str(mount / "未识别作品.S01E01.mkv")
+        conn.execute(
+            """
+            INSERT INTO source_nodes (
+                root_id, remote_path, parent_path, name, kind, size, mtime, etag,
+                content_hash, remote_id, logical_locator, provider_id, route_id,
+                tombstone
+            ) VALUES (?, '/动画/未识别作品/未识别作品.S01E01.mkv', '/动画/未识别作品',
+                '未识别作品.S01E01.mkv', 'file', 100, 1700000000, '', '', '',
+                ?, '', '', '')
+            """,
+            (root_id, node_locator),
+        )
+        conn.commit()
+        return root_id, unit_id
+
+    def test_resolve_rejects_cross_source(self, client, tmp_path):
+        """RWK-40（P0-3）：pan115 root + /baidu/needs-review/resolve → 409 + 0 mutation。
+
+        service 只验证「pan115 或 baidu」不够——baidu URL + pan115 root 会跨来源
+        修改。URL source 必须与 root.source_id 前缀一致。
+        """
+        from app.db.database import get_connection
+
+        root_id, unit_id = self._make_resolveable_root(tmp_path, target=1, completed=1)
+        resp = client.post(
+            "/api/imports/baidu/needs-review/resolve",
+            json={"root_id": root_id, "generation": 1, "unit_id": unit_id, "work_title": "未识别作品"},
+        )
+        assert resp.status_code == 409, resp.text
+        # 0 mutation：unit 仍 needs_review、无 current_revision_id、无 revision
+        row = get_connection().execute(
+            "SELECT status, current_revision_id FROM media_units WHERE unit_id=?", (unit_id,)
+        ).fetchone()
+        assert row["status"] == "needs_review"
+        assert not row["current_revision_id"]
+        # 0 revision 生成必须落到 import_revisions 表（不只依赖 unit.current_revision_id）
+        rev_count = get_connection().execute(
+            "SELECT COUNT(*) AS c FROM import_revisions WHERE unit_id=?", (unit_id,)
+        ).fetchone()["c"]
+        assert rev_count == 0, "跨来源 resolve 不得生成任何 revision"
+
+    def test_resolve_rejects_stale_generation(self, client, tmp_path):
+        """RWK-40（P0-3）：页面 generation=1 → target 前进到 2 → resolve gen=1 → 409 + 0 revision。
+
+        用户看到 A、期间导入 v2 使 target 前进，仍按旧页面提交 → 必须 409 拒绝。
+        """
+        from app.catalog import store as catalog_store
+        from app.db.database import get_connection
+
+        root_id, unit_id = self._make_resolveable_root(tmp_path, target=1, completed=1)
+        # 期间导入 v2 → target 前进到 2（completed 也推进，模拟成功 v2）
+        catalog_store.set_baseline_target(root_id, 2)
+        catalog_store.mark_baseline_completed(root_id, 2)
+        # 用户仍按页面 generation=1 提交
+        resp = client.post(
+            "/api/imports/pan115/needs-review/resolve",
+            json={"root_id": root_id, "generation": 1, "unit_id": unit_id, "work_title": "未识别作品"},
+        )
+        assert resp.status_code == 409, resp.text
+        # 0 mutation：unit 仍 needs_review、无 current_revision_id
+        row = get_connection().execute(
+            "SELECT status, current_revision_id FROM media_units WHERE unit_id=?", (unit_id,)
+        ).fetchone()
+        assert row["status"] == "needs_review"
+        assert not row["current_revision_id"]
+        # 0 revision 生成必须落到 import_revisions 表
+        rev_count = get_connection().execute(
+            "SELECT COUNT(*) AS c FROM import_revisions WHERE unit_id=?", (unit_id,)
+        ).fetchone()["c"]
+        assert rev_count == 0, "stale generation resolve 不得生成任何 revision"
+
+    def test_resolve_rejects_incomplete_baseline(self, client, tmp_path):
+        """RWK-40（P0-3）：target=2, completed=1 → resolve gen=2 → 409 + 0 revision。
+
+        partial/failed baseline（completed < target）即使恰好有 needs_review units
+        也不得 resolve——否则污染失败 generation、给用户假闭环。
+        """
+        from app.db.database import get_connection
+
+        root_id, unit_id = self._make_resolveable_root(tmp_path, target=2, completed=1)
+        resp = client.post(
+            "/api/imports/pan115/needs-review/resolve",
+            json={"root_id": root_id, "generation": 2, "unit_id": unit_id, "work_title": "未识别作品"},
+        )
+        assert resp.status_code == 409, resp.text
+        # 0 mutation
+        row = get_connection().execute(
+            "SELECT status, current_revision_id FROM media_units WHERE unit_id=?", (unit_id,)
+        ).fetchone()
+        assert row["status"] == "needs_review"
+        assert not row["current_revision_id"]
+        # 0 revision 生成必须落到 import_revisions 表
+        rev_count = get_connection().execute(
+            "SELECT COUNT(*) AS c FROM import_revisions WHERE unit_id=?", (unit_id,)
+        ).fetchone()["c"]
+        assert rev_count == 0, "incomplete baseline resolve 不得生成任何 revision"
+
+    def test_resolve_rejects_zero_generation(self, client, tmp_path):
+        """RWK-40（P0-3）：target=0（从未跑 baseline）→ resolve gen=0 → 409 + 0 mutation。
+
+        三零边界（generation=0, target=0, completed=0）不得因 0==0 放行——
+        否则在无基线 root 上生成孤儿 revision，confirm-root 无法确认它。
+        """
+        from app.db.database import get_connection
+
+        root_id, unit_id = self._make_resolveable_root(tmp_path, target=0, completed=0)
+        resp = client.post(
+            "/api/imports/pan115/needs-review/resolve",
+            json={"root_id": root_id, "generation": 0, "unit_id": unit_id, "work_title": "未识别作品"},
+        )
+        assert resp.status_code == 409, resp.text
+        row = get_connection().execute(
+            "SELECT status, current_revision_id FROM media_units WHERE unit_id=?", (unit_id,)
+        ).fetchone()
+        assert row["status"] == "needs_review"
+        assert not row["current_revision_id"]
+        rev_count = get_connection().execute(
+            "SELECT COUNT(*) AS c FROM import_revisions WHERE unit_id=?", (unit_id,)
+        ).fetchone()["c"]
+        assert rev_count == 0, "零基线 resolve 不得生成任何 revision"
+
+    def _published_root(self, unit_id: str, tmp_path) -> str:
+        """建真实 pan115 root + v1 完整发布链（mirror→scrape→library succeeded）。"""
+        from app.catalog import store as catalog_store
+        from app.media_presets.service import ensure_provider_source_root
+
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        root_id = ensure_provider_source_root(
+            provider="pan115", local_mount_root=str(mount),
+            import_family="anime", import_scope="",
+        )
+        catalog_store.set_baseline_target(root_id, 1)
+        catalog_store.mark_baseline_completed(root_id, 1)
+        rev1 = self._root_with_unit(unit_id, root_id=root_id)
+        self._mirror_job(rev1, unit_id, status="succeeded")
+        self._scrape_job(rev1, unit_id, status="succeeded")
+        self._library_job(unit_id, status="succeeded")
+        return root_id
+
+    def test_v2_draft_overrides_v1_published_pointer(self, tmp_path):
+        """RWK-40（P0-A）：v1 已发布 + v2 新 draft → 来源卡不得沿 v1 旧指针显示 ready。
+
+        media_units.current_revision_id 是上一代已确认指针（仍指 rev_v1=executed），
+        v2 target generation 的新 draft 必须覆盖它：confirmation_ready=true +
+        is_library_indexed=false + attention>0 → 重启后来源卡出现「继续确认」。
+        """
+        from app.catalog import store as catalog_store
+        from app.db.database import get_connection
+        from app.import_plan import revision_store
+        from app.media_presets.service import openlist_preset_state, preset_confirmation_state
+
+        root_id = self._published_root("card-v2draft", tmp_path)
+        # v2 更新：target=2，同 unit 生成新 draft revision（current_revision_id 仍 rev1）
+        catalog_store.set_baseline_target(root_id, 2)
+        catalog_store.mark_baseline_completed(root_id, 2)
+        rev1 = get_connection().execute(
+            "SELECT current_revision_id FROM media_units WHERE unit_id=?",
+            ("card-v2draft",),
+        ).fetchone()["current_revision_id"]
+        # v2 内容有变化（新增一集）→ create_revision 不复用 v1，生成新 draft
+        rev2 = revision_store.create_revision(
+            unit_id="card-v2draft", source_generation=2,
+            items=[_item("card-v2draft/Season 1/card-v2draft.mkv"),
+                   _item("card-v2draft/Season 1/card-v2draft.EP02.mkv")],
+            status="draft",
+        )
+        assert rev2["revision_id"] != rev1
+        # current_revision_id 仍指 v1（DiscoveryEngine 复用时不清指针）
+        row = get_connection().execute(
+            "SELECT current_revision_id FROM media_units WHERE unit_id=?",
+            ("card-v2draft",),
+        ).fetchone()
+        assert row["current_revision_id"] == rev1
+        # 投影：target generation 有 draft → 必须 attention / not indexed
+        state = openlist_preset_state(root_id, require_all=True)
+        assert state["is_library_indexed"] is False
+        assert state["attention_count"] == 1
+        # confirmation identity：gen2 有 draft → ready
+        gen, ready = preset_confirmation_state(root_id)
+        assert gen == 2 and ready is True
+
+    def test_v2_needs_review_overrides_v1_published_and_resolve_succeeds(self, client, tmp_path):
+        """RWK-40（P0-B）：v1 已发布 + v2 needs_review → attention 可见 + resolve 不被旧指针拒绝。
+
+        current_revision_id 仍指 rev_v1（executed/published），unit.status=needs_review：
+        来源卡必须显示 attention（needs_review_units 含该 unit），且 resolve gen=2
+        不得因旧 published 指针 409（老 rev_v1 继续作为已发布事实存在）。
+        """
+        from app.catalog import store as catalog_store
+        from app.db.database import get_connection
+        from app.media_presets.service import openlist_preset_state
+
+        root_id = self._published_root("card-v2nr", tmp_path)
+        catalog_store.set_baseline_target(root_id, 2)
+        catalog_store.mark_baseline_completed(root_id, 2)
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET status='needs_review', boundary='/动画/未识别作品' "
+            "WHERE unit_id=?",
+            ("card-v2nr",),
+        )
+        conn.commit()
+        # 投影：needs_review → attention 可见（不被 rev_v1 published 掩盖）
+        state = openlist_preset_state(root_id, require_all=True)
+        assert state["attention_count"] == 1
+        assert state["is_library_indexed"] is False
+        assert any(u["unit_id"] == "card-v2nr" for u in state["needs_review_units"])
+        # source_nodes：resolve 从既有节点重建 snapshot 需要
+        node_locator = str(tmp_path / "mount" / "未识别作品.S01E01.mkv")
+        conn.execute(
+            """
+            INSERT INTO source_nodes (
+                root_id, remote_path, parent_path, name, kind, size, mtime, etag,
+                content_hash, remote_id, logical_locator, provider_id, route_id,
+                tombstone
+            ) VALUES (?, '/动画/未识别作品/未识别作品.S01E01.mkv', '/动画/未识别作品',
+                '未识别作品.S01E01.mkv', 'file', 100, 1700000000, '', '', '',
+                ?, '', '', '')
+            """,
+            (root_id, node_locator),
+        )
+        conn.commit()
+        # resolve gen=2 → 成功（不因 rev1 confirmed/executed 而 409）
+        resp = client.post(
+            "/api/imports/pan115/needs-review/resolve",
+            json={"root_id": root_id, "generation": 2, "unit_id": "card-v2nr", "work_title": "未识别作品"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["revision_id"]
+
+    def test_unchanged_v2_no_draft_keeps_published(self, tmp_path):
+        """RWK-40（P0-C）：v2 无变化（无新 draft，复用 v1 已确认）→ 不误报 attention。
+
+        不得为修 A/B 把所有 plan_ready 都算 attention：target generation 无 draft、
+        status != needs_review 时，旧 published revision 继续作为有效当前结果。
+        """
+        from app.catalog import store as catalog_store
+        from app.media_presets.service import openlist_preset_state, preset_confirmation_state
+
+        root_id = self._published_root("card-v2same", tmp_path)
+        # v2 unchanged：target=2 但无新 draft（复用 v1）
+        catalog_store.set_baseline_target(root_id, 2)
+        catalog_store.mark_baseline_completed(root_id, 2)
+        state = openlist_preset_state(root_id, require_all=True)
+        assert state["is_library_indexed"] is True
+        assert state["attention_count"] == 0
+        gen, ready = preset_confirmation_state(root_id)
+        assert gen == 2 and ready is False
+
+    def test_v1_draft_plus_v2_draft_counts_unit_once(self, tmp_path):
+        """RWK-40（P0 边界）：v1 仍 draft（未确认）+ v2 新 draft（同 unit）→ attention 按 unit 计=1。
+
+        防止 projector 对两代 draft 重复计数：target generation 分支先命中并
+        continue，旧 current_revision_id（v1 draft）不得再计一次。
+        """
+        from app.catalog import store as catalog_store
+        from app.db.database import get_connection
+        from app.import_plan import revision_store
+        from app.media_presets.service import ensure_provider_source_root, openlist_preset_state
+
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        root_id = ensure_provider_source_root(
+            provider="pan115", local_mount_root=str(mount),
+            import_family="anime", import_scope="",
+        )
+        catalog_store.set_baseline_target(root_id, 1)
+        catalog_store.mark_baseline_completed(root_id, 1)
+        # v1 draft（未确认），current_revision_id 指向它
+        rev1 = self._root_with_unit("card-v1d2d", root_id=root_id, rev_status="draft")
+        # v2：target=2，内容变化生成新 draft
+        catalog_store.set_baseline_target(root_id, 2)
+        catalog_store.mark_baseline_completed(root_id, 2)
+        rev2 = revision_store.create_revision(
+            unit_id="card-v1d2d", source_generation=2,
+            items=[_item("card-v1d2d/Season 1/card-v1d2d.mkv"),
+                   _item("card-v1d2d/Season 1/card-v1d2d.EP02.mkv")],
+            status="draft",
+        )
+        assert rev2["revision_id"] != rev1
+        # 投影：target=2 有 draft → attention=1（只计一次，不叠加 v1 draft）
+        state = openlist_preset_state(root_id, require_all=True)
+        assert state["attention_count"] == 1, "两代 draft 同一 unit 只计一次 attention"
+        assert state["is_library_indexed"] is False
+
+    def test_v1_draft_plus_v2_needs_review_resolve_succeeds(self, client, tmp_path):
+        """RWK-40（P0 边界）：v1 仍 draft（旧）+ v2 needs_review → resolve gen=2 仍 200。
+
+        旧 v1 draft（gen1）不得阻止当前 target generation 的人工处理——
+        existing 查询按 source_generation=target 过滤，gen1 draft 不在集合内。
+        """
+        from app.catalog import store as catalog_store
+        from app.db.database import get_connection
+        from app.media_presets.service import ensure_provider_source_root, openlist_preset_state
+
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        root_id = ensure_provider_source_root(
+            provider="pan115", local_mount_root=str(mount),
+            import_family="anime", import_scope="",
+        )
+        catalog_store.set_baseline_target(root_id, 1)
+        catalog_store.mark_baseline_completed(root_id, 1)
+        self._root_with_unit("card-v1d2nr", root_id=root_id, rev_status="draft")
+        # v2：target=2，unit 识别失败 → needs_review（旧 v1 draft 指针仍在）
+        catalog_store.set_baseline_target(root_id, 2)
+        catalog_store.mark_baseline_completed(root_id, 2)
+        conn = get_connection()
+        conn.execute(
+            "UPDATE media_units SET status='needs_review', boundary='/动画/未识别作品' "
+            "WHERE unit_id=?",
+            ("card-v1d2nr",),
+        )
+        conn.commit()
+        state = openlist_preset_state(root_id, require_all=True)
+        assert state["attention_count"] == 1
+        assert any(u["unit_id"] == "card-v1d2nr" for u in state["needs_review_units"])
+        # source_nodes（resolve 需要）
+        node_locator = str(mount / "未识别作品.S01E01.mkv")
+        conn.execute(
+            """
+            INSERT INTO source_nodes (
+                root_id, remote_path, parent_path, name, kind, size, mtime, etag,
+                content_hash, remote_id, logical_locator, provider_id, route_id,
+                tombstone
+            ) VALUES (?, '/动画/未识别作品/未识别作品.S01E01.mkv', '/动画/未识别作品',
+                '未识别作品.S01E01.mkv', 'file', 100, 1700000000, '', '', '',
+                ?, '', '', '')
+            """,
+            (root_id, node_locator),
+        )
+        conn.commit()
+        # resolve gen=2 → 200（v1 draft 在 gen1，不阻止）
+        resp = client.post(
+            "/api/imports/pan115/needs-review/resolve",
+            json={"root_id": root_id, "generation": 2, "unit_id": "card-v1d2nr", "work_title": "未识别作品"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["revision_id"]
 
 
 class TestTerminalRetryBarrierAndNoopSemantics:

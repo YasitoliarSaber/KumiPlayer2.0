@@ -514,10 +514,79 @@ _EXTRA_TABLES: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_stage_runs_root ON source_stage_runs(root_id)",
+    # HYB-6：OpenList 请求成本遥测（本地计数，KumiPlayer → OpenList 方向）。
+    # 只统计本应用实际发出的请求数，不冒充上游网盘真实配额消耗。
+    """
+    CREATE TABLE IF NOT EXISTS openlist_telemetry (
+        conn_hash TEXT NOT NULL,
+        day TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (conn_hash, day, operation)
+    )
+    """,
 )
-
 
 def ensure_source_health_table(conn) -> None:
     """幂等补齐 source_health 及轻量扩展表（已有 v3 库的轻量迁移，不重置数据库）。"""
     for ddl in _EXTRA_TABLES:
         conn.execute(ddl)
+    ensure_source_directories_columns(conn)
+
+
+#: HYB-3/RWK-3：source_directories / source_roots 轻量扩展列（幂等 ALTER，不重置数据库）。
+_SOURCE_DIRECTORY_EXTRA_COLUMNS = (
+    (
+        "last_remote_verified_at",
+        "ALTER TABLE source_directories ADD COLUMN last_remote_verified_at TEXT DEFAULT ''",
+    ),
+)
+
+#: RWK-3：Provider root 的可选 OpenList binding（openlist_conn_hash +
+#: openlist_remote_locator），持久化「同一 Provider root 以后走 OpenList
+#: 增量通道」的事实；空值 = 未绑定。
+_SOURCE_ROOT_EXTRA_COLUMNS = (
+    (
+        "openlist_conn_hash",
+        "ALTER TABLE source_roots ADD COLUMN openlist_conn_hash TEXT DEFAULT ''",
+    ),
+    (
+        "openlist_remote_locator",
+        "ALTER TABLE source_roots ADD COLUMN openlist_remote_locator TEXT DEFAULT ''",
+    ),
+    # RWK-25/30：TXT snapshot baseline 状态机（target + completed）
+    (
+        "baseline_target_generation",
+        "ALTER TABLE source_roots ADD COLUMN baseline_target_generation INTEGER DEFAULT 0",
+    ),
+    (
+        "baseline_completed_generation",
+        "ALTER TABLE source_roots ADD COLUMN baseline_completed_generation INTEGER DEFAULT 0",
+    ),
+    (
+        "baseline_completed_at",
+        "ALTER TABLE source_roots ADD COLUMN baseline_completed_at TEXT DEFAULT ''",
+    ),
+)
+
+
+def ensure_source_directories_columns(conn) -> None:
+    """幂等补齐 source_directories 扩展列（老库轻量迁移）。
+
+    ``last_remote_verified_at``（HYB-3）：区分「TXT 快照见过该目录」与
+    「OpenList 真正 list 验证过该目录」——snapshot 扫描提交置空，
+    OpenList list 成功提交置 now。据此可计算远端基线覆盖率，
+    restart 后状态随表持久化不丢失。
+    """
+    for column, ddl in _SOURCE_DIRECTORY_EXTRA_COLUMNS:
+        try:
+            conn.execute(ddl)
+        except Exception:
+            # 列已存在（幂等）或旧库结构差异：SQLite 对已存在列抛
+            # duplicate column name，忽略即可。
+            pass
+    for column, ddl in _SOURCE_ROOT_EXTRA_COLUMNS:
+        try:
+            conn.execute(ddl)
+        except Exception:
+            pass

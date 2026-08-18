@@ -25,8 +25,10 @@ import type { TaskRecord } from '../api/types';
 import { useUiStore, type AppearanceMode } from '../stores/ui';
 import { BANGUMI_ACCESS_TOKEN_URL, getTmdbCredentialError, TMDB_API_SETTINGS_URL } from '../config/credentials';
 import DecodedImage from '../components/ui/DecodedImage';
-
-type SettingsTab = 'appearance' | 'scrape' | 'player' | 'bangumi' | 'support';
+import OpenListSettingsPanel from '../components/settings/OpenListSettingsPanel';
+import OpenListSourceRoutes from '../components/settings/OpenListSourceRoutes';
+import '../styles/settings-media-sources.css';
+type SettingsTab = 'appearance' | 'sources' | 'scrape' | 'player' | 'bangumi' | 'support';
 type SourceKey = 'pan115' | 'baidu' | 'local';
 type OpenListDraft = Pick<OpenListConfigPayload, 'server_url' | 'remote_root' | 'mount_root' | 'username' | 'password'> & {
   cache_ttl: string;
@@ -35,10 +37,11 @@ type OpenListDraft = Pick<OpenListConfigPayload, 'server_url' | 'remote_root' | 
 
 const sectionTabs: Array<{ key: SettingsTab; label: string; summary: string; icon: LucideIcon }> = [
   { key: 'bangumi', label: '账户与同步', summary: 'Bangumi 登录与观看同步', icon: UserRound },
-  { key: 'appearance', label: '外观', summary: '主题、卡片与显示密度', icon: Palette },
-  { key: 'scrape', label: '媒体与元数据', summary: 'TMDB、AniList 与刮削', icon: Database },
+  { key: 'sources', label: '媒体来源', summary: 'OpenList、本地与兼容来源', icon: Database },
+  { key: 'scrape', label: '元数据与图片', summary: 'TMDB、AniList 与刮削', icon: KeyRound },
   { key: 'player', label: '播放', summary: 'mpv 与连续播放', icon: PlaySquare },
-  { key: 'support', label: '应用与支持', summary: '初始引导与赞助入口', icon: HeartHandshake },
+  { key: 'appearance', label: '外观', summary: '主题、卡片与显示密度', icon: Palette },
+  { key: 'support', label: '应用与支持', summary: '网络、初始引导与支持', icon: HeartHandshake },
 ];
 
 const sourceLabels: Record<SourceKey | 'all' | 'openlist', string> = {
@@ -49,35 +52,8 @@ const sourceLabels: Record<SourceKey | 'all' | 'openlist', string> = {
   local: '本地',
 };
 
-// OpenList 提供商选项（不含 local：local 仅用于本地来源）
-const routeProviderOptions: Array<{ value: ProviderId; label: string }> = [
-  { value: 'pan115', label: '115 网盘' },
-  { value: 'baidu', label: '百度网盘' },
-  { value: 'quark', label: '夸克网盘' },
-  { value: 'other', label: '其他远程来源' },
-];
-
 const sectionId = (key: SettingsTab) => `settings-panel-${key}`;
 
-function buildOpenListWebdavAddress(serverUrl: string) {
-  const base = serverUrl.trim().replace(/\/+$/, '');
-  if (!base) return '';
-  const apiBase = base.toLowerCase().endsWith('/dav') ? base.slice(0, -4) : base;
-  return `${apiBase}/dav/`;
-}
-
-// 非回环 http 才需要明文风险确认；localhost / 127.x / ::1 直接放行
-function isNonLoopbackHttp(url: string): boolean {
-  if (!url.trim().toLowerCase().startsWith('http://')) return false;
-  try {
-    const host = new URL(url).hostname.toLowerCase();
-    if (host === 'localhost' || host === '::1' || host === '[::1]') return false;
-    if (/^127\./.test(host)) return false;
-    return true;
-  } catch {
-    return true;
-  }
-}
 
 export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void }) {
   const {
@@ -105,17 +81,9 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
   const [operationMessage, setOperationMessage] = useState('');
   const [activeAction, setActiveAction] = useState<string | null>(null);
   const [mediaPathValidation, setMediaPathValidation] = useState<MediaPathValidationResponse | null>(null);
-  const [activeSource, setActiveSource_] = useState<SourceKey>(
-    () => (localStorage.getItem('kumiplayer-active-source') as SourceKey) || 'pan115'
-  );
-  const setActiveSource = (val: SourceKey) => {
-    setActiveSource_(val);
-    localStorage.setItem('kumiplayer-active-source', val);
-  };
   const [bangumiToken, setBangumiToken] = useState('');
   const [openlistNotice, setOpenlistNotice] = useState('');
   const [openlistNoticeKind, setOpenlistNoticeKind] = useState<'success' | 'error' | 'info'>('info');
-  const [allowOpenlistHttp, setAllowOpenlistHttp] = useState(false);
   const [openlistDraft, setOpenlistDraft] = useState<OpenListDraft>({
     server_url: '', remote_root: '/', mount_root: '', username: 'admin', password: '',
     cache_ttl: '1440', prefetch_limit: '12',
@@ -138,7 +106,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
       void refreshTasks(12).catch(() => undefined);
     }, 2500);
     return () => window.clearInterval(timer);
-  }, [activeSection, activeSource]);
+  }, [activeSection]);
 
   useEffect(() => {
     if (!config) return;
@@ -343,66 +311,9 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
     report(result.ok ? '网盘路径验证通过' : '发现不可用或映射不匹配的网盘路径');
   });
 
-  const saveOpenlistConfig = () => runAction('保存 OpenList 连接', async () => {
-    if (!config) throw new Error('配置尚未加载');
-    const payload: OpenListConfigPayload = {
-      ...openlistDraft,
-      allow_insecure_http: allowOpenlistHttp || isNonLoopbackHttp(openlistDraft.server_url) === false,
-      cache_ttl_minutes: Math.max(1, Number(openlistDraft.cache_ttl) || 1440),
-      prefetch_limit: Math.max(0, Math.min(50, Number(openlistDraft.prefetch_limit) || 12)),
-    };
-    const result = await openlistApi.saveConfig(payload);
-    // 只有后端确认保存成功才提示成功
-    if (!result.ok) throw new Error(result.message);
-    setOpenlistNoticeKind('success');
-    setOpenlistNotice(result.message);
-    await loadConfig();
-    report(result.message);
-  });
-
-  const testOpenlistConnection = () => runAction('测试 OpenList 连接', async () => {
-    const result = await openlistApi.testConnection({
-      server_url: openlistDraft.server_url,
-      username: openlistDraft.username,
-      password: openlistDraft.password,
-      allow_insecure_http: allowOpenlistHttp || isNonLoopbackHttp(openlistDraft.server_url) === false,
-    });
-    // 连接成功绿色提示，失败红色提示
-    setOpenlistNoticeKind(result.ok ? 'success' : 'error');
-    setOpenlistNotice(result.message);
-    report(result.message);
-  });
-
   const updateOpenlistDraft = (key: keyof OpenListDraft, value: string) => {
     setOpenlistDraft((current) => ({ ...current, [key]: value }));
   };
-
-  const discoverOpenlistRoutes = () => runAction('读取 OpenList 来源目录', async () => {
-    const result = await openlistApi.discoverRoutes();
-    setRouteDiscoverItems(result.items);
-    // 已保存的路由保留原值；新目录使用名称建议值（仅建议，用户确认后才成为事实）
-    const saved = new Map(routeDraft.map((item) => [item.remote_prefix, item]));
-    const next: OpenListRouteItem[] = result.items.map((item) => {
-      const existing = saved.get(item.remote_prefix);
-      if (existing) return existing;
-      return {
-        route_id: '',
-        label: item.current_label || item.name,
-        remote_prefix: item.remote_prefix,
-        provider_id: item.current_provider || item.hint_provider,
-        enabled: true,
-      };
-    });
-    setRouteDraft(next);
-    setRouteNotice(`已读取 ${result.items.length} 个顶层目录；目录名建议仅供参考，请确认内容提供商后再保存`);
-  });
-
-  const saveOpenlistRoutes = () => runAction('保存来源目录路由', async () => {
-    const result = await openlistApi.saveRoutes(routeDraft);
-    setOpenlistRoutes(result.routes);
-    setRouteNotice('来源目录路由已保存；未勾选“可作为媒体来源”的目录仍可浏览，但不能导入');
-    report('来源目录路由已保存');
-  });
 
   const updateRouteDraft = (prefix: string, patch: Partial<OpenListRouteItem>) => {
     setRouteDraft((current) => current.map((item) => (item.remote_prefix === prefix ? { ...item, ...patch } : item)));
@@ -436,7 +347,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
 
   const renderScrape = () => (
     <PanelStack>
-      <SectionIntro title="媒体与元数据" description="管理刮削来源、图片保存方式和服务连接。" />
+      <SectionIntro title="元数据与图片" description="管理刮削来源、图片保存方式与图片策略。" />
       {config && (
         <SettingsSection title="常用连接配置">
           <div className="settings-field-list">
@@ -448,93 +359,15 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
               <a href={TMDB_API_SETTINGS_URL} target="_blank" rel="noreferrer">创建或查看令牌 <ExternalLink size={14} /></a>
             </div>
             <ConfigRow label="API 读取访问令牌" value={config.tmdb_bearer_token} secret placeholder="粘贴 TMDB API 读取访问令牌" onSave={saveTmdbCredential} />
-            <ConfigRow label="网络代理" value={config.proxy_url} onSave={(value) => saveConfig({ proxy_url: value })} />
+          </div>
+          <div className="settings-actions">
+            <GhostButton onClick={() => testConfig('tmdb')}>测试 TMDB 连接</GhostButton>
           </div>
         </SettingsSection>
       )}
       {config && (
-        <SettingsSection title="路径与图片">
+        <SettingsSection title="图片策略">
           <div className="settings-field-list">
-            <ConfigRow label="115 挂载根路径" value={config.pan115_root} onSave={(value) => saveConfig({ pan115_root: value })} />
-            <ConfigRow label="百度网盘挂载位置" value={config.baidu_root} onSave={(value) => saveConfig({ baidu_root: value })} />
-            <ConfigRow label="本地媒体根路径" value={config.local_root} onSave={(value) => saveConfig({ local_root: value })} />
-            <ConfigRow label="目录树文件目录" value={config.directory_tree_dir} onSave={(value) => saveConfig({ directory_tree_dir: value })} />
-            <ConfigRow label="镜像目录" value={config.mirror_dir} onSave={(value) => saveConfig({ mirror_dir: value })} />
-            <div className="settings-openlist-panel">
-              <div className="settings-openlist-head">
-                <strong>OpenList 连接</strong>
-                <span>OpenList 是取得目录的连接/导入方式，不是内容提供商；115、百度、夸克才是内容提供商。连接只配置一次：服务地址、账号密码、远端总根与本地总挂载根。用户名与密码仅保存在本机凭据管理器，不会回显到界面。OpenList 上游目录缓存的时长需在其存储配置中调整，KumiPlayer 不修改服务端配置；本页的缓存时长只控制 KumiPlayer 本地浏览缓存。</span>
-              </div>
-              <div className="settings-openlist-status-row">
-                <span className={`settings-openlist-status ${config.openlist_configured ? 'ok' : ''}`}>{config.openlist_configured ? '已配置' : '未配置'}</span>
-                <small>{config.openlist_configured ? '账号与密码已保存；留空即可继续使用，填写新值后可覆盖。' : '首次保存时请输入账号和密码；凭据仅存入本机凭据管理器。'}</small>
-              </div>
-              <div className="settings-field-list settings-openlist-form">
-                <label className="settings-config-row"><span>OpenList 地址</span><input type="url" value={openlistDraft.server_url} onChange={(event) => updateOpenlistDraft('server_url', event.target.value)} className="settings-input" placeholder="http://localhost:5244" autoComplete="url" /></label>
-                <div className="settings-config-row settings-openlist-derived"><span>挂载地址</span><output>{buildOpenListWebdavAddress(openlistDraft.server_url) || '填写 OpenList 地址后自动生成'}</output></div>
-                <label className="settings-config-row"><span>远端总根路径</span><input type="text" value={openlistDraft.remote_root} onChange={(event) => updateOpenlistDraft('remote_root', event.target.value)} className="settings-input" placeholder="/" /></label>
-                <label className="settings-config-row"><span>本地总挂载根路径</span><input type="text" value={openlistDraft.mount_root} onChange={(event) => updateOpenlistDraft('mount_root', event.target.value)} className="settings-input" placeholder="K:\\" /></label>
-                <label className="settings-config-row"><span>浏览缓存时长（分钟）</span><input type="number" min={1} max={43200} value={openlistDraft.cache_ttl} onChange={(event) => updateOpenlistDraft('cache_ttl', event.target.value)} className="settings-input" placeholder="1440" /></label>
-                <label className="settings-config-row"><span>预取直接子目录数（上限 50）</span><input type="number" min={0} max={50} value={openlistDraft.prefetch_limit} onChange={(event) => updateOpenlistDraft('prefetch_limit', event.target.value)} className="settings-input" placeholder="12" /></label>
-                <label className="settings-config-row"><span>OpenList 用户名</span><input type="text" value={openlistDraft.username} onChange={(event) => updateOpenlistDraft('username', event.target.value)} className="settings-input" placeholder={config.openlist_configured ? '已保存；填写新账号可覆盖' : 'admin'} autoComplete="username" /></label>
-                <label className="settings-config-row"><span>OpenList 密码</span><input type="password" value={openlistDraft.password} onChange={(event) => updateOpenlistDraft('password', event.target.value)} className="settings-input" placeholder={config.openlist_configured ? '已保存；填写新密码可覆盖' : '输入 OpenList 密码'} autoComplete="current-password" /></label>
-              </div>
-              <div className="settings-actions">
-                <PrimaryButton onClick={() => void saveOpenlistConfig()} busy={activeAction === '保存 OpenList 连接'}>保存连接</PrimaryButton>
-                <GhostButton onClick={() => testOpenlistConnection()} busy={activeAction === '测试 OpenList 连接'}>测试连接</GhostButton>
-                {isNonLoopbackHttp(openlistDraft.server_url) && (
-                  <label className="settings-risk-confirm">
-                    <input type="checkbox" checked={allowOpenlistHttp} onChange={(event) => setAllowOpenlistHttp(event.target.checked)} />
-                    该地址是本地/局域网 HTTP，密码将以明文传输；勾选表示已知晓风险
-                  </label>
-                )}
-              </div>
-              {openlistNotice && <p className={`settings-openlist-notice${openlistNoticeKind !== 'info' ? ` ${openlistNoticeKind}` : ''}`}>{openlistNotice}</p>}
-            </div>
-            <div className="settings-openlist-panel settings-routes-panel">
-              <div className="settings-openlist-head">
-                <strong>来源目录路由</strong>
-                <span>为远端总根下的顶层目录指定内容提供商。本地路径由「本地总挂载根 + 远端相对路径」自动推导，无需为每个提供商重复填写挂载路径。目录名建议仅供参考，保存后你的确认值才是事实；未勾选“可作为媒体来源”的目录仍可浏览，但不能导入。</span>
-              </div>
-              {config.openlist_configured ? (
-                <>
-                  <div className="settings-actions">
-                    <GhostButton onClick={() => void discoverOpenlistRoutes()} busy={activeAction === '读取 OpenList 来源目录'}>读取来源目录</GhostButton>
-                    <PrimaryButton onClick={() => void saveOpenlistRoutes()} busy={activeAction === '保存来源目录路由'} disabled={routeDraft.length === 0}>保存路由</PrimaryButton>
-                  </div>
-                  {routeNotice && <p className="settings-openlist-notice">{routeNotice}</p>}
-                  {routeDraft.length > 0 && (
-                    <div className="settings-route-list">
-                      {routeDraft.map((route) => {
-                        const localPath = openlistLocalPath(route.remote_prefix);
-                        return (
-                          <div key={route.remote_prefix} className="settings-route-row">
-                            <label className="settings-route-enabled" title="不作为媒体来源时取消勾选（仍可浏览）">
-                              <input type="checkbox" checked={route.enabled} onChange={(event) => updateRouteDraft(route.remote_prefix, { enabled: event.target.checked })} />
-                              <span>可作为媒体来源</span>
-                            </label>
-                            <label className="settings-config-row settings-route-prefix"><span>远端目录</span><input type="text" value={route.remote_prefix} readOnly className="settings-input" /></label>
-                            <label className="settings-config-row"><span>来源标签</span><input type="text" value={route.label} onChange={(event) => updateRouteDraft(route.remote_prefix, { label: event.target.value })} className="settings-input" /></label>
-                            <label className="settings-config-row"><span>内容提供商</span>
-                              <select value={route.provider_id} onChange={(event) => updateRouteDraft(route.remote_prefix, { provider_id: event.target.value as ProviderId })} className="settings-input">
-                                {routeProviderOptions.map((option) => (
-                                  <option key={option.value} value={option.value}>{option.label}</option>
-                                ))}
-                              </select>
-                            </label>
-                            {localPath && (
-                              <div className="settings-config-row settings-openlist-derived"><span>推导本地路径（只读）</span><output>{localPath}</output></div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </>
-              ) : (
-                <p className="settings-openlist-notice">请先保存 OpenList 连接，再读取并配置来源目录路由。</p>
-              )}
-            </div>
             <SelectRow
               label="图片策略"
               value={config.artwork_storage_mode || 'local'}
@@ -546,31 +379,8 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
               onSave={(value) => saveConfig({ artwork_storage_mode: value as PublicConfig['artwork_storage_mode'] })}
             />
           </div>
-          <div className="settings-actions">
-            <GhostButton onClick={testMediaPaths} busy={activeAction === '验证媒体路径'}>验证媒体路径</GhostButton>
-            <span className="field-help">百度目录树会根据文件名自动补齐“01动画”“新番”等目录，并抽样验证真实视频；无需逐次配置。</span>
-          </div>
-          {mediaPathValidation && (
-            <div className="media-path-validation" role="status" aria-label="媒体路径验证结果">
-              {mediaPathValidation.sources.map((item) => (
-                <div key={item.source} className={`media-path-validation-item ${item.ok ? 'is-ok' : 'is-error'}`}>
-                  <div>
-                    <strong>{sourceLabels[item.source]}</strong>
-                    <span>{item.ok ? '验证通过' : '需要处理'}</span>
-                  </div>
-                  <p>{item.message}</p>
-                  {item.resolved_root && <code>{item.resolved_root}</code>}
-                </div>
-              ))}
-            </div>
-          )}
         </SettingsSection>
       )}
-      <SettingsSection title="服务连接" action={<SourceSelect value={activeSource} onChange={setActiveSource} />}>
-        <div className="settings-actions">
-          <GhostButton onClick={() => testConfig('tmdb')}>测试 TMDB</GhostButton>
-        </div>
-      </SettingsSection>
       {config && (
         <SettingsSection title="高级参数" collapsible>
           <div className="settings-field-list">
@@ -593,6 +403,120 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
       )}
     </PanelStack>
   );
+
+  const renderSources = () => (
+    <PanelStack>
+      <SectionIntro title="媒体来源" description="管理 OpenList 连接、来源目录与本地兼容来源。" />
+      {config && (
+        <SettingsSection title="OpenList">
+          <OpenListSettingsPanel
+            config={config}
+            draft={openlistDraft}
+            onChangeDraft={updateOpenlistDraft}
+            onSaveConnection={async (payload) => {
+              const result = await openlistApi.saveConfig(payload);
+              if (!result.ok) throw new Error(result.message);
+              setOpenlistNoticeKind('success');
+              setOpenlistNotice(result.message);
+              await loadConfig();
+              report(result.message);
+            }}
+            onTestConnection={async (payload) => {
+              // REWORK P0：allow_insecure_http 由面板风险确认状态决定，
+              // 不在父级 hardcode true；返回后端 machine status code
+              const result = await openlistApi.testConnection(payload);
+              setOpenlistNoticeKind(result.ok ? 'success' : 'error');
+              setOpenlistNotice(result.message);
+              return result;
+            }}
+            notice={openlistNotice}
+            noticeKind={openlistNoticeKind}
+            onNotice={(message, kind) => {
+              setOpenlistNoticeKind(kind);
+              setOpenlistNotice(message);
+            }}
+            externalBusy={activeAction}
+          />
+        </SettingsSection>
+      )}
+      {config && (
+        <SettingsSection title="来源目录">
+          <OpenListSourceRoutes
+            configured={config.openlist_configured}
+            routes={openlistRoutes}
+            draft={routeDraft}
+            discoverItems={routeDiscoverItems}
+            notice={routeNotice}
+            busy={activeAction}
+            onDiscover={async () => {
+              const result = await openlistApi.discoverRoutes();
+              setRouteDiscoverItems(result.items);
+              const saved = new Map(routeDraft.map((item) => [item.remote_prefix, item]));
+              const next: OpenListRouteItem[] = result.items.map((item) => {
+                const existing = saved.get(item.remote_prefix);
+                if (existing) return existing;
+                return {
+                  route_id: '',
+                  label: item.current_label || item.name,
+                  remote_prefix: item.remote_prefix,
+                  provider_id: item.current_provider || item.hint_provider,
+                  enabled: true,
+                };
+              });
+              setRouteDraft(next);
+              setRouteNotice(`已读取 ${result.items.length} 个顶层目录；目录名建议仅供参考，请确认内容提供商后再保存`);
+            }}
+            onSave={async () => {
+              const result = await openlistApi.saveRoutes(routeDraft);
+              setOpenlistRoutes(result.routes);
+              setRouteNotice('来源目录已保存；未勾选“可作为媒体来源”的目录仍可浏览，但不能导入');
+              report('来源目录已保存');
+            }}
+            onUpdateDraft={updateRouteDraft}
+          />
+        </SettingsSection>
+      )}
+      {config && (
+        <SettingsSection title="本地与兼容来源">
+          <div className="sources-legacy-panel">
+            <p className="sources-legacy-note">如果你已经通过 OpenList 管理远程网盘，通常不需要重复配置这些兼容路径。已有工作流仍可继续使用。</p>
+            <div className="settings-field-list">
+              <ConfigRow label="115 挂载根路径" value={config.pan115_root} onSave={(value) => saveConfig({ pan115_root: value })} />
+              <ConfigRow label="百度网盘挂载位置" value={config.baidu_root} onSave={(value) => saveConfig({ baidu_root: value })} />
+              <ConfigRow label="本地媒体根路径" value={config.local_root} onSave={(value) => saveConfig({ local_root: value })} />
+              <ConfigRow label="目录树文件目录" value={config.directory_tree_dir} onSave={(value) => saveConfig({ directory_tree_dir: value })} />
+            </div>
+          </div>
+        </SettingsSection>
+      )}
+      {config && (
+        <SettingsSection title="镜像与路径">
+          <div className="settings-field-list">
+            <ConfigRow label="镜像目录" value={config.mirror_dir} onSave={(value) => saveConfig({ mirror_dir: value })} />
+          </div>
+          <div className="settings-actions">
+            <GhostButton onClick={testMediaPaths} busy={activeAction === '验证媒体路径'}>验证媒体路径</GhostButton>
+            <span className="field-help">百度目录树会根据文件名自动补齐“01动画”“新番”等目录，并抽样验证真实视频；无需逐次配置。</span>
+          </div>
+          {mediaPathValidation && (
+            <div className="media-path-validation" role="status" aria-label="媒体路径验证结果">
+              {mediaPathValidation.sources.map((item) => (
+                <div key={item.source} className={`media-path-validation-item ${item.ok ? 'is-ok' : 'is-error'}`}>
+                  <div>
+                    <strong>{sourceLabels[item.source]}</strong>
+                    <span>{item.ok ? '验证通过' : '需要处理'}</span>
+                  </div>
+                  <p>{item.message}</p>
+                  {item.resolved_root && <code>{item.resolved_root}</code>}
+                </div>
+              ))}
+            </div>
+          )}
+        </SettingsSection>
+      )}
+    </PanelStack>
+  );
+
 
   const renderPlayer = () => (
     <PanelStack>
@@ -723,7 +647,15 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
 
   const renderSupport = () => (
     <PanelStack>
-      <SectionIntro title="应用与支持" description="重新检查初始环境，或了解后续支持 KumiPlayer 的方式。" />
+      <SectionIntro title="应用与支持" description="网络、初始环境与后续支持方式。" />
+      {config && (
+        <SettingsSection title="网络">
+          <div className="settings-field-list">
+            <ConfigRow label="网络代理" value={config.proxy_url} onSave={(value) => saveConfig({ proxy_url: value })} />
+            <span className="field-help">代理用于访问 TMDB 等外部服务；OpenList 局域网连接不使用代理。</span>
+          </div>
+        </SettingsSection>
+      )}
       <SettingsSection title="初始设置引导">
         <div className="settings-support-row">
           <div>
@@ -773,6 +705,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
 
   const contentByTab: Record<SettingsTab, ReactNode> = {
     appearance: renderAppearance(),
+    sources: renderSources(),
     scrape: renderScrape(),
     player: renderPlayer(),
     bangumi: renderBangumi(),
@@ -869,16 +802,6 @@ function SettingsSection({ title, action, children, collapsible = false, classNa
       )}
       {children}
     </section>
-  );
-}
-
-function SourceSelect({ value, onChange }: { value: SourceKey; onChange: (value: SourceKey) => void }) {
-  return (
-    <select value={value} onChange={(event) => onChange(event.target.value as SourceKey)} className="settings-input w-36">
-      <option value="pan115">115 网盘</option>
-      <option value="baidu">百度网盘</option>
-      <option value="local">本地</option>
-    </select>
   );
 }
 

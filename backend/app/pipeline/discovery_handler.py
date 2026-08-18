@@ -26,6 +26,20 @@ from app.jobs.models import JobCancelledError, JobDeferredError
 from app.jobs.registry import register
 from app.pipeline import orchestrator
 
+
+class _RootProxy:
+    """把 scanner root dict 包装为 binding validator 需要的 SourceRootRecord 形状。"""
+
+    def __init__(self, root: dict):
+        self.source_id = str(root.get("source_id") or "")
+        self.openlist_conn_hash = str(root.get("openlist_conn_hash") or "")
+        self.openlist_remote_locator = str(root.get("openlist_remote_locator") or "")
+        self.remote_locator = str(root.get("remote_locator") or "")
+
+
+def _root_proxy(root: dict) -> _RootProxy:
+    return _RootProxy(root)
+
 #: 扫描过程中必须整棵中止并转 JobDeferredError 的来源级安全错误
 _RISK_ABORT_TYPES = (
     OpenListRiskControlError,
@@ -50,24 +64,37 @@ _DEFER_MESSAGE = "远端网盘疑似触发访问保护，KumiPlayer 已暂停该
 
 
 def _build_openlist_client(source_id: str):
-    """按 source 记录构造 OpenList 客户端（凭据只存内存，不进 payload）。"""
-    from app.core.config import load_config
+    """按 source 记录构造 OpenList 客户端（凭据只存内存，不进 payload）。
+
+    runtime 凭据统一走 ``resolve_openlist_credentials``（REWORK）：后台扫描
+    是真正 authenticated runtime 路径——cached 为空但 Credential Store 已
+    恢复时回源读取真实凭据，不依赖进程重启或先行 Test Connection / Save。
+    store 不可读时返回 None，由调用方按受控错误处理（不清凭据、不创建
+    错误 pool identity）。
+    """
+    from app.core.config import load_config, resolve_openlist_credentials
     from app.integrations.openlist.client import get_openlist_client
 
     config = load_config()
+    username, password, state = resolve_openlist_credentials()
+    if state == "unavailable":
+        return None
+    if not username or not password:
+        return None
     return get_openlist_client(
         config.openlist_server_url,
-        config.openlist_username,
-        config.openlist_password,
+        username,
+        password,
     )
 
 
 def _build_scanner(root: dict):
     """按来源构造统一扫描器（补完 5：115/百度/本地接入 Source Catalog）。
 
-    - openlist：OpenList 客户端分页枚举；
-    - local：本地分页枚举（adapter 直通）；
-    - pan115 / baidu：目录树 TXT 一次性快照（adapter.snapshot_entries）。
+    HYB-1：优先使用 root 内显式 scan_channel（openlist / snapshot_pan115 /
+    snapshot_baidu / local）；无显式通道时按 source_id 前缀 fallback，
+    保证旧 durable job（不带 scan_channel）行为不变。签名保持单参数，
+    兼容既有 monkeypatch 测试。
     """
     from app.catalog.scanner import SourceCatalogScanner
     from app.core.config import load_config
@@ -75,27 +102,118 @@ def _build_scanner(root: dict):
     from app.sources.registry import get_source_adapter
 
     source = str(root.get("source_id") or "")
+    channel = str(root.get("scan_channel") or "")
+    # HYB-1：显式通道优先（同一 root 首轮 TXT bootstrap → 后续 OpenList）。
+    if channel == "snapshot_pan115":
+        return _build_txt_scanner(root, "pan115")
+    if channel == "snapshot_baidu":
+        return _build_txt_scanner(root, "baidu")
+    if channel == "openlist":
+        return _build_openlist_scanner(root)
+    if channel == "local":
+        adapter = get_source_adapter("local")
+        return SourceCatalogScanner(source="local", adapter=adapter, source_root=root.get("remote_locator") or "/")
+    # fallback：旧 job 无显式通道 → 按 source_id 前缀分派（历史行为）。
     if source.startswith("openlist") or source == "openlist":
-        config = load_config()
-        client = get_openlist_client(
-            config.openlist_server_url,
-            config.openlist_username,
-            config.openlist_password,
-        )
-        return SourceCatalogScanner(source="openlist", client=client)
+        return _build_openlist_scanner(root)
     if source.startswith("local"):
         adapter = get_source_adapter("local")
         return SourceCatalogScanner(source="local", adapter=adapter, source_root=root.get("remote_locator") or "/")
     # pan115 / baidu：目录树 TXT 输入文件必须从 job payload 显式传入
+    provider = "pan115" if source.startswith("pan115") else "baidu"
+    return _build_txt_scanner(root, provider)
+
+
+def _build_openlist_scanner(root: dict):
+    """OpenList 通道：runtime 凭据统一走 resolver，构造分页枚举扫描器。
+
+    RWK-9（连接身份约束）：若 root 绑定了 OpenList（openlist_conn_hash 非空），
+    扫描前用可信 resolver 重新计算当前 conn hash 并与绑定值对比——
+    不一致（用户切换了 OpenList 服务器/账号）→ 受控拒绝，0 mutation，
+    绝不把旧 Provider root 悄悄扫到另一个网盘。
+
+    RWK-8（bound 映射）：bound 模式下 scanner 携带 canonical_root（Provider
+    remote_locator）与 openlist_root（binding remote locator），枚举时
+    入参/返回在双 namespace 间映射，保证 node identity 与 TXT snapshot 一致。
+    """
+    from app.catalog.scanner import SourceCatalogScanner
+    from app.integrations.openlist.client import (
+        get_openlist_client,
+        normalize_remote_path,
+    )
+    from app.integrations.openlist.governor import governor_connection_key
+    from app.core.config import load_config, resolve_openlist_credentials
+
+    # 函数内 import（避免模块级循环）：与 api 层同一 routes 来源
+    from app.api.openlist import _routes_from_config
+    # runtime 凭据统一走 resolver（REWORK）：后台扫描恢复后无需重启。
+    # store 不可读/未配置 → 抛受控错误，由 job 失败处理（不清凭据）。
+    config = load_config()
+    username, password, state = resolve_openlist_credentials()
+    if state == "unavailable":
+        raise ValueError("本机凭据管理器暂时不可用，OpenList 扫描已暂停，请稍后重试")
+    if not username or not password:
+        raise ValueError("OpenList 尚未配置，无法执行扫描")
+    bound_conn_hash = str(root.get("openlist_conn_hash") or "")
+    source_id = str(root.get("source_id") or "")
+    is_provider_root = source_id.startswith("pan115-") or source_id.startswith("baidu-")
+    if is_provider_root:
+        # RWK-15：Provider root 走 OpenList 通道必须通过完整 binding 复核
+        # （无条件调用：未绑定 / 连接变更 / remote_root 或 route 变更都会拒绝），
+        # 防未来新增入队路径绕过"请先绑定"保护。纯 OpenList 来源（openlist-*）
+        # 无 binding 语义，跳过。
+        from app.catalog.binding import validate_runtime_binding
+
+        current_hash = governor_connection_key(
+            config.openlist_server_url, username
+        )
+        try:
+            validate_runtime_binding(
+                root=_root_proxy(root),
+                bound_conn_hash=bound_conn_hash,
+                current_conn_hash=current_hash,
+                routes=_routes_from_config(config),
+                remote_root=(
+                    normalize_remote_path(config.openlist_remote_root)
+                    if config.openlist_remote_root
+                    else "/"
+                ),
+            )
+        except ValueError as exc:
+            raise ValueError(str(exc)) from None
+    client = get_openlist_client(
+        config.openlist_server_url,
+        username,
+        password,
+    )
+    return SourceCatalogScanner(
+        source="openlist",
+        client=client,
+        canonical_root=root.get("remote_locator") or "",
+        openlist_root=root.get("openlist_remote_locator") or "",
+    )
+
+def _build_txt_scanner(root: dict, provider: str):
+    """TXT 快照通道（snapshot_pan115 / snapshot_baidu）。
+
+    HYB-1：remote root 与 local root 正式拆开——remote root 是 OpenList
+    风格远端绝对路径前缀（后续切 OpenList 通道时 remote_path 对齐），
+    local root 是本地挂载根（拼 logical_locator/real_path）。
+    """
+    from app.catalog.scanner import SourceCatalogScanner
+    from app.sources.registry import get_source_adapter
+
     input_path = str(root.get("input_path") or "")
     if not input_path:
         raise ValueError(
-            f"{source} 来源的 discovery job 缺少 input_path（目录树 TXT 路径）"
+            f"{provider} 来源的 discovery job 缺少 input_path（目录树 TXT 路径）"
         )
-    adapter = get_source_adapter("pan115" if source.startswith("pan115") else "baidu")
+    adapter = get_source_adapter(provider)
     return SourceCatalogScanner(
-        source="pan115" if source.startswith("pan115") else "baidu",
-        adapter=adapter, input_path=input_path, source_root=root.get("remote_locator") or "/",
+        source=provider,
+        adapter=adapter, input_path=input_path,
+        source_root=root.get("remote_locator") or "/",
+        local_root=root.get("local_locator") or "",
     )
 
 
@@ -105,6 +223,66 @@ def _wait_for_backpressure(should_cancel) -> None:
         if should_cancel is not None and should_cancel():
             raise DiscoveryCancelled("取消请求：背压等待中")
         time.sleep(1.0)
+
+def _needs_first_remote_reconcile(root_id: str) -> bool:
+    """HYB-5：是否需要首次远端对账保护。
+
+    仅当存在「TXT bootstrap 完成过扫描」留下的 complete 目录（从未被
+    OpenList 验证过，last_remote_verified_at='' 且 state='complete'）时，
+    说明这是 bootstrap 后第一次走 OpenList 通道——需要先做错绑 preflight。
+    纯 OpenList 首次扫描（root 目录只是 queued，无 complete 快照）不触发。
+    """
+    row = catalog_store.get_connection().execute(
+        """
+        SELECT COUNT(*) AS c FROM source_directories
+        WHERE root_id = ? AND state = 'complete' AND last_remote_verified_at = ''
+        """,
+        (root_id,),
+    ).fetchone()
+    return int(row["c"] if row else 0) > 0
+
+
+def _reconcile_preflight(
+    scanner,
+    root_id: str,
+    remote_locator: str,
+    *,
+    snapshot_locator: str = "",
+):
+    """HYB-5：首次 TXT→OpenList 对账保护（bootstrap compatibility preflight）。
+
+    只 list 选定 root 的直接成员（1 次请求），与 TXT 快照的直接成员对比：
+    - 双方均非空但完全无重叠 → invalid_snapshot_mapping：中止任务，
+      0 tombstone、不生成大量 revisions（用户可能把 TXT 与错误的远端
+      目录绑定了）；
+    - 正常/轻微差异（TXT 是旧快照，允许增减）→ 放行进入 baseline learning。
+
+    ``snapshot_locator``：快照直接成员实际挂在的 parent locator（默认等于
+    remote_locator；Provider 模型下 root.remote_locator 可能是本地 POSIX
+    形式，而 binding 的远端路径不同——传 root.remote_locator 精确查快照子项）。
+    """
+    from app.catalog import store as catalog_store
+
+    snapshot_children = {
+        row["name"]
+        for row in catalog_store.list_current_children(
+            root_id, snapshot_locator or remote_locator
+        )
+    }
+    # 只取第一页（root 直接成员通常远小于分页上限）；有界读取，不递归。
+    page = scanner.enumerate_directory(remote_locator, page=1, per_page=100)
+    remote_children = {entry.name for entry in page.entries}
+    snapshot_children.discard("")
+    remote_children.discard("")
+    if (
+        snapshot_children
+        and remote_children
+        and not (snapshot_children & remote_children)
+    ):
+        raise ValueError(
+            "invalid_snapshot_mapping: 目录树快照与所选 OpenList 远端目录"
+            "直接成员完全无重叠，可能绑定错误；已中止，未删除任何数据"
+        )
 
 
 def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=None) -> dict:
@@ -117,18 +295,26 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
     if root is None:
         raise ValueError(f"source root 不存在: {root_id}")
 
-    # 模块 1 冷却拦截：OpenList 来源在构造扫描器之前检查连接健康。
-    # 冷却中不构造扫描器、不跑 engine、不请求远程；保留 Source Catalog 已有数据。
-    # 与 OpenListClient 上报一致：连接键 = sha256(server_url|username)
+    # REWORK（Blocker 3）：健康门按实际 scan_channel 判定，而不是 source_id
+    # 前缀。只有 OpenList 通道才进入 credential / health / cooldown gate；
+    # snapshot_pan115 / snapshot_baidu / local 是纯本地（或本地挂载）通道，
+    # 完全不读 OpenList 凭据、不查 source_health——OpenList 冷却/凭据故障
+    # 绝不能阻塞本地 TXT 扫描。
     health_key = ""
     source = str(root.source_id or "")
-    if source.startswith("openlist") or source == "openlist":
-        from app.core.config import load_config
+    channel = str(payload.get("scan_channel") or "")
+    is_openlist_channel = (
+        channel == "openlist"
+        or (not channel and (source.startswith("openlist") or source == "openlist"))
+    )
+    if is_openlist_channel:
+        from app.core.config import load_config, resolve_openlist_credentials
         from app.integrations.openlist.governor import governor_connection_key
 
         config = load_config()
+        username, _password, _state = resolve_openlist_credentials()
         health_key = governor_connection_key(
-            config.openlist_server_url, config.openlist_username
+            config.openlist_server_url, username or config.openlist_username or ""
         )
         allowed, record = source_health.peek_request_allowed(health_key)
         if not allowed:
@@ -139,6 +325,7 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
                 message=_DEFER_MESSAGE,
             )
 
+    scan_channel = str(payload.get("scan_channel") or "")
     scanner = _build_scanner(
         {
             "source_id": root.source_id,
@@ -147,7 +334,19 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
             "import_family": root.import_family,
             "import_scope": root.import_scope,
             "input_path": str(payload.get("input_path") or ""),
+            "scan_channel": scan_channel,
+            # RWK-8/9：Provider root 的 OpenList binding（bound 映射 + 连接身份约束）
+            "openlist_conn_hash": getattr(root, "openlist_conn_hash", "") or "",
+            "openlist_remote_locator": getattr(root, "openlist_remote_locator", "") or "",
         }
+    )
+    # HYB-5：首次 TXT→OpenList 对账保护——TXT bootstrap 后第一次走
+    # OpenList 通道时，先校验快照与远端 root 是否错绑（1 次 list）；
+    # 错绑则中止，0 tombstone、不生成 revisions。bound 模式下以 binding
+    # 远端定位为物理基准，快照直接成员以 Provider canonical locator 为基准。
+    needs_first_reconcile = (
+        scan_channel == "openlist"
+        and _needs_first_remote_reconcile(root_id)
     )
     engine = DiscoveryEngine(
         scanner,
@@ -158,17 +357,28 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
 
     summary = {"plan_ready": 0, "needs_review": 0, "mirror_enqueued": 0}
 
+    # RWK-26（单执行权威）：snapshot（TXT）通道是 baseline-only——只建立
+    # draft revision（Source Catalog 索引事实），**不自动确认、不入队 mirror**；
+    # 用户通过确认页确认时走 durable mirror（confirm 端点识别 SQLite revision）。
+    # 否则 TXT 导入会同时启动 legacy plan 确认链与 auto-confirm 的 durable
+    # mirror 链（双执行权威），且用户未确认时后台已开始镜像。
+    baseline_only = scan_channel.startswith("snapshot_")
+
     def on_unit(result: dict) -> None:
         if result.get("status") == "plan_ready" and result.get("revision_id"):
             # closure 后仍须通过同一确认门槛；不确定的识别只能进入复核，
             # 绝不能因“渐进导入”而绕过安全检查。
-            confirmed, _reason = revision_store.try_auto_confirm_revision(result["revision_id"])
-            if confirmed:
-                orchestrator.enqueue_mirror(result["revision_id"], result["unit_id"])
+            if baseline_only:
+                # TXT baseline：保留 draft（供用户确认页确认），不入队 mirror
                 summary["plan_ready"] += 1
-                summary["mirror_enqueued"] += 1
             else:
-                summary["needs_review"] += 1
+                confirmed, _reason = revision_store.try_auto_confirm_revision(result["revision_id"])
+                if confirmed:
+                    orchestrator.enqueue_mirror(result["revision_id"], result["unit_id"])
+                    summary["plan_ready"] += 1
+                    summary["mirror_enqueued"] += 1
+                else:
+                    summary["needs_review"] += 1
         elif result.get("status") == "needs_review":
             summary["needs_review"] += 1
         if progress_callback is not None:
@@ -186,6 +396,16 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
         _wait_for_backpressure(should_cancel)
 
     try:
+        # REWORK-fix（MEDIUM）：首次对账 preflight 也置于风控异常保护内——
+        # preflight 的 list 若触发 429/风控/冷却，与 engine.run 一致转
+        # JobDeferredError（延后等待冷却），而不是直接 failed 消耗 attempt。
+        if needs_first_reconcile:
+            _reconcile_preflight(
+                scanner,
+                root_id,
+                getattr(root, "openlist_remote_locator", "") or root.remote_locator,
+                snapshot_locator=root.remote_locator,
+            )
         results = engine.run(
             should_cancel=should_cancel,
             progress_callback=progress_callback,
@@ -213,12 +433,40 @@ def handle_discovery_scan(payload: dict, progress_callback=None, should_cancel=N
             {"phase": "discovery_done", "failed_count": len(failed_paths)},
         )
 
+    # RWK-25：snapshot（TXT）通道完整完成后，原子标记 baseline completed——
+    # 仅当无 failed 目录、且无 queued/scanning 残留（重启/中断时 prepare_scan
+    # 会把 scanning 恢复为 queued，故不会误标）。部分完成的 baseline 不得
+    # 被视为 ready（否则第一次 OpenList 增量会继续远端展开未本地建立的子树）。
+    if scan_channel.startswith("snapshot_") and not failed_paths:
+        _mark_baseline_completed_if_ready(root_id, generation)
+
     return {
         "root_id": root_id,
         "generation": generation,
         "units": results,
         "summary": summary,
     }
+
+
+def _mark_baseline_completed_if_ready(root_id: str, generation: int) -> None:
+    """RWK-25：全部目录 complete（无 queued/scanning/failed）时标记 baseline 完成。"""
+    row = catalog_store.get_connection().execute(
+        """
+        SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN state = 'queued' THEN 1 ELSE 0 END) AS queued,
+            SUM(CASE WHEN state = 'scanning' THEN 1 ELSE 0 END) AS scanning,
+            SUM(CASE WHEN state = 'failed' THEN 1 ELSE 0 END) AS failed
+        FROM source_directories WHERE root_id = ?
+        """,
+        (root_id,),
+    ).fetchone()
+    total = int(row["total"] or 0)
+    queued = int(row["queued"] or 0)
+    scanning = int(row["scanning"] or 0)
+    failed = int(row["failed"] or 0)
+    if total > 0 and queued == 0 and scanning == 0 and failed == 0:
+        catalog_store.mark_baseline_completed(root_id, generation)
 
 
 def register_discovery_handler() -> None:

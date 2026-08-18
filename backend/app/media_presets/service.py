@@ -5,6 +5,7 @@ import uuid
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import RLock
 
 from fastapi import HTTPException, UploadFile
 
@@ -26,12 +27,17 @@ _BAIDU_TREE_LINE = re.compile(
     re.MULTILINE,
 )
 
+# Confirmation authority lock：在单进程 FastAPI 生命周期内串行化
+# TXT baseline target 前进与 root-generation confirm，避免 target 在
+# validation 与 mutation 之间前进造成 stale root 部分确认。
+CONFIRMATION_AUTHORITY_LOCK = RLock()
+
 
 def now_iso() -> str:
     return datetime.now(timezone(timedelta(hours=8))).isoformat()
 
 
-def openlist_preset_state(catalog_root_id: str) -> dict:
+def openlist_preset_state(catalog_root_id: str, *, require_all: bool = False) -> dict:
     """OpenList 来源卡状态投影：从 SourceRoot 的 current MediaUnits / revisions /
     durable jobs 投影识别单元数、需处理数与是否已建立媒体库，**绝不依赖不存在
     的 current_plan_id**（来源卡代表 SourceRoot 生命周期，不是单个 ImportPlan）。
@@ -54,7 +60,8 @@ def openlist_preset_state(catalog_root_id: str) -> dict:
         return empty
     conn = get_connection()
     units = conn.execute(
-        "SELECT unit_id, current_revision_id FROM media_units WHERE root_id = ?",
+        "SELECT unit_id, current_revision_id, status, boundary, work_key "
+        "FROM media_units WHERE root_id = ?",
         (catalog_root_id,),
     ).fetchall()
     if not units:
@@ -62,6 +69,7 @@ def openlist_preset_state(catalog_root_id: str) -> dict:
     unit_count = len(units)
     attention_count = 0
     indexed = False
+    published_count = 0
 
     def _latest_stage_job(job_type: str, resource_key: str):
         return conn.execute(
@@ -110,18 +118,59 @@ def openlist_preset_state(catalog_root_id: str) -> dict:
             (f'%"unit_id": "{unit_id}"%',),
         ).fetchone()
 
+    needs_review_units: list[dict] = []
+    # RWK-40（P0）：media_units.current_revision_id 是「上一次已确认版本」的指针，
+    # 不代表当前 generation 的 draft / needs_review 事实。require_all 的 Provider
+    # TXT 必须让当前 target generation 的可执行状态覆盖旧指针：
+    # - unit 在 target generation 有 draft revision → attention / not indexed；
+    # - unit.status == needs_review → attention（不管旧 current_revision_id）；
+    # - 都没有待处理事实时，才允许沿旧 current_revision_id 的 published pipeline 判断。
+    from app.catalog import store as catalog_store
+
+    _root = catalog_store.get_source_root(catalog_root_id)
+    target = int(getattr(_root, "baseline_target_generation", 0) or 0) if _root else 0
     for unit in units:
-        revision_id = str(unit["current_revision_id"] or "")
         unit_id = str(unit["unit_id"] or "")
+        unit_status = str(unit["status"] or "")
+        if target > 0:
+            draft_row = conn.execute(
+                "SELECT COUNT(*) AS c FROM import_revisions r "
+                "JOIN media_units u ON u.unit_id = r.unit_id "
+                "WHERE u.unit_id = ? AND u.root_id = ? "
+                "AND r.source_generation = ? AND r.status = 'draft'",
+                (unit_id, catalog_root_id, target),
+            ).fetchone()
+            if draft_row and int(draft_row["c"] or 0) > 0:
+                # 当前 generation 有待确认 draft → 不得沿旧指针显示已发布
+                attention_count += 1
+                continue
+        if unit_status == "needs_review":
+            # 当前 generation 需要人工处理，不管旧 current_revision_id 指向什么
+            attention_count += 1
+            needs_review_units.append(
+                {
+                    "unit_id": unit_id,
+                    "boundary": str(unit["boundary"] or ""),
+                    "work_key": str(unit["work_key"] or ""),
+                    "status": unit_status,
+                }
+            )
+            continue
+        revision_id = str(unit["current_revision_id"] or "")
         if not revision_id:
             continue
         rev = conn.execute(
             "SELECT status FROM import_revisions WHERE revision_id = ?", (revision_id,)
         ).fetchone()
         if rev is None:
+            # current_revision_id 指向的 revision 行缺失（数据不一致）→ attention
+            attention_count += 1
             continue
         rev_status = str(rev["status"] or "")
         if rev_status == "draft":
+            attention_count += 1
+            continue
+        if rev_status in ("failed", "cancelled", "superseded"):
             attention_count += 1
             continue
         if rev_status not in ("confirmed", "executed"):
@@ -162,11 +211,238 @@ def openlist_preset_state(catalog_root_id: str) -> dict:
             continue
         if library_status == "succeeded":
             # LibraryIndex 已经发布（handle_library_rebuild 完成）
+            published_count += 1
             indexed = True
+    if require_all:
+        indexed = unit_count > 0 and published_count == unit_count and attention_count == 0
     return {
         "unit_count": unit_count,
         "attention_count": attention_count,
         "is_library_indexed": indexed,
+        "needs_review_units": needs_review_units,
+    }
+
+
+def ensure_provider_source_root(
+    *,
+    provider: str,
+    local_mount_root: str,
+    import_family: str,
+    import_scope: str = "",
+    remote_locator: str = "",
+) -> str:
+    """RWK-17：建立/复用 Provider（pan115/baidu）SourceRoot，返回 root_id。
+
+    bootstrap-tree 与现有 115/百度 TXT 导入路径共用同一实现：
+    - Provider source identity = {provider}-{sha256(local_mount_root)[:16]}，
+      与 OpenList 完全解耦；
+    - root 复用/创建遵循 lifecycle 覆盖解析（exact/ancestor/promote/create）；
+    - 同一本地挂载根永远只产生一个 Provider root（幂等）。
+
+    0 OpenList 请求；root 建立后 preset.catalog_root_id 由调用方关联。
+    """
+    from app.catalog import lifecycle
+    from app.catalog import store as catalog_store
+    from app.db.database import init_db
+
+    init_db()
+    provider = (provider or "").strip().lower()
+    if provider not in {"pan115", "baidu"}:
+        raise ValueError("provider 仅支持 pan115 或 baidu")
+    mount_root = (local_mount_root or "").strip()
+    if not mount_root:
+        raise ValueError("缺少本地挂载根")
+    effective_root = Path(mount_root).expanduser()
+    # 归一化后再哈希：尾斜杠/大小写差异不产生第二套 source（与 preset 复用判定一致）
+    norm_key = str(effective_root).strip().rstrip("\\/").casefold()
+
+    provider_key = hashlib.sha256(
+        norm_key.encode("utf-8")
+    ).hexdigest()[:16]
+    source_id = f"{provider}-{provider_key}"
+    catalog_store.create_source(
+        source_id=source_id,
+        source_type=provider,
+        provider_id=provider,
+        ingest_method="directory_tree",
+        connection_key=source_id,
+        display_name="115 目录树" if provider == "pan115" else "百度目录树",
+    )
+
+    normalized = remote_locator.strip() or (
+        "/" + str(effective_root).replace("\\", "/").strip("/")
+    )
+    resolution = lifecycle.resolve_root_for_import(
+        source_id,
+        normalized,
+        import_family=(import_family or "anime").strip(),
+        import_scope=(import_scope or "").strip(),
+        local_locator=str(effective_root),
+    )
+    if resolution.action == "create":
+        root = catalog_store.create_source_root(
+            source_id=source_id,
+            remote_locator=normalized,
+            local_locator=str(effective_root),
+            import_family=(import_family or "anime").strip(),
+            import_scope=(import_scope or "").strip(),
+            scan_policy="standard",
+        )
+    elif resolution.action == "promote_parent":
+        resolution = lifecycle.promote_parent_root(
+            source_id,
+            normalized,
+            local_locator=str(effective_root),
+            import_family=(import_family or "anime").strip(),
+            import_scope=(import_scope or "").strip(),
+            child_root_ids=resolution.covered_root_ids,
+        )
+        root = catalog_store.get_source_root(resolution.canonical_root_id)
+        if root is None:
+            raise ValueError("来源根归并失败，请重试")
+    else:
+        root = catalog_store.get_source_root(resolution.canonical_root_id)
+        if root is None:
+            raise ValueError("来源根解析失败，请重新导入")
+        if resolution.action == "reuse_ancestor":
+            # 只在显式提供了非空语义时更新元数据——空 scope 不得清空共享
+            # 祖先 root 的既有 scope（季节/子目录导入最后写入者不得胜出）
+            family = (import_family or "anime").strip()
+            scope = (import_scope or "").strip()
+            catalog_store.update_root_metadata(
+                root.root_id,
+                import_family=family,
+                import_scope=scope,
+            )
+    return root.root_id
+
+
+def bootstrap_provider_catalog_from_tree(
+    *,
+    provider: str,
+    tree_archive: str,
+    local_mount_root: str,
+    import_family: str,
+    import_scope: str = "",
+    remote_locator: str = "",
+) -> dict:
+    """RWK-21：把已归档的目录树 TXT 建立为 Provider SourceRoot 的完整 Source Catalog baseline。
+
+    语义（路线 A）：TXT → Provider Source Catalog 全量基线，0 OpenList 请求。
+    - ensure/复用 Provider source + root（幂等，同一挂载根不产生第二套）；
+    - enqueue durable discovery job（scan_channel=snapshot_{provider}, full）——
+      source_nodes / source_directories（complete frontier）/
+      media_units / revisions 由 durable handler 从归档 TXT 建立；
+    - 返回 {"root_id", "job_id", "generation", "source_id"}。
+
+    调用方（multipart create / import-local-tree）负责 preset.catalog_root_id 关联。
+    归档 TXT 已落在 KumiPlayer 数据目录（MediaTreeVersion 承载），restart 可恢复。
+    """
+    from app.catalog import store as catalog_store
+    from app.db.database import init_db
+    from app.pipeline import orchestrator
+
+    init_db()
+    root_id = ensure_provider_source_root(
+        provider=provider,
+        local_mount_root=local_mount_root,
+        import_family=import_family,
+        import_scope=import_scope,
+        remote_locator=remote_locator,
+    )
+    root = catalog_store.get_source_root(root_id)
+    if root is None:
+        raise ValueError("来源根建立失败")
+    generation = catalog_store.bump_generation(root_id)
+    # RWK-30：新 TXT baseline 入队即把 target 前进到该 generation——
+    # 旧 completed fact 不再代表当前基线（ready 失效），直到新版本完整完成。
+    catalog_store.set_baseline_target(root_id, generation)
+    job_id = orchestrator.enqueue_scan(
+        root_id,
+        generation,
+        root.source_id,
+        input_path=tree_archive,
+        scan_mode="full",
+        scan_channel=f"snapshot_{provider}",
+    )
+    return {
+        "root_id": root_id,
+        "job_id": job_id,
+        "generation": generation,
+        "source_id": root.source_id,
+    }
+
+
+def bootstrap_provider_catalog_sync(
+    *,
+    provider: str,
+    tree_archive: str,
+    local_mount_root: str,
+    import_family: str,
+    import_scope: str = "",
+    remote_locator: str = "",
+) -> dict:
+    """RWK-34：同步执行 TXT → Source Catalog baseline（**不创建 queued job**）。
+
+    与 ``bootstrap_provider_catalog_from_tree`` 的区别：不在 durable queue 创建
+    discovery job，而是直接构造 payload 单次调用 handler——消除「API 同步调
+    handler + worker 再 claim 同一 queued job」的双执行窗口与重复 draft revision。
+
+    TXT 导入是同步用户流程：成功即数据落库（Source Catalog 持久化），
+    失败当场可见可重试，无需 restart 恢复（v2 更新同理）。若调用方需要
+    durable 后台/重启恢复语义，请用 ``bootstrap_provider_catalog_from_tree``。
+
+    返回 {"root_id", "generation", "source_id", "summary", "revision_ids"}。
+    """
+    from app.catalog import store as catalog_store
+    from app.db.database import init_db
+    from app.pipeline.discovery_handler import handle_discovery_scan
+
+    init_db()
+    root_id = ensure_provider_source_root(
+        provider=provider,
+        local_mount_root=local_mount_root,
+        import_family=import_family,
+        import_scope=import_scope,
+        remote_locator=remote_locator,
+    )
+    root = catalog_store.get_source_root(root_id)
+    if root is None:
+        raise ValueError("来源根建立失败")
+    generation = catalog_store.bump_generation(root_id)
+    catalog_store.set_baseline_target(root_id, generation)
+    # RWK-37：同步执行必须与 enqueue_scan 等价地先 prepare_scan(full)——
+    # 否则既有 complete 目录不在 pending frontier，engine 不会重扫，
+    # 新版本 TXT（v2 新增作品）会被遗漏（仅扫 root）。
+    catalog_store.prepare_scan(root_id, generation=generation, mode="full")
+    payload = {
+        "root_id": root_id,
+        "generation": generation,
+        "source_id": root.source_id,
+        "input_path": tree_archive,
+        "scan_mode": "full",
+        "scan_channel": f"snapshot_{provider}",
+    }
+    summary = handle_discovery_scan(payload).get("summary", {})
+    # 收集该 generation 的全部 draft revision ids（root 级确认身份）
+    from app.db.database import get_connection
+
+    rows = get_connection().execute(
+        """
+        SELECT r.revision_id FROM import_revisions r
+        JOIN media_units u ON u.unit_id = r.unit_id
+        WHERE u.root_id = ? AND r.source_generation = ? AND r.status = 'draft'
+        ORDER BY r.created_at ASC
+        """,
+        (root_id, generation),
+    ).fetchall()
+    revision_ids = [str(r["revision_id"]) for r in rows]
+    return {
+        "root_id": root_id,
+        "generation": generation,
+        "source_id": root.source_id,
+        "summary": summary,
+        "revision_ids": revision_ids,
     }
 
 
@@ -176,12 +452,79 @@ def preset_to_dict(preset: MediaLibraryPreset) -> dict:
     # OpenList 来源卡：is_library_indexed 与识别单元/需处理数来自 SourceRoot 的
     # current MediaUnits/revisions/jobs 投影，不再用目录树 lifecycles 的 ready
     # 判定（来源卡从不经过 directory_tree 的 lifecycle 推进）。
-    if preset.source == "openlist" and preset.catalog_root_id:
-        state = openlist_preset_state(preset.catalog_root_id)
+    authority = str(preset.execution_authority or "")
+    durable_source_card = authority == "durable_root" and preset.source in {"pan115", "baidu"}
+    if preset.catalog_root_id and (preset.source == "openlist" or durable_source_card):
+        state = openlist_preset_state(
+            preset.catalog_root_id,
+            require_all=durable_source_card,
+        )
         data["is_library_indexed"] = state["is_library_indexed"]
         data["openlist_unit_count"] = state["unit_count"]
         data["openlist_attention_count"] = state["attention_count"]
+        data["openlist_needs_review_units"] = state.get("needs_review_units") or []
+        if durable_source_card:
+            if state["is_library_indexed"]:
+                data["lifecycle_status"] = "ready"
+            elif state["attention_count"] > 0:
+                data["lifecycle_status"] = "needs_attention"
+    # RWK-39（P0-2）：durable confirmation identity 可恢复投影——
+    # 一旦 preset 进入 Source Catalog durable authority（catalog_root_id 关联
+    # **或** execution_authority=durable_root——含 baseline 失败且 root 未写入
+    # 的场景），restart 后仍从 preset 恢复身份与阻断状态，绝不重新识别为
+    # legacy-executable。
+    is_durable = authority == "durable_root" or bool(preset.catalog_root_id)
+    if is_durable:
+        gen, ready = preset_confirmation_state(preset.catalog_root_id or "")
+        data["confirmation_root_id"] = preset.catalog_root_id or None
+        data["confirmation_generation"] = gen
+        data["confirmation_ready"] = ready
+        # RWK-40（P0）：durable TXT 且当前 target generation 仍有 draft
+        # （confirmation_ready=true）→ 不得对用户宣称「已全部正式完成」。
+        # current_revision_id 可能仍指上一代 published 指针，必须被当前 draft 覆盖。
+        # 只把已投影为 ready 的状态拉回 needs_attention；非 ready（如 rebind 后
+        # 的 draft）保持原值，避免过度改写既有 lifecycle 语义。
+        if preset.catalog_root_id and preset.source in {"pan115", "baidu"} and ready:
+            data["is_library_indexed"] = False
+            if data["lifecycle_status"] == "ready":
+                data["lifecycle_status"] = "needs_attention"
+        state = str(preset.confirmation_state or "")
+        if authority == "durable_root" and state in ("failed", "pending"):
+            # hard exception / 未完成基线：身份存在但确认被硬阻断
+            data["confirmation_blocked"] = True
+        elif preset.catalog_root_id and not ready:
+            # 基线未完成/已消费：同样不可确认（legacy 绝不回退）
+            data["confirmation_blocked"] = True
+        else:
+            data["confirmation_blocked"] = not ready
     return data
+
+
+def preset_confirmation_state(catalog_root_id: str) -> tuple[int, bool]:
+    """恢复 TXT durable confirmation 身份：(generation, ready)。
+
+    ready = 基线已真实完成（completed == target > 0）且该 generation 仍有
+    draft revisions 可确认。draft 全部确认/执行后 ready=False（避免重复确认）。
+    """
+    from app.catalog import store as catalog_store
+    from app.db.database import get_connection
+
+    root = catalog_store.get_source_root(catalog_root_id)
+    if root is None:
+        return 0, False
+    target = int(getattr(root, "baseline_target_generation", 0) or 0)
+    completed = int(getattr(root, "baseline_completed_generation", 0) or 0)
+    if target <= 0 or completed != target:
+        return target, False
+    row = get_connection().execute(
+        """
+        SELECT COUNT(*) AS c FROM import_revisions r
+        JOIN media_units u ON u.unit_id = r.unit_id
+        WHERE u.root_id = ? AND r.source_generation = ? AND r.status = 'draft'
+        """,
+        (catalog_root_id, target),
+    ).fetchone()
+    return target, bool(row and int(row["c"]) > 0)
 
 
 _LIFECYCLE_ORDER = {
@@ -571,8 +914,121 @@ def build_plan_for_snapshot(snapshot):
     return plan
 
 
-def rebind_preset_source_root(preset: MediaLibraryPreset, source_root: str):
-    """用用户选择的精确目录重新解析当前归档，不创建新版本或触碰真实媒体。"""
+def rebuild_provider_catalog_sync(
+    *,
+    root_id: str,
+    tree_archive: str,
+    local_locator: str,
+) -> dict:
+    """RWK-40（P0-1）：在既有 SourceRoot 上重建 Provider TXT baseline（root-scoped）。
+
+    与 ``bootstrap_provider_catalog_sync`` 的区别：**已有 durable preset 的所有
+    后续 TXT baseline（v2 update / same-TXT recovery / rebind）都必须走这里**——
+    以 ``root_id`` 为权威身份，绝不从 local_mount_root 重新推导 source/root 身份
+    （那是首次创建才做的）。保持 root_id / source_id / media_unit identity 不变，
+    仅更新 local_locator、推进 generation、重跑 snapshot baseline。
+
+    返回与 bootstrap 同构的 {"root_id", "generation", "source_id", "summary",
+    "revision_ids"}，供调用方继续统一处理 confirmation state。
+    """
+    from app.catalog import store as catalog_store
+    from app.db.database import get_connection, init_db
+    from app.pipeline.discovery_handler import handle_discovery_scan
+
+    init_db()
+    if not root_id:
+        raise HTTPException(status_code=409, detail="缺少 durable 来源根")
+    root = catalog_store.get_source_root(root_id)
+    if root is None:
+        raise HTTPException(status_code=409, detail="durable 来源根不存在，请重新导入目录树")
+    if not tree_archive or not Path(tree_archive).is_file():
+        raise HTTPException(status_code=409, detail="当前媒体库的目录树归档不存在，请重新导入")
+    source_id = str(root.source_id or "")
+    if source_id.startswith("pan115"):
+        provider = "pan115"
+    elif source_id.startswith("baidu"):
+        provider = "baidu"
+    else:
+        raise HTTPException(status_code=409, detail="该来源根不是可重扫的 Provider 来源")
+    with CONFIRMATION_AUTHORITY_LOCK:
+        catalog_store.update_root_local_locator(
+            root_id, str(Path(local_locator).expanduser())
+        )
+        generation = catalog_store.bump_generation(root_id)
+        catalog_store.set_baseline_target(root_id, generation)
+        catalog_store.prepare_scan(root_id, generation=generation, mode="full")
+        payload = {
+            "root_id": root_id,
+            "generation": generation,
+            "source_id": source_id,
+            "input_path": tree_archive,
+            "scan_mode": "full",
+            "scan_channel": f"snapshot_{provider}",
+        }
+        summary = handle_discovery_scan(payload).get("summary", {})
+    rows = get_connection().execute(
+        """
+        SELECT r.revision_id FROM import_revisions r
+        JOIN media_units u ON u.unit_id = r.unit_id
+        WHERE u.root_id = ? AND r.source_generation = ? AND r.status = 'draft'
+        ORDER BY r.created_at ASC
+        """,
+        (root_id, generation),
+    ).fetchall()
+    revision_ids = [str(r["revision_id"]) for r in rows]
+    return {
+        "root_id": root_id,
+        "generation": generation,
+        "source_id": source_id,
+        "summary": summary,
+        "revision_ids": revision_ids,
+    }
+
+
+def rebuild_durable_baseline_for_rebind(
+    preset: MediaLibraryPreset, new_local_mount_root: str, tree_archive: str
+) -> dict:
+    """RWK-39/40：rebind 实际视频文件夹时在同一 SourceRoot 上重建 durable baseline。
+
+    复用 ``rebuild_provider_catalog_sync``（root-scoped，绝不再派生 root 身份）；
+    在既有 root 上切换 local_locator、推进 generation、用归档 TXT 重跑 baseline。
+    返回新 (confirmation_root_id, confirmation_generation) + revision_ids；旧
+    generation 的 patch/confirm 由 confirm-root 的 generation fence 自动 409 stale。
+    """
+    root_id = (preset.catalog_root_id or "").strip()
+    info = rebuild_provider_catalog_sync(
+        root_id=root_id,
+        tree_archive=tree_archive,
+        local_locator=new_local_mount_root,
+    )
+    failed_count = int(info["summary"].get("failed_count", 0) or 0)
+    preset.execution_authority = "durable_root"
+    preset.confirmation_state = "failed" if failed_count > 0 else "ready"
+    preset.updated_at = now_iso()
+    save_preset(preset)
+    return {
+        "root_id": info["root_id"],
+        "generation": info["generation"],
+        "status": "baseline_failed" if failed_count > 0 else "baseline_queued",
+        "revision_ids": info["revision_ids"],
+        "confirmation_root_id": info["root_id"],
+        "confirmation_generation": info["generation"],
+        "summary": info["summary"],
+    }
+
+
+def rebind_preset_source_root(
+    preset: MediaLibraryPreset, source_root: str, *, rebuild_durable: bool = True
+):
+    """用用户选择的精确目录重新解析当前归档，不创建新版本或触碰真实媒体。
+
+    durable TXT preset（execution_authority=durable_root 或已关联 catalog_root_id）
+    在 rebind 新实际视频文件夹时，额外在同一 SourceRoot 上重建 durable baseline：
+    local_locator 切换、generation 前进、旧 generation patch/confirm 自动 409 stale。
+    revalidate（同路径）传 rebuild_durable=False 不重建。
+    返回 (snapshot, plan, version, path_validation, baseline)；baseline 为 None
+    表示非 durable 预设或未重建（revalidate）。
+    """
     if not source_root.strip():
         raise HTTPException(status_code=400, detail="请先选择实际视频文件夹")
     selected_root = Path(source_root).expanduser()
@@ -607,8 +1063,25 @@ def rebind_preset_source_root(preset: MediaLibraryPreset, source_root: str):
     preset.current_plan_id = plan.plan_id
     preset.lifecycle_status = "draft"
     preset.updated_at = now_iso()
-    save_preset(preset)
-    return snapshot, plan, version, path_validation
+    baseline = None
+    if (
+        rebuild_durable
+        and preset.source in {"pan115", "baidu"}
+        and (preset.execution_authority == "durable_root" or preset.catalog_root_id)
+    ):
+        # RWK-40（P1 residual）：rebind 的 authority transition 必须全程持同一把
+        # confirmation authority 锁——mark pending → persist preset → local locator
+        # switch → advance target → full rebuild。否则窄窗口里旧 generation 仍是
+        # current target，另一个 confirm-root 请求可能抢先确认旧 generation。
+        with CONFIRMATION_AUTHORITY_LOCK:
+            preset.confirmation_state = "pending"
+            save_preset(preset)
+            baseline = rebuild_durable_baseline_for_rebind(
+                preset, str(selected_root), str(archive)
+            )
+    else:
+        save_preset(preset)
+    return snapshot, plan, version, path_validation, baseline
 
 
 def create_preset_record(
@@ -931,6 +1404,12 @@ def activate_version(preset: MediaLibraryPreset, version: MediaTreeVersion, snap
     preset.version_count += 1
     preset.work_count = len(preview.groups)
     preset.video_count = int(preview.summary.get("video_count", snapshot.video_count))
+    # RWK-40（P0-2）：TXT preset 在 current_plan 对外可见的同一次 save 中
+    # 先声明 durable_root/pending；baseline 完成后再由 _ensure_tree_baseline
+    # 转为 ready/failed，消除 legacy-visible → durable 的并发窗口。
+    if preset.source in {"pan115", "baidu"}:
+        preset.execution_authority = "durable_root"
+        preset.confirmation_state = "pending"
     # 新目录树仍需重新确认、生成镜像和刮削，不能沿用旧版本的完成状态。
     preset.lifecycle_status = "draft"
     preset.updated_at = now_iso()
@@ -980,9 +1459,136 @@ def update_preset_from_tree(
         cumulative = merge_incremental_plan(base_plan, delta, diff, status="draft")
     cumulative.import_family = preset.import_family
     cumulative.import_scope = preset.import_scope
+    if preset.source in {"pan115", "baidu"}:
+        # 更新路径先持久化 authority，避免旧 current_plan 在新 plan 写入期间
+        # 仍可被外部 legacy confirm/mirror 使用。
+        preset.execution_authority = "durable_root"
+        preset.confirmation_state = "pending"
+        preset.updated_at = now_iso()
+        save_preset(preset)
     save_import_plan(cumulative, update_latest=False)
     activate_version(preset, version, snapshot, cumulative)
     version.diff_id = diff.diff_id
     save_preset(preset)
     return cumulative, diff
+
+
+def resolve_needs_review_unit(root_id: str, unit_id: str, work_title: str, generation: int = 0) -> dict:
+    """RWK-40（P0-2）：为 needs_review 且无 revision 的 MediaUnit 生成可编辑 draft revision。
+
+    事故链：TXT baseline 完整成功 → 作品识别失败 → needs_review unit 无 revision
+    → confirmation_ready=false → durable「继续确认」按钮不存在 → 重导相同 TXT 又
+    baseline_reused → 永久卡住。本函数让这类 unit 通过 DiscoveryEngine 从既有
+    source_nodes 重建 snapshot/items（scanner 为 None 仅读 source_nodes，0 网络），
+    生成 draft revision；用户提供 work_title 时复用 patch 规则强制写回作品身份。
+    生成后该 unit 进入 root-generation 确认集合（confirmation_ready=true），后续
+    确认走 confirm-root，**绝不依赖 legacy plan**。
+    """
+    from app.catalog import store as catalog_store
+    from app.catalog.discovery import DiscoveryEngine
+    from app.db.database import get_connection, init_db
+    from app.import_plan import revision_store
+
+    init_db()
+    if not unit_id:
+        raise HTTPException(status_code=400, detail="缺少识别单元")
+    root = catalog_store.get_source_root(root_id)
+    if root is None:
+        raise HTTPException(status_code=404, detail="来源根不存在")
+    source_id = str(root.source_id or "")
+    if not (source_id.startswith("pan115") or source_id.startswith("baidu")):
+        # RWK-40（M1）：needs-review resolve 是 Provider TXT durable 专属处理入口，
+        # 非 pan115/baidu 来源（纯 OpenList）不得走此路径（与 confirm-root 同约束）。
+        raise HTTPException(status_code=409, detail="该来源根不支持人工识别处理")
+    conn = get_connection()
+    unit = conn.execute(
+        "SELECT * FROM media_units WHERE unit_id = ? AND root_id = ?",
+        (unit_id, root_id),
+    ).fetchone()
+    if unit is None:
+        raise HTTPException(status_code=404, detail="识别单元不存在")
+    if str(unit["status"]) != "needs_review":
+        raise HTTPException(status_code=409, detail="该识别单元不在待处理状态")
+
+    target = int(getattr(root, "baseline_target_generation", 0) or 0)
+    completed = int(getattr(root, "baseline_completed_generation", 0) or 0)
+    # RWK-40（P0-3）：与 confirm-root/patch 同源的 generation fence——resolve 必须
+    # 精确作用在用户看到的 (root, generation) 上。target 已前进（页面陈旧）或基线
+    # 未完成（completed < target，partial/failed 场景）一律 409，0 revision 生成、
+    # 0 unit 变更。baseline 成功但全 needs_review（completed == target == generation，
+    # 无 draft revision）是唯一允许 resolve 的状态。
+    if generation <= 0 or target <= 0:
+        # 与 confirm-root（imports.py）对齐的兜底：target=0（从未跑 baseline）或
+        # generation=0 时三零边界（0==0）不得放行，防止在无基线 root 上生成孤儿 revision。
+        raise HTTPException(status_code=409, detail="该来源根没有进行中的目录树基线")
+    if generation != target:
+        raise HTTPException(status_code=409, detail="识别单元已过期，目录树基线已更新，请刷新后重试")
+    if completed != generation:
+        raise HTTPException(status_code=409, detail="目录树基线尚未完成，暂不能人工处理识别单元")
+    # RWK-40（P0）：旧的 current_revision_id 是上一代已确认指针（可能 confirmed/
+    # executed/published），不得阻止当前 target generation 人工生成新 draft。
+    # 只拒绝「当前 target generation 已存在 actionable revision」（draft/
+    # confirmed/executed），老的 rev_v1 继续作为已发布事实存在即可。
+    existing = conn.execute(
+        "SELECT revision_id, status FROM import_revisions "
+        "WHERE unit_id = ? AND source_generation = ?",
+        (unit_id, target),
+    ).fetchall()
+    for row in existing:
+        if str(row["status"]) in ("draft", "confirmed", "executed"):
+            raise HTTPException(
+                status_code=409, detail="该识别单元在当前目录树版本已有可处理版本"
+            )
+
+    engine = DiscoveryEngine(
+        None,
+        source_id=str(root.source_id or ""),
+        root_id=root_id,
+        generation=target,
+    )
+    boundary = str(unit["boundary"] or "")
+    result = engine._process_unit(
+        {
+            "boundary": boundary,
+            "work_key": str(unit["work_key"] or boundary),
+            "work_title": "",
+        },
+        should_cancel=None,
+    )
+    new_revision_id = str(result.get("revision_id") or "")
+    if not new_revision_id:
+        raise HTTPException(
+            status_code=409,
+            detail="该识别单元下没有可入库视频，无法生成可处理版本",
+        )
+    if work_title and work_title.strip():
+        cleaned_title = work_title.strip()
+        loaded = revision_store.load_plan(new_revision_id)
+        items = loaded.items if loaded else []
+        for item in items:
+            if getattr(item, "resource_type", "") == "video" and getattr(item, "action", "") == "generate_strm":
+                try:
+                    revision_store.patch_draft_revision_item(
+                        new_revision_id,
+                        item.id,
+                        {"work_title": cleaned_title, "needs_review": False, "warnings": []},
+                    )
+                except Exception:
+                    # 单 item patch 失败不阻塞整体（人工确认页仍可逐项修正）
+                    pass
+    # RWK-40（M2）：回写 current_revision_id → openlist_preset_state 把该 unit
+    # 视为「有待处理 draft」（attention 可见），而非 needs_review 重复提示；
+    # confirmation_ready 由该 draft revision 提供，与「继续确认」入口衔接。
+    get_connection().execute(
+        "UPDATE media_units SET status='plan_ready', current_revision_id=? "
+        "WHERE unit_id=? AND root_id=?",
+        (new_revision_id, unit_id, root_id),
+    )
+    get_connection().commit()
+    return {
+        "revision_id": new_revision_id,
+        "unit_id": unit_id,
+        "root_id": root_id,
+        "generation": target,
+    }
 
