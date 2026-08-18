@@ -196,46 +196,59 @@ def _persist_config_payload(config: AppConfig, *, cleared_keys: set[str] | None 
 
     - 凭据先于 JSON 写入；任一凭据写入失败 → 恢复已写入的旧凭据后抛出；
     - JSON 原子写失败 → 恢复全部本次写入的凭据后抛出；
-    - 凭据读取失败（``CredentialStoreError``）→ 直接中止本次保存（0 mutation），
-      绝不允许把「存储暂时不可读」当作「清除凭据」；
-    - **空值语义 = KEEP**：只有 ``cleared_keys`` 中显式列出的字段才执行
-      DELETE；其余空值字段既不写也不删（防止 stale blank cache 误删真实凭据）。
+    - **无关配置保存不触碰安全存储**：本次没有任何凭据需要 SET / CLEAR
+      （所有凭据字段为空且不在 ``cleared_keys``）时完全跳过安全存储读写，
+      即使 Credential Store 暂时不可读，普通配置保存也正常成功；
+    - 需要 **SET**（非空新值）的字段必须能读到旧值（用于补偿回滚）；
+      读取失败 → 直接中止本次保存（0 mutation），绝不允许把「存储暂时
+      不可读」当作「清除凭据」；
+    - 需要 **CLEAR**（显式 ``cleared_keys``，如用户主动退出）的字段直接
+      delete——显式清除意图优先，不因读取暂时失败而放弃用户登出；
+    - **空值语义 = KEEP**：空值且未显式清除 → 既不写也不删（防止 stale
+      blank cache 误删真实凭据）；config.json 中凭据字段始终置空，绝不落明文。
     """
     with DATA_WRITE_LOCK:
         payload = asdict(config)
         written: list[tuple[str, str]] = []  # (key, 旧值)
         cleared = cleared_keys or set()
         if _credential_storage_enabled():
+            # 凭据由安全存储接管：捕获本次待处理凭据新值后统一置空，
+            # 杜绝明文凭据写入 config.json。
+            pending_values = {
+                key: str(payload.get(key, "") or "")
+                for key in _CREDENTIAL_FIELDS
+            }
+            for key in _CREDENTIAL_FIELDS:
+                payload[key] = ""
+            # 只处理需要 SET / CLEAR 的字段；KEEP 字段完全不读写安全存储，
+            # 无关配置保存在 store 暂时不可读时也正常成功。
+            pending = [
+                key
+                for key in _CREDENTIAL_FIELDS
+                if pending_values.get(key) or key in cleared
+            ]
             try:
-                for key in _CREDENTIAL_FIELDS:
-                    value = str(payload.get(key, "") or "")
-                    try:
+                for key in pending:
+                    value = pending_values[key]
+                    if key not in cleared:
+                        # SET 前必须先读旧值用于补偿回滚；读取失败直接中止
+                        # （存储暂时不可读时绝不继续保存，避免明文落盘或误删）。
                         old = SECURE_CREDENTIAL_STORE.read(key)
-                    except CredentialStoreError:
-                        # 存储暂时不可读：绝不能继续保存——否则要么把「不可读」
-                        # 当作「清除凭据」，要么把未脱敏明文写进 config.json。
-                        # 直接中止本次保存（0 mutation：store / JSON / 内存全保持）。
-                        raise
-                    written.append((key, old or ""))
-                    if value:
+                        written.append((key, old or ""))
                         if value == old:
                             # 值未变化：跳过（幂等保存不产生多余秘密操作；
                             # 同时保证「只 SET 目标字段」的跨字段隔离）
-                            payload[key] = ""
                             continue
                         # SET：非空新值
                         SECURE_CREDENTIAL_STORE.write(key, value)
-                    elif key in cleared:
-                        # 显式 CLEAR intent：只有调用方明确要求清除才 delete
-                        SECURE_CREDENTIAL_STORE.delete(key)
                     else:
-                        # KEEP：空值且无显式 clear intent → 不写不删
-                        # （防止 hydrate 故障留下的 stale blank cache 误删真实凭据）
-                        pass
-                    payload[key] = ""
+                        # 显式 CLEAR intent：只有调用方明确要求清除才 delete，
+                        # 不因读取暂时失败而放弃（用户主动登出优先）。
+                        SECURE_CREDENTIAL_STORE.delete(key)
             except Exception:
                 _rollback_credentials(written)
                 raise
+        # 安全存储未启用（测试 / 明文配置回退）时，凭据字段随 asdict 原样落盘。
         try:
             write_json_atomic(get_config_file(), payload)
         except Exception:
