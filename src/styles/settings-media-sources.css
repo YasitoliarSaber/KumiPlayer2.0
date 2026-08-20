@@ -1,0 +1,240 @@
+/* ============================================================
+   OpenList 媒体来源设置（OL-4：Settings IA）
+   独立样式文件，避免 SettingsPage.tsx 继续膨胀。
+   ============================================================ */
+
+/* ---------- OpenList 连接状态卡 ---------- */
+.sources-openlist-card {
+  border: 1px solid var(--settings-border, rgba(120, 130, 145, 0.18));
+  border-radius: 10px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sources-openlist-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sources-openlist-card-head strong {
+  font-size: 15px;
+}
+
+.sources-openlist-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(128, 128, 128, 0.12);
+  color: var(--settings-muted, #8a93a2);
+  white-space: nowrap;
+}
+
+.sources-openlist-status.is-ok {
+  background: rgba(46, 160, 67, 0.14);
+  color: #2ea043;
+}
+
+.sources-openlist-status.is-error {
+  background: rgba(218, 54, 51, 0.14);
+  color: #da3633;
+}
+
+.sources-openlist-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  font-size: 12.5px;
+  color: var(--settings-muted, #8a93a2);
+}
+
+.sources-openlist-meta code {
+  font-family: inherit;
+  background: rgba(128, 128, 128, 0.1);
+  padding: 1px 6px;
+  border-radius: 5px;
+}
+
+.sources-openlist-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+/* ---------- OpenList 连接编辑区 ---------- */
+.sources-openlist-editor {
+  border: 1px solid var(--settings-border, rgba(120, 130, 145, 0.18));
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sources-webdav-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--settings-muted, #8a93a2);
+}
+
+.sources-webdav-hint code {
+  background: rgba(128, 128, 128, 0.1);
+  padding: 1px 6px;
+  border-radius: 5px;
+}
+
+.sources-credentials-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sources-credentials-status {
+  font-size: 12.5px;
+  color: var(--settings-muted, #8a93a2);
+}
+
+/* ---------- 高级设置（默认折叠） ---------- */
+.sources-advanced {
+  margin-top: 2px;
+}
+
+.sources-advanced summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--settings-muted, #8a93a2);
+  user-select: none;
+  padding: 4px 0;
+}
+
+.sources-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 6px;
+}
+
+/* ---------- 来源目录（路由）紧凑卡片 ---------- */
+.sources-routes-panel {
+  border: 1px solid var(--settings-border, rgba(120, 130, 145, 0.18));
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sources-route-card {
+  border: 1px solid var(--settings-border, rgba(120, 130, 145, 0.14));
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sources-route-card-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sources-route-card-name {
+  font-weight: 600;
+  font-size: 14px;
+  min-width: 90px;
+}
+
+.sources-route-card-paths {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--settings-muted, #8a93a2);
+  flex: 1;
+  min-width: 200px;
+}
+
+.sources-route-card-paths code {
+  background: rgba(128, 128, 128, 0.1);
+  padding: 0 5px;
+  border-radius: 4px;
+}
+
+.sources-route-card-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px dashed var(--settings-border, rgba(120, 130, 145, 0.14));
+  padding-top: 8px;
+}
+
+.sources-route-summary {
+  font-size: 12.5px;
+  color: var(--settings-muted, #8a93a2);
+}
+
+.sources-dirty-hint {
+  font-size: 12.5px;
+  color: #b08800;
+}
+
+/* ---------- 本地与兼容来源 ---------- */
+.sources-legacy-panel {
+  border: 1px solid var(--settings-border, rgba(120, 130, 145, 0.18));
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sources-legacy-note {
+  font-size: 12.5px;
+  color: var(--settings-muted, #8a93a2);
+}
+
+/* ---------- Build Provenance（构建来源） ---------- */
+.build-provenance {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.build-provenance-line {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.build-provenance-key {
+  display: inline-block;
+  min-width: 36px;
+  color: var(--settings-muted, #8a93a2);
+  font-weight: 500;
+}
+
+.build-provenance-val {
+  color: var(--settings-text, inherit);
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+
+.build-provenance-sha {
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+}

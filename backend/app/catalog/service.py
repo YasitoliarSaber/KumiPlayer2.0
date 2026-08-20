@@ -213,7 +213,13 @@ def scan_directory_paginated(
                     f"提前短页: 收集 {collected} 条 != 服务端总数 {first_total}"
                 )
             # 完整分页：原子提交（missing 只发生在完整读取后）
-            stats = store.commit_directory(root_id, remote_path, run_id, generation)
+            # HYB-3：OpenList 通道提交 → last_remote_verified_at=now；
+            # TXT 快照/local 通道 → 置空（远端未验证）。
+            remote_verified = getattr(client, "source", "") == "openlist"
+            stats = store.commit_directory(
+                root_id, remote_path, run_id, generation,
+                remote_verified=remote_verified,
+            )
             if progress_callback is not None:
                 progress_callback(
                     0, f"已提交 {remote_path}",

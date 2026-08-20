@@ -28,10 +28,18 @@ export interface BangumiUser {
 }
 
 export interface BangumiSession {
+  credential_state: 'found' | 'not_found' | 'unavailable';
   credential_saved: boolean;
-  status: 'connected' | 'unavailable' | 'invalid' | 'signed_out';
+  auth_status: 'unknown' | 'valid' | 'reauth_required';
+  connectivity: 'unknown' | 'online' | 'offline' | 'rate_limited' | 'forbidden' | 'server_error';
+  status: string; // 兼容派生值：signed_out / unavailable / available / connected
   user: BangumiUser | null;
-  message: string;
+  last_verified_at: string;
+  last_success_at: string;
+  last_failure_at: string;
+  last_http_status: number | null;
+  last_error_code: string;
+  last_error_message: string;
 }
 
 export interface BangumiMatch {
@@ -119,6 +127,13 @@ export const bangumiApi = {
 
   async getSession(): Promise<BangumiSession> {
     return fetchJson(`${API_BASE}/session`, { timeoutMs: 6_000 });
+  },
+
+  async verifySession(): Promise<BangumiSession> {
+    return fetchJson(`${API_BASE}/session/verify`, {
+      method: 'POST',
+      timeoutMs: 12_000,
+    });
   },
 
   async searchSubjects(keyword: string, limit = 10, offset = 0, subjectTypes: number[] = []): Promise<any> {

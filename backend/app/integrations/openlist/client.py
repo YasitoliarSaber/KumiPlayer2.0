@@ -346,6 +346,9 @@ class OpenListClient:
         """
         last_error: Exception | None = None
         for attempt in range(self.max_attempts):
+            # 发送 authenticated 请求前记录当前 token：迟到的旧 401 响应
+            # 不得清除其他线程刚刷新的新 token（stale-token-aware）。
+            observed_token = self._token
             # 快速预检（只读、不消费探针）：明确未到期冷却 → 直接拒绝，
             # 不进入限速队列、不发任何请求
             peek_allowed, _ = source_health.peek_request_allowed(self._conn_key)
@@ -362,6 +365,16 @@ class OpenListClient:
             try:
                 with self._client() as client:
                     response = client.post(path, json=payload, headers=self._headers())
+                    # HYB-6：KumiPlayer → OpenList 物理请求遥测（尽力而为）。
+                    # 已真实发出请求（无论成败）即计数一次，不冒充上游配额。
+                    from app.integrations.openlist.telemetry import (
+                        OP_FS_LIST,
+                        OP_LOGIN,
+                        record_request,
+                    )
+
+                    op = OP_LOGIN if "/login" in path else OP_FS_LIST
+                    record_request(self._conn_key, op)
             except httpx.TimeoutException:
                 last_error = OpenListTimeoutError()
                 if attempt + 1 < self.max_attempts:
@@ -412,8 +425,15 @@ class OpenListClient:
             # record_failure("auth") 的 cooling 保护会保留 cooldown，
             # 后续 login() 仍会被 peek_request_allowed 拒绝，不会穿透风控。
             if (status == 401 or code == 401) and retry_on_auth:
-                self._token = None
-                self._report_failure("auth")
+                # stale-token-aware invalidation：仅当当前 token 仍是本次
+                # 请求发出时观察到的 token，本线程才允许使会话失效并重登；
+                # 否则说明另一个线程已经刷新出新的 token，禁止清掉新 token
+                # （ROOT-6：late 401 不得清除刚刷新的 Token）。
+                invalidated = self._invalidate_token_if_current(observed_token)
+                # 仅真正使会话失效的线程上报 auth 失败（迟到 401 的线程
+                # 不应重复污染健康统计）
+                if invalidated:
+                    self._report_failure("auth")
                 self.login()
                 # 同一客户端的首次并发目录请求可能都已拿到旧的空 token。
                 # login() 内部会单飞；等待者返回后不应再各自发送一次 401。
@@ -452,6 +472,23 @@ class OpenListClient:
             return 0.0
 
     # -- 对外接口 ----------------------------------------------------
+
+    def _invalidate_token_if_current(self, observed_token: str | None) -> bool:
+        """仅当当前 token 仍是 ``observed_token`` 时才使会话失效。
+
+        用于 stale-token-aware invalidation（ROOT-6）：
+
+        - 当前 token == observed_token → 本线程确实使 token 失效，返回 True；
+        - 当前 token != observed_token → 另一个线程已经刷新出新 token，
+          禁止清掉新 token，返回 False（用新 token 重试即可）。
+
+        注意：不要在持有 ``_auth_lock`` 时调用（``login()`` 也需要该锁）。
+        """
+        with self._auth_lock:
+            if self._token != observed_token:
+                return False
+            self._token = None
+            return True
 
     def login(self) -> str:
         """登录并返回 Token（进程内缓存，不落盘）。
@@ -495,7 +532,10 @@ class OpenListClient:
             return token
 
     def _login_request(self) -> str:
-        """登录实际请求（不限速、不上报，供 login 包装）。"""
+        """登录实际请求（不限速、不上报，供 login 包装）。
+
+        HYB-6：真实发出登录物理请求后计一次 login 遥测（尽力而为）。
+        """
         with self._client() as client:
             try:
                 response = client.post(
@@ -503,6 +543,12 @@ class OpenListClient:
                     json={"username": self.username, "password": self.password},
                     headers={"accept": "application/json", "content-type": "application/json"},
                 )
+                from app.integrations.openlist.telemetry import (
+                    OP_LOGIN,
+                    record_request,
+                )
+
+                record_request(self._conn_key, OP_LOGIN)
             except httpx.TimeoutException:
                 raise OpenListTimeoutError() from None
             except httpx.HTTPError:
@@ -617,14 +663,25 @@ def get_openlist_client(
 ) -> OpenListClient:
     """取得同一连接的进程内共享客户端。
 
-    密码不参与键值，也绝不存入池的索引或日志。可选参数主要供测试注入；测试
-    通过 :func:`clear_openlist_client_pool` 隔离，生产调用不会传入它们。
+    池键仍为匿名键（server_url + username，sha256，密码不参与键值，
+    绝不存入池的索引或日志）；但**有效凭据身份包含密码**：
+    - 同 server / username / password → 复用既有会话（含内存 Token）；
+    - 同 server / username、password 变化 → 丢弃旧 client 并新建，
+      防止旧密码 / 旧 Token 污染新配置（ROOT-2）。
+
+    密码仅在内存中与池内既有 client 的 ``password`` 字段比较，不生成、
+    不记录任何密码哈希。可选参数主要供测试注入；测试通过
+    :func:`clear_openlist_client_pool` 隔离，生产调用不会传入它们。
     """
     key = _client_pool_key(server_url, username)
     with _CLIENT_POOL_LOCK:
         existing = _CLIENT_POOL.get(key)
         if existing is not None:
-            return existing
+            # 有效身份比较：密码相同才复用；不同则替换（不修改旧对象，
+            # 直接整体丢弃，避免旧 Token 继续参与新配置的请求）
+            if existing.password == password:
+                return existing
+            _CLIENT_POOL.pop(key, None)
         factory = client_factory or OpenListClient
         client = factory(server_url, username, password, **kwargs)
         if isinstance(client, OpenListClient):

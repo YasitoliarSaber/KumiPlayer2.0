@@ -458,12 +458,32 @@ test('Bangumi 启动恢复区分已保存凭据与临时连接失败', () => {
   const settings = readFileSync(new URL('../src/pages/SettingsPage.tsx', import.meta.url), 'utf8');
 
   assert.match(api, /getSession/);
+  assert.match(api, /verifySession/);
   assert.match(store, /saved_offline/);
   assert.match(store, /restoreSession/);
-  assert.match(app, /sessionStatus\s*!==\s*'saved_offline'/);
-  assert.match(app, /restoreSession\(1\)/);
+  assert.match(store, /SESSION_VERIFY_TTL_MS/);
+  assert.match(store, /credential_state/);
+  // 启动恢复：单次本地 /session（0 远程、不重试），无 4 连发、无 30 秒心跳；
+  // 仅 TTL 过期时后台触发一次远程验证（失败不阻塞 UI）
+  assert.doesNotMatch(app, /restoreSession\(1\)/);
+  assert.doesNotMatch(app, /30_000/);
+  assert.match(app, /SESSION_VERIFY_TTL_MS/);
+  assert.match(app, /verifySession/);
+  // REWORK P1-1：认证证据时间 = max(last_verified_at, last_success_at)，
+  // 任何 authenticated 业务请求成功都计入启动 TTL
+  assert.match(app, /Math\.max\(lastVerified, lastSuccess\)/);
+  assert.match(app, /session\.last_success_at/);
+  // REWORK P0-3/P0-4：cached user 身份卡与连接状态解耦，已连接需 valid+online；
+  // 401 保留身份并提供 Token 更新入口
+  assert.match(settings, /authStatus === 'valid' && connectivity === 'online'/);
+  assert.match(settings, /Bangumi 登录授权已失效/);
+  assert.match(settings, /更新登录信息/);
+  assert.match(settings, /Bangumi 请求暂时受限/);
+  assert.match(settings, /Bangumi 拒绝了本次请求/);
+  assert.match(settings, /暂时无法读取本机 Bangumi 登录凭据/);
+  assert.match(settings, /暂时无法连接 Bangumi/);
   assert.match(settings, /登录信息已保存/);
-  assert.match(settings, /重新连接/);
+  assert.match(settings, /重新验证/);
 });
 
 test('Bangumi 每次恢复连接只刷新当前已打开作品', () => {

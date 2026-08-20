@@ -47,6 +47,19 @@ export interface MediaLibraryPreset {
   openlist_unit_count?: number;
   /** OpenList 来源卡：SourceRoot 投影出的需处理单元数（draft / failed stage） */
   openlist_attention_count?: number;
+  /** RWK-40（P0-2）：needs_review 无 revision 的 MediaUnit 明细（boundary/unit_id），
+   * 供 TXT 来源卡展示需人工处理的识别单元并触发 durable resolve。 */
+  openlist_needs_review_units?: Array<{ unit_id: string; boundary: string; work_key: string; status: string }>;
+  /** RWK-38：TXT durable confirmation 身份可恢复投影（重启后从 preset 恢复，
+   * 不再依赖会话内临时 entry）。confirmation_ready=false 表示基线未完成/
+   * 失败或已确认完——禁止确认、禁止自动 pipeline、绝不回退 legacy。 */
+  confirmation_root_id?: string;
+  confirmation_generation?: number;
+  confirmation_ready?: boolean;
+  /** RWK-39：durable_root authority / failed state 的重启恢复投影 */
+  execution_authority?: '' | 'durable_root' | 'legacy';
+  confirmation_state?: '' | 'ready' | 'pending' | 'failed' | 'consumed';
+  confirmation_blocked?: boolean;
   scrape_task?: TaskRecord | null;
   review_count?: number;
   versions: MediaTreeVersion[];
@@ -65,6 +78,16 @@ export interface PresetImportResult {
   };
   reused_preset?: boolean;
   unchanged?: boolean;
+  /** RWK-21/22/27：Provider Source Catalog baseline 状态（TXT 导入/更新） */
+  baseline?: {
+    root_id?: string;
+    job_id?: string;
+    status: 'baseline_queued' | 'baseline_reused' | 'baseline_failed';
+    /** RWK-35：root 级确认身份（多作品一次确认全部 revisions） */
+    confirmation_root_id?: string;
+    confirmation_generation?: number;
+    revision_ids?: string[];
+  };
 }
 
 export interface PresetDeletePreview {

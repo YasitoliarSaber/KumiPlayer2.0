@@ -39,6 +39,10 @@ class MediaLibraryPreset:
     ingest_method: str = ""  # openlist_api / directory_tree / local_scan
     source_route_id: str = ""  # 使用的 OpenList 提供商路由，可为空
     catalog_root_id: str = ""  # 关联的 Source Catalog source_root（OpenList 来源卡的权威关联）
+    # RWK-39（P0-2）：执行权威持久化——一旦 TXT preset 进入 Source Catalog
+    # durable 模式，即使 baseline 失败/重启，也绝不重新识别为 legacy-executable。
+    execution_authority: str = ""  # ""（未定）| "durable_root" | "legacy"
+    confirmation_state: str = ""  # "" | "ready" | "pending" | "failed" | "consumed"
     created_at: str = ""
     updated_at: str = ""
     current_snapshot_id: str = ""

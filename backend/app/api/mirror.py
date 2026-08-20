@@ -53,6 +53,14 @@ def generate_mirror_task(source: str, req: GenerateRequest = GenerateRequest()):
             detail=f"plan.source={plan.source} 与 URL source={source} 不匹配",
         )
 
+    from app.api.imports import _legacy_plan_uses_durable_authority
+
+    if _legacy_plan_uses_durable_authority(plan.plan_id, source):
+        raise HTTPException(
+            status_code=409,
+            detail="该 TXT 预设已进入 durable_root 执行权威，禁止 legacy mirror",
+        )
+
     # 校验 plan.status
     if plan.status != "confirmed":
         raise HTTPException(

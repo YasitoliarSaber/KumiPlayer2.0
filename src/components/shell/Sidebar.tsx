@@ -52,7 +52,7 @@ export default function Sidebar() {
     toggleSidebar,
   } = useUiStore();
   const works = useLibraryStore((state) => state.works);
-  const { user, isLoggedIn } = useBangumiStore();
+  const { user, hasStoredCredential } = useBangumiStore();
   const categoryCounts = categoryWorkCounts(works, source);
   const sidebarExpanded = sidebarMode === 'expanded';
   const sidebarHidden = sidebarMode === 'hidden';
@@ -144,7 +144,7 @@ export default function Sidebar() {
         </button>
 
         <div className="sidebar-account-wrap mt-4 h-[76px]">
-        {isLoggedIn && user && (
+        {hasStoredCredential && user && (
           <div className="sidebar-account-card flex h-full items-center gap-3 rounded-lg border p-3" style={{ borderColor: 'var(--border)' }}>
             {user.avatar && (
               <DecodedImage

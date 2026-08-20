@@ -24,6 +24,15 @@ BATCH_WRITE_LIMIT = 500
 MAX_DIRECTORY_DEPTH = 128
 #: 无原生 delta 的来源完成一次目录验证后，24 小时后进入滚动完整校验候选。
 VERIFY_INTERVAL = timedelta(hours=24)
+#: HYB-5：单轮 rolling verification 预算（命名常量，非官方配额）——
+#: snapshot-only 未远端验证的目录每轮只取有限数量入队，避免一轮把
+#: TXT bootstrap 留下的全部目录一次性扫完（变相全扫）。后续 HYB-6
+#: 可把该值可视化/配置化，这里初版用保守固定预算。
+BASELINE_VERIFY_BUDGET = 50
+#: HYB-5：滚动验证到期时间抖动窗口（0 ~ 24h），叠加在 VERIFY_INTERVAL 上，
+#: 用 stable hash(remote_path) 确定性分散，避免 TXT 导入次日全部目录
+#: 同时到期（“滚动验证其实又是一次全扫”）。
+ROLLING_JITTER_WINDOW = timedelta(hours=24)
 
 
 def now_iso() -> str:
@@ -456,18 +465,64 @@ def bump_generation(root_id: str) -> int:
 
 
 def update_root_metadata(root_id: str, *, import_family: str = "", import_scope: str = "") -> None:
-    """更新来源根的 family/scope 元数据（不改变 locator，供复用既有根时对齐语义）。"""
+    """更新来源根的 family/scope 元数据（不改变 locator，供复用既有根时对齐语义）。
+
+    空值不覆盖既有值：import_scope 传 "" 不得清空共享祖先 root 的既有 scope
+    （季节/子目录导入最后写入者不得胜出——RWK-17 修复）。
+    """
     if not root_id:
         return
     get_connection().execute(
         """
         UPDATE source_roots
         SET import_family = CASE WHEN ? != '' THEN ? ELSE import_family END,
-            import_scope = CASE WHEN ? IS NOT NULL THEN ? ELSE import_scope END,
+            import_scope = CASE WHEN ? != '' THEN ? ELSE import_scope END,
             updated_at = ?
         WHERE root_id = ?
         """,
         (import_family, import_family, import_scope, import_scope, now_iso(), root_id),
+    )
+    get_connection().commit()
+
+
+def update_root_local_locator(root_id: str, local_locator: str) -> None:
+    """RWK-39（P0-2）：更新既有 SourceRoot 的本地播放挂载根（local_locator）。
+
+    rebind 实际视频文件夹时复用同一 root_id（不创建第二套 Provider source），
+    仅切换本地 playback locator；DiscoveryEngine._derive_real_path 据此拼出
+    新 real_path，generation 前进后旧 durable path 不再可执行（confirm-root
+    的 target/completed generation fence 自动 409 stale）。
+    """
+    if not root_id:
+        return
+    conn = get_connection()
+    conn.execute(
+        "UPDATE source_roots SET local_locator = ?, updated_at = ? WHERE root_id = ?",
+        (local_locator, now_iso(), root_id),
+    )
+    conn.commit()
+
+
+def bind_root_to_openlist(
+    root_id: str,
+    *,
+    openlist_conn_hash: str,
+    openlist_remote_locator: str,
+) -> None:
+    """RWK-3：把 Provider root 绑定到可选 OpenList 增量通道。
+
+    只写 binding 元数据，不改变 root identity / source / media_units；
+    后续对该 root 的 scan 使用 scan_channel=openlist 时，同一 root 复用。
+    """
+    if not root_id or not openlist_conn_hash:
+        return
+    get_connection().execute(
+        """
+        UPDATE source_roots
+        SET openlist_conn_hash = ?, openlist_remote_locator = ?, updated_at = ?
+        WHERE root_id = ?
+        """,
+        (openlist_conn_hash, openlist_remote_locator or "", now_iso(), root_id),
     )
     get_connection().commit()
 
@@ -538,7 +593,8 @@ def get_directory(root_id: str, remote_path: str) -> dict | None:
 def update_directory(root_id: str, remote_path: str, **fields: Any) -> None:
     allowed = {
         "state", "accepted_generation", "entry_count", "member_hash",
-        "last_verified_at", "next_verify_at", "retry_count", "last_error_kind",
+        "last_verified_at", "last_remote_verified_at", "next_verify_at",
+        "retry_count", "last_error_kind",
     }
     assignments = [f"{key} = ?" for key in fields if key in allowed]
     if not assignments:
@@ -579,6 +635,130 @@ def list_all_directories(root_id: str) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def set_baseline_target(root_id: str, generation: int) -> None:
+    """RWK-30：snapshot 入队时设置 baseline target（进入 pending 状态）。
+
+    新 TXT 版本入队即把 target 前进到新 generation——旧 completed fact 不再
+    表示当前基线（ready 失效），防止"v1 完成、v2 半途"被误判为 ready。
+    """
+    conn = get_connection()
+    conn.execute(
+        """
+        UPDATE source_roots
+        SET baseline_target_generation = ?,
+            updated_at = ?
+        WHERE root_id = ?
+        """,
+        (generation, now_iso(), root_id),
+    )
+    conn.commit()
+
+
+def mark_baseline_completed(root_id: str, generation: int) -> None:
+    """RWK-25/30：TXT snapshot baseline 完整完成的 durable fact。
+
+    仅当当前 target 仍是该 generation 时才写 completed（旧 job 晚完成不得
+    覆盖新 snapshot 的 pending 状态——晚到的旧 generation 直接忽略）。
+    """
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT baseline_target_generation FROM source_roots WHERE root_id = ?",
+        (root_id,),
+    ).fetchone()
+    target = int(row["baseline_target_generation"] if row else 0)
+    if target != generation:
+        return  # 旧 job 晚完成 / 目标已前进：不覆盖
+    conn.execute(
+        """
+        UPDATE source_roots
+        SET baseline_completed_generation = ?,
+            baseline_completed_at = ?,
+            updated_at = ?
+        WHERE root_id = ?
+        """,
+        (generation, now_iso(), now_iso(), root_id),
+    )
+    conn.commit()
+
+
+def source_catalog_baseline_stats(root_id: str) -> dict:
+    """RWK-25：Provider root 的 Source Catalog 本地基线统计。
+
+    返回 {baseline_ready, baseline_directory_count, baseline_node_count}：
+    - baseline_ready：**完整** TXT snapshot baseline 已完成（durable fact：
+      baseline_completed_generation > 0，由 snapshot job 全部目录完成后原子标记）。
+      部分完成/中断的扫描不得视为 ready——否则第一次 OpenList 增量会继续
+      远端展开尚未本地建立的 subtree；
+    - baseline_directory_count：complete 目录数；
+    - baseline_node_count：非 tombstone 的 source_nodes 数。
+    """
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT baseline_target_generation, baseline_completed_generation FROM source_roots WHERE root_id = ?",
+        (root_id,),
+    ).fetchone()
+    target = int(row["baseline_target_generation"] if row else 0)
+    completed = int(row["baseline_completed_generation"] if row else 0)
+    # RWK-30：ready 仅当「最新 snapshot target 已完整完成」——新版本入队
+    # （target 前进）后旧 completed 不再代表当前基线。
+    ready = target > 0 and completed == target
+    dirs = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM source_directories
+            WHERE root_id = ? AND state = 'complete'
+            """,
+            (root_id,),
+        ).fetchone()["c"]
+    )
+    nodes = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM source_nodes
+            WHERE root_id = ? AND tombstone = ''
+            """,
+            (root_id,),
+        ).fetchone()["c"]
+    )
+    return {
+        "baseline_ready": ready and dirs > 0,
+        "baseline_directory_count": dirs,
+        "baseline_node_count": nodes,
+    }
+
+
+def remote_baseline_coverage(root_id: str) -> dict:
+    """HYB-3：远端基线覆盖率统计。
+
+    返回 {total_directories, remote_verified_count, coverage}：
+    - total_directories：该 root 已知目录数（含 queued/complete）；
+    - remote_verified_count：OpenList 真正 list 验证过的目录数
+      （last_remote_verified_at 非空）；
+    - coverage：0.0~1.0 比例（无目录时为 1.0）。
+    """
+    conn = get_connection()
+    total = int(
+        conn.execute(
+            "SELECT COUNT(*) AS c FROM source_directories WHERE root_id = ?",
+            (root_id,),
+        ).fetchone()["c"]
+    )
+    if total == 0:
+        return {"total_directories": 0, "remote_verified_count": 0, "coverage": 1.0}
+    verified = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM source_directories
+            WHERE root_id = ? AND last_remote_verified_at != ''
+            """,
+            (root_id,),
+        ).fetchone()["c"]
+    )
+    return {
+        "total_directories": total,
+        "remote_verified_count": verified,
+        "coverage": round(verified / total, 4),
+    }
 def prepare_scan(root_id: str, *, generation: int, mode: str = "incremental") -> None:
     """把需要验证的目录写入持久 frontier。
 
@@ -637,6 +817,29 @@ def prepare_scan(root_id: str, *, generation: int, mode: str = "incremental") ->
               AND next_verify_at != '' AND next_verify_at <= ?
             """,
             (root_id, timestamp),
+        )
+        # HYB-5：rolling baseline learning 预算——从未被 OpenList 验证过
+        # （last_remote_verified_at=''）且**没有未来到期安排**（next_verify_at
+        # 为空或已到期）的 complete 目录每轮只取有限数量入队，选“最久未
+        # 验证 + stable hash jitter”而非全部同时到期，避免一轮变相全扫。
+        # 已有未来到期安排的目录（next_verify_at 在未来）不被 baseline
+        # 提前拉取，保持其既定滚动节奏。
+        tx.execute(
+            """
+            UPDATE source_directories SET state = 'queued'
+            WHERE root_id = ? AND state = 'complete'
+              AND last_remote_verified_at = ''
+              AND (next_verify_at = '' OR next_verify_at <= ?)
+              AND remote_path IN (
+                  SELECT remote_path FROM source_directories
+                  WHERE root_id = ? AND state = 'complete'
+                    AND last_remote_verified_at = ''
+                    AND (next_verify_at = '' OR next_verify_at <= ?)
+                  ORDER BY last_verified_at ASC, remote_path ASC
+                  LIMIT ?
+              )
+            """,
+            (root_id, timestamp, root_id, timestamp, BASELINE_VERIFY_BUDGET),
         )
 
 
@@ -764,6 +967,7 @@ def commit_directory(
     generation: int,
     *,
     max_batch: int = BATCH_WRITE_LIMIT,
+    remote_verified: bool = False,
 ) -> dict:
     """把完整分页读取的暂存区原子合并到 source_nodes 并落 directory checkpoint。
 
@@ -854,18 +1058,31 @@ def commit_directory(
                 # 目录 frontier 是持久状态：父目录一次完整提交后，把每个直属
                 # 子目录写成 queued。进程中断后 worker 从这里继续，不重建内存树。
                 if row["kind"] == "dir":
-                    # 阶段C（mtime 精准下钻）：已知 child 目录的直属 node mtime
-                    # 与上次入库不同（metadata 变化）→ 立即把 checkpoint 置回
-                    # queued，不等 24h rolling；UPDATE 未命中（目录曾消失、
-                    # checkpoint 已被级联删除）时回退 INSERT 重建 queued。
-                    # mtime 未变 → 保持原状态（complete 继续按 next_verify_at
-                    # 到期验证，24h rolling fallback 不变）。
+                    # HYB-4（mtime 三态下钻）：区分
+                    #   SAME    —— 双方均非 None 且相等 → 不下钻，等 rolling verify
+                    #   CHANGED —— 双方均非 None 且不等 → 立即 requeue 下钻
+                    #   UNKNOWN —— old=None（TXT bootstrap 遗留，无可信远端基线）
+                    #              → 记录 new mtime（node 已更新），但**不**立即
+                    #              全树展开，交给 baseline learning 分批验证；
+                    #              否则第一次 OpenList 增量会退化成全树扫描，
+                    #              吃掉 TXT bootstrap 的收益。
+                    # UPDATE 未命中（目录曾消失、checkpoint 已被级联删除）时
+                    # 回退 INSERT 重建 queued（新目录 → 当轮发现并扫描）。
                     requeued = False
-                    if (
-                        existing is not None
+                    old_mtime = existing["mtime"] if existing is not None else None
+                    new_mtime = row["mtime"]
+                    changed = (
+                        old_mtime is not None
+                        and new_mtime is not None
+                        and old_mtime != new_mtime
+                    )
+                    unknown = (
+                        old_mtime is None
+                        and new_mtime is not None
+                        and existing is not None
                         and existing["kind"] == "dir"
-                        and existing["mtime"] != row["mtime"]
-                    ):
+                    )
+                    if changed:
                         cursor = tx.execute(
                             """
                             UPDATE source_directories
@@ -876,7 +1093,7 @@ def commit_directory(
                             (root_id, remote),
                         )
                         requeued = cursor.rowcount > 0
-                    if not requeued:
+                    if not requeued and not unknown:
                         tx.execute(
                             """
                             INSERT OR IGNORE INTO source_directories (
@@ -932,15 +1149,29 @@ def commit_directory(
 
         tx.execute("DELETE FROM source_stage_entries WHERE run_id = ?", (run_id,))
         tx.execute("DELETE FROM source_stage_runs WHERE run_id = ?", (run_id,))
-        next_verify_at = (datetime.now(timezone(timedelta(hours=8))) + VERIFY_INTERVAL).isoformat()
+        # HYB-5：滚动验证到期时间按 stable hash(remote_path) 确定性抖动
+        # （0~24h 叠加在 24h 上），把目录分散到不同到期时刻——避免 TXT
+        # bootstrap 导入的目录在同一时刻全部到期（“滚动验证又是全扫”）。
+        jitter_seconds = int(hashlib.md5(str(remote_path).encode("utf-8")).hexdigest(), 16) % int(ROLLING_JITTER_WINDOW.total_seconds())
+        next_verify_at = (
+            datetime.now(timezone(timedelta(hours=8)))
+            + VERIFY_INTERVAL
+            + timedelta(seconds=jitter_seconds)
+        ).isoformat()
+        # HYB-3：区分「TXT 快照见过」与「OpenList 真正 list 验证过」。
+        # OpenList 通道提交成功 → last_remote_verified_at=now；
+        # snapshot 通道（TXT）提交 → 置空（远端未验证）。
+        verified_at = timestamp if remote_verified else ""
         tx.execute(
             """
             UPDATE source_directories
             SET state = 'complete', accepted_generation = ?, entry_count = ?,
-                member_hash = ?, last_verified_at = ?, next_verify_at = ?, last_error_kind = ''
+                member_hash = ?, last_verified_at = ?, next_verify_at = ?,
+                last_remote_verified_at = ?, last_error_kind = ''
             WHERE root_id = ? AND remote_path = ?
             """,
-            (generation, len(stage), member_hash, timestamp, next_verify_at, root_id, remote_path),
+            (generation, len(stage), member_hash, timestamp, next_verify_at,
+             verified_at, root_id, remote_path),
         )
     return stats
 

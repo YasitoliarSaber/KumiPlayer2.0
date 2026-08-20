@@ -45,6 +45,17 @@ if not exist "node_modules" (
 
 echo.
 echo [2/5] Running TypeScript checks...
+
+REM Inject build provenance (Git SHA / branch / build time) into the Vite build.
+REM These values are read at build time only; no runtime git/network calls.
+for /f "delims=" %%G in ('git rev-parse HEAD 2^>nul') do set "KUMI_BUILD_SHA=%%G"
+for /f "delims=" %%G in ('git branch --show-current 2^>nul') do set "KUMI_BUILD_BRANCH=%%G"
+if not defined KUMI_BUILD_SHA set "KUMI_BUILD_SHA=unknown"
+if not defined KUMI_BUILD_BRANCH set "KUMI_BUILD_BRANCH=unknown"
+REM ISO 8601 local build timestamp, e.g. 2026-08-18T14:30
+for /f "delims=" %%G in ('powershell -NoProfile -Command "Get-Date -Format 'yyyy-MM-ddTHH:mm'"') do set "KUMI_BUILD_TIME=%%G"
+echo Build provenance: branch=%KUMI_BUILD_BRANCH% sha=%KUMI_BUILD_SHA% time=%KUMI_BUILD_TIME%
+
 call npx tsc --noEmit
 if %ERRORLEVEL% neq 0 (
     echo [ERROR] TypeScript checks failed.

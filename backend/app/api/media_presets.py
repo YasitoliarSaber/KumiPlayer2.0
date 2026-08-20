@@ -1,8 +1,11 @@
 from dataclasses import asdict
+from pathlib import Path
 from threading import Lock
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
+
+from app.core.paths import get_data_dir
 
 from app.api.imports import _diff_to_dict, _preview_to_dict
 from app.import_plan.service import build_preview
@@ -192,14 +195,205 @@ def import_local_tree(req: LocalTreeImportRequest):
         version,
         snapshot,
     )
-    return {
+    # RWK-22：原生选择器/拖放 TXT 路径也建立 Provider Source Catalog baseline
+    # （0 网络），preset.catalog_root_id 持久关联——bindable 列表才能出现该来源。
+    # RWK-39（P1-2）：_activate_or_reuse_tree 在 reused/unchanged 时会 discard 本次
+    # provisional 归档，必须用 selected_version.archive_path（存活归档）重建 baseline，
+    # 不得用已 discard 的 provisional version.archive_path（input_path 悬空 → baseline_failed）。
+    baseline = _ensure_tree_baseline(
+        preset,
+        str(Path(get_data_dir()) / selected_version.archive_path) if selected_version.archive_path else "",
+        source_root,
+        req.import_family,
+        req.import_scope,
+        reused=reused,
+        unchanged=unchanged,
+    )
+    result = {
         "preset": preset_to_dict(preset),
         "version": asdict(selected_version),
-        "preview": _preview_to_dict(build_preview(plan)),
+        "preview": _bridge_preview_plan_id(
+            _preview_to_dict(build_preview(plan)), baseline
+        ),
         "reused_preset": reused,
         "unchanged": unchanged,
     }
+    if baseline:
+        result["baseline"] = baseline
+    return result
 
+
+def _bridge_preview_plan_id(preview: dict, baseline: dict | None) -> dict:
+    """RWK-35：preview 保留 legacy 展示结构（plan_id 不变，用于确认页渲染）。
+
+    多作品 TXT 的确认不再用单个 revision_id 冒充全库计划——确认身份由
+    baseline 的 confirmation_root_id / confirmation_generation（root 级批量）
+    承担，前端确认时调 confirm-root 一次性确认全部 eligible revisions。
+    """
+    return preview
+
+
+
+def _persist_durable_baseline_failure(preset, local_mount_root: str) -> dict:
+    """RWK-39（P0-2）：持久化 baseline failure 的 durable execution authority。
+
+    该函数必须覆盖 sync hard exception、缺失归档和部分目录失败后的恢复路径：
+    即使 root 只建立到一半，preset 也记录 durable_root + failed，重启后不能
+    再被当作 legacy-executable。ensure_provider_source_root 仅做本地幂等建根，
+    不触发 OpenList 网络请求。
+    """
+    import logging
+
+    from app.media_presets.service import ensure_provider_source_root, now_iso
+
+    # RWK-40（P0-2）：root identity 不变量——已有 catalog_root_id 时绝不再
+    # ensure/改绑 root。否则 rebind 后 v2 update/recovery 失败路径会依据「新挂载根」
+    # 重新 hash 派生 source_id 并创建 R2，把 preset 改绑到 R2，破坏「更换本地
+    # playback mount 不能改变 Provider SourceRoot 身份」的不变量（成功路径已
+    # root-scoped，失败路径同样必须保持 R1）。
+    root_id = (preset.catalog_root_id or "").strip()
+    if not root_id:
+        try:
+            root_id = ensure_provider_source_root(
+                provider=preset.source,
+                local_mount_root=local_mount_root,
+                import_family=preset.import_family,
+                import_scope=preset.import_scope,
+            )
+            if root_id:
+                preset.catalog_root_id = root_id
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "TXT baseline 失败后重取 root 失败（preset=%s）",
+                getattr(preset, "preset_id", ""),
+                exc_info=True,
+            )
+    preset.execution_authority = "durable_root"
+    preset.confirmation_state = "failed"
+    preset.updated_at = now_iso()
+    save_preset(preset)
+    return {
+        "status": "baseline_failed",
+        "confirmation_root_id": (preset.catalog_root_id or "").strip() or None,
+        "confirmation_generation": 0,
+    }
+
+
+
+def _ensure_tree_baseline(
+    preset,
+    tree_archive: str,
+    local_mount_root: str,
+    import_family: str,
+    import_scope: str,
+    *,
+    reused: bool = False,
+    unchanged: bool = False,
+) -> dict | None:
+    """RWK-21/22：把归档 TXT 建立为 Provider SourceRoot 的 Source Catalog baseline。
+
+    返回 baseline 信息（root_id/job_id/status）或 None（非 pan115/baidu 来源）。
+    失败只记日志不阻塞旧 TXT 导入主流程（兼容保留），但响应暴露 baseline_status，
+    前端据此提示"增量暂不可用"而不是静默缺失。
+
+    ``reused/unchanged``：_activate_or_reuse_tree 判定为复用既有卡片/内容无变化时，
+    归档文件可能已被 discard（删除）或 move（搬走），且该 root 已有历史 baseline——
+    此时跳过重新入队（避免悬空 input_path；既有 Source Catalog 数据保持）。
+    """
+    if not preset or preset.source not in {"pan115", "baidu"}:
+        return None
+    if unchanged:
+        # 内容真正无变化（同 SHA/同媒体）：归档已被 discard，root 已有 baseline——
+        # 跳过重新入队（避免悬空 input_path；既有 Source Catalog 数据保持）。
+        root_id = (preset.catalog_root_id or "").strip()
+        if root_id and preset.confirmation_state not in ("failed", "pending"):
+            from app.catalog import store as catalog_store
+
+            root = catalog_store.get_source_root(root_id)
+            gen = int(getattr(root, "baseline_target_generation", 0) or 0)
+            return {
+                "root_id": root_id,
+                "job_id": "",
+                "status": "baseline_reused",
+                "confirmation_root_id": root_id,
+                "confirmation_generation": gen,
+            }
+    # reused（卡片复用）但内容更新（v2 新版本）：仍须重新入队更新同 root
+    # 的 Source Catalog baseline（RWK-27）——archive 已 move 到版本目录，用
+    # version.archive_path 重取后有效。
+    if not tree_archive:
+        return _persist_durable_baseline_failure(preset, local_mount_root)
+    try:
+        from app.media_presets.service import (
+            bootstrap_provider_catalog_sync,
+            rebuild_provider_catalog_sync,
+            now_iso,
+            CONFIRMATION_AUTHORITY_LOCK,
+        )
+        from app.media_presets.store import save_preset as _save_preset
+
+        # RWK-40（P0-1）：已有 durable root 的后续 TXT baseline/recovery 必须
+        # 以 preset.catalog_root_id 为权威 root 身份，在既有 SourceRoot 上重建
+        # （rebuild_provider_catalog_sync），绝不从 local_mount_root 重新派生
+        # source/root——否则 rebind 换挂载后 v2 更新会创建第二套 R2 并改绑。
+        # 仅首次导入（无 catalog_root_id）才走 bootstrap 从 local mount 建根。
+        root_id = (preset.catalog_root_id or "").strip()
+        with CONFIRMATION_AUTHORITY_LOCK:
+            if root_id:
+                info = rebuild_provider_catalog_sync(
+                    root_id=root_id,
+                    tree_archive=tree_archive,
+                    local_locator=local_mount_root,
+                )
+            else:
+                info = bootstrap_provider_catalog_sync(
+                    provider=preset.source,
+                    tree_archive=tree_archive,
+                    local_mount_root=local_mount_root,
+                    import_family=import_family,
+                    import_scope=import_scope,
+                )
+                if info["root_id"] and preset.catalog_root_id != info["root_id"]:
+                    preset.catalog_root_id = info["root_id"]
+        # RWK-39：执行权威持久化——一旦进入 durable 模式，restart 后也
+        # 绝不重新识别为 legacy-executable。
+        preset.execution_authority = "durable_root"
+        preset.updated_at = now_iso()
+        _save_preset(preset)
+        if info["summary"].get("failed_count", 0) > 0:
+            # 部分目录失败：baseline 未完整完成 → 不提供确认身份（防错误基线）
+            preset.confirmation_state = "failed"
+            preset.updated_at = now_iso()
+            _save_preset(preset)
+            return {
+                "root_id": info["root_id"],
+                "status": "baseline_failed",
+                "failed_count": info["summary"].get("failed_count", 0),
+            }
+        # RWK-35：root 级确认身份——全部 draft revision ids（多作品），
+        # 用户一次确认 → 全部 eligible revisions durable confirm。
+        preset.confirmation_state = "ready"
+        preset.updated_at = now_iso()
+        _save_preset(preset)
+        return {
+            "root_id": info["root_id"],
+            "generation": info["generation"],
+            "status": "baseline_queued",
+            "revision_ids": info["revision_ids"],
+            "confirmation_root_id": info["root_id"],
+            "confirmation_generation": info["generation"],
+        }
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "TXT 导入时 Provider Source Catalog baseline 建立失败（preset=%s）",
+            getattr(preset, "preset_id", ""),
+            exc_info=True,
+        )
+        # RWK-39：hard exception 也持久化 durable_root + failed，restart 后
+        # 不得回退 legacy mirror 链。
+        return _persist_durable_baseline_failure(preset, local_mount_root)
 
 def _discard_temporary_preset(preset_id: str) -> None:
     """清理解析失败/来源不匹配时临时创建的预设与归档目录，避免残留。
@@ -285,13 +479,31 @@ async def create_media_preset(
         version,
         snapshot,
     )
-    return {
+    # RWK-21/22：multipart TXT 导入与 import-local-tree 共用同一 baseline 服务
+    # （真正把 TXT 快照写入 Source Catalog：source_nodes/directories/media_units）。
+    # RWK-39（P1-2）：同 import-local-tree，用 selected_version.archive_path（存活归档），
+    # 不用 _activate_or_reuse_tree 已 discard 的 provisional version.archive_path。
+    baseline = _ensure_tree_baseline(
+        preset,
+        str(Path(get_data_dir()) / selected_version.archive_path) if selected_version.archive_path else "",
+        source_root,
+        import_family,
+        import_scope,
+        reused=reused,
+        unchanged=unchanged,
+    )
+    result = {
         "preset": preset_to_dict(preset),
         "version": asdict(selected_version),
-        "preview": _preview_to_dict(build_preview(plan)),
+        "preview": _bridge_preview_plan_id(
+            _preview_to_dict(build_preview(plan)), baseline
+        ),
         "reused_preset": reused,
         "unchanged": unchanged,
     }
+    if baseline:
+        result["baseline"] = baseline
+    return result
 
 
 def _activate_or_reuse_tree(provisional, version, snapshot):
@@ -343,12 +555,15 @@ def rebind_media_preset_source_root(preset_id: str, req: SourceRootRequest):
     preset = get_preset(preset_id)
     if preset is None:
         raise HTTPException(status_code=404, detail="媒体库预设不存在")
-    _, plan, version, _ = rebind_preset_source_root(preset, req.source_root.strip())
-    return {
+    _, plan, version, _, baseline = rebind_preset_source_root(preset, req.source_root.strip())
+    result = {
         "preset": preset_to_dict(preset),
         "version": asdict(version),
         "preview": _preview_to_dict(build_preview(plan)),
     }
+    if baseline:
+        result["baseline"] = baseline
+    return result
 
 
 @router.post("/{preset_id}/revalidate")
@@ -356,7 +571,11 @@ def revalidate_media_preset_source_root(preset_id: str):
     preset = get_preset(preset_id)
     if preset is None:
         raise HTTPException(status_code=404, detail="媒体库预设不存在")
-    _, plan, version, _ = rebind_preset_source_root(preset, preset.source_root)
+    # revalidate 用同路径重新校验 path_validation，不重建 durable baseline
+    # （baseline 已存在则保持；失败状态走重新导入恢复，见 P1-2）。
+    _, plan, version, _, _ = rebind_preset_source_root(
+        preset, preset.source_root, rebuild_durable=False
+    )
     return {
         "preset": preset_to_dict(preset),
         "version": asdict(version),
@@ -411,12 +630,25 @@ async def update_media_preset(preset_id: str, tree_file: UploadFile = File(...))
     )
     version.path_validation = path_validation.to_dict()
     cumulative, diff = update_preset_from_tree(preset, version, snapshot)
-    return {
+    # RWK-27：新版本 TXT 同步同一 Provider Source Catalog baseline
+    baseline = _ensure_tree_baseline(
+        preset,
+        str(Path(get_data_dir()) / version.archive_path) if version.archive_path else "",
+        preset.source_root,
+        preset.import_family,
+        preset.import_scope,
+    )
+    result = {
         "preset": preset_to_dict(preset),
         "version": asdict(version),
         "diff": _diff_to_dict(diff),
-        "preview": _preview_to_dict(build_preview(cumulative)),
+        "preview": _bridge_preview_plan_id(
+            _preview_to_dict(build_preview(cumulative)), baseline
+        ),
     }
+    if baseline:
+        result["baseline"] = baseline
+    return result
 
 
 class LocalTreeUpdateRequest(BaseModel):
@@ -485,10 +717,39 @@ def update_media_preset_from_path(preset_id: str, req: LocalTreeUpdateRequest):
             detail=f"目录树来源不匹配：预期 {expected_source}，但 TXT 正文是 {source} 格式",
         )
 
-    # 相同 SHA-256 去重：不改预设、不新增版本、不创建重复归档
+    # 相同 SHA-256 去重：有效 durable baseline 仍保持旧行为；failed/pending
+    # 则必须复用已有归档执行 recovery，不能把失败状态冻结成 baseline_reused。
     duplicate = find_version_by_sha256(preset, version.sha256)
     if duplicate is not None:
         _cleanup_archived_version()
+        if (
+            preset.execution_authority == "durable_root"
+            and preset.confirmation_state in ("failed", "pending")
+        ):
+            baseline = _ensure_tree_baseline(
+                preset,
+                str(Path(get_data_dir()) / duplicate.archive_path) if duplicate.archive_path else "",
+                preset.source_root or source_root,
+                preset.import_family,
+                preset.import_scope,
+                reused=True,
+                unchanged=True,
+            )
+            duplicate_preview = None
+            if duplicate.plan_id:
+                import_plan = load_import_plan(plan_id=duplicate.plan_id)
+                if import_plan is not None:
+                    duplicate_preview = _preview_to_dict(build_preview(import_plan))
+            result = {
+                "preset": preset_to_dict(preset),
+                "version": asdict(duplicate),
+                "preview": duplicate_preview,
+                "reused_preset": True,
+                "unchanged": True,
+            }
+            if baseline:
+                result["baseline"] = baseline
+            return result
         duplicate_preview = None
         if duplicate.plan_id:
             import_plan = load_import_plan(duplicate.plan_id)
@@ -541,9 +802,24 @@ def update_media_preset_from_path(preset_id: str, req: LocalTreeUpdateRequest):
     preset.source_root = source_root
     preset.updated_at = version.created_at
     save_preset(preset)
-    return {
+    # RWK-27：新版本 TXT 同步同一 Provider Source Catalog baseline——
+    # 同 root_id 重新 enqueue snapshot full 更新，generation 前进；
+    # 失败/安全阻断在上面的 update_preset_from_tree 已保持旧 baseline 不动。
+    baseline = _ensure_tree_baseline(
+        preset,
+        str(Path(get_data_dir()) / version.archive_path) if version.archive_path else "",
+        source_root,
+        preset.import_family,
+        preset.import_scope,
+    )
+    result = {
         "preset": preset_to_dict(preset),
         "version": asdict(version),
         "diff": _diff_to_dict(diff),
-        "preview": _preview_to_dict(build_preview(cumulative)),
+        "preview": _bridge_preview_plan_id(
+            _preview_to_dict(build_preview(cumulative)), baseline
+        ),
     }
+    if baseline:
+        result["baseline"] = baseline
+    return result

@@ -70,12 +70,16 @@ def enqueue_scan(
     source_id: str = "",
     input_path: str = "",
     scan_mode: str = "incremental",
+    scan_channel: str = "",
 ) -> str:
     """创建/合并 discovery scan job。
 
     - 锁粒度：OpenList 连接（source_id）共享一把锁（scan:conn:{source_id}），
       同一连接下的多个 root 串行扫描（2 req/s 限流是连接级）；不同连接可并行；
-    - 115/百度目录树 TXT 的 input_path 随 payload 持久化，重启后仍可恢复。
+    - 115/百度目录树 TXT 的 input_path 随 payload 持久化，重启后仍可恢复；
+    - scan_channel（HYB-1）：显式扫描通道（openlist/snapshot_pan115/
+      snapshot_baidu/local），为空时 discovery handler 按 source_id 前缀
+      fallback——旧 job 不带该字段仍可正常恢复。
     """
     _ensure_handlers()
     from app.catalog import store as catalog_store
@@ -99,6 +103,7 @@ def enqueue_scan(
             "source_id": source_id,
             "input_path": input_path,
             "scan_mode": scan_mode,
+            "scan_channel": scan_channel,
         },
     )
     return job.job_id

@@ -300,7 +300,7 @@ def test_bangumi_me_normalizes_avatar_object(monkeypatch):
     from app.main import app
 
     class FakeBangumiClient:
-        def get_me(self):
+        def get_me(self, purpose: str = ""):
             return {
                 "id": 100,
                 "username": "kumi",
@@ -322,7 +322,12 @@ def test_bangumi_me_normalizes_avatar_object(monkeypatch):
 
 
 def test_bangumi_session_keeps_saved_credential_when_service_is_unavailable(monkeypatch):
-    """临时网络故障不能被前端误判为 Access Token 丢失。"""
+    """临时网络故障不能被前端误判为 Access Token 丢失。
+
+    新语义：/session 只读本地（0 远程请求），服务不可用时依然恢复凭据状态
+    （status=available、credential_saved=true），远程故障交给 /session/verify
+    分类，绝不触发 BangumiClient。
+    """
     from fastapi.testclient import TestClient
     from app.api import bangumi as bangumi_api
     from app.integrations.bangumi import BangumiError
@@ -332,21 +337,24 @@ def test_bangumi_session_keeps_saved_credential_when_service_is_unavailable(monk
         bangumi_access_token = "saved-token"
 
     class UnavailableBangumiClient:
-        def get_me(self):
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("/session 不得发起远程请求（Bangumi 服务不可用也不得调用）")
+
+        def get_me(self, purpose: str = ""):
             raise BangumiError("Bangumi 请求超时")
 
     monkeypatch.setattr(bangumi_api, "load_config", lambda: FakeConfig())
-    monkeypatch.setattr(bangumi_api, "BangumiClient", lambda *args, **kwargs: UnavailableBangumiClient())
+    monkeypatch.setattr(bangumi_api, "BangumiClient", UnavailableBangumiClient)
 
     response = TestClient(app).get("/api/integrations/bangumi/session")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "credential_saved": True,
-        "status": "unavailable",
-        "user": None,
-        "message": "Bangumi 请求超时",
-    }
+    payload = response.json()
+    assert payload["credential_saved"] is True
+    assert payload["credential_state"] == "found"
+    assert payload["status"] == "available"
+    assert payload["auth_status"] == "unknown"
+    assert payload["user"] is None
 
 
 def test_bangumi_session_reports_signed_out_without_saved_credential(monkeypatch):
