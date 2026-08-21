@@ -88,7 +88,10 @@ function PosterCard({
       onClick={handleClick}
       onPointerEnter={schedulePrewarm}
       onPointerLeave={cancelPrewarm}
-      onFocus={() => void getWorkDetail(work.work_id).catch(() => undefined)}
+      onFocus={() => {
+        // 滚动过程中聚焦变化会触发 getWorkDetail，造成抖动；仅在非滚动时触发
+        if (!isScrollRecentlyActive()) void getWorkDetail(work.work_id).catch(() => undefined);
+      }}
       className="poster-card text-left focus:outline-none"
     >
       <div

@@ -11,7 +11,7 @@ interface VirtualizedPosterGridProps {
   localArtworkOnly?: boolean;
 }
 
-const OVERSCAN_ROWS = 3;
+const OVERSCAN_ROWS = 1;
 
 // 缩略图档选择：按卡片 CSS 宽度 × DPR 向上取最近档，不超过 512。
 // 384 覆盖单列 140-256px @ DPR2，512 覆盖更大列宽或高 DPR。
