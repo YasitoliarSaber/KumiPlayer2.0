@@ -728,6 +728,25 @@ def test_txt_tree_roots_untouched_by_source_scoped_clear():
     assert lifecycle.list_roots_for_library_clear("all")[0].root_id == txt_root.root_id
 
 
+def test_pan115_provider_roots_cleared_by_source_scoped_clear():
+    """RWK-17 之后：pan115 TXT 建立的 Provider SourceRoot（source_type=pan115）
+    应能被「按 pan115 来源删除」清理；旧 txt 类型来源仍不参与。"""
+    store.create_source(
+        source_id="pan115-hash1", source_type="pan115", provider_id="pan115",
+        ingest_method="directory_tree",
+    )
+    provider_root = store.create_source_root(
+        source_id="pan115-hash1", remote_locator="/K:/115网盘", local_locator="K:\\115网盘",
+    )
+
+    roots = lifecycle.list_roots_for_library_clear("pan115")
+    assert [r.root_id for r in roots] == [provider_root.root_id]
+
+    result = lifecycle.delete_catalog_for_clear("pan115")
+    assert result.deleted_root_count >= 1
+    assert store.get_source_root(provider_root.root_id) is None
+
+
 # ============================================================
 # 复核新增：父根归并后必须对新父目录全扫，兄弟作品才能被发现
 # ============================================================

@@ -109,8 +109,9 @@ def list_roots_for_library_clear(source: str) -> list[SourceRootRecord]:
 
     - ``openlist``：仅 ``sources.source_type == 'openlist'`` 的来源根；
     - ``local``：仅本地路径来源根；
-    - ``all``：所有由后台 Source Catalog 管理的来源根；
-    - ``pan115`` / ``baidu``：目录树 TXT 来源没有 SourceRoot 管理，返回空。
+    - ``pan115`` / ``baidu``：目录树 TXT 建立的 Provider SourceRoot
+      （RWK-17 之后 source_type 分别为 pan115 / baidu，不是旧的 txt）；
+    - ``all``：所有由后台 Source Catalog 管理的来源根。
     """
     value = (source or "all").strip().lower()
     conn = get_connection()
@@ -118,7 +119,7 @@ def list_roots_for_library_clear(source: str) -> list[SourceRootRecord]:
         rows = conn.execute(
             "SELECT * FROM source_roots ORDER BY created_at"
         ).fetchall()
-    elif value in {"openlist", "local"}:
+    elif value in {"openlist", "local", "pan115", "baidu"}:
         rows = conn.execute(
             """
             SELECT r.* FROM source_roots AS r
@@ -129,7 +130,6 @@ def list_roots_for_library_clear(source: str) -> list[SourceRootRecord]:
             (value,),
         ).fetchall()
     else:
-        # pan115 / baidu 旧 TXT 目录树来源不参与 Source Catalog 生命周期
         return []
     return [SourceRootRecord.from_row(row) for row in rows]
 
