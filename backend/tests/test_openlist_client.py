@@ -438,6 +438,33 @@ class TestLogin:
         with pytest.raises(OpenListAuthError):
             client.login()
 
+    def test_login_failure_preserves_safe_message(self):
+        """服务端返回的安全错误信息（如「wrong password」）应原样透传给用户，
+        而非被回退为固定兜底文案。"""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return _json_response(200, {"code": 401, "message": "wrong password", "data": None})
+
+        client = make_client(handler)
+        with pytest.raises(OpenListAuthError) as exc:
+            client.login()
+        assert "wrong password" in str(exc.value)
+
+    def test_login_failure_strips_credential_leak(self):
+        """服务端 message 中若包含 key=value 形式的凭据泄露，
+        应回退为固定兜底文案，不得原样转发。"""
+        from app.integrations.openlist.client import _safe_auth_message
+        # key=value 形式的泄露 → 回退
+        assert _safe_auth_message({"message": "token=abc123"}) == "OpenList 拒绝了当前登录信息，请检查用户名或密码"
+        assert _safe_auth_message({"message": "password=secret"}) == "OpenList 拒绝了当前登录信息，请检查用户名或密码"
+        # 普通错误消息 → 原样转发
+        assert "用户名或密码错误" in _safe_auth_message({"message": "Invalid username or password"})
+        assert "二次验证" in _safe_auth_message({"message": "Invalid 2FA code"})
+        assert "wrong password" in _safe_auth_message({"message": "wrong password"})
+        assert "密码错误" in _safe_auth_message({"message": "密码错误"})
+        # 非 dict / 空 → 回退
+        assert _safe_auth_message(None) == "OpenList 拒绝了当前登录信息，请检查用户名或密码"
+        assert _safe_auth_message({"message": ""}) == "OpenList 拒绝了当前登录信息，请检查用户名或密码"
+
     def test_login_token_never_leaks_in_error(self):
         """服务端错误即使回传，也不得把 Token 或密码带进异常消息。"""
         def handler(request: httpx.Request) -> httpx.Response:

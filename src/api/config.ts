@@ -18,6 +18,8 @@ export interface PublicConfig {
   openlist_mount_root: string
   /** OpenList 用户名与密码是否已配置（凭据本身绝不回传前端） */
   openlist_configured: boolean
+  /** 已保存用户名的打码形式（首尾字符），用于界面确认当前账号 */
+  openlist_username_masked: string
   /** KumiPlayer 本地浏览缓存时长（分钟） */
   openlist_cache_ttl_minutes: number
   /** 单层目录浏览的有界预取直接子目录数量上限 */

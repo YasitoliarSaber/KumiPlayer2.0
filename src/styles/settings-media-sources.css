@@ -61,6 +61,36 @@
   border-radius: 5px;
 }
 
+.sources-openlist-intro {
+  margin-right: auto;
+}
+
+.sources-openlist-intro summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--settings-muted, #8a93a2);
+  user-select: none;
+  padding: 4px 0;
+}
+
+.sources-openlist-intro[open] .sources-route-summary {
+  display: block;
+  margin-top: 4px;
+}
+
+.sources-openlist-telemetry {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  align-items: center;
+  font-size: 12.5px;
+  color: var(--settings-muted, #8a93a2);
+}
+
+.sources-telemetry-summary {
+  font-weight: 500;
+}
+
 .sources-openlist-actions {
   display: flex;
   flex-wrap: wrap;
@@ -91,6 +121,45 @@
   background: rgba(128, 128, 128, 0.1);
   padding: 1px 6px;
   border-radius: 5px;
+}
+
+.settings-openlist-notice {
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings-openlist-notice.success {
+  background: rgba(26, 127, 55, 0.1);
+  color: #1a7f37;
+}
+
+.settings-openlist-notice.error {
+  background: rgba(207, 34, 46, 0.1);
+  color: #cf222e;
+}
+
+.settings-openlist-notice-dismiss {
+  margin-left: 6px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  opacity: 0.5;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.settings-openlist-notice-dismiss:hover {
+  opacity: 0.9;
 }
 
 .sources-credentials-block {

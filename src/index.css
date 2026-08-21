@@ -13974,6 +13974,3 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
   max-width: 520px;
   cursor: pointer;
 }
-.settings-openlist-notice { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
-.settings-openlist-notice.success { color: var(--success-text, #1a7f37); }
-.settings-openlist-notice.error { color: var(--danger-text, #cf222e); }

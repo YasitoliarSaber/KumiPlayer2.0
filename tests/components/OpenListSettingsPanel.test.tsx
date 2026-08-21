@@ -4,7 +4,22 @@ import OpenListSettingsPanel, {
   type OpenListDraft,
   stateLabel,
 } from '../../src/components/settings/OpenListSettingsPanel';
+import { openlistApi } from '../../src/api/openlist';
 import type { PublicConfig } from '../../src/api/config';
+
+vi.mock('../../src/api/openlist', () => ({
+  openlistApi: {
+    getTelemetryToday: vi.fn(async () => ({
+      fs_list: 3,
+      login: 1,
+      total: 4,
+      disclaimer: '仅统计本机到 OpenList 的请求',
+    })),
+    getBindableProviders: vi.fn(async () => ({ providers: [] })),
+    bindRoot: vi.fn(),
+    rescanBoundRoot: vi.fn(),
+  },
+}));
 
 function baseConfig(overrides: Partial<PublicConfig> = {}): PublicConfig {
   return {
@@ -275,5 +290,46 @@ describe('REWORK-FINAL：候选保存失败后的状态真实性', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(screen.getByText('尚未配置')).toBeTruthy();
     expect(onNotice).toHaveBeenCalledWith('保存失败', 'error');
+  });
+});
+
+describe('提示条交互', () => {
+  test('关闭提示按钮会清空 notice', () => {
+    const { onNotice } = renderPanel({
+      notice: '拒绝了当前登录信息',
+      noticeKind: 'error',
+    });
+    fireEvent.click(screen.getByText('管理连接'));
+    fireEvent.click(screen.getByRole('button', { name: '关闭提示' }));
+    expect(onNotice).toHaveBeenCalledWith('', 'info');
+  });
+
+  test('修改地址或凭据时自动清除错误提示', () => {
+    const { onChangeDraft, onNotice } = renderPanel({
+      notice: '拒绝了当前登录信息',
+      noticeKind: 'error',
+    });
+    fireEvent.click(screen.getByText('管理连接'));
+    fireEvent.change(screen.getByPlaceholderText('http://localhost:5244'), {
+      target: { value: 'https://openlist.example.com/new' },
+    });
+    expect(onChangeDraft).toHaveBeenCalledWith('server_url', 'https://openlist.example.com/new');
+    expect(onNotice).toHaveBeenCalledWith('', 'info');
+  });
+
+  test('保存与检查连接开始时先清空旧提示', async () => {
+    const { onNotice } = renderPanel({
+      notice: '旧错误',
+      noticeKind: 'error',
+    });
+    fireEvent.click(screen.getByText('检查连接'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onNotice).toHaveBeenCalledWith('', 'info');
+  });
+
+  test('挂载后展示今日遥测摘要', async () => {
+    renderPanel();
+    expect(await screen.findByText(/今日请求：目录 3 \/ 登录 1（共 4）/)).toBeTruthy();
+    expect(openlistApi.getTelemetryToday).toHaveBeenCalled();
   });
 });

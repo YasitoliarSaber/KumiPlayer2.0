@@ -758,7 +758,7 @@ class TestAtomicConfigCommit:
         )
         assert resp.status_code == 400
         body = resp.json()
-        assert "拒绝" in body["detail"] or "登录信息" in body["detail"]
+        assert "认证失败" in body["detail"] or "用户名" in body["detail"]
 
         # 配置 JSON 保持旧值（server/username 未变）
         saved = self._config_json(tmp_path)

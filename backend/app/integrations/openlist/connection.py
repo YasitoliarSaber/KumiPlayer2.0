@@ -107,7 +107,7 @@ def _classify(exc: OpenListError, *, phase: str) -> OpenListConnectionProbeResul
             False,
             "credential_rejected",
             "credential",
-            "OpenList 拒绝了当前登录信息，请更新账号或密码",
+            str(exc),
         )
     if isinstance(exc, OpenListPermissionError):
         return OpenListConnectionProbeResult(

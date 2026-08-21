@@ -140,6 +140,9 @@ class SaveConfigRequest(BaseModel):
     allow_insecure_http: bool = False
     cache_ttl_minutes: int | None = None
     prefetch_limit: int | None = None
+    # 仅保存不验证：跳过 Fresh Probe，直接持久化凭据（用于登录失败后仍然
+    # 想把账号密码先存下来的兑底入口；保存后标记为未验证，由用户稍后检查）。
+    skip_verification: bool = False
 class BatchImportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -596,8 +599,9 @@ def save_connection_config(req: SaveConfigRequest):
     if req.prefetch_limit is not None:
         candidate.openlist_prefetch_limit = max(0, min(int(req.prefetch_limit), _PREFETCH_MAX))
 
-    # validate-before-commit：remote-affecting 必须先真实 probe 成功
-    if remote_affecting:
+    # validate-before-commit：remote-affecting 必须先真实 probe 成功；
+    # 用户显式选择「仅保存不验证」时跳过 probe，先把凭据持久化。
+    if remote_affecting and not req.skip_verification:
         if not effective_username or not effective_password:
             raise HTTPException(status_code=400, detail=_NOT_CONFIGURED_MESSAGE)
         probe = probe_openlist_connection(
@@ -649,6 +653,8 @@ def save_connection_config(req: SaveConfigRequest):
         clear_openlist_client_pool()
 
     message = "OpenList 连接配置已保存"
+    if req.skip_verification and remote_affecting:
+        message = "OpenList 连接配置已保存（未验证，请稍后点击“检查连接”确认）"
     if connection_changed and old_routes_existed:
         message = "OpenList 连接已保存；连接身份已变化，旧来源目录路由已清空，请重新发现并确认"
     return {"ok": True, "message": message}

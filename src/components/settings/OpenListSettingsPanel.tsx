@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@fluentui/react-components';
+import { CheckCircle, Info, X, XCircle } from 'lucide-react';
 import { openlistApi, type BindableProvider, type OpenListConfigPayload, type OpenListTestConnectionPayload, type OpenListTestResult, type OpenListTelemetrySummary } from '../../api/openlist';
 import type { PublicConfig } from '../../api/config';
 
@@ -77,8 +78,8 @@ interface OpenListSettingsPanelProps {
   config: PublicConfig;
   draft: OpenListDraft;
   onChangeDraft: (key: keyof OpenListDraft, value: string) => void;
-  /** 保存连接：resolve 表示成功；reject 会被面板收口为可见错误 */
-  onSaveConnection: (payload: OpenListConfigPayload) => Promise<void>;
+  /** 保存连接：resolve 表示成功；reject 会被面板收口为可见错误。skipVerification=true 时跳过 Fresh Probe 直接持久化凭据。 */
+  onSaveConnection: (payload: OpenListConfigPayload, skipVerification?: boolean) => Promise<void>;
   /** 测试连接：接收 TestConnection 专用 payload，返回后端 machine status code（不 throw 分类错误；网络异常才 reject） */
   onTestConnection: (payload: OpenListTestConnectionPayload) => Promise<OpenListTestResult>;
   notice: string;
@@ -143,11 +144,19 @@ export default function OpenListSettingsPanel({
   onNotice,
   externalBusy,
 }: OpenListSettingsPanelProps) {
+  const clearNotice = () => onNotice?.('', 'info');
+  // 用户修改凭据/地址时自动清除旧错误提示，避免滞留
+  const handleDraftChange = (key: keyof OpenListDraft, value: string) => {
+    onChangeDraft(key, value);
+    if (noticeKind === 'error') clearNotice();
+  };
   const [editorOpen, setEditorOpen] = useState(false);
   const [credentialsOpen, setCredentialsOpen] = useState(false);
   const [allowOpenlistHttp, setAllowOpenlistHttp] = useState(false);
   const [actionLock, setActionLock] = useState<string | null>(null);
   const [telemetry, setTelemetry] = useState<OpenListTelemetrySummary | null>(null);
+  // 登录失败后是否展示「仍然保存（不验证）」兑底入口
+  const [skipVerificationOffered, setSkipVerificationOffered] = useState(false);
   // RWK-11：Provider root 绑定 OpenList 增量通道（最小可用入口）
   const [bindOpen, setBindOpen] = useState(false);
   const [bindProviders, setBindProviders] = useState<BindableProvider[]>([]);
@@ -275,35 +284,55 @@ export default function OpenListSettingsPanel({
     };
   };
 
-  const handleSave = async () => {
+  const runSave = async (skipVerification: boolean) => {
     if (actionLock) return; // 单操作锁：双击不产生并发
-    setActionLock('save');
+    setActionLock(skipVerification ? 'save-skip' : 'save');
+    // 清除旧提示，避免旧错误在重新保存时滞留
+    onNotice?.('', 'info');
+    setSkipVerificationOffered(false);
     try {
-      await onSaveConnection(buildPayload());
-      // remote-affecting「验证并保存」成功后，后端已 Fresh Probe 成功 → connected；
-      // local-only 保存不能凭空宣称连接正常（保持 saved_unverified）
-      setProbeState(remoteAffectingDirty ? 'connected' : saved ? 'saved_unverified' : 'unconfigured');
+      await onSaveConnection(buildPayload(), skipVerification);
+      if (skipVerification) {
+        // 仅保存不验证：凭据已持久化，但连接尚未验证
+        setProbeState('saved_unverified');
+      } else {
+        // remote-affecting「验证并保存」成功后，后端已 Fresh Probe 成功 → connected；
+        // local-only 保存不能凭空宣称连接正常（保持 saved_unverified）
+        setProbeState(remoteAffectingDirty ? 'connected' : saved ? 'saved_unverified' : 'unconfigured');
+      }
     } catch (error) {
       // 候选保存失败：后端保持旧提交状态。已有保存配置 → saved_unverified
       // （不得显示 unconfigured 让用户误以为旧连接丢失）；首次配置失败 → unconfigured
       setProbeState(saved ? 'saved_unverified' : 'unconfigured');
       const message = (error as Error)?.message || 'OpenList 配置保存失败';
       onNotice?.(message, 'error');
+      if (!skipVerification) setSkipVerificationOffered(true);
     } finally {
       setActionLock(null);
     }
   };
 
+  const handleSave = () => runSave(false);
+  const handleSaveSkipVerification = () => runSave(true);
+
   const handleTest = async () => {
     if (actionLock) return;
     setActionLock('test');
     setProbeState('checking');
+    // 清除旧提示，避免旧错误在重新测试时滞留
+    onNotice?.('', 'info');
     try {
       const result = await onTestConnection(buildTestPayload());
       // 真实 machine status code 映射，不得全部折叠为 network_unavailable
-      setProbeState(result.ok ? 'connected' : mapProbeCode(result.code));
+      const nextState = result.ok ? 'connected' : mapProbeCode(result.code);
+      setProbeState(nextState);
+      // 失败时显示后端返回的具体错误信息（如登录失败原因），而非空白
+      if (!result.ok && result.message) {
+        onNotice?.(result.message, 'error');
+      }
     } catch {
       setProbeState('network_unavailable');
+      onNotice?.('无法连接 OpenList 服务，请检查服务地址是否可达', 'error');
     } finally {
       setActionLock(null);
     }
@@ -330,7 +359,10 @@ export default function OpenListSettingsPanel({
       </div>
 
       <div className="sources-openlist-meta">
-        <span className="sources-route-summary">OpenList 用于读取远程目录；115、百度、夸克是实际内容来源。通常只需配置一次。</span>
+        <details className="sources-openlist-intro">
+          <summary>介绍</summary>
+          <span className="sources-route-summary">OpenList 用于读取远程目录；115、百度、夸克是实际内容来源。通常只需配置一次。</span>
+        </details>
         {config.openlist_server_url && <span>服务地址：<code>{config.openlist_server_url}</code></span>}
         {config.openlist_mount_root && <span>本地挂载：<code>{config.openlist_mount_root}</code></span>}
         {saved && <span>账号与密码已保存（仅存本机凭据管理器）</span>}
@@ -338,9 +370,8 @@ export default function OpenListSettingsPanel({
 
       {telemetry && (
         <div className="sources-openlist-telemetry">
-          <span className="sources-route-summary">
-            今日 KumiPlayer → OpenList 请求：目录 {telemetry.fs_list} 次 / 登录 {telemetry.login} 次
-            （共 {telemetry.total} 次）
+          <span className="sources-telemetry-summary">
+            今日请求：目录 {telemetry.fs_list} / 登录 {telemetry.login}（共 {telemetry.total}）
           </span>
           <span className="sources-route-hint">{telemetry.disclaimer}</span>
         </div>
@@ -405,7 +436,7 @@ export default function OpenListSettingsPanel({
         <div className="sources-openlist-editor">
           <label className="settings-config-row">
             <span>OpenList 地址</span>
-            <input type="url" value={draft.server_url} onChange={(event) => onChangeDraft('server_url', event.target.value)} className="settings-input" placeholder="http://localhost:5244" autoComplete="url" />
+            <input type="url" value={draft.server_url} onChange={(event) => handleDraftChange('server_url', event.target.value)} className="settings-input" placeholder="http://localhost:5244" autoComplete="url" />
           </label>
           <div className="sources-webdav-hint">
             <span>WebDAV：</span>
@@ -413,17 +444,20 @@ export default function OpenListSettingsPanel({
           </div>
           <label className="settings-config-row">
             <span>远端根目录</span>
-            <input type="text" value={draft.remote_root} onChange={(event) => onChangeDraft('remote_root', event.target.value)} className="settings-input" placeholder="/" />
+            <input type="text" value={draft.remote_root} onChange={(event) => handleDraftChange('remote_root', event.target.value)} className="settings-input" placeholder="/" />
           </label>
           <label className="settings-config-row">
             <span>本地挂载位置</span>
-            <input type="text" value={draft.mount_root} onChange={(event) => onChangeDraft('mount_root', event.target.value)} className="settings-input" placeholder="K:\\" />
+            <input type="text" value={draft.mount_root} onChange={(event) => handleDraftChange('mount_root', event.target.value)} className="settings-input" placeholder="K:\\" />
           </label>
 
           <div className="sources-credentials-block">
             {saved ? (
               <>
-                <div className="sources-credentials-status">登录信息已保存</div>
+                <div className="sources-credentials-status">
+                  登录信息已保存
+                  {config.openlist_username_masked ? `（当前用户名：${config.openlist_username_masked}）` : ''}
+                </div>
                 <Button appearance="secondary" size="small" onClick={() => setCredentialsOpen((v) => !v)} className="settings-ghost-btn fluent-settings-btn">
                   {credentialsOpen ? '收起账号密码' : '更新账号或密码'}
                 </Button>
@@ -435,13 +469,21 @@ export default function OpenListSettingsPanel({
               <div className="settings-field-list">
                 <label className="settings-config-row">
                   <span>用户名</span>
-                  <input type="text" value={draft.username} onChange={(event) => onChangeDraft('username', event.target.value)} className="settings-input" placeholder={saved ? '留空 = 使用已保存信息；填写 = 更新' : 'OpenList 用户名'} autoComplete="username" />
+                  <input type="text" value={draft.username} onChange={(event) => handleDraftChange('username', event.target.value)} className="settings-input" placeholder={saved ? '留空 = 使用已保存信息；填写 = 更新' : 'OpenList 用户名'} autoComplete="username" />
                 </label>
                 <label className="settings-config-row">
                   <span>密码</span>
-                  <input type="password" value={draft.password} onChange={(event) => onChangeDraft('password', event.target.value)} className="settings-input" placeholder={saved ? '留空 = 使用已保存信息；填写 = 更新' : 'OpenList 密码'} autoComplete="current-password" />
+                  <input type="password" value={draft.password} onChange={(event) => handleDraftChange('password', event.target.value)} className="settings-input" placeholder={saved ? '留空 = 使用已保存信息；填写 = 更新' : 'OpenList 密码'} autoComplete="current-password" />
                 </label>
-                <div className="sources-credentials-status">更换账号时需要同时输入该账号的密码。</div>
+                <div className="sources-credentials-status">更换用户名或密码时，需要同时填写新的用户名与密码。</div>
+              </div>
+            )}
+            {skipVerificationOffered && (
+              <div className="sources-openlist-actions">
+                <Button appearance="secondary" size="small" onClick={handleSaveSkipVerification} className="settings-ghost-btn fluent-settings-btn" disabled={Boolean(busy)}>
+                  仍然保存（不验证）
+                </Button>
+                <span className="sources-route-hint">登录验证失败时仍可先把账号密码保存下来，稍后再点「检查连接」确认。</span>
               </div>
             )}
           </div>
@@ -451,11 +493,11 @@ export default function OpenListSettingsPanel({
             <div className="sources-advanced-body">
               <label className="settings-config-row">
                 <span>目录浏览缓存（分钟）</span>
-                <input type="number" min={1} max={43200} value={draft.cache_ttl} onChange={(event) => onChangeDraft('cache_ttl', event.target.value)} className="settings-input" placeholder="1440" />
+                <input type="number" min={1} max={43200} value={draft.cache_ttl} onChange={(event) => handleDraftChange('cache_ttl', event.target.value)} className="settings-input" placeholder="1440" />
               </label>
               <label className="settings-config-row">
                 <span>提前加载子目录（上限 50）</span>
-                <input type="number" min={0} max={50} value={draft.prefetch_limit} onChange={(event) => onChangeDraft('prefetch_limit', event.target.value)} className="settings-input" placeholder="12" />
+                <input type="number" min={0} max={50} value={draft.prefetch_limit} onChange={(event) => handleDraftChange('prefetch_limit', event.target.value)} className="settings-input" placeholder="12" />
               </label>
             </div>
           </details>
@@ -467,7 +509,20 @@ export default function OpenListSettingsPanel({
             </label>
           )}
 
-          {notice && <p className={`settings-openlist-notice${noticeKind !== 'info' ? ` ${noticeKind}` : ''}`}>{notice}</p>}
+          {notice && (
+            <p className={`settings-openlist-notice${noticeKind !== 'info' ? ` ${noticeKind}` : ''}`}>
+              {noticeKind === 'success' ? <CheckCircle size={14} /> : noticeKind === 'error' ? <XCircle size={14} /> : <Info size={14} />}
+              <span>{notice}</span>
+              <button
+                type="button"
+                className="settings-openlist-notice-dismiss"
+                aria-label="关闭提示"
+                onClick={() => onNotice?.('', 'info')}
+              >
+                <X size={12} />
+              </button>
+            </p>
+          )}
         </div>
       )}
     </div>

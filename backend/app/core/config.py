@@ -22,6 +22,15 @@ _SENSITIVE_FIELDS = {"tmdb_bearer_token", "deepseek_api_key", "bangumi_access_to
 _CREDENTIAL_FIELDS = _SENSITIVE_FIELDS | {"openlist_username"}
 
 
+def _mask_username(username: str) -> str:
+    """打码用户名，只保留首尾字符用于界面确认（不泄露完整凭据）。"""
+    if not username:
+        return ""
+    if len(username) <= 2:
+        return username[0] + "*" * (len(username) - 1)
+    return username[0] + "*" * (len(username) - 2) + username[-1]
+
+
 @dataclass
 class AppConfig:
     """应用配置"""
@@ -114,11 +123,12 @@ class AppConfig:
                     d[key] = val[:8] + "..."
                 else:
                     d[key] = val[:4] + "..."
-        # OpenList 凭据零泄露：用户名与密码绝不进入 API 响应（掩码也不保留，
-        # 密码前缀仍属敏感信息），只向客户端暴露是否已配置。
+        # OpenList 凭据零泄露：密码绝不进入 API 响应；用户名只暴露打码形式
+        # （首尾字符）供用户确认当前保存的账号，避免“不知道存了哪个用户名”。
         username = d.pop("openlist_username", "")
         password = d.pop("openlist_password", "")
         d["openlist_configured"] = bool(username and password)
+        d["openlist_username_masked"] = _mask_username(username)
         return d
 
 

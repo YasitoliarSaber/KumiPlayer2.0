@@ -113,6 +113,8 @@ export interface OpenListConfigPayload {
   allow_insecure_http?: boolean
   cache_ttl_minutes?: number
   prefetch_limit?: number
+  /** 仅保存不验证：跳过 Fresh Probe，直接持久化凭据 */
+  skip_verification?: boolean
 }
 
 export interface OpenListRoutesResult {

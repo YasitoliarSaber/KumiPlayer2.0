@@ -82,6 +82,58 @@ _RISK_CONTROL_BODY_LIMIT = 8192
 _logger = logging.getLogger(__name__)
 
 
+# ============================================================
+# 认证错误消息提取
+# ============================================================
+
+# 面向用户的安全提示前缀；服务端 message 不经过滤风控字词，
+# 因此只在确认安全后原样转发，否则用固定兜底文案。
+_AUTH_HINT_PREFIX = "OpenList 登录失败："
+# OpenList 常见的服务端错误文案 → 中文指引（帮助用户定位是用户名/密码错、
+# 二次验证还是请求过于频繁）。命中时优先用中文，未命中的安全消息原样转发。
+_AUTH_MESSAGE_TRANSLATIONS = (
+    ("invalid username or password", "用户名或密码错误，请核对后重新输入"),
+    ("invalid 2fa code", "二次验证码错误（该账号已开启二次验证，暂不支持二次验证登录）"),
+    ("too many unsuccessful sign-in attempts", "登录尝试过于频繁，请稍后再试"),
+    ("guest user is disabled", "服务器未开放游客访问，请使用有效账号"),
+)
+# 服务端 message 中可能泄露敏感信息的模式，命中时不原样转发。
+# 仅匹配「key=value」或「key: value」形式的凭据泄露，
+# 而非普通错误消息中偶尔出现的「密码」一词（如「Invalid username or password」）。
+_AUTH_LEAK_PATTERNS = (
+    r"token\s*[=:]\s*\S",
+    r"passwd\s*[=:]\s*\S",
+    r"password\s*[=:]\s*\S",
+    r"secret\s*[=:]\s*\S",
+    r"cookie\s*[=:]\s*\S",
+    r"authorization\s*[=:]\s*\S",
+)
+
+
+def _safe_auth_message(body: dict[str, Any] | None) -> str:
+    """从 OpenList 登录失败响应体中提取面向用户的安全错误消息。
+
+    OpenList 登录失败通常返回 HTTP 400 + body.code != 200，
+    body.message 包含诸如「密码错误」「用户不存在」等提示。
+    这些提示对用户有诊断价值，但可能携带敏感关键词，
+    命中时回退为固定兜底文案，避免泄露。
+    """
+    if not isinstance(body, dict):
+        return "OpenList 拒绝了当前登录信息，请检查用户名或密码"
+    raw = body.get("message")
+    if not isinstance(raw, str) or not raw.strip():
+        return "OpenList 拒绝了当前登录信息，请检查用户名或密码"
+    lowered = raw.lower()
+    # 仅当 message 中出现「key=value」形式的凭据泄露时才回退，
+    # 普通错误消息（如「Invalid username or password」）应原样转发以帮助用户诊断。
+    if any(re.search(pattern, lowered) for pattern in _AUTH_LEAK_PATTERNS):
+        return "OpenList 拒绝了当前登录信息，请检查用户名或密码"
+    for needle, translated in _AUTH_MESSAGE_TRANSLATIONS:
+        if needle in lowered:
+            return f"{_AUTH_HINT_PREFIX}{translated}"
+    return f"{_AUTH_HINT_PREFIX}{raw.strip()}"
+
+
 # 同一 OpenList 连接的客户端复用池。目录浏览、预取和后台扫描都会在同一
 # 进程内运行；如果每处各建一个 client，未携带 Token 的目录请求会先收到 401，
 # 随后各自登录再重试，既慢又会放大账号风控风险。池只保存内存会话，不落盘。
@@ -440,7 +492,7 @@ class OpenListClient:
                 return self._post(path, payload, retry_on_auth=False)
 
             if code == 401 or status == 401:
-                raise OpenListAuthError()
+                raise OpenListAuthError(_safe_auth_message(body))
             if code == 403 or status == 403:
                 raise OpenListPermissionError()
             if code == 404 or status == 404:
@@ -561,7 +613,7 @@ class OpenListClient:
         if response.status_code == 429 or int(body.get("code", 200)) == 429:
             raise OpenListRateLimitedError()
         if response.status_code != 200 or body.get("code") != 200:
-            raise OpenListAuthError()
+            raise OpenListAuthError(_safe_auth_message(body))
         data = body.get("data")
         token = data.get("token") if isinstance(data, dict) else None
         if not isinstance(token, str) or not token:

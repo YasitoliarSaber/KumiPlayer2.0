@@ -413,8 +413,11 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
             config={config}
             draft={openlistDraft}
             onChangeDraft={updateOpenlistDraft}
-            onSaveConnection={async (payload) => {
-              const result = await openlistApi.saveConfig(payload);
+            onSaveConnection={async (payload, skipVerification) => {
+              const result = await openlistApi.saveConfig({
+                ...payload,
+                skip_verification: skipVerification ?? false,
+              });
               if (!result.ok) throw new Error(result.message);
               setOpenlistNoticeKind('success');
               setOpenlistNotice(result.message);
