@@ -293,3 +293,27 @@ class TestSyntheticBoundaryFixture:
         # root（分类容器）不得成为全根 unit，也不能把整个库收进 needs_review
         assert "/媒体库" not in _boundaries(results)
         assert "/媒体库" not in _boundaries(results, status="needs_review")
+
+    def test_work_container_with_ova_sp_suffix_aggregates_all_subdirs(self):
+        """作品容器名含 OVA/SP（如 CLANNAD.S1-S2+SP+OVA）不是结构段：
+        整个作品聚合成一个 unit，其 OVA/SP 子目录视频不丢失、不依赖全根 unit。"""
+        tree = {
+            "/分类": [("CLANNAD.S1-S2+SP+OVA", True, None, None)],
+            "/分类/CLANNAD.S1-S2+SP+OVA": [
+                ("1.CLANNAD.[S01].2007", True, None, None),
+                ("2.CLANNAD.[S01][OVA].", True, None, None),
+                ("special", True, None, None),
+            ],
+            "/分类/CLANNAD.S1-S2+SP+OVA/1.CLANNAD.[S01].2007": [("Clannad S01E01.mkv", False, 100, 1.0)],
+            "/分类/CLANNAD.S1-S2+SP+OVA/2.CLANNAD.[S01][OVA].": [("Clannad OVA01.mkv", False, 100, 1.0)],
+            "/分类/CLANNAD.S1-S2+SP+OVA/special": [("Clannad NCED.mkv", False, 100, 1.0)],
+        }
+        root, engine = _setup_root(tree, remote_locator="/分类")
+        results = _run(engine)
+        # 整个 CLANNAD 系列聚合成一个 unit，3 个视频都在，无漏网、无全根 unit
+        assert _boundaries(results) == {"/分类/CLANNAD.S1-S2+SP+OVA"}
+        ready = [r for r in results if r["status"] == "plan_ready"]
+        assert len(ready) == 1
+        assert ready[0]["video_count"] == 3
+        assert "/分类" not in _boundaries(results)
+        assert "/分类" not in _boundaries(results, status="needs_review")

@@ -23,7 +23,11 @@ from app.catalog.service import PageConsistencyError, ScanCancelled
 from app.db.database import get_connection
 from app.integrations.openlist.models import OpenListError
 from app.recognition.evidence import is_structure_dirname, recognize_path_evidence
-from app.recognition.media import _is_baidu_category_dir, _is_group_folder
+from app.recognition.media import (
+    _is_baidu_category_dir,
+    _is_group_folder,
+    _looks_like_plain_season_dir,
+)
 
 
 class DiscoveryCancelled(Exception):
@@ -36,9 +40,32 @@ class DiscoveryCancelled(Exception):
 #: 分类层时，root 是媒体库容器，不应把整个媒体库聚合为一个全根 unit。
 #: SPs/Specials 同时命中分类与季/结构集合，仍视为结构段。
 def _is_work_structure_child(dirname: str) -> bool:
-    if _is_baidu_category_dir(dirname) and not _is_group_folder(dirname):
+    # 只有「目录名整体是结构段」（S1/Season/OVA/SPs/番外等）才证明父目录是
+    # 作品容器；「作品名+S1-S2+SP+OVA」这类作品容器不是结构子目录，不能作为
+    # 父分类层成候选的证据（否则挂载根/分类层会被误判为候选并全量聚合）。
+    return _is_pure_structure_dirname(dirname)
+
+
+#: 目录名整体是否就是一个结构段容器（S1/Season/Specials/SPs/OVA/番外/短篇等）。
+#: is_structure_dirname 用 search 匹配，「CLANNAD.S1-S2+SP+OVA」「某作品OVA」这类
+#: 含 OVA/SP 字样的作品容器也会被误判为结构段，导致整个作品不聚合、其 OVA/SP
+#: 子目录的视频漏网（只能靠全根 unit 兜住）。这里只把「目录名整体就是结构标记」
+#: 判为纯结构段，作品容器仍可成为候选并被 settle 聚合。
+def _is_pure_structure_dirname(dirname: str) -> bool:
+    cleaned = (dirname or "").strip()
+    if not cleaned:
         return False
-    return is_structure_dirname(dirname)
+    if _looks_like_plain_season_dir(cleaned):
+        return True
+    if _is_group_folder(cleaned):
+        return True
+    return bool(
+        re.fullmatch(
+            r"(?:OVA|OAD|SPECIALS?|SPs?|番外|短篇|小剧场|BD\s*特典)",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 #: 扫描必须立即中止（并向 handler 传播为 JobDeferredError）的来源级错误类型。
@@ -115,7 +142,10 @@ def _resolve_boundary_owner(
             return current
         child_name = current.rsplit("/", 1)[-1]
         parent_name = parent.rsplit("/", 1)[-1] or parent
-        if _is_content_layer_dirname(child_name, parent_name) or is_structure(child_name):
+        # 提升只发生在子目录「整体就是结构段」（Season/OVA/SPs/番外）或内容层；
+        # 「作品名+S1-S2+SP+OVA」这类含 OVA/SP 字样的作品容器不算结构段，
+        # 否则会被错误提升到父分类层（再次触发全根聚合）。
+        if _is_content_layer_dirname(child_name, parent_name) or _is_pure_structure_dirname(child_name):
             current = parent
             continue
         return current
@@ -206,7 +236,10 @@ class DiscoveryEngine:
             # 用户选中的 root 本身可以是作品容器（如“飞跃巅峰 内封中字”下直接
             # 是 S1/S2 季目录）：root 有直属视频或结构子目录时也作为候选单元。
             dirname = path.rstrip("/").rsplit("/", 1)[-1]
-            if self.is_structure(dirname):
+            # 只有「目录名整体就是结构段」（S1/Season/OVA/番外等）才不是候选；
+            # 「作品名+S1-S2+SP+OVA」这类作品容器不算结构段，否则整个作品
+            # 不聚合、其 OVA/SP 子目录视频会漏网。
+            if _is_pure_structure_dirname(dirname):
                 return False
             children = catalog_store.list_current_children(self.root_id, path)
             return any(
