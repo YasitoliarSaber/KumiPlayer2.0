@@ -835,6 +835,24 @@ def archive_local_tree(
     data = _read_dropped_tree(resolved)
     source = _detect_tree_source_bytes(data)
     source_root = str(resolved.parent)
+    # 从网盘「总根」导出的目录树（文件名形如「根目录2026..._目录树.txt」）实际覆盖整个
+    # 挂载根，其相对路径里已含「动画」等顶层目录；此时来源根应提升为配置挂载根，而不是
+    # TXT 所在父目录，否则会多叠一层（K:\115网盘\动画\动画\...）。
+    # 判定复用 tree_scope_name 的「根目录」文件名语义（文件名是导出时的权威事实）。
+    if source == "pan115" and re.fullmatch(
+        r"根目录\d*",
+        re.sub(
+            r"[_\s-]*(?:文件目录|目录树)(?:[_\s-]*\d{6,})?$",
+            "",
+            Path(resolved.name).stem.strip(),
+            flags=re.IGNORECASE,
+        ).strip(),
+    ):
+        from app.sources.registry import get_source_root
+
+        mount_root = get_source_root(source, "")
+        if mount_root:
+            source_root = mount_root
     version, archive = _archive_tree_bytes(
         preset_id,
         resolved.name,

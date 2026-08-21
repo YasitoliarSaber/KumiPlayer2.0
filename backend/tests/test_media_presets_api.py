@@ -1336,6 +1336,13 @@ def _pan115_tree_bytes(*episodes: int, scope: str = "动画") -> bytes:
     return ("\n".join(lines) + "\n").encode()
 
 
+def _pan115_root_tree_bytes(*episodes: int) -> bytes:
+    """从 115 总根导出的树：首行根节点「根目录」，第一层是「动画」。"""
+    lines = ["|——根目录", "| |-动画", "| | |-示例动画"]
+    lines.extend(f"| | | |-示例动画 [{ep:02d}].mkv" for ep in episodes)
+    return ("\n".join(lines) + "\n").encode()
+
+
 def _baidu_tree_bytes(*episodes: int, scope: str = "动画") -> bytes:
     lines = [f"├── {scope}", "│   ├── 示例动画"]
     lines.extend(f"│   │   ├── 示例动画 [{ep:02d}].mkv" for ep in episodes)
@@ -1359,6 +1366,45 @@ def _create_from_path(client: TestClient, tree_path: Path, *, expected: str, fam
             "import_scope": "",
         },
     )
+
+
+def test_import_root_tree_uses_mount_root_not_parent(tmp_path, monkeypatch):
+    """从 115 总根导出的「根目录」树：来源根=配置挂载根，不叠一层「动画」。
+
+    复现真实场景：TXT 文件放在「动画」子目录里，但树本身覆盖整个挂载根
+    （首行「根目录」，第一层「动画」），此前会得到 K:\\115网盘\\动画\\动画\\...。
+    """
+    from app.core.config import AppConfig, save_config
+
+    monkeypatch.setenv("KUMIPLAYER_DATA_DIR", str(tmp_path / "data"))
+    mount_root = tmp_path / "115网盘"
+    scope_dir = mount_root / "动画"
+    media = scope_dir / "示例动画" / "示例动画 [01].mkv"
+    media.parent.mkdir(parents=True, exist_ok=True)
+    media.write_bytes(b"video")
+    save_config(AppConfig(pan115_root=str(mount_root)))
+
+    tree_path = _write_tree(scope_dir, "根目录20260810194521_目录树.txt", _pan115_root_tree_bytes(1))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/media-presets/import-local-tree",
+            json={
+                "tree_path": str(tree_path),
+                "expected_source": "pan115",
+                "import_family": "anime",
+                "import_scope": "",
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["preset"]["source_root"] == str(mount_root)
+    pv = body["version"]["path_validation"]
+    assert pv["ok"] is True
+    assert pv["example_path"] == str(media)
+    # 不出现重复的「动画」层
+    assert str(scope_dir / "动画") not in pv["example_path"]
 
 
 # ============================================================
