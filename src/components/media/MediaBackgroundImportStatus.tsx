@@ -1,10 +1,11 @@
 import { Button, ProgressBar, Spinner } from '@fluentui/react-components';
 import { CheckCircle2, CircleAlert, Layers3, LoaderCircle, RefreshCw, Sparkles, Wrench } from 'lucide-react';
 import type { BackgroundImportUnit, OpenListImportBatch } from '../../api/openlist';
+import type { MediaWorkflowSource } from '../../stores/mediaWorkflow';
 
 type Props = {
   batch: OpenListImportBatch | null;
-  source: 'local' | 'openlist';
+  source: MediaWorkflowSource;
   /** 处理识别结果（needs_review）：打开该 unit 的实际 revision 确认界面 */
   onReviewUnit?: (unit: BackgroundImportUnit) => void;
   /** 重试失败单元（exact-stage retry） */
@@ -105,7 +106,13 @@ export default function MediaBackgroundImportStatus({ batch, source, onReviewUni
   const attention = units.filter((unit) => ['needs_review', 'failed', 'cancelled'].includes(unit.state)).length;
   const total = Math.max(units.length, roots.length, 1);
   const progress = Math.min(1, (completed + attention) / total);
-  const sourceLabel = source === 'local' ? '本地路径' : 'OpenList 网盘路径';
+  const sourceLabelMap: Record<MediaWorkflowSource, string> = {
+    local: '本地路径',
+    openlist: 'OpenList 网盘路径',
+    pan115: '115 目录树',
+    baidu: '百度网盘目录树',
+  };
+  const sourceLabel = sourceLabelMap[source] || '网盘路径';
   const stages = stageLabels.map((_, index) => stageState(index, roots, units));
   const current = currentStage(stages);
   const overallStage = stages[current];
