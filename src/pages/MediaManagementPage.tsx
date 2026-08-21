@@ -817,7 +817,7 @@ export default function MediaManagementPage() {
       txtProgressTimerRef.current = null;
     }
     setBackgroundImport({ source, batchId: '' });
-    setStep('background');
+    setStep('workbench');
     const poll = () => {
       void importsApi.getRootProgress(source, rootId).then((result) => {
         const units = result.units as unknown as BackgroundImportUnit[];
@@ -2226,20 +2226,31 @@ export default function MediaManagementPage() {
         </section>
       )}
 
-      {step === 'workbench' && (preview || isScrapeTask(task)) && <MediaTaskWorkbench
-        mode={isScrapeTask(task) && taskKind === 'scrape' ? 'scrape' : 'mirror'}
-        title="创建媒体库并补充资料"
-        description="根据确认内容生成媒体库并自动补充资料。开始前最多抽样验证 3 个代表视频，镜像完整后自动开始刮削。"
-        task={task}
-        logs={taskLogs}
-        onStart={handleWorkbenchStart}
-        onNewImport={beginNewImport}
-        onCancel={activeTask ? () => void cancelTask() : undefined}
-        startLabel={isScrapeTask(task) && taskKind === 'scrape' ? '开始补充资料' : '创建媒体库'}
-        disabled={isScrapeTask(task) && taskKind === 'scrape'
-          ? !preview || isDurablePipelineTask(task)
-          : isDurablePipelineTask(task) || !preview || preview.status !== 'confirmed' || activeEntry?.pathValidation?.ok === false}
-      />}
+      {step === 'workbench' && (backgroundImport?.source === 'pan115' || backgroundImport?.source === 'baidu') && backgroundBatch && (
+        <MediaBackgroundImportStatus
+          batch={backgroundBatch}
+          source={backgroundImport.source}
+          title="创建媒体库并补充资料"
+          onReviewUnit={(unit) => void reviewUnit(unit)}
+          retryingUnitId={retryingUnitIdRef.current}
+        />
+      )}
+      {step === 'workbench' && !((backgroundImport?.source === 'pan115' || backgroundImport?.source === 'baidu') && backgroundBatch) && (preview || isScrapeTask(task)) && (
+        <MediaTaskWorkbench
+          mode={isScrapeTask(task) && taskKind === 'scrape' ? 'scrape' : 'mirror'}
+          title="创建媒体库并补充资料"
+          description="根据确认内容生成媒体库并自动补充资料。开始前最多抽样验证 3 个代表视频，镜像完整后自动开始刮削。"
+          task={task}
+          logs={taskLogs}
+          onStart={handleWorkbenchStart}
+          onNewImport={beginNewImport}
+          onCancel={activeTask ? () => void cancelTask() : undefined}
+          startLabel={isScrapeTask(task) && taskKind === 'scrape' ? '开始补充资料' : '创建媒体库'}
+          disabled={isScrapeTask(task) && taskKind === 'scrape'
+            ? !preview || isDurablePipelineTask(task)
+            : isDurablePipelineTask(task) || !preview || preview.status !== 'confirmed' || activeEntry?.pathValidation?.ok === false}
+        />
+      )}
       {step === 'background' && <MediaBackgroundImportStatus
         batch={backgroundBatch}
         source={backgroundImport?.source || 'local'}

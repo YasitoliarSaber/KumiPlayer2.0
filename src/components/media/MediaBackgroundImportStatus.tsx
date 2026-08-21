@@ -6,6 +6,8 @@ import type { MediaWorkflowSource } from '../../stores/mediaWorkflow';
 type Props = {
   batch: OpenListImportBatch | null;
   source: MediaWorkflowSource;
+  /** 顶部眉题（默认「后台导入」）；TXT 确认后复用本组件时传「创建媒体库并补充资料」 */
+  title?: string;
   /** 处理识别结果（needs_review）：打开该 unit 的实际 revision 确认界面 */
   onReviewUnit?: (unit: BackgroundImportUnit) => void;
   /** 重试失败单元（exact-stage retry） */
@@ -97,7 +99,7 @@ function rootIsCoolingDown(root: OpenListImportBatch['roots'][number]): boolean 
   return /访问保护|冷却/.test(detail) && root.job_status === 'queued';
 }
 
-export default function MediaBackgroundImportStatus({ batch, source, onReviewUnit, onRetryUnit, retryingUnitId }: Props) {
+export default function MediaBackgroundImportStatus({ batch, source, title, onReviewUnit, onRetryUnit, retryingUnitId }: Props) {
   const roots = batch?.roots || [];
   const units = roots.flatMap((root) => root.units || []);
   const coolingDown = source === 'openlist' && roots.some(rootIsCoolingDown);
@@ -129,7 +131,7 @@ export default function MediaBackgroundImportStatus({ batch, source, onReviewUni
       <header className="media-background-header">
         <div className="media-background-icon"><LoaderCircle size={22} /></div>
         <div>
-          <span>后台导入</span>
+          <span>{title || '后台导入'}</span>
           <h2>{overallTitle}</h2>
           <p>{sourceLabel}已提交 · {summary}</p>
         </div>
