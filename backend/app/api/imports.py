@@ -646,6 +646,61 @@ def _source_matches(source_id: str, source: str) -> bool:
     return source_id == source or source_id.startswith(source + "-")
 
 
+@router.get("/{source}/root-progress")
+def root_progress(source: str, root_id: str):
+    """按 root_id 投影 Source Catalog 下游进度（TXT 确认后前端轮询）。
+
+    TXT 目录树确认（confirm-root）后，镜像/刮削是以每个 revision 为单位的 durable
+    job 串行执行，没有 import-batch 的批次聚合；前端之前只跟踪第一个 job，看不到
+    其余作品的进度。本端点直接按 root 从 media_units + jobs 投影所有 unit 的
+    mirror/scrape/library 状态，units 结构与 import-batch 的 refresh_batch_status
+    一致，前端复用同一进度组件展示。
+    """
+    from app.catalog import store as catalog_store
+    from app.db.database import get_connection
+    from app.pipeline.batch_status import _revision_jobs, _unit_payload
+
+    root = catalog_store.get_source_root(root_id)
+    if root is None:
+        raise HTTPException(status_code=404, detail="来源根不存在")
+    if not _source_matches((root.source_id or ""), source):
+        raise HTTPException(
+            status_code=400,
+            detail=f"root.source_id={root.source_id} 与 URL source={source} 不一致",
+        )
+
+    rows = get_connection().execute(
+        """
+        SELECT u.unit_id, u.boundary, u.work_key, u.status, u.current_revision_id,
+               (SELECT COUNT(*) FROM import_revision_items i
+                WHERE i.revision_id = u.current_revision_id
+                  AND i.resource_type = 'video') AS video_count
+        FROM media_units u
+        WHERE u.root_id = ?
+        ORDER BY u.created_at ASC
+        """,
+        (root_id,),
+    ).fetchall()
+
+    jobs_by_revision = _revision_jobs()
+    units = []
+    for row in rows:
+        units.append(_unit_payload({
+            "unit_id": str(row["unit_id"]),
+            "revision_id": str(row["current_revision_id"] or ""),
+            "work_title": str(row["work_key"] or row["boundary"] or ""),
+            "boundary": str(row["boundary"] or ""),
+            "video_count": int(row["video_count"] or 0),
+            "status": str(row["status"] or ""),
+        }, jobs_by_revision))
+
+    return {
+        "root_id": root_id,
+        "source": source,
+        "units": units,
+    }
+
+
 class _TxtBaselinePatchMiss(Exception):
     """RWK-37（C）：item 不属于该 root 的任何 draft revision。"""
 def _preset_for_legacy_plan(plan_id: str, source: str):

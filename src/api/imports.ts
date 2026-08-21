@@ -69,6 +69,12 @@ export const importsApi = {
       `/api/imports/${source}/confirm-root-preview?root_id=${encodeURIComponent(rootId)}&generation=${generation}`
     ),
 
+  // 按 root 投影 Source Catalog 下游进度（TXT 确认后轮询，展示作品级镜像/刮削状态）
+  getRootProgress: (source: string, rootId: string) =>
+    api.get<{ root_id: string; source: string; units: Array<Record<string, unknown>> }>(
+      `/api/imports/${source}/root-progress?root_id=${encodeURIComponent(rootId)}`
+    ),
+
   // RWK-40（P0-2）：needs_review 无 revision 的 MediaUnit 人工 durable 处理入口。
   // 用户填写作品身份后生成可编辑 draft revision，进入 root-generation 确认集合
   // （confirmation_ready=true），不依赖 legacy plan。

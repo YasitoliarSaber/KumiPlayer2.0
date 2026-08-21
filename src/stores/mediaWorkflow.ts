@@ -26,7 +26,7 @@ export interface MediaWorkflowEntry {
 }
 
 export interface BackgroundImportSession {
-  source: 'local' | 'openlist';
+  source: MediaWorkflowSource;
   batchId: string;
 }
 

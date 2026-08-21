@@ -197,6 +197,7 @@ export default function MediaManagementPage() {
   const openlistBatchIdRef = useRef('');
   const refreshedBackgroundBatchRef = useRef('');
   const openlistPollTimerRef = useRef<number | null>(null);
+  const txtProgressTimerRef = useRef<number | null>(null);
   const [selectedCloudRoot, setSelectedCloudRoot] = useState('');
   const [repairingPresetId, setRepairingPresetId] = useState('');
   const [uploadMessage, setUploadMessage] = useState('');
@@ -808,6 +809,57 @@ export default function MediaManagementPage() {
 
   useEffect(() => () => stopOpenlistPolling(), []);
 
+  // TXT 目录树确认后：轮询 root 级进度，展示作品级镜像/刮削状态（海报墙），
+  // 复用 OpenList 的后台观察页组件，不再只跟踪单个 job。
+  const attachTxtRootProgress = (rootId: string) => {
+    if (txtProgressTimerRef.current !== null) {
+      window.clearTimeout(txtProgressTimerRef.current);
+      txtProgressTimerRef.current = null;
+    }
+    setBackgroundImport({ source, batchId: '' });
+    setStep('background');
+    const poll = () => {
+      void importsApi.getRootProgress(source, rootId).then((result) => {
+        const units = result.units as unknown as BackgroundImportUnit[];
+        const active = units.some((unit) =>
+          ['discovering', 'queued', 'mirroring', 'scraping', 'updating_library', 'needs_review'].includes(unit.state)
+        );
+        const batch: OpenListImportBatch = {
+          batch_id: rootId,
+          status: active ? 'running' : 'succeeded',
+          mode: 'directory_tree',
+          import_family: family,
+          created_at: '',
+          updated_at: '',
+          roots: [{
+            batch_id: rootId,
+            root_id: rootId,
+            remote_locator: '',
+            normalized_locator: '',
+            local_locator: '',
+            import_family: family,
+            import_scope: importScope,
+            status: active ? 'running' : 'succeeded',
+            generation: 0,
+            job_id: '',
+            units,
+          }],
+          job_ids: [],
+        };
+        setBackgroundBatch(batch);
+        if (active) {
+          txtProgressTimerRef.current = window.setTimeout(poll, 1200);
+        } else {
+          txtProgressTimerRef.current = null;
+          void loadLibrary({ force: true }).catch((error: Error) => {
+            setActionError(`媒体库已创建，但刷新失败：${error.message}`);
+          });
+        }
+      }).catch(() => undefined);
+    };
+    poll();
+  };
+
   // 接管批次（创建或恢复共用）：后台观察页跟踪 durable 批次，不再转入旧确认页。
   const attachOpenlistBatch = (batch: OpenListImportBatch, reason = '') => {
     stopOpenlistPolling();
@@ -904,7 +956,7 @@ export default function MediaManagementPage() {
     if (!unit.revision_id || !backgroundBatch) return;
     setActionError('');
     try {
-      const preview = await importsApi.getPreview(backgroundImport?.source === 'local' ? 'local' : 'openlist', unit.revision_id);
+      const preview = await importsApi.getPreview(backgroundImport?.source || 'local', unit.revision_id);
       const entry = makeEntry();
       entry.note = unit.work_title || unit.boundary || '待处理识别单元';
       entry.status = 'parsed';
@@ -1667,17 +1719,15 @@ export default function MediaManagementPage() {
     try {
       if (activeEntry.confirmationRootId && activeEntry.confirmationGeneration != null) {
         // durable_root：TXT baseline 多作品一次确认全部（root + generation 身份）
-        const rootResult = await importsApi.confirmRoot(
+        await importsApi.confirmRoot(
           source,
           activeEntry.confirmationRootId,
           activeEntry.confirmationGeneration,
         );
         setTask(null);
         setTaskKind('mirror');
-        setStep('workbench');
-        if (rootResult.job_ids && rootResult.job_ids.length > 0) {
-          setTask(await tasksApi.get(rootResult.job_ids[0]));
-        }
+        // 展示作品级镜像/刮削进度（海报墙），而不是只跟踪第一个 job
+        attachTxtRootProgress(activeEntry.confirmationRootId);
         return true;
       }
       // durable_revision / legacy：幂等确认门面（draft → confirm+入队；
@@ -2194,7 +2244,7 @@ export default function MediaManagementPage() {
         batch={backgroundBatch}
         source={backgroundImport?.source || 'local'}
         onReviewUnit={(unit) => void reviewUnit(unit)}
-        onRetryUnit={(unit) => void retryBackgroundUnit(unit)}
+        onRetryUnit={backgroundImport?.source === 'openlist' || backgroundImport?.source === 'local' ? (unit) => void retryBackgroundUnit(unit) : undefined}
         retryingUnitId={retryingUnitIdRef.current}
       />}
       {step === 'maintenance' && <LibraryMaintenancePanel onCleared={() => loadPresets(true)} />}
