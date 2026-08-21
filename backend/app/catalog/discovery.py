@@ -23,10 +23,22 @@ from app.catalog.service import PageConsistencyError, ScanCancelled
 from app.db.database import get_connection
 from app.integrations.openlist.models import OpenListError
 from app.recognition.evidence import is_structure_dirname, recognize_path_evidence
+from app.recognition.media import _is_baidu_category_dir, _is_group_folder
 
 
 class DiscoveryCancelled(Exception):
     pass
+
+
+#: 子目录是否是「作品内部结构段」（季/OVA/SP 等），排除纯顶层分类层。
+#: is_structure_dirname 会把「动画/电影/剧集」等分类层也算作结构段（用于从
+#: 作品路径中剥离分类层），但分类层目录不是“作品容器”的证据——root 直属只有
+#: 分类层时，root 是媒体库容器，不应把整个媒体库聚合为一个全根 unit。
+#: SPs/Specials 同时命中分类与季/结构集合，仍视为结构段。
+def _is_work_structure_child(dirname: str) -> bool:
+    if _is_baidu_category_dir(dirname) and not _is_group_folder(dirname):
+        return False
+    return is_structure_dirname(dirname)
 
 
 #: 扫描必须立即中止（并向 handler 传播为 JobDeferredError）的来源级错误类型。
@@ -200,7 +212,7 @@ class DiscoveryEngine:
             return any(
                 item["kind"] == "file" and _is_video_name(item["name"]) for item in children
             ) or any(
-                item["kind"] == "dir" and self.is_structure(item["name"])
+                item["kind"] == "dir" and _is_work_structure_child(item["name"])
                 for item in children
             )
 

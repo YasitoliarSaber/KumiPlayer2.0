@@ -274,3 +274,22 @@ class TestSyntheticBoundaryFixture:
                 groups.add(entry["series_group"])
         assert groups == {"石纪元", "斩服少女"}
         assert "刮削好的动画" not in groups
+
+    def test_root_with_only_category_layer_children_creates_no_root_unit(self):
+        """选中根直属只有分类层（动画/新番）时，root 是媒体库容器，
+        不得把整个媒体库聚合为一个「全根 unit」；作品边界应下探到分类层内部。"""
+        tree = {
+            "/媒体库": [("动画", True, None, None), ("新番", True, None, None)],
+            "/媒体库/动画": [("WorkA", True, None, None)],
+            "/媒体库/动画/WorkA": [("Season 1", True, None, None)],
+            "/媒体库/动画/WorkA/Season 1": [("WorkA S01E01.mkv", False, 100, 1.0)],
+            "/媒体库/新番": [("WorkB", True, None, None)],
+            "/媒体库/新番/WorkB": [("Season 1", True, None, None)],
+            "/媒体库/新番/WorkB/Season 1": [("WorkB S01E01.mkv", False, 100, 1.0)],
+        }
+        root, engine = _setup_root(tree, remote_locator="/媒体库")
+        results = _run(engine)
+        assert _boundaries(results) == {"/媒体库/动画/WorkA", "/媒体库/新番/WorkB"}
+        # root（分类容器）不得成为全根 unit，也不能把整个库收进 needs_review
+        assert "/媒体库" not in _boundaries(results)
+        assert "/媒体库" not in _boundaries(results, status="needs_review")
