@@ -723,6 +723,19 @@ def _clear_work_database_state(
             conn.execute("DELETE FROM tracking_bindings WHERE work_id = ?", (work_id,))
             conn.execute("DELETE FROM playback_history WHERE work_id = ?", (work_id,))
             conn.execute("DELETE FROM work_overrides WHERE work_id = ?", (work_id,))
+            # V3 刮削事实随作品一起清除：reviews/failures 先按 binding 归属删除，
+            # 避免 bindings 删除后留下孤儿行（学习查询与跨 revision 归属不再读到）
+            conn.execute(
+                "DELETE FROM scrape_failures WHERE binding_id IN "
+                "(SELECT binding_id FROM scrape_bindings WHERE work_id = ?)",
+                (work_id,),
+            )
+            conn.execute(
+                "DELETE FROM scrape_reviews WHERE binding_id IN "
+                "(SELECT binding_id FROM scrape_bindings WHERE work_id = ?)",
+                (work_id,),
+            )
+            conn.execute("DELETE FROM scrape_bindings WHERE work_id = ?", (work_id,))
             target_ids = sorted(scrape_target_ids or set())
             if target_ids:
                 marks = ",".join("?" for _ in target_ids)
@@ -1092,6 +1105,7 @@ def _execute_library_clear_guarded(preview: DeletePreview) -> DeleteResult:
                 failed.append(DeleteFailure(path=str(path), reason=str(e)))
         failed.extend(_clear_import_plans("all"))
         failed.extend(_clear_error_logs("all"))
+        failed.extend(_clear_scrape_database_state("all"))
     else:
         failed.extend(_clear_rebuildable_source_cache(source))
         failed.extend(_clear_import_plans(source))
@@ -1398,7 +1412,57 @@ def _clear_rebuildable_source_cache(source: str) -> List[DeleteFailure]:
     except Exception as e:
         failures.append(DeleteFailure(path="failed_cases.json", reason=str(e)))
 
+    failures.extend(_clear_scrape_database_state(source))
     return failures
+
+
+def _clear_scrape_database_state(source: str) -> List[DeleteFailure]:
+    """清理 V3 SQLite 刮削事实，与 JSON 双写侧对称。
+
+    按来源清库后不留待处理 review_queue 行，也不留 bindings 被删后的
+    孤儿 scrape_reviews / scrape_failures；candidate_cache 按 queue 的
+    target 归属同步清除（须在 queue 删除前收集）。source 为 "all" 时整表清空。
+    """
+    try:
+        from app.db.database import close_connection, get_connection, init_db
+
+        init_db()
+        conn = get_connection()
+        try:
+            scoped = source not in {"", "all"}
+            if scoped:
+                conn.execute(
+                    "DELETE FROM scrape_candidate_cache WHERE scrape_target_id IN "
+                    "(SELECT scrape_target_id FROM scrape_review_queue WHERE source = ?)",
+                    (source,),
+                )
+                conn.execute("DELETE FROM scrape_review_queue WHERE source = ?", (source,))
+                conn.execute(
+                    "DELETE FROM scrape_failures WHERE binding_id IN "
+                    "(SELECT binding_id FROM scrape_bindings WHERE source = ?)",
+                    (source,),
+                )
+                conn.execute(
+                    "DELETE FROM scrape_reviews WHERE binding_id IN "
+                    "(SELECT binding_id FROM scrape_bindings WHERE source = ?)",
+                    (source,),
+                )
+                conn.execute("DELETE FROM scrape_bindings WHERE source = ?", (source,))
+            else:
+                conn.execute("DELETE FROM scrape_candidate_cache")
+                conn.execute("DELETE FROM scrape_review_queue")
+                conn.execute("DELETE FROM scrape_failures")
+                conn.execute("DELETE FROM scrape_reviews")
+                conn.execute("DELETE FROM scrape_bindings")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            close_connection()
+    except Exception as exc:
+        return [DeleteFailure(path="scrape.db", reason=str(exc))]
+    return []
 
 
 def _clear_import_plans(source: str) -> List[DeleteFailure]:
