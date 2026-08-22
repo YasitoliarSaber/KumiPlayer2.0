@@ -1676,7 +1676,19 @@ class TestRwk39ConfirmationAuthority:
                 "revision_ids": [],
             }
 
+        def recover_rebuild(*, root_id, tree_archive, local_locator):
+            # RWK-40：已有 durable root 的 recovery 走 rebuild（不重新派生 source/root）
+            recovery_calls.append(tree_archive)
+            return {
+                "root_id": root_id,
+                "generation": 2,
+                "source_id": "pan115-test",
+                "summary": {"failed_count": 0, "failed_paths": []},
+                "revision_ids": [],
+            }
+
         monkeypatch.setattr(service_mod, "bootstrap_provider_catalog_sync", recover_sync)
+        monkeypatch.setattr(service_mod, "rebuild_provider_catalog_sync", recover_rebuild)
         preset_id = first.json()["preset"]["preset_id"]
         second = client.post(
             f"/api/media-presets/{preset_id}/updates-from-path",

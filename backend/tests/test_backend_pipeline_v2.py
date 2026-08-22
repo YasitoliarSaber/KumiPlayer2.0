@@ -223,7 +223,7 @@ class TestPipelineJobs:
             generated_count=1, items=[],
         )
         with patch("app.mirror.generator.generate_mirror", return_value=fake_result) as mock_mirror, \
-                patch("app.pipeline.orchestrator.enqueue_scrape") as mock_scrape:
+                patch("app.pipeline.orchestrator.enqueue_scrape", return_value="job-scrape") as mock_scrape:
             job = job_store.create_job(
                 job_type="mirror_revision", resource_key=f"mirror:{revision['revision_id']}",
                 payload={"revision_id": revision["revision_id"], "unit_id": "unit-bad"},
@@ -273,7 +273,7 @@ class TestPipelineJobs:
             generated_count=1, items=[],
         )
         with patch("app.mirror.generator.generate_mirror", return_value=fake_result) as mock_mirror, \
-                patch("app.pipeline.orchestrator.enqueue_scrape") as mock_scrape:
+                patch("app.pipeline.orchestrator.enqueue_scrape", return_value="job-scrape") as mock_scrape:
             job = job_store.create_job(
                 job_type="mirror_revision", resource_key=f"mirror:{revision['revision_id']}",
                 payload={"revision_id": revision["revision_id"], "unit_id": "unit-ok"},

@@ -191,10 +191,11 @@ class TestEndToEnd115:
             "SELECT COUNT(*) AS c FROM media_units WHERE root_id = ?",
             (root.root_id,),
         ).fetchone()["c"]
-        # 两轮扫描后 unit 数量应等于作品数（2）加上 root "/" 容器候选单元
-        # （“动画”分类目录被识别为结构段，root 按容器候选结算，_create_unit
-        # 按 root+boundary 复用，第二轮不会翻倍），共 3 个而不是 4 个
-        assert unit_count == 3
+        # 两轮扫描后 unit 数量等于作品数（2）。a480404 起 root 直属只有分类层
+        # （“动画”）时 root 是媒体库容器，不创建全根 unit——分类层不是作品容器
+        # 证据（否则挂载根会被误判为候选并全量聚合）。_create_unit 按 root+boundary
+        # 复用，第二轮不会翻倍。
+        assert unit_count == 2
         # 内容变化的单元（作品A）有增量 revision 且带 parent 链；
         # 内容未变的单元（作品B）hash 去重，保持同一 revision（稳定 revision 语义）
         conn = get_connection()
