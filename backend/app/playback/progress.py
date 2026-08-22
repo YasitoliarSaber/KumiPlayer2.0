@@ -6,6 +6,7 @@ This store is intentionally small and JSON-backed.  Playback history answers
 """
 
 import json
+import math
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -70,9 +71,13 @@ def save_progress(
     threshold: float = COMPLETE_THRESHOLD,
     sync_bangumi: bool = True,
 ) -> PlaybackProgressItem:
+    # 非有限值（NaN/inf）不产生进度：min/max 会原样传播 NaN 并写出非法
+    # JSON 字面量，completed 判定也会被 NaN 比较误放行
+    position = float(position) if math.isfinite(position) else 0.0
+    duration = float(duration) if math.isfinite(duration) else 0.0
     ratio = 0.0
     if duration > 0:
-        ratio = max(0.0, min(1.0, float(position) / float(duration)))
+        ratio = max(0.0, min(1.0, position / duration))
     completed = duration > 0 and ratio >= threshold
     now = datetime.now(timezone(timedelta(hours=8))).isoformat()
 

@@ -218,6 +218,15 @@ def patch_config(req: ConfigPatch):
 
     # 敏感/凭据字段：空字符串表示不修改
     from app.core.config import _CREDENTIAL_FIELDS
+    # 修改 OpenList 账号但未提供新密码：禁止把旧账号密码套给新账号，
+    # 与 OpenList 专用保存端点同语义（防止通用 PATCH 成为绕过点）
+    new_openlist_username = str(patch_dict.get("openlist_username") or "").strip()
+    if (
+        new_openlist_username
+        and new_openlist_username != config.openlist_username
+        and not patch_dict.get("openlist_password")
+    ):
+        raise HTTPException(status_code=400, detail="请输入新 OpenList 账号对应的密码")
     for key in _CREDENTIAL_FIELDS:
         if key in patch_dict and patch_dict[key] == "":
             # 空字符串表示不修改，跳过

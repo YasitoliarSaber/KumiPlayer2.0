@@ -5,6 +5,7 @@ PlaybackManager 管理当前播放会话，支持 play/stop/status 和 mpv 原�
 """
 
 import logging
+import math
 import os
 import re
 import subprocess
@@ -437,7 +438,7 @@ class PlaybackManager:
         return active_playlist_position, last_checkpoint_at, next_checkpoint_retry_at
 
     def _update_session_progress(self, session: PlaybackSession, position: float, duration: float) -> None:
-        if position < 0 or duration <= 0:
+        if not math.isfinite(position) or not math.isfinite(duration) or position < 0 or duration <= 0:
             return
         with self._lock:
             session.position = float(position)
@@ -489,7 +490,7 @@ class PlaybackManager:
     def _save_progress_sample(self, session: PlaybackSession, position: float, duration: float) -> None:
         if not session.work_id or not session.episode_id:
             return
-        if position < 0 or duration <= 0:
+        if not math.isfinite(position) or not math.isfinite(duration) or position < 0 or duration <= 0:
             return
         item = save_progress(
             session.work_id,
@@ -539,7 +540,7 @@ class PlaybackManager:
             return False
         if item.completed:
             return True
-        if item.ratio < COMPLETE_THRESHOLD:
+        if not math.isfinite(item.ratio) or item.ratio < COMPLETE_THRESHOLD:
             return False
         return mark_episode_completed(session.work_id, session.episode_id, True).completed
 

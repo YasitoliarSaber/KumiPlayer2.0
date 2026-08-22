@@ -323,6 +323,27 @@ class TestPatchConfig:
         saved = json.loads(temp_config.read_text(encoding="utf-8"))
         assert saved["directory_tree_dir"] == str(tree_dir)
 
+    def test_patch_openlist_username_without_password_rejected(self, client, temp_config):
+        """只改 OpenList 账号不带新密码必须 400，禁止产生不一致凭据对"""
+        resp = client.patch("/api/config", json={"openlist_username": "another_user"})
+        assert resp.status_code == 400
+        assert "密码" in resp.json()["detail"]
+
+    def test_patch_same_openlist_username_without_password_ok(self, client, temp_config):
+        """重复提交相同账号保持幂等，不要求密码"""
+        config = AppConfig(openlist_username="same_user")
+        save_config(config)
+        resp = client.patch("/api/config", json={"openlist_username": "same_user"})
+        assert resp.status_code == 200
+
+    def test_patch_openlist_username_with_password_accepted(self, client, temp_config):
+        """账号与新密码一起提交可通过"""
+        resp = client.patch("/api/config", json={
+            "openlist_username": "new_user",
+            "openlist_password": "new_password",
+        })
+        assert resp.status_code == 200
+
     @pytest.mark.parametrize("port", [0, 70000])
     def test_patch_rejects_invalid_server_port(self, client, temp_config, port):
         """无效端口不能写入配置"""
