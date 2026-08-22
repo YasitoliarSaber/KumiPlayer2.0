@@ -165,6 +165,33 @@ def provider_for_remote(
     return route.route_id, route.provider_id
 
 
+def derive_remote_path(mount_root: str, remote_root: str, local_path: str) -> "str | None":
+    """由本地挂载路径反推远端路径（``derive_local_path`` 的逆向）。
+
+    自动联动用：TXT 导入记录的 ``local_locator``（挂载根下的本地路径）+
+    OpenList 连接级挂载根 → 反推 remote_root 下的远端定位。Windows 盘符
+    与段名大小写不敏感比较；不在挂载根之下时返回 None（能否推导是判定
+    条件而不是异常）。
+    """
+    from app.integrations.openlist.client import normalize_remote_path
+
+    # 统一分隔符后按大小写归一前缀判定（盘符 "K:"/"K:\" 与段名大小写都不敏感；
+    # pathlib 对裸盘符 "K:" 的 parts 形态不稳定，故用字符串段边界判定）
+    mount_n = str(mount_root or "").strip().replace("/", "\\").rstrip("\\")
+    local_n = str(local_path or "").strip().replace("/", "\\").rstrip("\\")
+    if not mount_n or not local_n:
+        return None
+    mount_cf = mount_n.casefold()
+    local_cf = local_n.casefold()
+    if local_cf == mount_cf or not local_cf.startswith(mount_cf + "\\"):
+        return None
+    remainder = "/".join(local_n[len(mount_n):].lstrip("\\").split("\\"))
+    if not remainder:
+        return None
+    rroot = normalize_remote_path(remote_root or "/")
+    return normalize_remote_path(f"{rroot.rstrip('/')}/{remainder}")
+
+
 def derive_local_path(mount_root: str, remote_root: str, remote_path: str) -> str:
     """由连接级挂载根推导本地路径：mount_root + 远端相对 remote_root 的各段。"""
     from app.integrations.openlist.client import normalize_remote_path

@@ -17,7 +17,16 @@ enqueue。校验函数抛 ValueError（调用方转 HTTPException 或 Job 失败
 """
 from __future__ import annotations
 
-from app.integrations.openlist.providers import PROVIDER_OTHER, provider_for_remote
+import logging
+
+from app.integrations.openlist.providers import (
+    PROVIDER_OTHER,
+    OpenListRouteConfig,
+    derive_remote_path,
+    provider_for_remote,
+)
+
+_AUTO_BIND_LOGGER = logging.getLogger(__name__)
 
 
 #: 允许绑定的 Provider 来源类型（OpenList 增量通道只能挂在网盘 Provider 上）
@@ -79,6 +88,81 @@ def validate_binding_contract(
             f"但该 OpenList 目录路由归属 {route_provider}，已拒绝绑定"
         )
     return {"route_id": route_id, "provider_id": route_provider}
+
+
+def try_auto_bind_provider_root(root) -> str:
+    """TXT baseline 之后的自动联动：由 root 本地定位反推 OpenList 远端路径。
+
+    条件全部满足才绑定（0 网络请求）：OpenList 已配置且凭据可解析、root
+    未绑定、本地基线已就绪、local_locator 位于配置挂载根之下、反推路径
+    通过与手动绑定完全相同的 ``validate_binding_contract`` 契约。
+
+    返回 ``bound`` / ``already`` / ``unconfigured`` / ``skipped:<原因>``；
+    任何失败只保持未绑定（手动绑定入口不受影响），绝不抛出。
+    """
+    try:
+        from app.core.config import load_config, resolve_openlist_credentials
+        from app.integrations.openlist.governor import governor_connection_key
+
+        from app.catalog import store as catalog_store
+
+        # 以库中最新事实为准（调用方持有的可能是绑定前的陈旧对象）
+        persisted = catalog_store.get_source_root(root.root_id)
+        if persisted is not None:
+            root = persisted
+        config = load_config()
+        if not (config.openlist_server_url or "").strip():
+            return "unconfigured"
+        username, _password, state = resolve_openlist_credentials()
+        if state == "unavailable" or not username:
+            return "unconfigured"
+        if getattr(root, "openlist_conn_hash", "") or getattr(root, "openlist_remote_locator", ""):
+            return "already"
+        baseline = catalog_store.source_catalog_baseline_stats(root.root_id)
+        if not baseline["baseline_ready"]:
+            return "skipped:baseline-not-ready"
+        from app.integrations.openlist.client import normalize_remote_path
+
+        remote_root = (
+            normalize_remote_path(config.openlist_remote_root)
+            if config.openlist_remote_root
+            else "/"
+        )
+        remote = derive_remote_path(
+            config.openlist_mount_root or "",
+            remote_root,
+            str(getattr(root, "local_locator", "") or ""),
+        )
+        if not remote or remote == "/":
+            return "skipped:not-under-mount"
+        routes = [
+            item
+            for item in (config.openlist_routes or [])
+            if isinstance(item, OpenListRouteConfig)
+        ]
+        validate_binding_contract(
+            root=root, remote_locator=remote, routes=routes, remote_root=remote_root,
+        )
+        catalog_store.bind_root_to_openlist(
+            root.root_id,
+            openlist_conn_hash=governor_connection_key(config.openlist_server_url, username),
+            openlist_remote_locator=remote,
+        )
+        _AUTO_BIND_LOGGER.info(
+            "OpenList 自动联动：%s 由本地路径反推并绑定到 %s",
+            root.root_id, remote,
+        )
+        return "bound"
+    except ValueError as exc:
+        _AUTO_BIND_LOGGER.info(
+            "OpenList 自动联动跳过（root=%s）：%s", getattr(root, "root_id", "?"), exc,
+        )
+        return f"skipped:{exc}"
+    except Exception:
+        _AUTO_BIND_LOGGER.exception(
+            "OpenList 自动联动异常（root=%s）", getattr(root, "root_id", "?"),
+        )
+        return "skipped:error"
 
 
 def validate_runtime_binding(

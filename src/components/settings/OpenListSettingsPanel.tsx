@@ -381,11 +381,11 @@ export default function OpenListSettingsPanel({
         <Button appearance="secondary" size="small" onClick={toggleBindOpen} className="settings-ghost-btn fluent-settings-btn">
           {bindOpen ? '收起 Provider 增量绑定' : 'Provider 增量绑定（可选）'}
         </Button>
-        <span className="sources-route-hint">为 115/百度目录树来源绑定 OpenList 增量检测（root 身份不变）</span>
+        <span className="sources-route-hint">TXT 导入完成本地基线后，挂载路径能对上 OpenList 挂载根与来源目录路由时会自动绑定增量通道；此处可查看状态或手动补绑</span>
         {bindOpen && (
           <div className="sources-openlist-binding-editor">
             <span className="sources-route-hint">
-              纯 TXT 建立的 115/百度来源根可绑定 OpenList 作为增量检测通道（root 身份不变）。
+              绑定由本地路径反推导出（0 网络请求）；未自动绑定的来源可在此手动绑定。
             </span>
             <label className="settings-config-row">
               <span>115/百度来源</span>

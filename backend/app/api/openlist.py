@@ -1065,7 +1065,39 @@ def save_routes(req: SaveRoutesRequest):
 
     config.openlist_routes = routes
     save_config(config)
-    return {"routes": [_route_public(route, config) for route in routes]}
+    # 自动联动：路由保存后为符合条件的既有 TXT 来源补绑定（本地推导，0 请求）
+    auto_bound = _auto_bind_eligible_roots()
+    payload = {"routes": [_route_public(route, config) for route in routes]}
+    if auto_bound:
+        payload["auto_bound_roots"] = auto_bound
+    return payload
+
+
+def _auto_bind_eligible_roots() -> list[dict]:
+    """遍历预设关联的 Provider root，尝试自动绑定，返回本轮新绑定列表。"""
+    from app.catalog.binding import try_auto_bind_provider_root
+    from app.catalog import store as catalog_store
+    from app.media_presets.store import list_presets
+
+    bound: list[dict] = []
+    seen_roots: set[str] = set()
+    for preset in list_presets():
+        if preset.source not in {"pan115", "baidu"}:
+            continue
+        root_id = (preset.catalog_root_id or "").strip()
+        if not root_id or root_id in seen_roots:
+            continue
+        seen_roots.add(root_id)
+        root = catalog_store.get_source_root(root_id)
+        if root is None:
+            continue
+        if try_auto_bind_provider_root(root) == "bound":
+            bound.append({
+                "root_id": root_id,
+                "name": preset.name or preset.source,
+                "provider": preset.source,
+            })
+    return bound
 
 
 @router.post("/presets/{preset_id}/rescan")

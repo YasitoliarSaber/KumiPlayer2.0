@@ -467,6 +467,16 @@ def _mark_baseline_completed_if_ready(root_id: str, generation: int) -> None:
     failed = int(row["failed"] or 0)
     if total > 0 and queued == 0 and scanning == 0 and failed == 0:
         catalog_store.mark_baseline_completed(root_id, generation)
+        # 自动联动：baseline 落定后尝试按本地挂载路径反推并绑定 OpenList
+        # 增量通道（条件不满足时静默保持未绑定，0 网络请求）
+        try:
+            from app.catalog.binding import try_auto_bind_provider_root
+
+            fresh_root = catalog_store.get_source_root(root_id)
+            if fresh_root is not None:
+                try_auto_bind_provider_root(fresh_root)
+        except Exception:
+            pass
 
 
 def register_discovery_handler() -> None:
