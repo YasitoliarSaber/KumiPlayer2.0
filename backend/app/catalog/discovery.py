@@ -570,6 +570,18 @@ class DiscoveryEngine:
             files=files,
         )
         plan = recognize_import_plan_media(build_draft_import_plan(snapshot))
+        # 单元级收口（2026-08-22 天元突破实库回归）：一个 unit 天然是一张卡，
+        # 其内部 tv/ sprcial/ 等结构子目录在目录身份下会分裂，使
+        # 「06(On Air Ver)」这类变体集号与正片 SxxEyy 撞车时收口失效，
+        # 最终以无法分辨的重复剧集错误暴露给用户。按 unit 身份重跑两个
+        # 收口规则；legacy 全树计划不经过此处，行为不变。
+        from app.recognition.plan_recognizer import (
+            _auto_resolve_duplicate_episodes,
+            _move_implicit_season_collision_to_specials,
+        )
+
+        _move_implicit_season_collision_to_specials(plan, card_identity=f"unit:{boundary}")
+        _auto_resolve_duplicate_episodes(plan, card_identity=f"unit:{boundary}")
         # canonical 身份需要 unit_id（同一 root+boundary 跨 generation 复用），
         # 因此先登记/复用 media_unit，再构造 items。
         unit_id = self._create_unit(unit, status="plan_ready")

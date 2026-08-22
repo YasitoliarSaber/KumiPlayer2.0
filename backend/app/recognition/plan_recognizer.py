@@ -228,14 +228,23 @@ def _normalize_explicit_later_season_episode_numbers(plan: ImportPlan) -> None:
             )
 
 
-def _move_implicit_season_collision_to_specials(plan: ImportPlan) -> None:
-    """显式 Sxx 与编号推断季撞车时，将隐式篇章保守归入特别篇。"""
-    groups: dict[tuple[str, int, int], list[ImportPlanItem]] = defaultdict(list)
+def _move_implicit_season_collision_to_specials(
+    plan: ImportPlan, *, card_identity: str = "",
+) -> None:
+    """显式 Sxx 与编号推断季撞车时，将隐式篇章保守归入特别篇。
+
+    ``card_identity``：可选的单元级身份覆盖。durable discovery 的一个
+    unit 天然是一张卡（boundary 判定），其内部的 tv/ sprcial/ 等结构
+    子目录在目录身份下会分裂，导致「06(On Air Ver)」这类变体集号与
+    正片 SxxEyy 撞车时收口失效（以无法分辨的重复剧集错误暴露）；
+    传入 unit 身份后按单元范围收口。legacy 全树计划不传，行为不变。
+    """
+    groups: dict[tuple, list[ImportPlanItem]] = defaultdict(list)
     for item in _video_items(plan):
         if item.group_type != "season" or item.season_number is None or item.episode_number is None:
             continue
-        card_identity = library_card_identity(item)
-        groups[(card_identity, int(item.season_number), int(item.episode_number))].append(item)
+        identity = card_identity or library_card_identity(item)
+        groups[(identity, int(item.season_number), int(item.episode_number))].append(item)
 
     implicit_parents: set[tuple[str, str]] = set()
     for items in groups.values():
@@ -682,7 +691,7 @@ def _is_generic_special_title(title: str, item: ImportPlanItem) -> bool:
     }
 
 
-def _auto_resolve_duplicate_episodes(plan: ImportPlan) -> None:
+def _auto_resolve_duplicate_episodes(plan: ImportPlan, *, card_identity: str = "") -> None:
     """自动处理同一作品目录、季度和集号下的重复 season 条目。
 
     默认导入应该尽量向前走。重复正片保留一个最像正片/质量最高的版本，
@@ -698,12 +707,19 @@ def _auto_resolve_duplicate_episodes(plan: ImportPlan) -> None:
                 and item.group_type == "season"
                 and item.season_number is not None
                 and item.episode_number is not None):
-            # 作品维度用 library_card_identity：它对目录树 TXT（路径段）与
-            # OpenList（无分类层时回退识别身份）都稳定。
-            key = (library_card_identity(item), item.season_number, item.episode_number)
+            # 作品维度用 library_card_identity：目录树 TXT（路径段）与
+            # OpenList（无分类层时回退识别身份）都稳定；durable 单元范围
+            # 传入 card_identity 覆盖（同一 unit 内结构子目录不拆身份）。
+            identity = card_identity or library_card_identity(item)
+            key = (identity, item.season_number, item.episode_number)
             season_map[key].append(item)
 
     for key, items in season_map.items():
+        active = [
+            item for item in items
+            if item.action == "generate_strm" and item.group_type == "season"
+        ]
+        items = active
         if len(items) <= 1:
             continue
         _, sn, en = key
