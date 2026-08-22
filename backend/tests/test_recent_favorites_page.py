@@ -76,10 +76,11 @@ def test_global_source_filter_has_a_titlebar_menu_and_reaches_every_library_view
     assert "115 网盘" in titlebar
     assert "百度网盘" in titlebar
     assert "本地" in titlebar
-    assert "work.source === source" in home
-    assert "source !== 'all'" in category
-    assert "work.source === source" in recent
-    assert "work.source === source" in favorites
+    # 六处内联筛选已收敛到 matchesSourceFilter（多来源命中语义）
+    assert "matchesSourceFilter(work, source)" in home
+    assert "matchesSourceFilter(work, source)" in category
+    assert "matchesSourceFilter(work, source)" in recent
+    assert "matchesSourceFilter(work, source)" in favorites
 
 
 def test_favorite_toggle_updates_the_library_index_used_by_recent_page():
