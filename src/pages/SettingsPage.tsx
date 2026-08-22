@@ -92,6 +92,8 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
   const [routeDraft, setRouteDraft] = useState<OpenListRouteItem[]>([]);
   const [routeDiscoverItems, setRouteDiscoverItems] = useState<OpenListDiscoverItem[]>([]);
   const [routeNotice, setRouteNotice] = useState('');
+  const [routesLoaded, setRoutesLoaded] = useState(false);
+  const routeAutoDiscoverRef = useRef(false);
   const seenLibraryRefreshRef = useRef<Set<string>>(new Set());
   const navigationTargetRef = useRef<SettingsTab | null>(null);
   const navigationUnlockTimerRef = useRef<number | null>(null);
@@ -121,6 +123,31 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
     });
   }, [config?.openlist_server_url, config?.openlist_remote_root, config?.openlist_mount_root, config?.openlist_configured, config?.openlist_cache_ttl_minutes, config?.openlist_prefetch_limit]);
 
+  // 刷新来源目录（discover）：远端顶层目录 + 提供商建议合并进可编辑草稿。
+  // auto=true 为启动时的自动读取（文案引导直接保存），false 为手动点击刷新。
+  async function discoverRoutes(auto: boolean) {
+    const result = await openlistApi.discoverRoutes();
+    setRouteDiscoverItems(result.items);
+    const saved = new Map(routeDraft.map((item) => [item.remote_prefix, item]));
+    const next: OpenListRouteItem[] = result.items.map((item) => {
+      const existing = saved.get(item.remote_prefix);
+      if (existing) return existing;
+      return {
+        route_id: '',
+        label: item.current_label || item.name,
+        remote_prefix: item.remote_prefix,
+        provider_id: item.current_provider || item.hint_provider,
+        enabled: true,
+      };
+    });
+    setRouteDraft(next);
+    setRouteNotice(
+      auto
+        ? `已自动读取 ${result.items.length} 个顶层目录；目录名建议仅供参考，确认内容提供商后点击「保存更改」`
+        : `已读取 ${result.items.length} 个顶层目录；目录名建议仅供参考，请确认内容提供商后再保存`,
+    );
+  }
+
   // 提供商路由：读取已保存路由
   useEffect(() => {
     if (!config?.openlist_configured) return;
@@ -135,8 +162,21 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
           enabled: route.enabled,
         })));
       })
-      .catch(() => setRouteNotice('读取来源路由失败，请确认 OpenList 连接配置'));
+      .catch(() => setRouteNotice('读取来源路由失败，请确认 OpenList 连接配置'))
+      .finally(() => setRoutesLoaded(true));
   }, [config?.openlist_configured, config?.openlist_server_url]);
+
+  // 已配置连接但没有任何已保存路由时，自动读取一次顶层目录建议；
+  // 失败静默（保留手动「刷新来源目录」入口），避免每次重启都要求手动刷新。
+  useEffect(() => {
+    if (!routesLoaded || routeAutoDiscoverRef.current) return;
+    if (openlistRoutes.length > 0 || routeDraft.length > 0 || routeDiscoverItems.length > 0) {
+      routeAutoDiscoverRef.current = true;
+      return;
+    }
+    routeAutoDiscoverRef.current = true;
+    void discoverRoutes(true).catch(() => undefined);
+  }, [routesLoaded, openlistRoutes.length, routeDraft.length, routeDiscoverItems.length]);
 
 
   useEffect(() => {
@@ -451,27 +491,19 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
             discoverItems={routeDiscoverItems}
             notice={routeNotice}
             busy={activeAction}
-            onDiscover={async () => {
-              const result = await openlistApi.discoverRoutes();
-              setRouteDiscoverItems(result.items);
-              const saved = new Map(routeDraft.map((item) => [item.remote_prefix, item]));
-              const next: OpenListRouteItem[] = result.items.map((item) => {
-                const existing = saved.get(item.remote_prefix);
-                if (existing) return existing;
-                return {
-                  route_id: '',
-                  label: item.current_label || item.name,
-                  remote_prefix: item.remote_prefix,
-                  provider_id: item.current_provider || item.hint_provider,
-                  enabled: true,
-                };
-              });
-              setRouteDraft(next);
-              setRouteNotice(`已读取 ${result.items.length} 个顶层目录；目录名建议仅供参考，请确认内容提供商后再保存`);
-            }}
+            onDiscover={() => discoverRoutes(false)}
             onSave={async () => {
               const result = await openlistApi.saveRoutes(routeDraft);
               setOpenlistRoutes(result.routes);
+              // 回填已保存路由（含后端生成的 route_id）：
+              // 新发现目录保存后不再是「未保存更改」，重复保存也不会反复生成新 route_id。
+              setRouteDraft(result.routes.map((route) => ({
+                route_id: route.route_id,
+                label: route.label,
+                remote_prefix: route.remote_prefix,
+                provider_id: route.provider_id,
+                enabled: route.enabled,
+              })));
               setRouteNotice('来源目录已保存；未勾选“可作为媒体来源”的目录仍可浏览，但不能导入');
               report('来源目录已保存');
             }}

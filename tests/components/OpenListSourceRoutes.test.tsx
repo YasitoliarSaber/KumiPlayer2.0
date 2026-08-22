@@ -123,6 +123,44 @@ describe('OpenListSourceRoutes', () => {
     expect(screen.queryByText(/有 1 项更改尚未保存/)).toBeNull();
   });
 
+  test('新发现的未保存目录（route_id 为空）无需手动编辑即可保存', () => {
+    renderRoutes({
+      routes: [],
+      draft: [
+        { route_id: '', label: '115网盘', remote_prefix: '/115网盘', provider_id: 'pan115', enabled: true },
+      ],
+    });
+    expect(screen.getByText(/有 1 项更改尚未保存/)).toBeTruthy();
+    expect(screen.getByText('新发现的目录，确认内容提供商后保存生效')).toBeTruthy();
+    // 保存按钮立即可用：确认建议提供商后可以直接保存，不再要求先改动某个字段
+    expect((screen.getByText('保存更改') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  test('新目录保存成功且回填 route_id 后不再显示未保存状态', () => {
+    const { rerender } = renderRoutes({
+      routes: [],
+      draft: [
+        { route_id: '', label: '115网盘', remote_prefix: '/115网盘', provider_id: 'pan115', enabled: true },
+      ],
+    });
+    rerender(
+      <OpenListSourceRoutes
+        configured={true}
+        routes={[{ route_id: 'r-new', label: '115网盘', remote_prefix: '/115网盘', provider_id: 'pan115', enabled: true, local_path: 'K:\\115网盘', local_available: false }]}
+        draft={[{ route_id: 'r-new', label: '115网盘', remote_prefix: '/115网盘', provider_id: 'pan115', enabled: true }]}
+        discoverItems={[]}
+        notice=""
+        busy={null}
+        onDiscover={vi.fn(async () => undefined)}
+        onSave={vi.fn(async () => undefined)}
+        onUpdateDraft={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText(/有 1 项更改尚未保存/)).toBeNull();
+    expect(screen.queryByText('新发现的目录，确认内容提供商后保存生效')).toBeNull();
+    expect((screen.getByText('保存更改') as HTMLButtonElement).disabled).toBe(true);
+  });
+
   test('刷新来源目录调用 onDiscover', () => {
     const { onDiscover } = renderRoutes();
     fireEvent.click(screen.getByText('刷新来源目录'));

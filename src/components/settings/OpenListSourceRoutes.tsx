@@ -47,7 +47,12 @@ export default function OpenListSourceRoutes({
   const [actionLock, setActionLock] = useState<string | null>(null);
   const [localError, setLocalError] = useState('');
 
-  const dirtyCount = Object.values(dirtyPrefixes).filter(Boolean).length;
+  // 新发现但尚未保存的目录（route_id 为空）本身就是待确认更改：
+  // 用户确认建议提供商后必须能直接「保存更改」，不能依赖先手动改动某个字段。
+  const isItemDirty = (route: OpenListRouteItem) =>
+    route.route_id === '' || Boolean(dirtyPrefixes[route.remote_prefix]);
+
+  const dirtyCount = draft.filter(isItemDirty).length;
   const isBusy = actionLock !== null || Boolean(busy);
 
   const toggleEdit = (prefix: string) => {
@@ -119,7 +124,8 @@ export default function OpenListSourceRoutes({
             {draft.map((route) => {
               const localPath = localPathFor(route.remote_prefix);
               const isExpanded = Boolean(expanded[route.remote_prefix]);
-              const isDirty = Boolean(dirtyPrefixes[route.remote_prefix]);
+              const isDirty = isItemDirty(route);
+              const isNewItem = route.route_id === '';
               const providerLabel = ROUTE_PROVIDER_OPTIONS.find((option) => option.value === route.provider_id)?.label ?? route.provider_id;
               return (
                 <div key={route.remote_prefix} className="sources-route-card">
@@ -137,7 +143,11 @@ export default function OpenListSourceRoutes({
                       {isExpanded ? '收起' : '编辑'}
                     </Button>
                   </div>
-                  {isDirty && <span className="sources-dirty-hint">该项有未保存的更改</span>}
+                  {isDirty && (
+                    <span className="sources-dirty-hint">
+                      {isNewItem ? '新发现的目录，确认内容提供商后保存生效' : '该项有未保存的更改'}
+                    </span>
+                  )}
                   {isExpanded && (
                     <div className="sources-route-card-edit">
                       <label className="settings-config-row">
