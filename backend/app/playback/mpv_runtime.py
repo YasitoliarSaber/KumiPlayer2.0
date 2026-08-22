@@ -36,7 +36,12 @@ MANIFEST_FILENAME = "runtime-manifest.json"
 # 分层架构：portable_config 是用户可替换的整合包层（mpv.conf/input.conf 由整合包决定）；
 # KumiPlayer 自有层 kumiplayer/ 承载应用必需配置与脚本（不可替换）。
 REQUIRED_CONFIG_FILES = ("mpv.conf",)  # 仅校验自有层强制配置
-REQUIRED_SCRIPTS = ("screenshot_to_video_dir.lua", "kumiplayer_anime4k.lua", "kumiplayer_bindings.lua")
+REQUIRED_SCRIPTS = (
+    "screenshot_to_video_dir.lua",
+    "kumiplayer_anime4k.lua",
+    "kumiplayer_bindings.lua",
+    "kumiplayer_uosc_menu.lua",
+)
 _VERSION_TIMEOUT_SECONDS = 10
 _RUNTIME_CHECK_FILENAME = "runtime-check.json"
 

@@ -380,6 +380,19 @@ class PlaybackManager:
                         last_event = fallback_event
                 time.sleep(reconnect_delay)
                 reconnect_delay = min(reconnect_delay * 2, IPC_RECONNECT_MAX_SECONDS)
+            except Exception:
+                # 兜底：进度存储/反序列化等意外异常不允许静默杀死监控线程——
+                # 先尽力保住最后进度再安全退出，避免会话卡在 playing、进度丢失
+                LOGGER.exception(
+                    "MPV progress monitor crashed; saving final checkpoint (session=%s)",
+                    session.session_id,
+                )
+                try:
+                    if session.position >= 0 and session.duration > 0:
+                        self._checkpoint_progress(session, session.position, session.duration, attempts=1)
+                except Exception:
+                    LOGGER.warning("Final checkpoint after monitor crash failed")
+                break
 
         if last_event is not None and session.position >= 0 and session.duration > 0:
             self._checkpoint_progress(session, session.position, session.duration, attempts=3)
@@ -542,7 +555,14 @@ class PlaybackManager:
             return True
         if not math.isfinite(item.ratio) or item.ratio < COMPLETE_THRESHOLD:
             return False
-        return mark_episode_completed(session.work_id, session.episode_id, True).completed
+        # Bangumi 同步放后台：本函数运行在 MPV IPC 读取线程/退出路径，
+        # 同步网络调用（超时 15s）会阻塞事件流与暂停/seek 强制检查点
+        updated = mark_episode_completed(
+            session.work_id, session.episode_id, True, sync_bangumi=False,
+        )
+        if updated.completed and not updated.bangumi_synced:
+            self._schedule_completion_sync(session, updated)
+        return updated.completed
 
 def _find_episode(work: WorkIndex, episode_id: str) -> Optional[EpisodeIndex]:
     for episode in work.episodes:

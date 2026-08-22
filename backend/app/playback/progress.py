@@ -109,6 +109,8 @@ def mark_episode_completed(
     work_id: str,
     episode_id: str,
     completed: bool,
+    *,
+    sync_bangumi: bool = True,
 ) -> PlaybackProgressItem:
     """Set the local completed flag from KumiPlayer UI controls."""
     with DATA_WRITE_LOCK:
@@ -135,7 +137,7 @@ def mark_episode_completed(
             existing.manually_unwatched = True
         existing.updated_at = now
         _write_progress(items)
-    if completed and not existing.bangumi_synced:
+    if sync_bangumi and completed and not existing.bangumi_synced:
         synced, error = _try_sync_bangumi_episode(work_id, episode_id)
         existing = _store_bangumi_result(work_id, episode_id, synced, error)
     return existing
