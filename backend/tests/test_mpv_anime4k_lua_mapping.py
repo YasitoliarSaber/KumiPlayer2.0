@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-LUA_PATH = PROJECT_ROOT / "resources/mpv-runtime/portable_config/scripts/kumiplayer_anime4k.lua"
+LUA_PATH = PROJECT_ROOT / "resources/mpv-runtime/kumiplayer/scripts/kumiplayer_anime4k.lua"
 SHADER_DIR = PROJECT_ROOT / "resources/mpv-runtime/portable_config/shaders/anime4k-v4.0.1"
 
 MODES = ("a", "b", "c", "a+a", "b+b", "c+a")

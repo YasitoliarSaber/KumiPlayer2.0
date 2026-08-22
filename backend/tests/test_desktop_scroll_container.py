@@ -61,5 +61,5 @@ def test_virtual_poster_grid_clamps_the_start_row_when_results_shrink():
 def test_category_changes_reset_the_main_scroll_position():
     page = (Path(__file__).resolve().parents[2] / "src" / "pages" / "CategoryPage.tsx").read_text(encoding="utf-8")
 
-    assert "main?.scrollTo({ top: 0, behavior: 'auto' });" in page
+    assert "main?.scrollTo({ top: restoredScrollTop ?? 0, behavior: 'auto' });" in page
     assert "}, [activeCategory, source]);" in page

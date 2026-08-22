@@ -119,7 +119,7 @@ def test_continue_playback_progress_is_readable_before_and_after_hover():
         "mica": ("rgb(229 231 235 / .11)", "rgb(229 231 235 / .15)", "#e5e7eb"),
     }
     for theme in ("fluent", "cinema", "mica"):
-        theme_selector = f":root[data-theme='{theme}']"
+        theme_selector = f":root[data-theme='{theme}'] .detail-classic-page"
         theme_start = css.index(theme_selector)
         theme_end = css.index("}\n", theme_start)
         theme_rules = css[theme_start:theme_end]

@@ -47,4 +47,4 @@ def test_startup_first_frame_matches_all_three_appearance_presets():
     assert "html[data-theme='mica']" in document
     assert "--kumi-boot-bg: #eef3f9" in document
     assert "--kumi-boot-bg: #0a0a0a" in document
-    assert "--kumi-boot-bg: #eeeeec" in document
+    assert "--kumi-boot-bg: #ffffff" in document
