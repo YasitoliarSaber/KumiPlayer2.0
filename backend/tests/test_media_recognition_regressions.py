@@ -356,3 +356,38 @@ def test_series_container_metadata_is_removed_from_work_title():
     assert violet.work_title == "紫罗兰永恒花园"
     assert violet.series_group == "紫罗兰永恒花园"
     assert gunbuster.work_title == "飞跃巅峰"
+
+
+def test_existing_work_title_with_year_still_recognizes_single_file_movie():
+    """单文件电影目录树：existing_work_title 携带年份，不得因丢年份误判 needs_review。
+
+    回归背景：DiscoveryEngine._process_boundary 的证据步只传 boundary 相对路径
+    （文件名）+ existing_work_title（作品目录名）。目录名里的年份是电影兜底识别的
+    唯一证据，旧实现直接赋值 work_title 不解析年份，导致「东京教父.Tokyo.Godfathers.2003」
+    这类单文件电影全部落 needs_review。
+    """
+    cases = [
+        (
+            "[Noxia-AI] 东京教父.2003.2160p.BDRip.AV1.10-bit.DTS-HD5.1.PGS.mkv",
+            "东京教父.Tokyo.Godfathers.2003",
+        ),
+        (
+            "Porco.Rosso.1992.2160p.WEB-DL.H265.DDP5.1.2Audio-DreamHD.mkv",
+            "红猪.Porco.Rosso.1992",
+        ),
+        (
+            "BanG Dream! It's MyGO!!!!! 前篇：春日向阳，迷途野猫 (2024) -1080p.mkv",
+            "BanG Dream! It's MyGO!!!!! 前篇：春日向阳，迷途野猫 (2024)",
+        ),
+    ]
+    for filename, boundary_name in cases:
+        guess = recognize_media(
+            filename,
+            filename,
+            source="pan115",
+            existing_work_title=boundary_name,
+        )
+        assert guess.group_type == "movie", filename
+        assert guess.media_type == "movie", filename
+        assert guess.needs_review is False, filename
+        assert guess.year is not None, filename

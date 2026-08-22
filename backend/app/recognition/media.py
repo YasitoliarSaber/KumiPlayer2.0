@@ -1793,8 +1793,12 @@ def recognize_media(
 
     # 解析作品名和年份
     if existing_work_title:
-        work_title = existing_work_title
-        year = existing_year
+        # existing_work_title 是已确认的作品外层目录名（如「东京教父.Tokyo.Godfathers.2003」），
+        # 仍须清洗出作品名与年份：目录名里的年份是电影兜底识别的关键证据，直接赋值会
+        # 丢失年份，导致单文件电影（无 SxxExx 结构）被误判为 needs_review。
+        work_title, year = _parse_work_title_and_year(existing_work_title)
+        if existing_year is not None:
+            year = existing_year
         clean_warnings = []
         clean_needs_review = False
     else:
