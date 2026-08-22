@@ -45,7 +45,11 @@ test('确认阶段默认可见媒体摘要，决策区与唯一主按钮同处�
 });
 
 test('镜像与刮削由一个第三阶段工作台串联并自动推进', () => {
-  assert.match(page, /step === 'workbench' && \(preview \|\| isScrapeTask\(task\)\)/);
+  // RWK-44 起 workbench 渲染拆为两个独立条件：TXT 进度展示优先，
+  // 否则渲染 MediaTaskWorkbench（第三阶段工作台）串联镜像与刮削。
+  assert.match(page, /step === 'workbench'/);
+  assert.match(page, /\(preview \|\| isScrapeTask\(task\)\) && \(\s*$/m);
+  assert.match(page, /<MediaTaskWorkbench/);
   assert.match(page, /mode=\{\s*isScrapeTask\(task\) && taskKind === 'scrape' \? 'scrape' : 'mirror'\s*\}/);
   assert.match(page, /isMirrorTaskReady\(task\)[\s\S]*startTask\('scrape'\)/);
   assert.match(workbench, /SUB_STAGES/);
@@ -73,17 +77,27 @@ test('确认并继续在 draft 与 confirmed 都走幂等确认门面，durable 
     page.indexOf('const confirmPlan = async () => {'),
     page.indexOf('const saveItem = async () => {'),
   );
-  // 幂等确认门面：confirm API 只出现一次，不再被 draft 状态分支包裹
-  // （confirmed 恢复场景同样调用，由后端幂等/ensure 语义保证安全）
-  assert.equal((confirmPlan.match(/importsApi\.confirm\(/g) || []).length, 1);
-  assert.match(confirmPlan, /await importsApi\.confirm\(source, activeEntry\.planId\);/);
+  // 手动确认走幂等确认门面（薄封装，逻辑在 confirmCurrentImport 内）
+  assert.match(confirmPlan, /await confirmCurrentImport\(\);/);
   assert.doesNotMatch(confirmPlan, /if \(preview\.status === 'draft'\)/);
-  // durable 响应挂接已入队/恢复的镜像任务
-  assert.match(confirmPlan, /setTask\(await tasksApi\.get\(confirmed\.job_id\)\)/);
-  // 确认后刷新预览并进入工作台
-  assert.match(confirmPlan, /importsApi\.getPreview\(source, activeEntry\.planId\)/);
-  assert.match(confirmPlan, /updateEntry\(activeEntry\.id, \{ preview: confirmedPreview \}\)/);
-  assert.match(confirmPlan, /setStep\('workbench'\)/);
-  // legacy 不自动创建镜像或刮削任务（工作台手动启动，避免重复生成）
+  // 手动路径不直接创建镜像或刮削任务（门面内部分流，工作台展示进度）
   assert.doesNotMatch(confirmPlan, /mirrorApi\.generate|scrapeApi|startTask\(/);
+
+  // 门面内部：confirm API 只出现一次，不再被 draft 状态分支包裹
+  // （confirmed 恢复场景同样调用，由后端幂等/ensure 语义保证安全）
+  const confirmCurrent = page.slice(
+    page.indexOf('const confirmCurrentImport = async ()'),
+    page.indexOf('const confirmPlan = async () => {'),
+  );
+  assert.equal((confirmCurrent.match(/importsApi\.confirm\(/g) || []).length, 1);
+  assert.match(confirmCurrent, /await importsApi\.confirm\(source, activeEntry\.planId\);/);
+  assert.doesNotMatch(confirmCurrent, /if \(preview\.status === 'draft'\)/);
+  // durable 响应挂接已入队/恢复的镜像任务
+  assert.match(confirmCurrent, /setTask\(await tasksApi\.get\(confirmed\.job_id\)\)/);
+  // 确认后刷新预览并进入工作台
+  assert.match(confirmCurrent, /importsApi\.getPreview\(source, activeEntry\.planId\)/);
+  assert.match(confirmCurrent, /updateEntry\(activeEntry\.id, \{ preview: confirmedPreview, status: 'parsed' \}\)/);
+  assert.match(confirmCurrent, /setStep\('workbench'\)/);
+  // 刮削不在此处自动启动（由后端 durable 链或工作台手动启动）
+  assert.doesNotMatch(confirmCurrent, /scrapeApi|startTask\(/);
 });
