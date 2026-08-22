@@ -54,7 +54,7 @@ class FakeTxtAdapter:
             ("动画/作品A/Season 2", "Season 2", "dir", "动画/作品A", None, 8.0),
             ("动画/作品A/OVA", "OVA", "dir", "动画/作品A", None, 9.0),
             # 作品B：仅直属视频（closure 立即）
-            ("动画/作品B/电影B.mkv", "电影B.mkv", "file", "动画/作品B", 500, 10.0),
+            ("动画/作品B/作品B.S01E01.mkv", "作品B.S01E01.mkv", "file", "动画/作品B", 500, 10.0),
             ("动画/作品B", "作品B", "dir", "动画", None, 11.0),
         ]
         return [
@@ -151,7 +151,7 @@ class TestEndToEnd115:
                     ("动画/作品A/Season 1", "Season 1", "dir", "动画/作品A", None, 7.0),
                     ("动画/作品A/Season 2", "Season 2", "dir", "动画/作品A", None, 8.0),
                     ("动画/作品A/OVA", "OVA", "dir", "动画/作品A", None, 9.0),
-                    ("动画/作品B/电影B.mkv", "电影B.mkv", "file", "动画/作品B", 500, 10.0),
+                    ("动画/作品B/作品B.S01E01.mkv", "作品B.S01E01.mkv", "file", "动画/作品B", 500, 10.0),
                     ("动画/作品B", "作品B", "dir", "动画", None, 11.0),
                 ]
                 return [

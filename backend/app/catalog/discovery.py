@@ -43,10 +43,10 @@ def _is_work_structure_child(dirname: str) -> bool:
     # 只有「目录名整体是结构段」（S1/Season/OVA/SPs/番外等）才证明父目录是
     # 作品容器；「作品名+S1-S2+SP+OVA」这类作品容器不是结构子目录，不能作为
     # 父分类层成候选的证据（否则挂载根/分类层会被误判为候选并全量聚合）。
-    # OP&ED 等附属内容目录不是结构段：它既可能挂在单作品容器下，也可能挂在
-    # 系列容器下（如「间谍过家家.S1-S2+剧场版/OP&ED」），不能证明父目录是单
-    # 作品容器——否则系列容器会被误判为作品容器并吞掉所有编号子作品目录。
-    if _is_op_ed_dirname(dirname):
+    # OP&ED/MV合集/PV/CM 等附属内容目录不是结构段：它们既可能挂在单作品容器下，
+    # 也可能挂在系列容器下（如「间谍过家家.S1-S2+剧场版/OP&ED」），不能证明父
+    # 目录是单作品容器——否则系列容器会被误判为作品容器并吞掉所有编号子作品目录。
+    if _is_auxiliary_content_dirname(dirname):
         return False
     return _is_pure_structure_dirname(dirname)
 
@@ -57,6 +57,25 @@ _OP_ED_DIRNAME_RE = re.compile(r"OP[＆&_-]?ED", re.IGNORECASE)
 def _is_op_ed_dirname(dirname: str) -> bool:
     """目录名整体是否为 OP&ED 附属内容目录（OP&ED / OPED / OP_ED）。"""
     return bool(_OP_ED_DIRNAME_RE.fullmatch((dirname or "").strip()))
+
+
+#: 附属内容目录名（识别层 _AUXILIARY_DIR_KEYWORDS 同源，整体匹配才生效）。
+#: 这类目录里的视频只作为附属内容（MV/PV/CM/菜单/预告）处理，本身不是作品，
+#: 不得成为 MediaUnit boundary——否则会生成全 auxiliary/ignored 的「空 revision」，
+#: 让 confirm-root 的“至少一个 generate_strm”校验整体失败（间谍过家家 MV合集 实库回归）。
+_AUXILIARY_CONTENT_DIRNAMES = frozenset({
+    "pv", "pvs", "cm", "cms", "mv", "mvs", "mv合集",
+    "menu", "menus", "trailer", "trailers", "eyecatch",
+    "预告", "菜单", "花絮",
+})
+
+
+def _is_auxiliary_content_dirname(dirname: str) -> bool:
+    """目录名整体是否为附属内容目录（OP&ED/MV合集/PV/CM/MENU/预告/花絮 等）。"""
+    if _is_op_ed_dirname(dirname):
+        return True
+    normalized = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", (dirname or "").strip().lower())
+    return normalized in _AUXILIARY_CONTENT_DIRNAMES
 
 
 #: 目录名整体是否就是一个结构段容器（S1/Season/Specials/SPs/OVA/番外/短篇等）。
@@ -249,10 +268,10 @@ class DiscoveryEngine:
             # 用户选中的 root 本身可以是作品容器（如“飞跃巅峰 内封中字”下直接
             # 是 S1/S2 季目录）：root 有直属视频或结构子目录时也作为候选单元。
             dirname = path.rstrip("/").rsplit("/", 1)[-1]
-            # 只有「目录名整体就是结构段」（S1/Season/OVA/番外等）才不是候选；
-            # 「作品名+S1-S2+SP+OVA」这类作品容器不算结构段，否则整个作品
-            # 不聚合、其 OVA/SP 子目录视频会漏网。
-            if _is_pure_structure_dirname(dirname):
+            # 只有「目录名整体就是结构段」（S1/Season/OVA/番外等）或附属内容目录
+            # （MV合集/PV/CM/OP&ED 等）才不是候选；「作品名+S1-S2+SP+OVA」这类
+            # 作品容器不算结构段，否则整个作品不聚合、其 OVA/SP 子目录视频会漏网。
+            if _is_pure_structure_dirname(dirname) or _is_auxiliary_content_dirname(dirname):
                 return False
             children = catalog_store.list_current_children(self.root_id, path)
             return any(

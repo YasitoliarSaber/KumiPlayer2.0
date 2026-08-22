@@ -409,6 +409,7 @@ class TestSeriesContainerOpEdDoesNotAbsorbSubworks:
             "/K:/115网盘/动画/间谍过家家.S1-S2+剧场版": [
                 ("1.Spy x Family.[S1][Part1].2022", True, None, None),
                 ("4.剧场版：代号白.2023", True, None, None),
+                ("MV合集", True, None, None),
                 ("OP&ED", True, None, None),
             ],
             "/K:/115网盘/动画/间谍过家家.S1-S2+剧场版/1.Spy x Family.[S1][Part1].2022": [
@@ -417,6 +418,9 @@ class TestSeriesContainerOpEdDoesNotAbsorbSubworks:
             "/K:/115网盘/动画/间谍过家家.S1-S2+剧场版/4.剧场版：代号白.2023": [
                 ("[MAI] Spy x Family Code-White [Ma10p_2160p][x265_DTS-HDMA5.1_ass].mkv", False, 100, 1.0),
             ],
+            "/K:/115网盘/动画/间谍过家家.S1-S2+剧场版/MV合集": [
+                ("[MAI] Spy x Family [MV Breeze ~(K)NoW_NAME~][Ma10p_2160p][x265_flac].mkv", False, 100, 1.0),
+            ],
             "/K:/115网盘/动画/间谍过家家.S1-S2+剧场版/OP&ED": [
                 ("[MAI] Spy x Family [NCOP01][Ma10p_2160p][x265_flac].mkv", False, 100, 1.0),
             ],
@@ -424,9 +428,10 @@ class TestSeriesContainerOpEdDoesNotAbsorbSubworks:
         root, engine = _setup_root_pan115(tree)
         results = _run(engine)
         boundaries = {r["boundary"] for r in results}
-        # 编号子作品各自成 boundary，系列容器与 OP&ED 不得成 boundary
+        # 编号子作品各自成 boundary，系列容器与附属内容目录（MV合集/OP&ED）不得成 boundary
         assert any(b.endswith("1.Spy x Family.[S1][Part1].2022") for b in boundaries)
         assert any(b.endswith("4.剧场版：代号白.2023") for b in boundaries)
         assert not any(b.endswith("间谍过家家.S1-S2+剧场版") for b in boundaries)
         assert not any(b.endswith("OP&ED") for b in boundaries)
+        assert not any(b.endswith("MV合集") for b in boundaries)
         assert all(r["status"] == "plan_ready" for r in results if r["boundary"].endswith("4.剧场版：代号白.2023"))
