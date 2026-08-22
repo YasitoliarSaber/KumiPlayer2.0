@@ -317,3 +317,116 @@ class TestSyntheticBoundaryFixture:
         assert ready[0]["video_count"] == 3
         assert "/分类" not in _boundaries(results)
         assert "/分类" not in _boundaries(results, status="needs_review")
+
+
+def _setup_root_pan115(tree, remote_locator="/K:/115网盘"):
+    """Provider TXT（pan115）来源根，含「动画」分类层，贴近真实目录树。"""
+    store.create_source(source_id="pan115-x", source_type="pan115", provider_id="pan115")
+    root = store.create_source_root(source_id="pan115-x", remote_locator=remote_locator)
+    generation = store.bump_generation(root.root_id)
+    scanner = OpenListDirectoryScanner(FakeClient(tree), rate_per_second=0)
+    engine = discovery.DiscoveryEngine(
+        scanner, source_id="pan115-x", root_id=root.root_id, generation=generation
+    )
+    return root, engine
+
+
+class TestVerifiedBoundaryUsesFullPath:
+    """RWK-40 后续：_process_boundary 证据步必须用 root-relative 完整路径，
+    否则 verified 特别篇（番外/OVA）与通用电影目录名拿不到路径上下文，
+    被误判成 needs_review。"""
+
+    def test_steins_gate_spin_off_special_uses_full_path(self):
+        tree = {
+            "/K:/115网盘": [("动画", True, None, None)],
+            "/K:/115网盘/动画": [("命运石之门.S1-S2+剧场版+OVA", True, None, None)],
+            "/K:/115网盘/动画/命运石之门.S1-S2+剧场版+OVA": [
+                ("命运石之门番外：聪明睿智的认知计算.2014", True, None, None)
+            ],
+            "/K:/115网盘/动画/命运石之门.S1-S2+剧场版+OVA/命运石之门番外：聪明睿智的认知计算.2014": [
+                ("[ReinForce] Steins;Gate ~Soumei Eichi no Cognitive Computing(1).mkv", False, 100, 1.0),
+            ],
+        }
+        root, engine = _setup_root_pan115(tree)
+        results = _run(engine)
+        tail = "命运石之门番外：聪明睿智的认知计算.2014"
+        ready = [r["boundary"] for r in results if r["status"] == "plan_ready"]
+        nr = [r["boundary"] for r in results if r["status"] == "needs_review"]
+        assert any(b.endswith(tail) for b in ready)
+        assert not any(b.endswith(tail) for b in nr)
+
+    def test_mob_psycho_reigen_ova_uses_full_path(self):
+        tree = {
+            "/K:/115网盘": [("动画", True, None, None)],
+            "/K:/115网盘/动画": [("灵能百分百.S1-S3+OVA", True, None, None)],
+            "/K:/115网盘/动画/灵能百分百.S1-S3+OVA": [("灵能百分百 I.2016", True, None, None)],
+            "/K:/115网盘/动画/灵能百分百.S1-S3+OVA/灵能百分百 I.2016": [
+                ("[MAI] Mob Psycho 100 [01][Ma10p_2160p][x265_flac_ass].mkv", False, 100, 1.0),
+                ("灵能百分百 I REIGEN.[OVA]", True, None, None),
+            ],
+            "/K:/115网盘/动画/灵能百分百.S1-S3+OVA/灵能百分百 I.2016/灵能百分百 I REIGEN.[OVA]": [
+                ("[MAI] Mob Psycho 100 REIGEN [Ma10p_2160p][x265_flac_aac_ass].mkv", False, 100, 1.0),
+            ],
+        }
+        root, engine = _setup_root_pan115(tree)
+        results = _run(engine)
+        tail = "灵能百分百 I.2016"
+        ready = [r["boundary"] for r in results if r["status"] == "plan_ready"]
+        nr = [r["boundary"] for r in results if r["status"] == "needs_review"]
+        assert any(b.endswith(tail) for b in ready)
+        assert not any(b.endswith(tail) for b in nr)
+
+    def test_generic_movie_dirname_boundary_uses_full_path_context(self):
+        """鬼灭之刃 无限列车 剧场版：boundary 名是通用词「剧场版」，无年份，
+        只有完整路径下 _check_path_context_special 才能匹配 deeper_dirs 里的
+        「剧场版」目录并识别为 movie（否则 needs_review）。"""
+        tree = {
+            "/K:/115网盘": [("动画", True, None, None)],
+            "/K:/115网盘/动画": [("鬼灭之刃系列", True, None, None)],
+            "/K:/115网盘/动画/鬼灭之刃系列": [("2.无限列车篇.[S1.1].2020", True, None, None)],
+            "/K:/115网盘/动画/鬼灭之刃系列/2.无限列车篇.[S1.1].2020": [("剧场版", True, None, None)],
+            "/K:/115网盘/动画/鬼灭之刃系列/2.无限列车篇.[S1.1].2020/剧场版": [
+                ("[MAI] Kimetsu no Yaiba Mugen Ressha-hen [Ma10p_2160p][x265_DTS-HDMA5.1_sup].mkv", False, 100, 1.0),
+            ],
+        }
+        root, engine = _setup_root_pan115(tree)
+        results = _run(engine)
+        tail = "剧场版"
+        ready = [r["boundary"] for r in results if r["status"] == "plan_ready"]
+        nr = [r["boundary"] for r in results if r["status"] == "needs_review"]
+        assert any(b.endswith(tail) for b in ready)
+        assert not any(b.endswith(tail) for b in nr)
+
+
+class TestSeriesContainerOpEdDoesNotAbsorbSubworks:
+    """系列容器（含编号子作品目录 + OP&ED 附属目录）不得被误判为单作品容器，
+    否则会把所有编号子作品吞成一个 unit（间谍过家家.S1-S2+剧场版 实库回归）。"""
+
+    def test_numbered_subworks_split_and_op_ed_is_not_boundary(self):
+        tree = {
+            "/K:/115网盘": [("动画", True, None, None)],
+            "/K:/115网盘/动画": [("间谍过家家.S1-S2+剧场版", True, None, None)],
+            "/K:/115网盘/动画/间谍过家家.S1-S2+剧场版": [
+                ("1.Spy x Family.[S1][Part1].2022", True, None, None),
+                ("4.剧场版：代号白.2023", True, None, None),
+                ("OP&ED", True, None, None),
+            ],
+            "/K:/115网盘/动画/间谍过家家.S1-S2+剧场版/1.Spy x Family.[S1][Part1].2022": [
+                ("[MAI] Spy x Family [01][Ma10p_2160p][x265_flac_ass].mkv", False, 100, 1.0),
+            ],
+            "/K:/115网盘/动画/间谍过家家.S1-S2+剧场版/4.剧场版：代号白.2023": [
+                ("[MAI] Spy x Family Code-White [Ma10p_2160p][x265_DTS-HDMA5.1_ass].mkv", False, 100, 1.0),
+            ],
+            "/K:/115网盘/动画/间谍过家家.S1-S2+剧场版/OP&ED": [
+                ("[MAI] Spy x Family [NCOP01][Ma10p_2160p][x265_flac].mkv", False, 100, 1.0),
+            ],
+        }
+        root, engine = _setup_root_pan115(tree)
+        results = _run(engine)
+        boundaries = {r["boundary"] for r in results}
+        # 编号子作品各自成 boundary，系列容器与 OP&ED 不得成 boundary
+        assert any(b.endswith("1.Spy x Family.[S1][Part1].2022") for b in boundaries)
+        assert any(b.endswith("4.剧场版：代号白.2023") for b in boundaries)
+        assert not any(b.endswith("间谍过家家.S1-S2+剧场版") for b in boundaries)
+        assert not any(b.endswith("OP&ED") for b in boundaries)
+        assert all(r["status"] == "plan_ready" for r in results if r["boundary"].endswith("4.剧场版：代号白.2023"))

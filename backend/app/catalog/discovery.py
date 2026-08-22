@@ -43,7 +43,20 @@ def _is_work_structure_child(dirname: str) -> bool:
     # 只有「目录名整体是结构段」（S1/Season/OVA/SPs/番外等）才证明父目录是
     # 作品容器；「作品名+S1-S2+SP+OVA」这类作品容器不是结构子目录，不能作为
     # 父分类层成候选的证据（否则挂载根/分类层会被误判为候选并全量聚合）。
+    # OP&ED 等附属内容目录不是结构段：它既可能挂在单作品容器下，也可能挂在
+    # 系列容器下（如「间谍过家家.S1-S2+剧场版/OP&ED」），不能证明父目录是单
+    # 作品容器——否则系列容器会被误判为作品容器并吞掉所有编号子作品目录。
+    if _is_op_ed_dirname(dirname):
+        return False
     return _is_pure_structure_dirname(dirname)
+
+
+_OP_ED_DIRNAME_RE = re.compile(r"OP[＆&_-]?ED", re.IGNORECASE)
+
+
+def _is_op_ed_dirname(dirname: str) -> bool:
+    """目录名整体是否为 OP&ED 附属内容目录（OP&ED / OPED / OP_ED）。"""
+    return bool(_OP_ED_DIRNAME_RE.fullmatch((dirname or "").strip()))
 
 
 #: 目录名整体是否就是一个结构段容器（S1/Season/Specials/SPs/OVA/番外/短篇等）。
@@ -379,9 +392,15 @@ class DiscoveryEngine:
         source = self._source_for_root()
         for row in video_rows:
             boundary_name = boundary.rsplit("/", 1)[-1] or boundary
-            relative_to_boundary = _relative_to_root(row["remote_path"], boundary)
+            # 证据步必须与 _process_unit 用同一份 root-relative 完整路径：
+            # boundary-relative（只剩文件名）会丢掉分类层/系列容器名，导致
+            # match_verified_series_special（番外/OVA 归属主系列）与电影兜底识别
+            # 拿不到路径上下文，把「命运石之门番外」「灵能百分百 REIGEN」「无限列车
+            # 剧场版」这类已核验条目误判成 needs_review。work_title 仍由
+            # existing_work_title（boundary 名）兜底，openlist 内容层结构不受影响。
+            relative = _relative_to_root(row["remote_path"], root_path) or row["remote_path"]
             evidence = self.recognize(
-                row["name"], relative_to_boundary or row["remote_path"],
+                row["name"], relative,
                 source=source,
                 existing_work_title=boundary_name if boundary != root_path else "",
             )

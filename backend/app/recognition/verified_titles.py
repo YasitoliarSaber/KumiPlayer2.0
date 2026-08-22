@@ -218,6 +218,9 @@ _VERIFIED_TMDB_BINDINGS = (
     VerifiedTmdbBinding(("剧场总集篇", "孤独摇滚", "re-"), 1129610, "movie", "孤独摇滚 (上)"),
     VerifiedTmdbBinding(("飞跃巅峰 内封中字",), 66931, "tv", "飞跃巅峰!"),
     VerifiedTmdbBinding(("top o nerae",), 66931, "tv", "飞跃巅峰!"),
+    # 「无限列车 + 剧场版」是电影（TMDB 635302），必须放在「鬼灭之刃系列」tv 绑定之前，
+    # 否则会先命中 tv 85937 把剧场版错误绑到 TV 系列。
+    VerifiedTmdbBinding(("无限列车", "剧场版"), 635302, "movie", "鬼灭之刃 无限列车篇 剧场版"),
     VerifiedTmdbBinding(("demon slayer",), 85937, "tv", "鬼灭之刃"),
     VerifiedTmdbBinding(("鬼灭之刃系列",), 85937, "tv", "鬼灭之刃"),
     VerifiedTmdbBinding(("kono subarashii sekai ni shukufuku wo! movie",), 532067, "movie", "为美好的世界献上祝福！红传说"),
@@ -237,6 +240,7 @@ _VERIFIED_TMDB_BINDINGS = (
     VerifiedTmdbBinding(("路人女主", "fine"), 608826, "movie", "路人女主的养成方法 Fine"),
     VerifiedTmdbBinding(("yuru camp movie",), 566466, "movie", "摇曳露营△ 剧场版"),
     VerifiedTmdbBinding(("clannad", "剧场版"), 16516, "movie", "CLANNAD 剧场版"),
+    VerifiedTmdbBinding(("代号白",), 1062807, "movie", "间谍过家家 剧场版 代号白"),
     VerifiedTmdbBinding(("福音战士新剧场版", "序"), 15137, "movie", "福音战士新剧场版：序"),
     VerifiedTmdbBinding(("福音战士新剧场版", "破"), 22843, "movie", "福音战士新剧场版：破"),
 )
