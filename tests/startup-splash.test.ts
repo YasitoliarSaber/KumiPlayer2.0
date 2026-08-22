@@ -55,7 +55,7 @@ test('图标更大：启动首帧图标尺寸不小于 96px', () => {
 
 test('三主题背景直接出现：各自 boot-bg 色值', () => {
   assert.match(html, /html\[data-theme='fluent'\] \{[\s\S]*?--kumi-boot-bg:\s*#eef3f9/);
-  assert.match(html, /html\[data-theme='cinema'\] \{[\s\S]*?--kumi-boot-bg:\s*#080808/);
+  assert.match(html, /html\[data-theme='cinema'\] \{[\s\S]*?--kumi-boot-bg:\s*#0a0a0a/);
   assert.match(html, /html\[data-theme='mica'\] \{[\s\S]*?--kumi-boot-bg:\s*#ffffff/);
 });
 

@@ -298,7 +298,10 @@ test('浏览竞争防护：只有最新请求提交目录状态', () => {
 });
 
 test('来源筛选按作品来源列表过滤（跨来源合并作品可见）', () => {
-  assert.match(libraryStore, /w\.source === activeSource \|\| w\.sources\?\.includes\(activeSource\) === true/);
+  // 六处内联已收敛到 matchesSourceFilter：store 引用 + 工具函数本身实现并集语义
+  assert.match(libraryStore, /matchesSourceFilter\(w, activeSource\)/);
+  const sourceFilterUtil = readFileSync(new URL('../src/utils/sourceFilter.ts', import.meta.url), 'utf8');
+  assert.match(sourceFilterUtil, /work\.source === source \|\| \(work\.sources \|\| \[\]\)\.includes\(source\)/);
 });
 
 test('OpenList 首发禁用新番追更，并说明原因', () => {
