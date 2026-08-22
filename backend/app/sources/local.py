@@ -257,17 +257,24 @@ class LocalScanner(SourceAdapter):
             return DirectoryPage(entries=[], total=0)
         start = (max(1, int(page)) - 1) * per_page
         chunk = entries[start:start + per_page]
-        nodes = [
-            SourceNodeInput(
-                name=item.name,
-                remote_path=(Path(remote_path) / item.name).as_posix(),
-                parent_path=Path(remote_path).as_posix(),
-                kind="dir" if item.is_dir() else "file",
-                size=item.stat().st_size if item.is_file() else None,
-                mtime=item.stat().st_mtime if item.is_file() else None,
-            )
-            for item in chunk
-        ]
+        nodes: list[SourceNodeInput] = []
+        for item in chunk:
+            # 网盘挂载在 scandir 与 stat 之间条目可能消失：跳过单条而非整页 500
+            try:
+                is_dir = item.is_dir()
+                is_file = item.is_file()
+                nodes.append(
+                    SourceNodeInput(
+                        name=item.name,
+                        remote_path=(Path(remote_path) / item.name).as_posix(),
+                        parent_path=Path(remote_path).as_posix(),
+                        kind="dir" if is_dir else "file",
+                        size=item.stat().st_size if is_file else None,
+                        mtime=item.stat().st_mtime if is_file else None,
+                    )
+                )
+            except OSError:
+                continue
         return DirectoryPage(entries=nodes, total=len(entries))
 
     def _walk(

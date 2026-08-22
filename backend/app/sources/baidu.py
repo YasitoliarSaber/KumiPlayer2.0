@@ -19,6 +19,7 @@
 """
 
 import hashlib
+import logging
 import os
 import re
 from datetime import datetime, timedelta, timezone
@@ -150,7 +151,12 @@ class BaiduAdapter(SourceAdapter):
         try:
             text = data.decode("utf-8-sig")
         except UnicodeDecodeError:
+            # GBK 回退的替换符会以乱码文件名进入识别/镜像，必须留下可观测线索
             text = data.decode("gbk", errors="replace")
+            logging.getLogger(__name__).warning(
+                "百度目录树非 UTF-8 编码，GBK 回退产生替换符（文件数约 %d 行）",
+                len(text.splitlines()),
+            )
 
         lines = text.splitlines()
         content_hash = hashlib.md5(data).hexdigest()[:12]

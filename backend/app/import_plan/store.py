@@ -219,11 +219,12 @@ def save_user_override(override: UserOverride) -> None:
 # ============================================================
 
 def save_diff_result(diff_result) -> str:
-    """保存 DiffResult"""
-    diffs_dir = _get_data_dir() / "diffs"
-    diffs_dir.mkdir(parents=True, exist_ok=True)
-    path = diffs_dir / f"{diff_result.diff_id}.json"
-    write_json_atomic(path, asdict(diff_result))
+    """保存 DiffResult（与同文件其余 store 一致持 DATA_WRITE_LOCK）"""
+    with DATA_WRITE_LOCK:
+        diffs_dir = _get_data_dir() / "diffs"
+        diffs_dir.mkdir(parents=True, exist_ok=True)
+        path = diffs_dir / f"{diff_result.diff_id}.json"
+        write_json_atomic(path, asdict(diff_result))
     return str(path)
 
 
