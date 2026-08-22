@@ -68,10 +68,16 @@ fn save_diagnostics(content: String, context: State<'_, RuntimeContext>) -> Resu
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 完整发行包优先使用内置后端；源码目录保留 Python 开发后备链路。
-    let runtime_context = RuntimeContext::discover();
-    let (backend, startup_error) = match start_backend(&runtime_context) {
-        Ok(child) => (child, None),
-        Err(error) => (None, Some(error)),
+    // 身份/token 生成失败与后端启动失败共用同一个启动错误对话框，不 panic。
+    let (runtime_context, backend, startup_error) = match RuntimeContext::discover()
+        .and_then(|context| start_backend(&context).map(|child| (context, child)))
+    {
+        Ok((context, child)) => (context, child, None),
+        Err(error) => (
+            RuntimeContext::fallback_for_error_dialog(),
+            None,
+            Some(error),
+        ),
     };
     let expected_instance = backend
         .as_ref()

@@ -63,6 +63,11 @@ impl Default for RestartTimings {
     }
 }
 
+/// 重启串行锁：显式串行化整个重启序列（停旧→等端口→起新→健康等待），
+/// 不再依赖「同步命令恰好在主线程内联执行」的隐含事实；并发重启会互相
+/// 杀掉对方刚启动的后端。
+static RESTART_LOCK: Mutex<()> = Mutex::new(());
+
 /// 桌面壳当前托管的后端进程（可能没有）。
 pub struct BackendProcess(Mutex<Option<ManagedBackend>>);
 
@@ -225,7 +230,13 @@ impl RuntimeContext {
         &self.api_token
     }
 
-    pub fn discover() -> Self {
+    /// discover 失败（如系统熵源不可用）时的占位身份：仅用于把启动错误
+    /// 送入既有错误对话框流程，随后进程退出，不启动任何后端。
+    pub fn fallback_for_error_dialog() -> Self {
+        Self::new("source", project_root(), "", "")
+    }
+
+    pub fn discover() -> Result<Self, String> {
         let bundled = bundled_backend_path().is_some();
         let kind = if bundled { "bundled" } else { "source" }.to_string();
         let install_root = if bundled {
@@ -241,8 +252,8 @@ impl RuntimeContext {
             .unwrap_or_default()
             .as_nanos();
         let instance_id = format!("{}-{nonce:x}", std::process::id());
-        let api_token = generate_api_token().expect("KumiPlayer 无法生成桌面 API 安全令牌");
-        Self::new(kind, install_root, instance_id, api_token)
+        let api_token = generate_api_token()?;
+        Ok(Self::new(kind, install_root, instance_id, api_token))
     }
 
     fn apply_environment(&self, command: &mut Command, runtime_dir: &Path) {
@@ -351,6 +362,9 @@ pub fn restart_backend_with(
     context: &RuntimeContext,
     supervisor: &dyn BackendSupervisor,
 ) -> Result<(), String> {
+    let _serial = RESTART_LOCK
+        .lock()
+        .map_err(|_| "后端重启锁已中毒".to_string())?;
     let timings = supervisor.timings();
     supervisor.stop(process)?;
 
