@@ -105,6 +105,7 @@ def _load_from_path(path: Path) -> Optional[RawSnapshot]:
             ingest_method=data.get("ingest_method", ""),
             source_route_id=data.get("source_route_id", ""),
             source_root=data.get("source_root", ""),
+            root_container=data.get("root_container", ""),
             import_family=data.get("import_family", ""),
             import_scope=data.get("import_scope", ""),
             created_at=data.get("created_at", ""),
