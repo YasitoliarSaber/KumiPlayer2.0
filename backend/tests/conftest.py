@@ -25,6 +25,31 @@ for _path in (_PROJECT_ROOT, _PROJECT_ROOT / "backend"):
         sys.path.insert(0, _path_text)
 
 
+def _close_db_connections_inside(target: Path) -> None:
+    """关闭数据库文件位于 target 内的全部 SQLite 连接（跨线程）。
+
+    ``get_connection()`` 是 threading.local：``close_connection()`` 只能关闭
+    调用线程自己的连接；TestClient 的 portal 工作线程持有的连接会让
+    Windows 下 rmtree 报 WinError 32。gc 扫描按文件路径归属判定，
+    只关 target 内的连接，不影响其他测试的独立数据库。
+    """
+    import gc
+    import sqlite3
+
+    resolved = str(target.resolve())
+    for obj in gc.get_objects():
+        if not isinstance(obj, sqlite3.Connection):
+            continue
+        try:
+            row = obj.execute("PRAGMA database_list").fetchone()
+            db_file = row[2] if row else ""
+            if db_file and str(Path(db_file).resolve()).startswith(resolved + os.sep):
+                obj.close()
+        except Exception:
+            # 已关闭或异常连接：跳过即可
+            pass
+
+
 def _is_real_data_path(path: Path) -> bool:
     try:
         resolved = path.resolve()
@@ -100,6 +125,8 @@ def isolate_runtime_data(tmp_path, monkeypatch, request):
         )
         if db_inside:
             db_module.close_connection()
+        # 关闭其他线程（TestClient portal 等）持有的 target 内 SQLite 连接
+        _close_db_connections_inside(target)
         result = original_rmtree(path, *args, **kwargs)
         if db_inside:
             db_module._db_path = None
