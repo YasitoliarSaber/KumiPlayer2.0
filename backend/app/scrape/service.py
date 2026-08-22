@@ -1873,6 +1873,14 @@ def _tmdb_image_url(client, file_path: str, size: str) -> str:
     if not file_path:
         return ""
     if re.match(r"^https?://", file_path, flags=re.IGNORECASE):
+        # SSRF/信任边界：完整远程 URL 必须命中受信任 CDN（TMDB/AniList），
+        # 否则不写入镜像/索引（与 assets /remote 代理同一校验规则）。
+        from app.core.url_guard import validate_remote_asset_url
+
+        try:
+            validate_remote_asset_url(file_path)
+        except ValueError:
+            return ""
         return file_path
     builder = getattr(client, "build_image_url", None)
     if callable(builder):

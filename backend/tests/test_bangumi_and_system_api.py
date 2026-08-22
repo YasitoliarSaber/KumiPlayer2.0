@@ -428,3 +428,34 @@ def test_config_persists_poster_size(tmp_path, monkeypatch):
     response = client.get("/api/config")
     assert response.status_code == 200
     assert response.json()["poster_size"] == 220
+
+
+def test_bangumi_image_proxy_rejects_non_whitelisted_host():
+    """SSRF 防护：图片代理仅放行 Bangumi 官方图片域，拒绝内网/任意 URL。"""
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    client = TestClient(app)
+    for raw in (
+        "https://127.0.0.1/secret.jpg",
+        "https://192.168.1.1/pic/x.jpg",
+        "https://evil.example.com/pic/user/x.jpg",
+        "http://lain.bgm.tv/pic/user/x.jpg",  # 非 HTTPS 也不放行
+    ):
+        response = client.get(
+            "/api/integrations/bangumi/avatar", params={"url": raw}
+        )
+        assert response.status_code == 400, f"{raw} 应被拒绝"
+
+
+def test_bangumi_subject_image_proxy_rejects_non_whitelisted_host():
+    """条目图片代理同样拒绝非 Bangumi 官方域（含重定向入口被拒）。"""
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/integrations/bangumi/subject-image",
+        params={"url": "https://evil.example.com/pic/cover/x.jpg"},
+    )
+    assert response.status_code == 400

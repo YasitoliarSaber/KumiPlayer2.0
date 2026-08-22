@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse, Response
 
 from app.core.config import load_config
 from app.core.paths import get_cache_dir, get_data_dir, get_mirror_root
+from app.core.url_guard import validate_remote_asset_url
 from app.library.thumbnails import (
     DEFAULT_THUMBNAIL_WIDTH,
     THUMBNAIL_WIDTHS,
@@ -126,21 +127,8 @@ def get_asset(path: str = Query(..., description="文件路径（绝对路径或
 
 
 def _validate_remote_asset_url(url: str):
-    parsed = urlparse(url)
-    try:
-        port = parsed.port
-    except ValueError as error:
-        raise ValueError("远程图片端口无效") from error
-    if parsed.scheme != "https" or port not in (None, 443) or parsed.username or parsed.password:
-        raise ValueError("远程图片必须使用标准 HTTPS")
-    trusted_path = (
-        parsed.hostname == "image.tmdb.org" and parsed.path.startswith("/t/p/")
-    ) or (
-        parsed.hostname == "s4.anilist.co" and parsed.path.startswith("/file/anilistcdn/")
-    )
-    if not trusted_path:
-        raise ValueError("远程图片地址不在受信任 CDN 范围内")
-    return parsed
+    """兼容别名：共享校验实现位于 :mod:`app.core.url_guard`。"""
+    return validate_remote_asset_url(url)
 
 
 @router.get("/remote")

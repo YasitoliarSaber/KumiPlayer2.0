@@ -292,8 +292,13 @@ def get_cached_subject_image(url: str):
 
 def _cached_remote_image(url: str, cache_name: str, label: str):
     raw_url = unquote(url).strip()
-    if not raw_url.startswith(("http://", "https://")):
-        raise HTTPException(status_code=400, detail=f"{label}地址无效")
+    # SSRF 防护：仅放行 Bangumi 官方图片域（lain.bgm.tv），拒绝其他任意 URL。
+    from app.core.url_guard import validate_bangumi_image_url
+
+    try:
+        validate_bangumi_image_url(raw_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{label}地址不在受信任域名范围内") from exc
     cache_dir = get_cache_dir() / cache_name
     cache_dir.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256(raw_url.encode("utf-8")).hexdigest()[:24]
@@ -303,7 +308,8 @@ def _cached_remote_image(url: str, cache_name: str, label: str):
     path = cache_dir / f"{digest}{suffix}"
     if not path.exists():
         try:
-            response = httpx.get(raw_url, timeout=10, follow_redirects=True)
+            # 拒绝跟随重定向：白名单域内的地址不应跳转到其他主机
+            response = httpx.get(raw_url, timeout=10, follow_redirects=False)
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"{label}下载失败: {exc}") from exc

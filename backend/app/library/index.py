@@ -309,11 +309,11 @@ def _build_work_index(
     clearlogo_path = scrape_info.get("clearlogo_path", "")
 
     # 检查 asset 是否存在。远程图片 URL 是有效展示资源，不走本地 Path 检查。
-    if poster_path and not _is_remote_asset_path(poster_path) and not Path(poster_path).exists():
+    if poster_path and not _trusted_remote_asset_path(poster_path) and not Path(poster_path).exists():
         poster_path = ""
-    if fanart_path and not _is_remote_asset_path(fanart_path) and not Path(fanart_path).exists():
+    if fanart_path and not _trusted_remote_asset_path(fanart_path) and not Path(fanart_path).exists():
         fanart_path = ""
-    if clearlogo_path and not _is_remote_asset_path(clearlogo_path) and not Path(clearlogo_path).exists():
+    if clearlogo_path and not _trusted_remote_asset_path(clearlogo_path) and not Path(clearlogo_path).exists():
         clearlogo_path = ""
 
     # 如果 scrape_map 没有图片，尝试从 target_dir 及同系列目录查找。
@@ -594,11 +594,25 @@ def _is_remote_asset_path(value: str) -> bool:
     return bool(re.match(r"^https?://", value or "", flags=re.IGNORECASE))
 
 
+def _trusted_remote_asset_path(value: str) -> bool:
+    """远程图片 URL 且命中受信任 CDN（TMDB/AniList）才视为有效；
+    本地路径返回 False（由调用方按文件存在性判定）。"""
+    if not _is_remote_asset_path(value):
+        return False
+    from app.core.url_guard import validate_remote_asset_url
+
+    try:
+        validate_remote_asset_url(value)
+        return True
+    except ValueError:
+        return False
+
+
 def _asset_path_available(value: str) -> bool:
     if not value:
         return False
     if _is_remote_asset_path(value):
-        return True
+        return _trusted_remote_asset_path(value)
     return Path(value).exists()
 
 
@@ -958,11 +972,11 @@ def _enrich_season_from_scrape_map(
         season.fanart_path = season.fanart_path or _find_asset_path(str(target_dir), "fanart", asset_index)
         season.clearlogo_path = season.clearlogo_path or _find_asset_path(str(target_dir), "clearlogo", asset_index)
 
-    if season.poster_path and not _is_remote_asset_path(season.poster_path) and not Path(season.poster_path).exists():
+    if season.poster_path and not _trusted_remote_asset_path(season.poster_path) and not Path(season.poster_path).exists():
         season.poster_path = ""
-    if season.fanart_path and not _is_remote_asset_path(season.fanart_path) and not Path(season.fanart_path).exists():
+    if season.fanart_path and not _trusted_remote_asset_path(season.fanart_path) and not Path(season.fanart_path).exists():
         season.fanart_path = ""
-    if season.clearlogo_path and not _is_remote_asset_path(season.clearlogo_path) and not Path(season.clearlogo_path).exists():
+    if season.clearlogo_path and not _trusted_remote_asset_path(season.clearlogo_path) and not Path(season.clearlogo_path).exists():
         season.clearlogo_path = ""
 
     # 没有季级图片时回退到作品卡片图片，但保留季级标题/简介/TMDB 信息。
