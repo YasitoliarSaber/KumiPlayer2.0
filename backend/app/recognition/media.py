@@ -466,18 +466,19 @@ def _clean_work_title(raw: str) -> str:
 
 def _extract_tmdb_hint(text: str) -> tuple[Optional[int], str]:
     """Extract {tmdb-123} / {tmdbid=123} / [tmdbid=123] style hints."""
-    if not text:
+    from app.scrape.tmdb_hint import extract_tmdb_hint
+
+    tmdb_id = extract_tmdb_hint(text)
+    if tmdb_id is None:
         return None, ""
-    m = re.search(r"[\{\[]\s*(tmdb|tmdbid)\s*[-_=：:]?\s*(\d+)\s*[\}\]]", text, re.IGNORECASE)
-    if not m:
-        return None, ""
-    return int(m.group(2)), "tv"
+    return tmdb_id, "tv"
 
 
 def _strip_tmdb_hint(text: str) -> str:
     """Remove TMDB hint braces from display/search titles."""
-    cleaned = re.sub(r"\s*[\{\[]\s*(?:tmdb|tmdbid)\s*[-_=：:]?\s*\d+\s*[\}\]]\s*", " ", text or "", flags=re.IGNORECASE)
-    return " ".join(cleaned.split()).strip()
+    from app.scrape.tmdb_hint import strip_tmdb_hint
+
+    return strip_tmdb_hint(text)
 
 
 def _extract_year(text: str) -> Optional[int]:

@@ -76,15 +76,15 @@ def _clean_scrape_title(title: str, series_group: str = "") -> str:
 
 
 def _strip_tmdb_hint(title: str) -> str:
-    cleaned = re.sub(r"\s*[\{\[]\s*(?:tmdb|tmdbid)\s*[-_=：:]?\s*\d+\s*[\}\]]\s*", " ", title or "", flags=re.IGNORECASE)
-    return " ".join(cleaned.split()).strip()
+    from app.scrape.tmdb_hint import strip_tmdb_hint
+
+    return strip_tmdb_hint(title)
 
 
 def _extract_tmdb_hint(title: str) -> Optional[int]:
-    m = re.search(r"[\{\[]\s*(?:tmdb|tmdbid)\s*[-_=：:]?\s*(\d+)\s*[\}\]]", title or "", flags=re.IGNORECASE)
-    if not m:
-        return None
-    return int(m.group(1))
+    from app.scrape.tmdb_hint import extract_tmdb_hint
+
+    return extract_tmdb_hint(title)
 
 
 def _strip_sequence_prefix(title: str) -> str:

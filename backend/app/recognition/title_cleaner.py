@@ -31,7 +31,6 @@ _RE_BRACKET_TOKEN = re.compile(r"\[([^\]]*)\]")
 # B 86-不存在的战区 -> 86-不存在的战区
 # 仅在单字母后面接数字标题时清理，避免误伤 A Channel / K-ON! 等真实作品名。
 _RE_SINGLE_LETTER_NUMERIC_PREFIX = re.compile(r"^[A-Za-z]\s+(?=\d)")
-_RE_TMDB_HINT = re.compile(r"\s*\{\s*(?:tmdb|tmdbid)\s*[-_:：]?\s*\d+\s*\}\s*", re.IGNORECASE)
 
 # 技术标签关键词（用于过滤方括号 token）
 _TECH_KEYWORDS = {
@@ -185,7 +184,9 @@ def clean_work_title_container(container: str) -> TitleCleanResult:
             applied.append(f"去掉状态词: {word}")
 
     # 1.2 去掉 TMDB ID 提示，ID 本身由识别层作为结构化字段保留。
-    tmdb_cleaned = _RE_TMDB_HINT.sub(" ", cleaned).strip()
+    from app.scrape.tmdb_hint import strip_tmdb_hint
+
+    tmdb_cleaned = strip_tmdb_hint(cleaned)
     if tmdb_cleaned != cleaned:
         cleaned = " ".join(tmdb_cleaned.split())
         applied.append("去掉 TMDB ID 提示")

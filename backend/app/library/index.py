@@ -493,8 +493,9 @@ def _preserve_local_work_title(item: ImportPlanItem) -> bool:
 
 
 def _strip_tmdb_hint(title: str) -> str:
-    cleaned = re.sub(r"\s*[\{\[]\s*(?:tmdb|tmdbid)\s*[-_=：:]?\s*\d+\s*[\}\]]\s*", " ", title or "", flags=re.IGNORECASE)
-    return " ".join(cleaned.split()).strip()
+    from app.scrape.tmdb_hint import strip_tmdb_hint
+
+    return strip_tmdb_hint(title)
 
 
 def _is_main_series_scrape_candidate(info: dict, series_group: str) -> bool:

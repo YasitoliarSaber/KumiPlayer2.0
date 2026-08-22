@@ -402,8 +402,9 @@ def _looks_like_absolute_numbered_tmdb_season(
 
 
 def _normalize_title(value: str) -> str:
-    value = (value or "").casefold()
-    value = re.sub(r"\{?\[?\s*(?:tmdb|tmdbid)\s*[-_=：:]?\s*\d+\s*[\}\]]?", " ", value)
+    from app.scrape.tmdb_hint import strip_tmdb_hint
+
+    value = strip_tmdb_hint((value or "").casefold())
     value = re.sub(r"\b(?:season|s)\s*\d+\b", " ", value)
     value = re.sub(r"第\s*\d+\s*季", " ", value)
     return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", value)

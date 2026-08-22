@@ -1184,8 +1184,9 @@ def _strip_movie_descriptors(title: str) -> str:
 
 
 def _strip_tmdb_hint_text(title: str) -> str:
-    cleaned = re.sub(r"\s*\{\s*(?:tmdb|tmdbid)\s*[-_:：]?\s*\d+\s*\}\s*", " ", title or "", flags=re.IGNORECASE)
-    return " ".join(cleaned.split()).strip()
+    from app.scrape.tmdb_hint import strip_tmdb_hint
+
+    return strip_tmdb_hint(title)
 
 
 def _clean_release_search_title(title: str) -> str:
