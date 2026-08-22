@@ -74,7 +74,7 @@ def test_local_artwork_probe_remote_url_not_probed(tmp_path, monkeypatch):
 
 
 def test_artwork_probe_cache_ttl_expiry(tmp_path, monkeypatch):
-    """TTL 过期后重新探测。"""
+    """未命中不缓存：海报生成后立即可见（无需等 TTL 过期）。"""
     _reset_cache()
     monkeypatch.setattr(service, "_ARTWORK_PROBE_CACHE_TTL_SECONDS", 0.05)
     work_dir = tmp_path / "作品B"
@@ -84,13 +84,13 @@ def test_artwork_probe_cache_ttl_expiry(tmp_path, monkeypatch):
     before = service._local_summary_artwork_path(work, "poster_path")
     assert before == ""
 
-    # 生成 poster 后，缓存未过期（同一对象）仍返回旧结果（可接受）
+    # P0-4 修复：未命中不缓存空结果——海报生成前每次探测都返回空
     cached = service._local_summary_artwork_path(work, "poster_path")
     assert cached == ""
 
-    # 等 TTL 过期后重建对象（新 id）→ 能探测到
-    time.sleep(0.06)
+    # 海报生成后，新对象探测立即可见（不缓存空，无需等 TTL 过期）
     (work_dir / "poster.jpg").write_bytes(b"fake")
     work2 = WorkIndex(work_id="w3", dir_path=str(work_dir))
     after = service._local_summary_artwork_path(work2, "poster_path")
     assert after == str(work_dir / "poster.jpg")
+

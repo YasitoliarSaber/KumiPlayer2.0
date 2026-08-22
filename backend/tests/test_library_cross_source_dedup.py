@@ -96,3 +96,15 @@ def test_different_canonical_not_merged():
     b = _series_work("unit:bbb:main", "pan115", "作品B")
     normalized = _deduplicate_library_works([a, b])
     assert len(normalized) == 2
+
+
+def test_compact_summary_outputs_canonical_work_id():
+    """P0-3 修复回归：compact 序列化必须输出 canonical_work_id 字段，
+    否则前端 deduplicateWorks 拿不到跨来源合并键而回退旧行为不合并。"""
+    from app.library.service import _work_summary_to_dict
+
+    w = _series_work("unit:xyz:main", "pan115", "刀剑神域外传")
+    summary = _work_summary_to_dict(w)
+    assert summary.get("canonical_work_id") == "unit:xyz:main", (
+        "compact 必须输出 canonical_work_id，否则前端跨来源去重失效"
+    )

@@ -1378,7 +1378,9 @@ def _summary_artwork_path(w: WorkIndex, field: str) -> str:
                 break
         if result:
             break
-    _cache_artwork_probe(probe_key, result)
+    # P0-4 修复：只缓存命中结果，未命中不缓存（海报生成后立即可见）
+    if result:
+        _cache_artwork_probe(probe_key, result)
     return result
 
 
@@ -1394,7 +1396,8 @@ def _local_summary_artwork_path(w: WorkIndex, field: str) -> str:
         if Path(work_path).is_file():
             _cache_artwork_probe(probe_key, work_path)
             return work_path
-        _cache_artwork_probe(probe_key, "")
+        # P0-4 修复：未命中不缓存空结果——海报生成后应立即可见，
+        # 缓存空会导致 60s 内海报生成后仍返回空（用户刮完看不到海报）。
         return ""
 
     season_path = next(
@@ -1444,7 +1447,9 @@ def _local_summary_artwork_path(w: WorkIndex, field: str) -> str:
                 break
         if result:
             break
-    _cache_artwork_probe(probe_key, result)
+    # P0-4 修复：只缓存命中结果，未命中不缓存（海报生成后立即可见）
+    if result:
+        _cache_artwork_probe(probe_key, result)
     return result
 
 
@@ -1457,6 +1462,9 @@ def _work_summary_to_dict(w: WorkIndex) -> dict:
     total_episode_count = len(w.episodes)
     return {
         "work_id": w.work_id,
+        # P0-3 修复：compact 必须输出 canonical_work_id，否则前端
+        # deduplicateWorks 拿不到跨来源合并键，回退 source+work_id 不合并。
+        "canonical_work_id": getattr(w, "canonical_work_id", "") or "",
         "title": w.title,
         "original_title": w.original_title,
         "year": w.year,
