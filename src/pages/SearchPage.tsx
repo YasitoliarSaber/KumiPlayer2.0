@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { useLibraryStore } from '../stores/library';
 import { useUiStore } from '../stores/ui';
+import { matchesSourceFilter } from '../utils/sourceFilter';
 import VirtualizedPosterGrid from '../components/library/VirtualizedPosterGrid';
 import LoadingState from '../components/ui/loading-state';
 
@@ -18,7 +19,7 @@ export default function SearchPage() {
     const recentRank = new Map(history.map((item, index) => [item.work_id, index]));
     return works
       .filter((work) => {
-        if (source !== 'all' && work.source !== source) return false;
+        if (!matchesSourceFilter(work, source)) return false;
         const haystack = [
           work.title,
           work.original_title,

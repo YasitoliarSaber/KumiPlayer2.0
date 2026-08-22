@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown, Cloud, FolderOpen, HardDrive, Plus, ScanLine, Square, X } from 'lucide-react';
 import { useLibraryStore } from '../stores/library';
 import { useUiStore, type LibraryView, type SortId } from '../stores/ui';
+import { matchesSourceFilter } from '../utils/sourceFilter';
 import { getSortDimension, getSortOption, sortDimensions, toggleSort } from '../utils/categorySort';
 import { useDismissiblePopover } from '../hooks/useDismissiblePopover';
 import VirtualizedPosterGrid from '../components/library/VirtualizedPosterGrid';
@@ -108,7 +109,7 @@ export default function CategoryPage() {
     if (!activeCategory) return [];
 
     let filtered = works.filter((work) => isWorkInLibraryView(work, activeCategory));
-    if (source !== 'all') filtered = filtered.filter((work) => (work.sources || [work.source]).includes(source));
+    if (source !== 'all') filtered = filtered.filter((work) => matchesSourceFilter(work, source));
 
     const sorted = [...filtered];
     const recentRank = new Map(history.map((item, index) => [item.work_id, index]));

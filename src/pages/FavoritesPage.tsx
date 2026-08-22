@@ -4,6 +4,7 @@ import VirtualizedPosterGrid from '../components/library/VirtualizedPosterGrid';
 import type { WorkIndex } from '../api/types';
 import { useLibraryStore } from '../stores/library';
 import { useUiStore } from '../stores/ui';
+import { matchesSourceFilter } from '../utils/sourceFilter';
 
 export default function FavoritesPage() {
   const works = useLibraryStore((state) => state.works);
@@ -20,7 +21,7 @@ export default function FavoritesPage() {
     return <PageState message={error} />;
   }
 
-  const sourceWorks = source === 'all' ? works : works.filter((work) => work.source === source);
+  const sourceWorks = works.filter((work) => matchesSourceFilter(work, source));
   const favoriteWorks = selectFavoriteWorks(sourceWorks);
   const columnsPerRow = normalizeColumns(posterSize);
 

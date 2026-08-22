@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useLibraryStore } from '../stores/library';
 import { useUiStore, type CategoryKey } from '../stores/ui';
+import { matchesSourceFilter } from '../utils/sourceFilter';
 import PosterCard from '../components/library/PosterCard';
 import LoadingState from '../components/ui/loading-state';
 import type { WorkIndex } from '../api/types';
@@ -34,7 +35,7 @@ export default function HomePage() {
   const [featureTimerKey, setFeatureTimerKey] = useState(0);
 
   const displayWorks = useMemo(
-    () => source === 'all' ? works : works.filter((work) => work.source === source),
+    () => works.filter((work) => matchesSourceFilter(work, source)),
     [source, works],
   );
   const homeDisplayWorks = useMemo(

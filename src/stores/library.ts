@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { libraryApi } from '../api/library'
 import { playbackApi } from '../api/playback'
 import { useUiStore, type SourceId } from './ui'
+import { matchesSourceFilter } from '../utils/sourceFilter'
 import type { WorkIndex, PlaybackHistoryItem } from '../api/types'
 import { mainEpisodeCount } from '../utils/workStats'
 import { isWorkInLibraryView } from '../utils/libraryCategories'
@@ -151,7 +152,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
     if (ui.source !== 'all') {
       const activeSource = ui.source as Exclude<SourceId, 'all'>
-      result = result.filter((w) => w.source === activeSource || w.sources?.includes(activeSource) === true)
+      result = result.filter((w) => matchesSourceFilter(w, activeSource))
     }
 
     if (ui.activeCategory) {

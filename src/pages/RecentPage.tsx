@@ -1,5 +1,6 @@
 import { useLibraryStore } from '../stores/library';
 import { useUiStore } from '../stores/ui';
+import { matchesSourceFilter } from '../utils/sourceFilter';
 import PosterCard from '../components/library/PosterCard';
 import type { PlaybackHistoryItem, WorkIndex } from '../api/types';
 
@@ -26,7 +27,7 @@ export default function RecentPage() {
     );
   }
 
-  const sourceWorks = source === 'all' ? works : works.filter((work) => work.source === source);
+  const sourceWorks = works.filter((work) => matchesSourceFilter(work, source));
   const recentWorks = selectRecentWorks(sourceWorks, history);
   const hasContent = recentWorks.length > 0;
 
