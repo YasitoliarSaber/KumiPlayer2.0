@@ -5497,6 +5497,28 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .media-edit-dialog h2 {
   font-size: 21px;
 }
+.media-edit-source {
+  display: grid;
+  gap: 3px;
+  padding: 9px 11px;
+  margin-top: 10px;
+  border: 1px solid color-mix(in srgb, var(--border) 62%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+}
+.media-edit-source-label {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: .06em;
+}
+.media-edit-source-name { font-size: 13px; overflow-wrap: anywhere; }
+.media-edit-source-path {
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.media-edit-source-size { color: var(--text-secondary); font-size: 12px; }
 
 .media-flow-command-bar,
 .media-flow-section-head,

@@ -163,7 +163,7 @@ export default function MediaBackgroundImportStatus({ batch, source, title, onRe
             <div className="media-background-unit-icon">{isActive(unit) ? <Spinner size="tiny" /> : unit.state === 'completed' ? <CheckCircle2 size={17} /> : unit.state === 'mirrored' ? <Layers3 size={17} /> : unit.state === 'scraping' ? <Sparkles size={17} /> : <CircleAlert size={17} />}</div>
             <div><strong>{unit.work_title}</strong><span>{unitDetail(unit)}</span></div>
             <div className="media-background-unit-actions">
-              {unit.state === 'needs_review' && onReviewUnit && <Button appearance="secondary" size="small" icon={<Wrench size={14} />} onClick={() => onReviewUnit(unit)}>处理识别</Button>}
+              {unit.state === 'needs_review' && onReviewUnit && <Button appearance="primary" size="small" icon={<Wrench size={14} />} onClick={() => onReviewUnit(unit)}>处理识别</Button>}
               {unit.state === 'failed' && onRetryUnit && <Button appearance="secondary" size="small" icon={retryingUnitId === unit.unit_id ? <Spinner size="tiny" /> : <RefreshCw size={14} />} disabled={Boolean(retryingUnitId)} onClick={() => onRetryUnit(unit)}>重试</Button>}
               <span className="media-background-unit-state">{stateLabel[unit.state] || '正在处理'}</span>
             </div>

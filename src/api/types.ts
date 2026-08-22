@@ -291,6 +291,7 @@ export interface ImportPlanItem {
   source: string
   relative_path: string
   real_path: string
+  source_size?: number
   resource_type: 'video' | 'subtitle' | 'nfo' | 'image' | 'font' | 'archive' | 'audio' | 'text' | 'other'
   action: 'generate_strm' | 'ignore' | 'attach_only'
   work_id: string
