@@ -807,7 +807,14 @@ export default function MediaManagementPage() {
     }
   };
 
-  useEffect(() => () => stopOpenlistPolling(), []);
+  useEffect(() => () => {
+    stopOpenlistPolling();
+    // TXT root 进度轮询链同样卸载即停：不清会持续每 1.2s 刷新库直到单元全部 inactive
+    if (txtProgressTimerRef.current !== null) {
+      window.clearTimeout(txtProgressTimerRef.current);
+      txtProgressTimerRef.current = null;
+    }
+  }, []);
 
   // TXT 目录树确认后：轮询 root 级进度，展示作品级镜像/刮削状态（海报墙），
   // 复用 OpenList 的后台观察页组件，不再只跟踪单个 job。

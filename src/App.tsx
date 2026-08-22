@@ -25,7 +25,16 @@ const MediaManagementPage = lazy(() => import('./pages/MediaManagementPage'));
 const FirstRunSetup = lazy(() => import('./pages/FirstRunSetup'));
 
 export default function App() {
-  const { page, query, selectedWorkId, source: activeSource, styleMode, motionMode, appearanceMode, setSeriesCardImageMode, setPosterSize, goManage } = useUiStore();
+  const page = useUiStore((state) => state.page);
+  const query = useUiStore((state) => state.query);
+  const selectedWorkId = useUiStore((state) => state.selectedWorkId);
+  const activeSource = useUiStore((state) => state.source);
+  const styleMode = useUiStore((state) => state.styleMode);
+  const motionMode = useUiStore((state) => state.motionMode);
+  const appearanceMode = useUiStore((state) => state.appearanceMode);
+  const setSeriesCardImageMode = useUiStore((state) => state.setSeriesCardImageMode);
+  const setPosterSize = useUiStore((state) => state.setPosterSize);
+  const goManage = useUiStore((state) => state.goManage);
   const loadLibrary = useLibraryStore((state) => state.loadLibrary);
   const { restoreSession, verifySession } = useBangumiStore();
   const { startHeartbeat, stopHeartbeat, startHealthPolling, stopHealthPolling } = useConnectionStore();

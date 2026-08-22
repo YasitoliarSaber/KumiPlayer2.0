@@ -37,7 +37,7 @@ test('媒体库维护迁入媒体管理并保留按来源同步与安全删除',
   assert.match(maintenance, /deleteLibraryPreview\(selectedSource/);
   assert.match(maintenance, /preview\.source\s*!==\s*selectedSource/);
   assert.match(maintenance, /deleteScopeLabel/);
-  assert.match(app, /source:\s*activeSource/);
+  assert.match(app, /const activeSource = useUiStore\(\(state\) => state\.source\)/);
 });
 
 test('新番扫描提交当前可见范围并允许停止任务', () => {

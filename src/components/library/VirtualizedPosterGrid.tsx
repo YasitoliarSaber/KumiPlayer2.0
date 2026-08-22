@@ -170,9 +170,9 @@ export default function VirtualizedPosterGrid({
     >
       {topSpacer > 0 && <div style={{ height: topSpacer }} aria-hidden="true" />}
       <div className="category-grid">
-        {visible.items.map((work, index) => (
+        {visible.items.map((work) => (
           <PosterCard
-            key={`${work.source}:${work.work_id}:${visible.startRow * effectiveColumns + index}`}
+            key={`${work.source}:${work.work_id}`}
             work={work}
             recentLabel={recentLabel}
             thumbnailWidth={thumbnailWidth}
