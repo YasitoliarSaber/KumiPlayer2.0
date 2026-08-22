@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import { Button, ProgressBar, Spinner } from '@fluentui/react-components';
-import { CheckCircle2, CircleAlert, Layers3, LoaderCircle, RefreshCw, Sparkles, Wrench } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronRight, CircleAlert, Layers3, LoaderCircle, RefreshCw, Sparkles, Wrench } from 'lucide-react';
 import type { BackgroundImportUnit, OpenListImportBatch } from '../../api/openlist';
 import type { MediaWorkflowSource } from '../../stores/mediaWorkflow';
 
@@ -102,6 +103,18 @@ function rootIsCoolingDown(root: OpenListImportBatch['roots'][number]): boolean 
 export default function MediaBackgroundImportStatus({ batch, source, title, onReviewUnit, onRetryUnit, retryingUnitId }: Props) {
   const roots = batch?.roots || [];
   const units = roots.flatMap((root) => root.units || []);
+  // P1-5（问题 4b）：刮削目标排序——正在处理置顶、已完成置底；已完成可折叠。
+  // 默认展开（保持既有测试与用户查看历史一致），用户可手动折叠。
+  const [completedExpanded, setCompletedExpanded] = useState(true);
+  const unitRank = (unit: BackgroundImportUnit): number => {
+    if (isActive(unit)) return 0; // queued/discovering/mirroring/scraping/updating_library
+    if (unit.state === 'needs_review') return 1;
+    if (unit.state === 'failed' || unit.state === 'cancelled') return 2;
+    return 3; // completed/mirrored 置底
+  };
+  const sortedUnits = [...units].sort((a, b) => unitRank(a) - unitRank(b) || (a.unit_id < b.unit_id ? -1 : 1));
+  const completedUnits = sortedUnits.filter((unit) => unitRank(unit) === 3);
+  const activeUnits = sortedUnits.filter((unit) => unitRank(unit) < 3);
   const coolingDown = source === 'openlist' && roots.some(rootIsCoolingDown);
   const active = units.filter(isActive).length + roots.filter((root) => ['queued', 'running', 'pending'].includes(root.job_status || root.status)).length;
   const completed = units.filter((unit) => unit.state === 'completed').length;
@@ -158,17 +171,34 @@ export default function MediaBackgroundImportStatus({ batch, source, title, onRe
         })}
       </ol>
       <section className="media-background-list" aria-label="作品处理列表">
-        {units.length ? units.map((unit) => (
-          <article key={`${unit.unit_id}-${unit.revision_id}`} className={`media-background-unit ${unit.state}`}>
-            <div className="media-background-unit-icon">{isActive(unit) ? <Spinner size="tiny" /> : unit.state === 'completed' ? <CheckCircle2 size={17} /> : unit.state === 'mirrored' ? <Layers3 size={17} /> : unit.state === 'scraping' ? <Sparkles size={17} /> : <CircleAlert size={17} />}</div>
-            <div><strong>{unit.work_title}</strong><span>{unitDetail(unit)}</span></div>
-            <div className="media-background-unit-actions">
-              {unit.state === 'needs_review' && onReviewUnit && <Button appearance="primary" size="small" icon={<Wrench size={14} />} onClick={() => onReviewUnit(unit)}>处理识别</Button>}
-              {unit.state === 'failed' && onRetryUnit && <Button appearance="secondary" size="small" icon={retryingUnitId === unit.unit_id ? <Spinner size="tiny" /> : <RefreshCw size={14} />} disabled={Boolean(retryingUnitId)} onClick={() => onRetryUnit(unit)}>重试</Button>}
-              <span className="media-background-unit-state">{stateLabel[unit.state] || '正在处理'}</span>
-            </div>
-          </article>
-        )) : roots.map((root) => {
+        {units.length ? (<>
+          {activeUnits.map((unit) => (
+            <article key={`${unit.unit_id}-${unit.revision_id}`} className={`media-background-unit ${unit.state}`}>
+              <div className="media-background-unit-icon">{isActive(unit) ? <Spinner size="tiny" /> : unit.state === 'completed' ? <CheckCircle2 size={17} /> : unit.state === 'mirrored' ? <Layers3 size={17} /> : unit.state === 'scraping' ? <Sparkles size={17} /> : <CircleAlert size={17} />}</div>
+              <div><strong>{unit.work_title}</strong><span>{unitDetail(unit)}</span></div>
+              <div className="media-background-unit-actions">
+                {unit.state === 'needs_review' && onReviewUnit && <Button appearance="primary" size="small" icon={<Wrench size={14} />} onClick={() => onReviewUnit(unit)}>处理识别</Button>}
+                {unit.state === 'failed' && onRetryUnit && <Button appearance="secondary" size="small" icon={retryingUnitId === unit.unit_id ? <Spinner size="tiny" /> : <RefreshCw size={14} />} disabled={Boolean(retryingUnitId)} onClick={() => onRetryUnit(unit)}>重试</Button>}
+                <span className="media-background-unit-state">{stateLabel[unit.state] || '正在处理'}</span>
+              </div>
+            </article>
+          ))}
+          {completedUnits.length > 0 && (
+            <button type="button" className="media-background-collapse-toggle" aria-expanded={completedExpanded} onClick={() => setCompletedExpanded((open) => !open)}>
+              {completedExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+              <span>已完成 {completedUnits.length} 项{completedExpanded ? '' : '（点击展开）'}</span>
+            </button>
+          )}
+          {completedExpanded && completedUnits.map((unit) => (
+            <article key={`${unit.unit_id}-${unit.revision_id}`} className={`media-background-unit ${unit.state}`}>
+              <div className="media-background-unit-icon"><CheckCircle2 size={17} /></div>
+              <div><strong>{unit.work_title}</strong><span>{unitDetail(unit)}</span></div>
+              <div className="media-background-unit-actions">
+                <span className="media-background-unit-state">{stateLabel[unit.state] || '已完成'}</span>
+              </div>
+            </article>
+          ))}
+        </>) : roots.map((root) => {
           const rootCoolingDown = source === 'openlist' && rootIsCoolingDown(root);
           return <article key={root.root_id} className={`media-background-unit ${rootCoolingDown ? 'attention' : 'discovering'}`}>
             <div className="media-background-unit-icon">{rootCoolingDown ? <CircleAlert size={17} /> : <Spinner size="tiny" />}</div>

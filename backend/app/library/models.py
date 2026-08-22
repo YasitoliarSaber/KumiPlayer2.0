@@ -75,6 +75,7 @@ class WorkIndex:
     """作品索引条目"""
 
     work_id: str = ""
+    canonical_work_id: str = ""  # 跨来源稳定作品身份（V3 canonical；legacy 为空时 fallback work_id）
     title: str = ""
     original_title: str = ""
     year: Optional[int] = None

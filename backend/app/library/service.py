@@ -3,6 +3,7 @@
 
 import os
 import re
+import time
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -736,7 +737,17 @@ def _deduplicate_library_works(works: list[WorkIndex]) -> list[WorkIndex]:
     order: list[tuple[str, ...]] = []
     for work in works:
         mirror_series_key = _mirror_series_work_identity(work)
-        key = _seasonal_work_identity(work) or mirror_series_key or ("directory", work.source, work.work_id)
+        # P0-3：兜底目录卡键优先使用 canonical_work_id（V3 跨来源稳定身份），
+        # 跨来源合并同一作品（同一 canonical 无论 pan115/baidu/openlist 只留一张卡）；
+        # legacy（无 canonical）才按 source+work_id 兜底保持历史行为。
+        directory_key = None
+        if getattr(work, "canonical_work_id", "") or work.work_id:
+            identity = getattr(work, "canonical_work_id", "") or work.work_id
+            if getattr(work, "canonical_work_id", ""):
+                directory_key = ("directory", identity)
+            else:
+                directory_key = ("directory", work.source, identity)
+        key = _seasonal_work_identity(work) or mirror_series_key or directory_key
         previous = selected.get(key)
         if previous is None:
             selected[key] = deepcopy(work)
@@ -746,6 +757,10 @@ def _deduplicate_library_works(works: list[WorkIndex]) -> list[WorkIndex]:
             selected[key] = _merge_seasonal_works(previous, work)
         elif mirror_series_key is not None:
             selected[key] = _merge_mirror_series_works(previous, work)
+        elif len(key) == 2 and key[0] == "directory":
+            # P0-3：同一 canonical 跨来源命中 → 合并来源（sources/source_locations/
+            # source_episode_counts/episodes），保留完整性更高的主卡身份。
+            selected[key] = _merge_canonical_directory_works(previous, work)
         elif _library_work_completeness(work) >= _library_work_completeness(previous):
             if previous.last_played and not work.last_played:
                 work.last_played = previous.last_played
@@ -837,6 +852,50 @@ def _merge_mirror_series_works(left: WorkIndex, right: WorkIndex) -> WorkIndex:
         if getattr(primary, field):
             setattr(merged, field, deepcopy(getattr(primary, field)))
     merged.rating = primary.rating or merged.rating
+    return merged
+
+
+def _merge_canonical_directory_works(left: WorkIndex, right: WorkIndex) -> WorkIndex:
+    """P0-3：同一 canonical_work_id 跨来源目录卡合并。
+
+    - 保留完整性更高的主卡身份（含 canonical_work_id、work_id、标题、海报等）；
+    - 合并 sources / source_locations / source_episode_counts / episodes / seasons，
+      补齐另一来源的剧集与来源信息；
+    - 不跨 canonical 合并（key 已按 canonical 分组）。
+    """
+    candidates = [left, right]
+    primary = max(candidates, key=_library_work_completeness)
+    other = candidates[1] if candidates[0] is primary else candidates[0]
+    merged = deepcopy(primary)
+    merged.sources = _ordered_sources(
+        (merged.sources or [merged.source])
+        + (other.sources or [other.source])
+        + [episode.source for episode in other.episodes if episode.source]
+    )
+    merged.source_locations = _merge_source_locations(candidates)
+    merged.source_episode_counts = _merge_source_episode_counts(candidates)
+    merged.episodes = _merge_seasonal_episodes(
+        deepcopy(merged.episodes) + deepcopy(other.episodes),
+        merged.work_id,
+    )
+    merged.seasons = _merge_seasonal_seasons(
+        deepcopy(merged.seasons) + deepcopy(other.seasons),
+        merged.episodes,
+    )
+    for season in merged.seasons:
+        season.work_id = merged.work_id
+    merged.last_played = max(
+        filter(None, (merged.last_played, other.last_played)),
+        default=None,
+    )
+    for field in (
+        "title", "original_title", "plot", "poster_path", "fanart_path",
+        "clearlogo_path", "dir_path", "genres", "studios", "cast", "tags",
+    ):
+        if not getattr(merged, field) and getattr(other, field):
+            setattr(merged, field, deepcopy(getattr(other, field)))
+    if not merged.related_works:
+        merged.related_works = deepcopy(other.related_works)
     return merged
 
 
@@ -1242,6 +1301,37 @@ def _library_exception_work_ids() -> set[str]:
     return ids
 
 
+# P0-4：本地 artwork 探测结果短 TTL 缓存（避免每次 compact 对网络盘重复
+# Path.is_file() stat——100 部作品 × 3 字段 × 多次 stat 是滑动卡顿根因之一）。
+# 键 = (对象 id, 字段)；探测 60 秒内缓存命中，同一请求/相邻请求不重复 stat。
+_ARTWORK_PROBE_CACHE_TTL_SECONDS = 60.0
+_artwork_probe_cache: dict[tuple[int, str], tuple[str, float]] = {}
+
+
+def _cached_artwork_probe(key: tuple[int, str]) -> tuple[str, bool]:
+    hit = _artwork_probe_cache.get(key)
+    if hit is None:
+        return "", False
+    result, expires_at = hit
+    if time.monotonic() < expires_at:
+        return result, True
+    _artwork_probe_cache.pop(key, None)
+    return "", False
+
+
+def _cache_artwork_probe(key: tuple[int, str], result: str) -> None:
+    _artwork_probe_cache[key] = (
+        result,
+        time.monotonic() + _ARTWORK_PROBE_CACHE_TTL_SECONDS,
+    )
+    # 缓存总量有界：超 4096 项时清理过期项（防御性，避免对象 id 复用后膨胀）
+    if len(_artwork_probe_cache) > 4096:
+        now = time.monotonic()
+        expired = [k for k, (_, ts) in _artwork_probe_cache.items() if ts <= now]
+        for k in expired:
+            _artwork_probe_cache.pop(k, None)
+
+
 def _summary_artwork_path(w: WorkIndex, field: str) -> str:
     work_path = getattr(w, field, "")
     if work_path:
@@ -1256,6 +1346,10 @@ def _summary_artwork_path(w: WorkIndex, field: str) -> str:
     start = Path(w.dir_path) if w.dir_path else None
     if start is None:
         return ""
+    probe_key = ("dir", id(w), field)
+    cached, ok = _cached_artwork_probe(probe_key)
+    if ok:
+        return cached
     roots = [start]
     name = start.name.casefold()
     if (
@@ -1275,20 +1369,33 @@ def _summary_artwork_path(w: WorkIndex, field: str) -> str:
             "logo.png", "logo.jpg", "logo.webp",
         ),
     }.get(field, ())
+    result = ""
     for root in roots:
         for filename in filenames:
             candidate = root / filename
             if candidate.is_file():
-                return str(candidate)
-    return ""
+                result = str(candidate)
+                break
+        if result:
+            break
+    _cache_artwork_probe(probe_key, result)
+    return result
 
 
 def _local_summary_artwork_path(w: WorkIndex, field: str) -> str:
     """Return an existing local artwork path without replacing the canonical reference."""
     work_path = getattr(w, field, "")
     if work_path and not str(work_path).lower().startswith(("http://", "https://")):
+        # P0-4：work_path 已指本地路径时，探测结果短 TTL 缓存（防重复 stat）
+        probe_key = ("path", id(w), field)
+        cached, ok = _cached_artwork_probe(probe_key)
+        if ok:
+            return cached
         if Path(work_path).is_file():
+            _cache_artwork_probe(probe_key, work_path)
             return work_path
+        _cache_artwork_probe(probe_key, "")
+        return ""
 
     season_path = next(
         (
@@ -1305,6 +1412,10 @@ def _local_summary_artwork_path(w: WorkIndex, field: str) -> str:
     start = Path(w.dir_path) if w.dir_path else None
     if start is None:
         return ""
+    probe_key = ("local-dir", id(w), field)
+    cached, ok = _cached_artwork_probe(probe_key)
+    if ok:
+        return cached
     roots = [start]
     name = start.name.casefold()
     if (
@@ -1324,12 +1435,17 @@ def _local_summary_artwork_path(w: WorkIndex, field: str) -> str:
             "logo.png", "logo.jpg", "logo.webp",
         ),
     }.get(field, ())
+    result = ""
     for root in roots:
         for filename in filenames:
             candidate = root / filename
             if candidate.is_file():
-                return str(candidate)
-    return ""
+                result = str(candidate)
+                break
+        if result:
+            break
+    _cache_artwork_probe(probe_key, result)
+    return result
 
 
 def _work_summary_to_dict(w: WorkIndex) -> dict:

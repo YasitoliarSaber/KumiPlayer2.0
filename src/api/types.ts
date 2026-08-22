@@ -65,6 +65,7 @@ export interface SourceSummary {
 
 export interface WorkIndex {
   work_id: string
+  canonical_work_id?: string
   title: string
   original_title: string
   title_provenance?: 'manual' | 'nfo' | 'online'

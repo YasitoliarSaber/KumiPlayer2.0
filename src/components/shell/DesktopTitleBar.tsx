@@ -6,11 +6,12 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useUiStore, type SourceId } from '../../stores/ui';
 import { useLibraryStore } from '../../stores/library';
 
+// P1-1：OpenList 是连接方式（ingest_method），不是与 115/百度/本地同级的
+// 媒体来源，不进入侧栏来源筛选下拉（用户 2026-08-22 明确）。
 const sourceOptions: Array<{ value: SourceId; label: string }> = [
   { value: 'all', label: '全部来源' },
   { value: 'pan115', label: '115 网盘' },
   { value: 'baidu', label: '百度网盘' },
-  { value: 'openlist', label: 'OpenList 连接' },
   { value: 'local', label: '本地' },
 ];
 

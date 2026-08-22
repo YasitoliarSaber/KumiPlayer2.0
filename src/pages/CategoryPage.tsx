@@ -59,13 +59,12 @@ export default function CategoryPage() {
   const loading = useLibraryStore((state) => state.loading);
   const error = useLibraryStore((state) => state.error);
   const loadLibrary = useLibraryStore((state) => state.loadLibrary);
-  const {
-    activeCategory,
-    source,
-    sort,
-    setSort,
-    posterSize,
-  } = useUiStore();
+  // P0-5：字段选择器订阅（避免 UI store 任意字段变化触发整页重渲染）
+  const activeCategory = useUiStore((state) => state.activeCategory);
+  const source = useUiStore((state) => state.source);
+  const sort = useUiStore((state) => state.sort);
+  const setSort = useUiStore((state) => state.setSort);
+  const posterSize = useUiStore((state) => state.posterSize);
   const [sortOpen, setSortOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -233,6 +232,12 @@ export default function CategoryPage() {
     let timer: number | undefined;
 
     const recoverActiveTrackingTask = async () => {
+      // P0-6：后台标签页不轮询（避免不可见时持续刷网络请求拖慢前台滚动）
+      const visible = typeof document === 'undefined' || document.visibilityState === 'visible';
+      if (!visible) {
+        if (!disposed) timer = window.setTimeout(recoverActiveTrackingTask, 15_000);
+        return;
+      }
       try {
         const response = await tasksApi.list({ type_prefix: 'tracking_', limit: 20 });
         const latestImportTask = response.tasks.find((task) => task.task_type === 'tracking_import_root');
@@ -269,7 +274,11 @@ export default function CategoryPage() {
       } catch {
         // 后端短暂不可用时保留当前任务按钮，下次轮询继续恢复。
       } finally {
-        if (!disposed) timer = window.setTimeout(recoverActiveTrackingTask, 1500);
+        if (!disposed) {
+          // P0-6：有活跃任务时高频恢复，空闲时降频减少无效请求
+          const idle = !recoveredScanTaskIdRef.current;
+          timer = window.setTimeout(recoverActiveTrackingTask, idle ? 15_000 : 1500);
+        }
       }
     };
 

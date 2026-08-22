@@ -122,7 +122,10 @@ async function waitForDetailArtwork(work: WorkIndex, timeoutMs: number) {
 function deduplicateWorks(works: WorkIndex[]) {
   const selected = new Map<string, WorkIndex>()
   for (const work of works) {
-    const key = `${work.source}:${work.work_id}`
+    // P0-3：优先用 canonical_work_id（V3 跨来源稳定身份）去重；legacy 数据无
+    // canonical 时回退 source+work_id 保持历史行为。
+    const identity = work.canonical_work_id || work.work_id
+    const key = work.canonical_work_id ? identity : `${work.source}:${identity}`
     const previous = selected.get(key)
     if (!previous || workCompleteness(work) >= workCompleteness(previous)) {
       selected.set(key, work)

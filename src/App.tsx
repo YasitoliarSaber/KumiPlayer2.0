@@ -88,14 +88,23 @@ export default function App() {
   useEffect(() => {
     if (!appConfig?.setup_completed) return undefined;
     let disposed = false;
+    let timer = 0;
     scrapeWatcherStartedAtRef.current = Date.now();
 
     const refreshAfterCompletedScrape = async () => {
+      // P0-6：后台标签页不轮询（不可见时避免无效网络请求拖慢前台滚动）
+      const visible = typeof document === 'undefined' || document.visibilityState === 'visible';
+      if (!visible) {
+        if (!disposed) timer = window.setTimeout(refreshAfterCompletedScrape, 30_000);
+        return;
+      }
+      let hasActiveScrape = false;
       try {
         const payload = await tasksApi.list({ type_prefix: 'scrape_', limit: 12 });
         if (disposed) return;
         const tasks = payload.tasks || [];
         const activeTasks = tasks.filter((task) => task.status === 'pending' || task.status === 'running');
+        hasActiveScrape = activeTasks.length > 0;
         for (const task of activeTasks) {
           observedActiveScrapeTaskIdsRef.current.add(task.task_id);
         }
@@ -129,17 +138,19 @@ export default function App() {
         }
       } catch {
         // 后台任务轮询不能阻断主界面；媒体管理页仍会显示更具体的任务错误。
+      } finally {
+        if (!disposed) {
+          // P0-6：有活跃刮削任务时高频轮询，空闲时降频减少无效请求
+          timer = window.setTimeout(refreshAfterCompletedScrape, hasActiveScrape ? 4000 : 30_000);
+        }
       }
     };
 
     void refreshAfterCompletedScrape();
-    const timer = window.setInterval(() => {
-      void refreshAfterCompletedScrape();
-    }, 4000);
 
     return () => {
       disposed = true;
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
     };
   }, [appConfig?.setup_completed, loadLibrary]);
 

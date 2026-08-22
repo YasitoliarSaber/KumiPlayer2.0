@@ -30,7 +30,8 @@ export default function VirtualizedPosterGrid({
   localArtworkOnly = false,
 }: VirtualizedPosterGridProps) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
-  const { seriesCardImageMode } = useUiStore();
+  // P0-5：字段选择器订阅（避免 UI store 其他字段变化触发网格重渲染）
+  const seriesCardImageMode = useUiStore((state) => state.seriesCardImageMode);
   const requestedColumns = Math.max(1, Math.round(columns || 1));
   const [effectiveColumns, setEffectiveColumns] = useState(requestedColumns);
   const [layout, setLayout] = useState({

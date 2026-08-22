@@ -243,7 +243,9 @@ test('失败、取消、完成三种终态都有独立可读 UI', () => {
 });
 
 test('顶部来源筛选与详情页来源标签使用统一 OpenList 名称', () => {
-  assert.match(titleBar, /\{ value: 'openlist', label: 'OpenList 连接' \}/);
+  // P1-1：OpenList 是连接方式（ingest_method），不是与 115/百度/本地同级的
+  // 媒体来源，侧栏来源筛选下拉不再提供 OpenList 选项（用户 2026-08-22 明确）。
+  assert.doesNotMatch(titleBar, /\{ value: 'openlist', label: 'OpenList 连接' \}/);
   assert.match(workDetailPage, /openlist: 'OpenList 连接'/);
   assert.match(workDetailPage, /priority = \{ pan115: 0, baidu: 1, local: 2, openlist: 3 \}/);
   assert.match(maintenancePanel, /openlist: 'OpenList 连接'/);

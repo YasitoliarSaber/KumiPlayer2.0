@@ -157,7 +157,6 @@ export default function MediaManagementPage() {
   const refreshedWorkflowTaskRef = useRef('');
   const taskStartInFlightRef = useRef(false);
   const autoAdvanceScrapeRef = useRef('');
-  const autoPipelineEntryRef = useRef('');
   const refreshedPresetScrapeTaskIdsRef = useRef<Set<string>>(new Set());
   const deletePreviewAbortRef = useRef<AbortController | null>(null);
   const treeUploadRef = useRef<HTMLInputElement>(null);
@@ -328,27 +327,9 @@ export default function MediaManagementPage() {
     return () => window.clearInterval(timer);
   }, [task?.task_id, activeTask]);
 
-  useEffect(() => {
-    if (source === 'local' || source === 'openlist') return;
-    if (step !== 'confirm' || !activeEntry?.planId || !activeEntry.preview || activeTask) return;
-    if (activeEntry.pathValidation?.ok === false) return;
-    if (activeEntry.preview.issues.some((issue) => issue.level === 'error')) return;
-    // RWK-38（P0-3）：baseline 失败/未完成 → 自动 pipeline 绝不运行、绝不回退 legacy
-    if (activeEntry.confirmationBlocked) return;
-    const pipelineKey = `${source}:${activeEntry.planId}:${activeEntry.confirmationRootId ?? ''}:${activeEntry.confirmationGeneration ?? ''}`;
-    if (autoPipelineEntryRef.current === pipelineKey) return;
-    autoPipelineEntryRef.current = pipelineKey;
-    void (async () => {
-      try {
-        // RWK-38：唯一确认入口（durable_root → confirmRoot(root, generation)；
-        // 其余 → 幂等确认门面）。成功会 setStep('workbench')，effect 不再重入。
-        await confirmCurrentImport();
-      } catch (error) {
-        autoPipelineEntryRef.current = '';
-        setActionError(`自动处理未能继续：${(error as Error).message}。你仍可在此页处理识别结果后重试。`);
-      }
-    })();
-  }, [activeEntry?.confirmationBlocked, activeEntry?.confirmationGeneration, activeEntry?.confirmationRootId, activeEntry?.id, activeEntry?.pathValidation?.ok, activeEntry?.planId, activeEntry?.preview, activeTask, setStep, source, step]);
+  // P1-3（问题 4c）：移除"确认计划"自动推进 effect——进入确认步骤后由用户手动
+  // 点"确认并继续"（confirmPlan）才进入刮削，避免确认计划界面闪一下直接跳走。
+  // 确认动作统一走 confirmCurrentImport 幂等门面（RWK-38 分流逻辑保持不变）。
 
   useEffect(() => {
     if (taskKind !== 'mirror' || !isMirrorTaskReady(task) || !task || !activeEntry?.planId) return;
@@ -1761,6 +1742,8 @@ export default function MediaManagementPage() {
   const confirmPlan = async () => {
     if (!activeEntry?.planId || !preview || activeEntry.pathValidation?.ok === false) return;
     if (preview.status !== 'draft' && preview.status !== 'confirmed') return;
+    // RWK-38：baseline 失败/未完成 → 手动确认同样拒绝，绝不回退 legacy
+    if (activeEntry.confirmationBlocked) return;
     await confirmCurrentImport();
   };
 
