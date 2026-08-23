@@ -265,6 +265,20 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         )
         """,
         """
+        CREATE TABLE scrape_bindings (
+            binding_id TEXT PRIMARY KEY,
+            revision_id TEXT NOT NULL REFERENCES import_revisions(revision_id) ON DELETE CASCADE,
+            work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE CASCADE,
+            provider TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'confirmed',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(revision_id, work_id, provider)
+        )
+        """,
+        """
         CREATE TABLE jobs (
             job_id TEXT PRIMARY KEY,
             job_type TEXT NOT NULL,
