@@ -112,6 +112,7 @@ def test_openlist_scan_recursively_emits_the_same_source_evidence_contract(tmp_p
             return OpenListDirPage(entries=entries[path], total=len(entries[path]))
 
     mount = tmp_path / "mount"
+    directories = {}
     _scan_id, evidence = scan_openlist_directory(
         FakeClient(),
         remote_root="/Anime",
@@ -119,6 +120,7 @@ def test_openlist_scan_recursively_emits_the_same_source_evidence_contract(tmp_p
         mount_root=str(mount),
         root_id="root-openlist",
         default_provider="openlist",
+        directory_observations=directories,
     )
 
     assert [item.relative_path for item in evidence] == ["Show/Season 1/Show.S01E01.mkv"]
@@ -127,3 +129,4 @@ def test_openlist_scan_recursively_emits_the_same_source_evidence_contract(tmp_p
     assert evidence[0].playback_locator == str(
         mount / "Anime" / "Show" / "Season 1" / "Show.S01E01.mkv"
     )
+    assert set(directories) == {"", "Show", "Show/Season 1"}

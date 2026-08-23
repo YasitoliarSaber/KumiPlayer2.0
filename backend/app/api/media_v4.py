@@ -3,21 +3,32 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.core.config import load_config, resolve_openlist_credentials
 from app.core.paths import get_data_dir
+from app.integrations.openlist.client import normalize_remote_path
 from app.integrations.openlist.models import OpenListError
 from app.media_v4.jobs.runner import V4JobRunner
 from app.media_v4.jobs.scrape import V4ScrapeService
 from app.media_v4.parsing.parser import V4Parser
 from app.media_v4.persistence.database import V4Database
+from app.media_v4.persistence.repositories import V4Repository
 from app.media_v4.playback.store import V4PlaybackStore
 from app.media_v4.projection.library import V4LibraryProjection
 from app.media_v4.revisions.service import RevisionBlockedError, V4RevisionService
 from app.media_v4.sources.adapters import SourceEntry, to_source_evidence
+from app.media_v4.sources.incremental import (
+    activate_scan_state,
+    build_full_scan_state,
+    build_tree_baseline_state,
+    load_active_state,
+    scan_openlist_incremental,
+    stage_scan_state,
+)
 from app.media_v4.sources.scanner import (
     openlist_root_id,
     parse_directory_tree_file,
@@ -82,11 +93,12 @@ class TrackingStateRequest(BaseModel):
 
 
 class SourceScanRequest(BaseModel):
-    source: str = "local"
+    source: Literal["local", "tree", "openlist", "hybrid"] = "local"
     root_path: str = ""
     tree_file: str = ""
     provider: str = "local"
     source_root: str = ""
+    scan_mode: Literal["auto", "full"] = "auto"
 
 
 class OverrideRequest(BaseModel):
@@ -139,13 +151,52 @@ def _make_entries(request: PreviewRequest):
     ]
 
 
+def _confirmed_source_evidence(root_id: str):
+    """读取来源根当前 confirmed revision 的完整证据快照。"""
+
+    database = get_database()
+    return V4Repository(database).list_confirmed_source_evidence(root_id)
+
+
 @router.post("/sources/scan")
 def scan_source(request: SourceScanRequest):
-    if request.source != "openlist" and not request.tree_file and not request.root_path.strip():
-        raise HTTPException(status_code=400, detail="来源路径不能为空")
+    if request.source == "local" and not request.root_path.strip():
+        raise HTTPException(status_code=400, detail="本地媒体目录不能为空")
+    if request.source in {"tree", "hybrid"} and not request.tree_file:
+        detail = "目录树 + OpenList 增量需要先选择 TXT 基线文件" if request.source == "hybrid" else "目录树 TXT 文件不能为空"
+        raise HTTPException(status_code=400, detail=detail)
     try:
+        effective_scan_mode: str = request.source
+        scan_stats: dict[str, int] = {}
         content_provider = request.provider if request.provider in {"local", "pan115", "baidu"} else "unknown"
-        if request.tree_file:
+        if request.source == "hybrid":
+            effective_scan_mode = "tree_baseline"
+            from app.api.openlist_v4 import _remote_root
+            from app.integrations.openlist.providers import derive_local_path
+
+            config = load_config()
+            username, _password, credential_state = resolve_openlist_credentials()
+            if credential_state == "unavailable":
+                raise HTTPException(status_code=503, detail="本机凭据管理器暂时不可用，请稍后重试")
+            if not config.openlist_server_url or not username:
+                raise HTTPException(status_code=400, detail="请先在设置页完成 OpenList 连接配置")
+            remote_root = normalize_remote_path(request.root_path.strip() or _remote_root(config))
+            root_id = openlist_root_id(config.openlist_server_url, username, remote_root)
+            local_root = request.source_root.strip()
+            if not local_root and config.openlist_mount_root:
+                local_root = derive_local_path(config.openlist_mount_root, _remote_root(config), remote_root)
+            scan_id, evidence = parse_directory_tree_file(
+                request.tree_file,
+                root_id=root_id,
+                provider=content_provider,
+                source_root=local_root,
+            )
+            stage_scan_state(
+                scan_id,
+                build_tree_baseline_state(root_id, remote_root, evidence),
+            )
+        elif request.source == "tree":
+            effective_scan_mode = "tree_snapshot"
             root_id = tree_root_id(request.provider, request.source_root, request.tree_file)
             scan_id, evidence = parse_directory_tree_file(
                 request.tree_file,
@@ -162,17 +213,41 @@ def scan_source(request: SourceScanRequest):
                 raise HTTPException(status_code=503, detail="本机凭据管理器暂时不可用，请稍后重试")
             if not config.openlist_mount_root:
                 raise HTTPException(status_code=409, detail="OpenList 导入需要先配置本地挂载根，才能建立可播放 Asset")
-            remote_root = request.root_path.strip() or _remote_root(config)
+            remote_root = normalize_remote_path(request.root_path.strip() or _remote_root(config))
             root_id = openlist_root_id(config.openlist_server_url, username, remote_root)
-            scan_id, evidence = scan_openlist_directory(
-                _client(config),
-                remote_root=remote_root,
-                mapping_root=_remote_root(config),
-                mount_root=config.openlist_mount_root,
-                root_id=root_id,
-                default_provider=content_provider,
-                routes=_configured_routes(config),
-            )
+            baseline = _confirmed_source_evidence(root_id)
+            state = load_active_state(root_id)
+            if request.scan_mode != "full" and baseline:
+                if not state or state.get("remote_root") != remote_root:
+                    state = build_tree_baseline_state(root_id, remote_root, baseline)
+                effective_scan_mode = "incremental"
+                scan_id, evidence, next_state, scan_stats = scan_openlist_incremental(
+                    _client(config),
+                    baseline=baseline,
+                    state=state,
+                    mapping_root=_remote_root(config),
+                    mount_root=config.openlist_mount_root,
+                    default_provider=content_provider,
+                    routes=_configured_routes(config),
+                )
+                stage_scan_state(scan_id, next_state)
+            else:
+                effective_scan_mode = "full"
+                directory_observations: dict[str, float | None] = {}
+                scan_id, evidence = scan_openlist_directory(
+                    _client(config),
+                    remote_root=remote_root,
+                    mapping_root=_remote_root(config),
+                    mount_root=config.openlist_mount_root,
+                    root_id=root_id,
+                    default_provider=content_provider,
+                    routes=_configured_routes(config),
+                    directory_observations=directory_observations,
+                )
+                stage_scan_state(
+                    scan_id,
+                    build_full_scan_state(root_id, remote_root, directory_observations),
+                )
         else:
             root_id, scan_id, evidence = scan_local_directory(request.root_path)
     except (FileNotFoundError, NotADirectoryError, OSError, OpenListError, ValueError) as exc:
@@ -181,6 +256,8 @@ def scan_source(request: SourceScanRequest):
         "root_id": root_id,
         "scan_id": scan_id,
         "entries": [asdict(item) for item in evidence],
+        "scan_mode": effective_scan_mode,
+        "scan_stats": scan_stats,
     }
 
 
@@ -211,13 +288,25 @@ def preview(request: PreviewRequest):
 
 @router.post("/imports/{revision_id}/confirm")
 def confirm(revision_id: str):
-    service = V4RevisionService(get_database())
+    database = get_database()
+    service = V4RevisionService(database)
     try:
         service.confirm(revision_id)
     except (RevisionBlockedError, ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"revision 不存在: {revision_id}") from exc
+    with database.connect() as conn:
+        row = conn.execute(
+            "SELECT scan_id FROM import_revisions WHERE revision_id = ?",
+            (revision_id,),
+        ).fetchone()
+    if row is not None:
+        try:
+            activate_scan_state(row["scan_id"])
+        except OSError:
+            # 检查点是可重建的扫描加速数据，发布失败不能反转已确认 revision。
+            pass
     return {
         "revision_id": revision_id,
         "status": service.get_status(revision_id),

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -37,6 +40,10 @@ def _payload(revision_id: str = "rev-api"):
 
 def test_preview_confirm_and_library_use_revision_work_and_job_identities(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
+    from app.api import media_v4
+
+    activated_scan_ids = []
+    monkeypatch.setattr(media_v4, "activate_scan_state", activated_scan_ids.append)
 
     preview = client.post("/api/v4/imports/preview", json=_payload())
     assert preview.status_code == 200, preview.text
@@ -50,6 +57,10 @@ def test_preview_confirm_and_library_use_revision_work_and_job_identities(tmp_pa
     assert confirmed.status_code == 200, confirmed.text
     assert confirmed.json()["status"] == "confirmed"
     assert all("job_id" in job for job in confirmed.json()["jobs"])
+    assert activated_scan_ids == ["scan-api"]
+
+    confirmed_evidence = media_v4._confirmed_source_evidence("root-api")
+    assert [item.relative_path for item in confirmed_evidence] == ["Show/Show.S01E01.mkv"]
 
     library = client.get("/api/v4/library")
     assert library.status_code == 200, library.text
@@ -67,6 +78,88 @@ def test_preview_with_unknown_title_returns_review_issue_and_confirm_conflict(tm
 
     confirmed = client.post("/api/v4/imports/rev-review/confirm")
     assert confirmed.status_code == 409
+
+
+def test_hybrid_tree_scan_reuses_the_openlist_root_identity(tmp_path, monkeypatch):
+    from app.api import media_v4
+    from app.media_v4.sources.scanner import openlist_root_id
+
+    tree = tmp_path / "anime-tree.txt"
+    tree.write_text("Show/Show.S01E01.mkv\n", encoding="utf-8")
+    config = SimpleNamespace(
+        openlist_server_url="https://openlist.example.test",
+        openlist_remote_root="/",
+        openlist_mount_root="",
+    )
+    monkeypatch.setattr(media_v4, "load_config", lambda: config)
+    monkeypatch.setattr(
+        media_v4,
+        "resolve_openlist_credentials",
+        lambda: ("kumi", "secret", "available"),
+    )
+    monkeypatch.setattr(media_v4, "stage_scan_state", lambda _scan_id, _state: None)
+
+    result = media_v4.scan_source(media_v4.SourceScanRequest(
+        source="hybrid",
+        root_path="/Anime",
+        tree_file=str(tree),
+        provider="pan115",
+    ))
+
+    assert result["root_id"] == openlist_root_id(
+        config.openlist_server_url,
+        "kumi",
+        "/Anime",
+    )
+    assert result["entries"][0]["ingest_method"] == "directory_tree"
+    assert result["entries"][0]["relative_path"] == "Show/Show.S01E01.mkv"
+
+
+def test_openlist_auto_scan_rebuilds_missing_checkpoint_from_confirmed_revision(monkeypatch):
+    from app.api import media_v4, openlist_v4
+    from app.media_v4.sources.adapters import SourceEntry, to_source_evidence
+    from app.media_v4.sources.scanner import openlist_root_id
+
+    config = SimpleNamespace(
+        openlist_server_url="https://openlist.example.test",
+        openlist_remote_root="/",
+        openlist_mount_root="X:\\OpenList",
+        openlist_routes=[],
+    )
+    root_id = openlist_root_id(config.openlist_server_url, "kumi", "/Anime")
+    baseline = [to_source_evidence(SourceEntry(
+        root_id=root_id,
+        scan_id="scan-confirmed",
+        provider="pan115",
+        ingest_method="directory_tree",
+        relative_path="Show/Show.S01E01.mkv",
+    ))]
+    captured = {}
+
+    monkeypatch.setattr(media_v4, "load_config", lambda: config)
+    monkeypatch.setattr(media_v4, "resolve_openlist_credentials", lambda: ("kumi", "secret", "available"))
+    monkeypatch.setattr(media_v4, "_confirmed_source_evidence", lambda _root_id: baseline)
+    monkeypatch.setattr(media_v4, "load_active_state", lambda _root_id: None)
+    monkeypatch.setattr(openlist_v4, "_client", lambda _config: object())
+    monkeypatch.setattr(media_v4, "scan_openlist_directory", lambda *_args, **_kwargs: pytest.fail("不应退回全量扫描"))
+
+    def fake_incremental(_client, **kwargs):
+        captured["state"] = kwargs["state"]
+        return "scan-incremental", baseline, kwargs["state"], {"requested_directories": 1}
+
+    monkeypatch.setattr(media_v4, "scan_openlist_incremental", fake_incremental)
+    monkeypatch.setattr(media_v4, "stage_scan_state", lambda scan_id, _state: captured.setdefault("scan_id", scan_id))
+
+    result = media_v4.scan_source(media_v4.SourceScanRequest(
+        source="openlist",
+        root_path="/Anime",
+        provider="pan115",
+    ))
+
+    assert result["scan_mode"] == "incremental"
+    assert captured["scan_id"] == "scan-incremental"
+    assert captured["state"]["remote_verified"] is False
+    assert captured["state"]["root_id"] == root_id
 
 
 def test_playback_and_tracking_are_user_state_endpoints(tmp_path, monkeypatch):

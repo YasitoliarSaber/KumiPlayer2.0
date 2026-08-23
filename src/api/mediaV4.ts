@@ -85,7 +85,14 @@ export const mediaV4Api = {
     tree_file?: string
     provider?: string
     source_root?: string
-  }) => api.post<{ root_id: string; scan_id: string; entries: V4SourceEvidence[] }>('/api/v4/sources/scan', request),
+    scan_mode?: 'auto' | 'full'
+  }) => api.post<{
+    root_id: string
+    scan_id: string
+    entries: V4SourceEvidence[]
+    scan_mode?: 'local' | 'tree_snapshot' | 'tree_baseline' | 'incremental' | 'full'
+    scan_stats?: { requested_directories?: number; rolling_verified?: number; changed_directories?: number }
+  }>('/api/v4/sources/scan', request),
 
   preview: (request: {
     revision_id: string

@@ -189,6 +189,7 @@ def scan_openlist_directory(
     routes: list[OpenListRouteConfig] | None = None,
     max_entries: int = 20_000,
     max_depth: int = 32,
+    directory_observations: dict[str, float | None] | None = None,
 ) -> tuple[str, list]:
     """递归枚举 OpenList，并只输出统一的不可变 SourceEvidence。"""
 
@@ -200,6 +201,8 @@ def scan_openlist_directory(
     seen_directories: set[str] = set()
     observed_entries = 0
     route_configs = routes or []
+    if directory_observations is not None:
+        directory_observations[""] = None
 
     while queue:
         directory, depth = queue.pop(0)
@@ -217,6 +220,10 @@ def scan_openlist_directory(
                     raise OpenListScanLimitExceeded()
                 remote_path = normalize_remote_path(item.remote_path)
                 if item.is_dir:
+                    if directory_observations is not None:
+                        directory_observations[
+                            PurePosixPath(remote_path).relative_to(PurePosixPath(selected_root)).as_posix()
+                        ] = item.modified
                     queue.append((remote_path, depth + 1))
                     continue
                 if Path(item.name).suffix.casefold() not in VIDEO_SUFFIXES:

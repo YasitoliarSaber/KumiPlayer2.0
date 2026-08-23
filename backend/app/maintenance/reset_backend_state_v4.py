@@ -27,6 +27,7 @@ MANAGED_DATA_ENTRIES = (
     "playback",
     "user_assets",
     "openlist_cache",
+    "openlist_incremental",
     "openlist_manifests",
     "cache",
     "tmp",

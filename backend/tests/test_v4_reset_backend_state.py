@@ -17,6 +17,8 @@ def test_preview_is_non_destructive_and_apply_keeps_credentials_and_runtime_stat
     (data_dir / "kumiplayer.db-wal").write_bytes(b"wal")
     (data_dir / "library_snapshots").mkdir()
     (data_dir / "library_snapshots" / "old.json").write_text("{}", encoding="utf-8")
+    (data_dir / "openlist_incremental").mkdir()
+    (data_dir / "openlist_incremental" / "checkpoint.json").write_text("{}", encoding="utf-8")
     (mirror_dir / "Show").mkdir()
     (mirror_dir / "Show" / "S01E01.strm").write_text("local://show", encoding="utf-8")
 
@@ -37,6 +39,7 @@ def test_preview_is_non_destructive_and_apply_keeps_credentials_and_runtime_stat
     assert (data_dir / "bangumi_account.json").exists()
     assert (data_dir / "logs").exists()
     assert not (data_dir / "library_snapshots").exists()
+    assert not (data_dir / "openlist_incremental").exists()
     assert not mirror_dir.exists()
 
 

@@ -14,6 +14,32 @@ class V4Repository:
     def __init__(self, database: V4Database):
         self.database = database
 
+    @staticmethod
+    def _row_to_source_evidence(row) -> SourceEvidence:
+        return SourceEvidence(
+            evidence_id=row["evidence_id"],
+            scan_id=row["scan_id"],
+            root_id=row["root_id"],
+            provider=row["provider"],
+            source_key=row["source_key"],
+            relative_path=row["relative_path"],
+            entry_kind=row["entry_kind"],
+            size=row["size"],
+            mtime=row["mtime"],
+            fingerprint=row["fingerprint"],
+            raw_file_id=row["raw_file_id"],
+            ingest_method=row["ingest_method"],
+            source_route_id=row["source_route_id"],
+            source_locator=row["source_locator"],
+            playback_locator=row["playback_locator"],
+            tmdb_hint_id=row["tmdb_hint_id"],
+            tmdb_hint_type=row["tmdb_hint_type"],
+            import_family=row["import_family"],
+            target_filename=row["target_filename"],
+            observed_at=row["observed_at"],
+            presence_state=row["presence_state"],
+        )
+
     def save_source_evidence(self, evidence: SourceEvidence) -> None:
         with self.database.connect() as conn:
             conn.execute(
@@ -60,29 +86,24 @@ class V4Repository:
             ).fetchone()
         if row is None:
             raise KeyError(evidence_id)
-        return SourceEvidence(
-            evidence_id=row["evidence_id"],
-            scan_id=row["scan_id"],
-            root_id=row["root_id"],
-            provider=row["provider"],
-            source_key=row["source_key"],
-            relative_path=row["relative_path"],
-            entry_kind=row["entry_kind"],
-            size=row["size"],
-            mtime=row["mtime"],
-            fingerprint=row["fingerprint"],
-            raw_file_id=row["raw_file_id"],
-            ingest_method=row["ingest_method"],
-            source_route_id=row["source_route_id"],
-            source_locator=row["source_locator"],
-            playback_locator=row["playback_locator"],
-            tmdb_hint_id=row["tmdb_hint_id"],
-            tmdb_hint_type=row["tmdb_hint_type"],
-            import_family=row["import_family"],
-            target_filename=row["target_filename"],
-            observed_at=row["observed_at"],
-            presence_state=row["presence_state"],
-        )
+        return self._row_to_source_evidence(row)
+
+    def list_confirmed_source_evidence(self, root_id: str) -> list[SourceEvidence]:
+        """一次查询读取来源根当前唯一 confirmed revision 的完整证据。"""
+
+        with self.database.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT se.*
+                FROM import_revisions ir
+                JOIN revision_evidence re ON re.revision_id = ir.revision_id
+                JOIN source_evidence se ON se.evidence_id = re.evidence_id
+                WHERE ir.root_id = ? AND ir.status = 'confirmed'
+                ORDER BY se.relative_path COLLATE NOCASE, se.evidence_id
+                """,
+                (root_id,),
+            ).fetchall()
+        return [self._row_to_source_evidence(row) for row in rows]
 
     def save_parsed_facts(self, facts: ParsedFacts) -> None:
         with self.database.connect() as conn:
