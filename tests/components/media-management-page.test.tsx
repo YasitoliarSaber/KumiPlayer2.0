@@ -49,6 +49,9 @@ test('导入工作台用可见来源卡和连续步骤呈现主流程', () => {
   expect(screen.getByRole('button', { name: 'OpenList' })).toHaveAttribute('aria-pressed', 'false');
   expect(screen.getByRole('button', { name: '目录树 + OpenList 增量' })).toHaveAttribute('aria-pressed', 'false');
   expect(screen.getByRole('button', { name: '扫描并识别' })).toBeDisabled();
+  expect(screen.queryByRole('button', { name: '重新开始' })).not.toBeInTheDocument();
+  expect(screen.getByRole('textbox', { name: '媒体目录' })).toHaveAttribute('name', 'media_path');
+  expect(screen.getByRole('textbox', { name: '媒体目录' })).toHaveAttribute('autocomplete', 'off');
 });
 
 test('切换来源会清空不兼容路径并只展示当前来源字段', () => {
@@ -63,6 +66,7 @@ test('切换来源会清空不兼容路径并只展示当前来源字段', () =>
   const providerSelect = screen.getByRole('combobox', { name: '存储来源' });
   expect(providerSelect).toBeVisible();
   expect(providerSelect.tagName).toBe('SELECT');
+  expect(providerSelect).toHaveAttribute('name', 'storage_provider');
   expect(screen.getByRole('textbox', { name: '本地挂载根目录（可选）' })).toBeVisible();
   expect(screen.getByRole('button', { name: '选择文件' })).toBeVisible();
 
@@ -118,7 +122,10 @@ test('OpenList 可显式要求本次完整远端校验', async () => {
 
   fireEvent.click(screen.getByRole('button', { name: 'OpenList' }));
   expect(screen.queryByRole('button', { name: /clear/i })).not.toBeInTheDocument();
+  expect(screen.getByText('通常只检查新增和变化内容；发现结果不完整时再使用完整扫描。')).toBeVisible();
+  expect(screen.getByText('增量扫描')).toBeVisible();
   fireEvent.click(screen.getByRole('switch', { name: '完整扫描' }));
+  expect(screen.getByText('完整扫描')).toBeVisible();
   fireEvent.click(screen.getByRole('button', { name: '扫描并识别' }));
 
   await waitFor(() => expect(api.scan).toHaveBeenCalledWith(expect.objectContaining({

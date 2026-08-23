@@ -29,6 +29,10 @@ def test_poster_grid_uses_measured_columns_and_preserves_vertical_artwork():
     assert "transform: none" in css
     assert css.index(".poster-card:hover .poster-media-vertical img") > css.index(".poster-card:hover .poster-media img")
     assert "--sidebar-width: 56px !important" in css
+    navigation_layer = css.split("/* Three-stage NavigationView layout: hidden, compact icon rail, expanded pane. */", 1)[1]
+    assert "@media (max-width: 760px)" in navigation_layer
+    assert ".app-shell.sidebar-expanded {\n    --sidebar-width: 56px !important;\n  }" in navigation_layer
+    assert ".app-shell.sidebar-expanded .app-sidebar {\n    width: 56px !important;\n  }" in navigation_layer
 
 
 def test_responsive_css_does_not_override_virtual_poster_grid_columns():
@@ -61,8 +65,14 @@ def test_media_management_collapses_before_controls_can_overlap():
     assert "@container media-flow (max-width: 1080px)" in css
     assert "@container media-flow (max-width: 900px)" in css
     assert "@container media-flow (max-width: 760px)" in css
-    assert ".media-v4-controls" in css
+    assert ".media-v4-settings-list" in css
+    assert ".media-v4-setting-row" in css
+    assert ".media-v4-select-control" in css
     assert ".media-v4-path-row" in css
+    assert "@container media-flow (max-width: 620px) {\n  .media-v4-source-options { grid-template-columns: 1fr; }" in css
+    assert ".media-v4-source-options small {" in css
+    assert "font-size: 12px" in css.split(".media-v4-source-options small {", 1)[1].split("}", 1)[0]
+    assert "font-size: 12px" in css.split(".media-v4-setting-copy span {", 1)[1].split("}", 1)[0]
     assert 'className="media-flow-page media-v4-page"' in page
-    assert 'className="media-stage-shell media-v4-source-card"' in page
-    assert 'className="media-stage-shell media-v4-review-card"' in page
+    assert 'className="media-stage-shell media-v4-stage-panel media-v4-source-card"' in page
+    assert 'className="media-stage-shell media-v4-stage-panel media-v4-review-card"' in page

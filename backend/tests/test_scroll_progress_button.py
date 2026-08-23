@@ -37,6 +37,8 @@ def test_scroll_progress_uses_real_scroll_extent_without_react_frame_renders():
 
     assert "scrollHeight - clientHeight" in component
     assert "scrollTop / maxScroll" in component
+    assert "const revealThreshold = Math.min(160, clientHeight * 0.2)" in component
+    assert "const visible = maxScroll > revealThreshold && scrollTop >= revealThreshold" in component
     assert "addEventListener('scroll', scheduleUpdate, { passive: true })" in component
     assert "new ResizeObserver(scheduleUpdate)" in component
     assert "buttonRef.current" in component

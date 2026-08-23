@@ -59,31 +59,36 @@ const PATH_CONFIG: Record<ImportKind, {
   title: string
   description: string
   ariaLabel: string
+  name: string
   placeholder: string
 }> = {
   local: {
     title: '媒体目录',
     description: '选择包含视频文件的文件夹；也支持已挂载的网盘目录。',
     ariaLabel: '媒体目录',
-    placeholder: '例如 D:\\Anime',
+    name: 'media_path',
+    placeholder: '例如 D:\\动画',
   },
   tree: {
     title: '目录树文件',
     description: '选择从 115、百度或 OpenList 导出的 TXT 目录清单。',
     ariaLabel: '目录树 TXT 文件',
-    placeholder: '选择或输入 TXT 文件路径',
+    name: 'tree_file',
+    placeholder: '例如 D:\\媒体清单\\动画.txt',
   },
   openlist: {
     title: '远端目录',
     description: '留空时使用 OpenList 设置中的远端根目录。',
     ariaLabel: 'OpenList 远端目录',
+    name: 'openlist_remote_root',
     placeholder: '例如 /动画（可留空）',
   },
   hybrid: {
     title: '基线目录树',
     description: '首次通过 TXT 建立大库基线，后续再由 OpenList 核对变化。',
     ariaLabel: '首次目录树 TXT 文件',
-    placeholder: '选择或输入 TXT 文件路径',
+    name: 'hybrid_tree_file',
+    placeholder: '例如 D:\\媒体清单\\动画.txt',
   },
 }
 
@@ -393,13 +398,13 @@ export default function MediaManagementPage() {
         <div className="media-v4-config-panel">
           <div className="media-v4-config-heading">
             <strong>{kind === 'local' ? '配置本地目录' : kind === 'tree' ? '配置目录树清单' : kind === 'hybrid' ? '配置 TXT 基线与 OpenList 增量' : '配置 OpenList 扫描'}</strong>
-            <span>{kind === 'local' ? '支持直接输入路径，也可以从资源管理器选择。' : kind === 'tree' ? 'TXT 只作为目录证据；可选挂载目录用于生成可播放路径。' : kind === 'hybrid' ? '首次只读取 TXT；确认后，同一远端目录会按预算核对变化，避免每次遍历整库。' : '留空会扫描已配置的 OpenList 根目录。'}</span>
+            <span>{kind === 'local' ? '支持直接输入路径，也可以从资源管理器选择。' : kind === 'tree' ? 'TXT 用于建立目录清单；挂载目录只用于补充本地播放位置。' : kind === 'hybrid' ? '首次用 TXT 建立基线；之后优先核对变化目录并分批抽查，减少整库请求。' : '留空会扫描已配置的 OpenList 根目录。'}</span>
           </div>
 
           <div className="media-v4-settings-list">
             {kind !== 'local' && (
-              <SettingRow title="存储来源" description="用于解释清单中的路径，并选择对应的播放地址规则。" controlClassName="media-v4-select-control">
-                <Select aria-label="存储来源" value={provider} onChange={(event) => setProvider(event.currentTarget.value)}>
+              <SettingRow title="存储来源" description="选择清单中的媒体文件实际存放在哪里。" controlClassName="media-v4-select-control">
+                <Select aria-label="存储来源" name="storage_provider" value={provider} onChange={(event) => setProvider(event.currentTarget.value)}>
                   {PROVIDER_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                 </Select>
               </SettingRow>
@@ -409,18 +414,21 @@ export default function MediaManagementPage() {
               <div className="media-v4-path-row">
                 <Input
                   aria-label={pathConfig.ariaLabel}
+                  name={pathConfig.name}
+                  autoComplete="off"
+                  spellCheck={false}
                   value={path}
                   onChange={(_, data) => setPath(data.value)}
                   placeholder={pathConfig.placeholder}
                 />
-                {kind !== 'openlist' && <Button appearance="secondary" icon={<FolderOpen24Regular />} onClick={() => void choosePath()}>{kind === 'local' ? '选择文件夹' : '选择文件'}</Button>}
+                {kind !== 'openlist' && <Button appearance="secondary" icon={kind === 'local' ? <FolderOpen24Regular /> : <DocumentText24Regular />} onClick={() => void choosePath()}>{kind === 'local' ? '选择文件夹' : '选择文件'}</Button>}
               </div>
             </SettingRow>
 
             {kind === 'tree' && (
-              <SettingRow title="播放路径映射" description="可选。把清单中的相对路径映射到本机或已挂载网盘的位置。" controlClassName="media-v4-path-control">
+              <SettingRow title="本地播放位置" description="可选。TXT 只有相对路径时，选择对应的本机或挂载目录。" controlClassName="media-v4-path-control">
                 <div className="media-v4-path-row">
-                  <Input aria-label="本地挂载根目录（可选）" value={sourceRoot} onChange={(_, data) => setSourceRoot(data.value)} placeholder="用于把相对路径映射到播放位置" />
+                  <Input aria-label="本地挂载根目录（可选）" name="local_mount_root" autoComplete="off" spellCheck={false} value={sourceRoot} onChange={(_, data) => setSourceRoot(data.value)} placeholder="例如 Z:\\动画（可留空）" />
                   <Button appearance="secondary" icon={<FolderOpen24Regular />} onClick={() => void chooseSourceRoot()}>选择文件夹</Button>
                 </div>
               </SettingRow>
@@ -428,12 +436,12 @@ export default function MediaManagementPage() {
 
             {kind === 'hybrid' && (
               <SettingRow title="增量扫描目录" description="必须与 TXT 清单对应；留空时使用 OpenList 设置中的远端根目录。" controlClassName="media-v4-path-control">
-                <Input aria-label="OpenList 增量目录" value={remoteRoot} onChange={(_, data) => setRemoteRoot(data.value)} placeholder="/115网盘/动画（可留空）" />
+                <Input aria-label="OpenList 增量目录" name="openlist_incremental_root" autoComplete="off" spellCheck={false} value={remoteRoot} onChange={(_, data) => setRemoteRoot(data.value)} placeholder="例如 /115网盘/动画（可留空）" />
               </SettingRow>
             )}
 
             {kind === 'openlist' && (
-              <SettingRow title="扫描方式" description="默认按已确认基线增量核对；怀疑遗漏变化时再执行完整扫描。" controlClassName="media-v4-switch-control">
+              <SettingRow title="扫描方式" description="通常只检查新增和变化内容；发现结果不完整时再使用完整扫描。" controlClassName="media-v4-switch-control">
                 <Switch
                   aria-label="完整扫描"
                   checked={fullScan}
@@ -447,7 +455,7 @@ export default function MediaManagementPage() {
           <div className="media-v4-command-row">
             <div>
               <strong>{canScan ? '可以开始扫描' : kind === 'local' ? '还需要选择媒体目录' : '还需要选择目录树文件'}</strong>
-              <span>{canScan ? kind === 'openlist' ? '将按当前方式读取远端目录，并生成可审核的识别结果。' : '扫描后会直接生成可审核的识别结果。' : '填写路径或使用右侧按钮选择后即可继续。'}</span>
+              <span>{canScan ? kind === 'openlist' ? '将按当前方式读取远端目录，并生成供你确认的识别结果。' : '扫描后会直接生成供你确认的识别结果。' : '填写路径或使用右侧按钮选择后即可继续。'}</span>
             </div>
             <Button aria-label="扫描并识别" className="media-primary-command" appearance="primary" icon={<ScanObject24Regular />} disabled={busy !== '' || !canScan} onClick={() => void scanSource()}>{busy === 'scan' ? <><Spinner size="tiny" />正在扫描</> : '扫描并识别'}</Button>
           </div>

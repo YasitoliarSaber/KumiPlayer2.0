@@ -24,7 +24,8 @@ export default function ScrollProgressButton({ scrollContainerRef }: ScrollProgr
       const maxScroll = Math.max(0, scrollHeight - clientHeight);
       const nextProgress = maxScroll > 0 ? Math.min(100, Math.max(0, (scrollTop / maxScroll) * 100)) : 0;
       const roundedProgress = Math.round(nextProgress);
-      const visible = maxScroll > 0;
+      const revealThreshold = Math.min(160, clientHeight * 0.2);
+      const visible = maxScroll > revealThreshold && scrollTop >= revealThreshold;
 
       ring.style.strokeDashoffset = String(100 - nextProgress);
       button.classList.toggle('is-visible', visible);
