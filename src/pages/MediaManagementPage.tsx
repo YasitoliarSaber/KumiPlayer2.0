@@ -47,6 +47,7 @@ import MediaTaskWorkbench, { isMirrorTaskReady } from '../components/media/Media
 import MediaBackgroundImportStatus from '../components/media/MediaBackgroundImportStatus';
 import TaskDashboard from '../components/media/TaskDashboard';
 import ImportModePicker from '../components/media/ImportModePicker';
+import RecognitionFixDialog from '../components/media/RecognitionFixDialog';
 import { pickFolder, pickDirectoryTreeFile } from '../platform/folderPicker';
 
 const flowSteps: Array<Exclude<WorkflowStep, 'maintenance' | 'background'>> = ['import', 'confirm', 'workbench'];
@@ -2255,32 +2256,22 @@ export default function MediaManagementPage() {
       )}
       {step === 'maintenance' && <LibraryMaintenancePanel onCleared={() => loadPresets(true)} />}
 
-      {editingItem && <div className="media-edit-backdrop" role="presentation"><section className="media-edit-dialog" role="dialog" aria-modal="true" aria-label="修正导入条目"><header><h2>处理识别结果</h2><Button appearance="subtle" onClick={() => setEditingItem(null)}>关闭</Button></header><div className="media-edit-source"><span className="media-edit-source-label">正在处理的文件</span><strong className="media-edit-source-name">{editingItem.relative_path.split('/').pop() || editingItem.relative_path}</strong><code className="media-edit-source-path" title={editingItem.relative_path}>{editingItem.relative_path}</code>{editingItem.source_size ? <span className="media-edit-source-size">大小 {formatOpenlistSize(editingItem.source_size)}</span> : null}</div><label>作品名称<input value={editDraft.work_title} onChange={(event) => setEditDraft((value) => ({ ...value, work_title: event.target.value }))} /></label><div className="media-edit-grid"><label>分组<select value={editDraft.group_type} onChange={(event) => setEditDraft((value) => ({ ...value, group_type: event.target.value }))}><option value="season">季度</option><option value="special">特别篇</option><option value="movie">电影</option><option value="ignored">忽略</option></select></label><label>季度<input type="number" value={editDraft.season_number} onChange={(event) => setEditDraft((value) => ({ ...value, season_number: event.target.value }))} /></label><label>集数<input type="number" value={editDraft.episode_number} onChange={(event) => setEditDraft((value) => ({ ...value, episode_number: event.target.value }))} /></label></div><footer><Button appearance="secondary" onClick={() => setEditingItem(null)}>取消</Button><Button appearance="primary" onClick={() => void saveItem()}>保存处理结果</Button></footer></section></div>}
-      {/* RWK-40（P0-2）：needs_review 无 revision 单元的人工 durable 处理入口——
-          列出识别失败的具体单元（boundary 路径），用户填写作品名称后 resolve 生成
-          可编辑 draft revision，进入 root-generation 确认集合（不依赖 legacy plan）。 */}
-      {needsReviewPreset && (
-        <div className="media-edit-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setNeedsReviewPreset(null); }}>
-          <section className="media-edit-dialog media-needs-review-dialog" role="dialog" aria-modal="true" aria-label="处理识别结果">
-            <header><div><span className="media-import-step-label">人工处理</span><h2>{getPresetDisplayName(needsReviewPreset)}</h2><p>以下识别单元未能自动确认作品身份，请填写作品名称后生成可编辑版本，再进入确认页核对。</p></div><Button appearance="subtle" onClick={() => setNeedsReviewPreset(null)}>关闭</Button></header>
-            <div className="media-needs-review-list">
-              {(needsReviewPreset.openlist_needs_review_units ?? []).map((unit) => (
-                <div key={unit.unit_id} className="media-needs-review-unit">
-                  <label className="media-needs-review-boundary" title={unit.boundary}>{unit.boundary || unit.work_key}</label>
-                  <input
-                    value={needsReviewTitles[unit.unit_id] ?? ''}
-                    placeholder="填写作品名称"
-                    onChange={(event) => setNeedsReviewTitles((value) => ({ ...value, [unit.unit_id]: event.target.value }))}
-                    disabled={Boolean(resolvingReviewUnitId)}
-                  />
-                  <Button appearance="primary" disabled={Boolean(resolvingReviewUnitId)} onClick={() => void resolveNeedsReview(needsReviewPreset, unit.unit_id)}>{resolvingReviewUnitId === unit.unit_id ? '处理中…' : '生成可编辑版本'}</Button>
-                </div>
-              ))}
-            </div>
-            <footer><Button appearance="secondary" onClick={() => setNeedsReviewPreset(null)}>取消</Button></footer>
-          </section>
-        </div>
-      )}
+      {/* P1-2（步骤9）：统一人工处理弹窗（单条修正 + 批量 needs_review） */}
+      <RecognitionFixDialog
+        editingItem={editingItem}
+        editDraft={editDraft}
+        onEditDraftChange={setEditDraft}
+        onSaveItem={() => void saveItem()}
+        onCloseEditing={() => setEditingItem(null)}
+        needsReviewPreset={needsReviewPreset}
+        needsReviewTitles={needsReviewTitles}
+        onNeedsReviewTitleChange={(unitId, title) => setNeedsReviewTitles((value) => ({ ...value, [unitId]: title }))}
+        resolvingReviewUnitId={resolvingReviewUnitId}
+        onResolveNeedsReview={(preset, unitId) => void resolveNeedsReview(preset, unitId)}
+        onCloseNeedsReview={() => setNeedsReviewPreset(null)}
+        getPresetDisplayName={getPresetDisplayName}
+        formatOpenlistSize={formatOpenlistSize}
+      />
       {pendingSeasonalImport && <div className="media-edit-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPendingSeasonalImport(null); }}>
         <section className="media-edit-dialog media-seasonal-confirm-dialog" role="alertdialog" aria-modal="true" aria-label="确认新番导入">
           <header><div><span className="media-import-step-label">高风险分类</span><h2>确认按新番导入？</h2></div></header>
