@@ -48,6 +48,15 @@ def test_tauri_build_script_publishes_runtime_dll_and_safely_cleans_build_cache(
     assert "'release'" in cleanup
 
 
+def test_tauri_build_restores_incomplete_frontend_dependencies():
+    """依赖目录残缺时，开发构建必须从锁文件恢复完整前端依赖。"""
+    script = (ROOT / "build_tauri.bat").read_text(encoding="utf-8")
+
+    assert "call npm ls --depth=0 >nul 2>&1" in script
+    assert "Frontend dependencies are incomplete" in script
+    assert "call npm ci" in script
+
+
 def test_tauri_release_verifier_checks_bundled_api_url_and_runtime_files():
     verifier = (ROOT / "scripts" / "verify_tauri_build.ps1").read_text(encoding="utf-8")
 

@@ -32,15 +32,17 @@ if not exist "package.json" (
     pause
     exit /b 1
 )
-if not exist "node_modules" (
-    call npm install
-    if %ERRORLEVEL% neq 0 (
-        echo [ERROR] npm install failed.
+call npm ls --depth=0 >nul 2>&1
+if errorlevel 1 (
+    echo Frontend dependencies are incomplete. Restoring them from package-lock.json...
+    call npm ci
+    if errorlevel 1 (
+        echo [ERROR] npm ci failed.
         pause
         exit /b 1
     )
 ) else (
-    echo node_modules exists. Skipping npm install.
+    echo Frontend dependencies are complete. Skipping npm ci.
 )
 
 echo.
