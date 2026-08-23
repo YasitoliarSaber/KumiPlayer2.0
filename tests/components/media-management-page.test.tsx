@@ -60,8 +60,11 @@ test('切换来源会清空不兼容路径并只展示当前来源字段', () =>
 
   fireEvent.click(screen.getByRole('button', { name: '目录树 TXT' }));
   expect(screen.getByRole('textbox', { name: '目录树 TXT 文件' })).toHaveValue('');
-  expect(screen.getByRole('combobox', { name: '默认内容来源' })).toBeVisible();
+  const providerSelect = screen.getByRole('combobox', { name: '存储来源' });
+  expect(providerSelect).toBeVisible();
+  expect(providerSelect.tagName).toBe('SELECT');
   expect(screen.getByRole('textbox', { name: '本地挂载根目录（可选）' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '选择文件' })).toBeVisible();
 
   fireEvent.click(screen.getByRole('button', { name: 'OpenList' }));
   expect(screen.queryByRole('textbox', { name: '目录树 TXT 文件' })).not.toBeInTheDocument();
@@ -114,7 +117,8 @@ test('OpenList 可显式要求本次完整远端校验', async () => {
   render(<MediaManagementPage />);
 
   fireEvent.click(screen.getByRole('button', { name: 'OpenList' }));
-  fireEvent.click(screen.getByRole('checkbox', { name: '本次进行完整远端校验（请求较多）' }));
+  expect(screen.queryByRole('button', { name: /clear/i })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('switch', { name: '完整扫描' }));
   fireEvent.click(screen.getByRole('button', { name: '扫描并识别' }));
 
   await waitFor(() => expect(api.scan).toHaveBeenCalledWith(expect.objectContaining({

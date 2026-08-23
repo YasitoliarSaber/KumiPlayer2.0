@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Button, Checkbox, Dropdown, Field, Input, MessageBar, MessageBarBody, Option, Spinner } from '@fluentui/react-components'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { Button, Checkbox, Input, MessageBar, MessageBarBody, Select, Spinner, Switch } from '@fluentui/react-components'
 import {
   ArrowReset24Regular,
   ArrowSync24Regular,
@@ -53,6 +53,55 @@ const JOB_STATUS_LABELS: Record<string, string> = {
   succeeded: '已完成',
   failed: '处理失败',
   cancelled: '已取消',
+}
+
+const PATH_CONFIG: Record<ImportKind, {
+  title: string
+  description: string
+  ariaLabel: string
+  placeholder: string
+}> = {
+  local: {
+    title: '媒体目录',
+    description: '选择包含视频文件的文件夹；也支持已挂载的网盘目录。',
+    ariaLabel: '媒体目录',
+    placeholder: '例如 D:\\Anime',
+  },
+  tree: {
+    title: '目录树文件',
+    description: '选择从 115、百度或 OpenList 导出的 TXT 目录清单。',
+    ariaLabel: '目录树 TXT 文件',
+    placeholder: '选择或输入 TXT 文件路径',
+  },
+  openlist: {
+    title: '远端目录',
+    description: '留空时使用 OpenList 设置中的远端根目录。',
+    ariaLabel: 'OpenList 远端目录',
+    placeholder: '例如 /动画（可留空）',
+  },
+  hybrid: {
+    title: '基线目录树',
+    description: '首次通过 TXT 建立大库基线，后续再由 OpenList 核对变化。',
+    ariaLabel: '首次目录树 TXT 文件',
+    placeholder: '选择或输入 TXT 文件路径',
+  },
+}
+
+function SettingRow({ title, description, children, controlClassName = '' }: {
+  title: string
+  description: string
+  children: ReactNode
+  controlClassName?: string
+}) {
+  return (
+    <div className="media-v4-setting-row">
+      <div className="media-v4-setting-copy">
+        <strong>{title}</strong>
+        <span>{description}</span>
+      </div>
+      <div className={`media-v4-setting-control ${controlClassName}`.trim()}>{children}</div>
+    </div>
+  )
 }
 
 function createRevisionId() {
@@ -129,7 +178,8 @@ export default function MediaManagementPage() {
 
   const activeStep = jobs.length > 0 ? 2 : scan ? 1 : 0
   const canScan = kind === 'openlist' || Boolean(path.trim())
-  const providerLabel = PROVIDER_OPTIONS.find((option) => option.value === provider)?.label || provider
+  const pathConfig = PATH_CONFIG[kind]
+  const showReset = kind !== 'local' || Boolean(path || sourceRoot || remoteRoot || scan || preview || jobs.length || error)
 
   const clearResultState = () => {
     setScan(null)
@@ -298,7 +348,7 @@ export default function MediaManagementPage() {
           <h1>导入媒体</h1>
           <p>选择一个媒体来源，检查识别结果，然后建立可播放的媒体库。</p>
         </div>
-        <Button className="media-v4-new-import" appearance="subtle" icon={<ArrowReset24Regular />} onClick={startNewImport}>新建导入</Button>
+        {showReset && <Button className="media-v4-new-import" appearance="subtle" icon={<ArrowReset24Regular />} onClick={startNewImport}>重新开始</Button>}
       </header>
 
       <nav className="media-v4-steps" aria-label="导入步骤">
@@ -346,56 +396,59 @@ export default function MediaManagementPage() {
             <span>{kind === 'local' ? '支持直接输入路径，也可以从资源管理器选择。' : kind === 'tree' ? 'TXT 只作为目录证据；可选挂载目录用于生成可播放路径。' : kind === 'hybrid' ? '首次只读取 TXT；确认后，同一远端目录会按预算核对变化，避免每次遍历整库。' : '留空会扫描已配置的 OpenList 根目录。'}</span>
           </div>
 
-          <div className={`media-v4-controls media-v4-controls-${kind}`}>
+          <div className="media-v4-settings-list">
             {kind !== 'local' && (
-              <Field label="默认内容来源" className="media-v4-provider-field">
-                <Dropdown aria-label="默认内容来源" value={providerLabel} selectedOptions={[provider]} onOptionSelect={(_, data) => data.optionValue && setProvider(data.optionValue)}>
-                  {PROVIDER_OPTIONS.map((option) => <Option key={option.value} value={option.value}>{option.label}</Option>)}
-                </Dropdown>
-              </Field>
+              <SettingRow title="存储来源" description="用于解释清单中的路径，并选择对应的播放地址规则。" controlClassName="media-v4-select-control">
+                <Select aria-label="存储来源" value={provider} onChange={(event) => setProvider(event.currentTarget.value)}>
+                  {PROVIDER_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </Select>
+              </SettingRow>
             )}
 
-            <Field label={kind === 'local' ? '媒体目录' : kind === 'tree' ? '目录树 TXT 文件' : kind === 'hybrid' ? '首次目录树 TXT 文件' : 'OpenList 远端目录'} className="media-v4-path-field">
+            <SettingRow title={pathConfig.title} description={pathConfig.description} controlClassName="media-v4-path-control">
               <div className="media-v4-path-row">
                 <Input
-                  aria-label={kind === 'local' ? '媒体目录' : kind === 'tree' ? '目录树 TXT 文件' : kind === 'hybrid' ? '首次目录树 TXT 文件' : 'OpenList 远端目录'}
+                  aria-label={pathConfig.ariaLabel}
                   value={path}
                   onChange={(_, data) => setPath(data.value)}
-                  placeholder={kind === 'local' ? '选择或输入本地媒体目录' : kind === 'tree' || kind === 'hybrid' ? '选择或输入目录树 TXT 路径' : '/动画（留空扫描根目录）'}
+                  placeholder={pathConfig.placeholder}
                 />
-                {kind !== 'openlist' && <Button appearance="secondary" icon={<FolderOpen24Regular />} onClick={() => void choosePath()}>浏览</Button>}
+                {kind !== 'openlist' && <Button appearance="secondary" icon={<FolderOpen24Regular />} onClick={() => void choosePath()}>{kind === 'local' ? '选择文件夹' : '选择文件'}</Button>}
               </div>
-            </Field>
+            </SettingRow>
 
             {kind === 'tree' && (
-              <Field label="本地挂载根目录（可选）" className="media-v4-mount-field">
+              <SettingRow title="播放路径映射" description="可选。把清单中的相对路径映射到本机或已挂载网盘的位置。" controlClassName="media-v4-path-control">
                 <div className="media-v4-path-row">
                   <Input aria-label="本地挂载根目录（可选）" value={sourceRoot} onChange={(_, data) => setSourceRoot(data.value)} placeholder="用于把相对路径映射到播放位置" />
-                  <Button appearance="secondary" icon={<FolderOpen24Regular />} onClick={() => void chooseSourceRoot()}>浏览</Button>
+                  <Button appearance="secondary" icon={<FolderOpen24Regular />} onClick={() => void chooseSourceRoot()}>选择文件夹</Button>
                 </div>
-              </Field>
+              </SettingRow>
             )}
 
             {kind === 'hybrid' && (
-              <Field label="OpenList 增量目录" className="media-v4-mount-field" hint="必须与 TXT 内容对应；留空使用 OpenList 设置中的远端根目录。">
+              <SettingRow title="增量扫描目录" description="必须与 TXT 清单对应；留空时使用 OpenList 设置中的远端根目录。" controlClassName="media-v4-path-control">
                 <Input aria-label="OpenList 增量目录" value={remoteRoot} onChange={(_, data) => setRemoteRoot(data.value)} placeholder="/115网盘/动画（可留空）" />
-              </Field>
+              </SettingRow>
             )}
 
             {kind === 'openlist' && (
-              <div className="media-v4-scan-mode media-v4-mount-field">
-                <Checkbox
+              <SettingRow title="扫描方式" description="默认按已确认基线增量核对；怀疑遗漏变化时再执行完整扫描。" controlClassName="media-v4-switch-control">
+                <Switch
+                  aria-label="完整扫描"
                   checked={fullScan}
                   onChange={(_, data) => setFullScan(Boolean(data.checked))}
-                  label="本次进行完整远端校验（请求较多）"
+                  label={fullScan ? '完整扫描' : '增量扫描'}
                 />
-                <span>默认优先使用已确认的 TXT 基线做风险受控更新；怀疑遗漏变化时再启用完整校验。</span>
-              </div>
+              </SettingRow>
             )}
           </div>
 
           <div className="media-v4-command-row">
-            <div><strong>准备扫描</strong><span>{canScan ? '扫描后会直接生成可审核的识别结果。' : '请先填写或选择媒体目录。'}</span></div>
+            <div>
+              <strong>{canScan ? '可以开始扫描' : kind === 'local' ? '还需要选择媒体目录' : '还需要选择目录树文件'}</strong>
+              <span>{canScan ? kind === 'openlist' ? '将按当前方式读取远端目录，并生成可审核的识别结果。' : '扫描后会直接生成可审核的识别结果。' : '填写路径或使用右侧按钮选择后即可继续。'}</span>
+            </div>
             <Button aria-label="扫描并识别" className="media-primary-command" appearance="primary" icon={<ScanObject24Regular />} disabled={busy !== '' || !canScan} onClick={() => void scanSource()}>{busy === 'scan' ? <><Spinner size="tiny" />正在扫描</> : '扫描并识别'}</Button>
           </div>
         </div>
@@ -412,7 +465,7 @@ export default function MediaManagementPage() {
         {preview && <>
           {preview.issues.length > 0 && <MessageBar intent="warning"><MessageBarBody>发现 {preview.issues.length} 个需要人工处理的问题；未解决前不能确认。</MessageBarBody></MessageBar>}
           {groupedWorks.length > 0 ? <div className="media-v4-work-grid">{groupedWorks.map((work) => <article className="media-v4-work-card" key={work.work_key}><div><strong>{work.preferred_title || '未命名作品'}</strong><span>{work.year || '年份未知'} · {work.media_type === 'movie' ? '电影' : '剧集'}</span></div><div className="media-v4-episode-list">{work.episodes.map((episode) => <span key={`${episode.episode_key}-${episode.edition_key}`}>{episodeLabel(episode)} · {episode.asset_evidence_ids.length} 个文件</span>)}{work.movieAssets.map((asset) => <span key={`${work.work_key}-${asset.edition_key}`}>电影{asset.edition_key === 'default' ? '' : ` · ${asset.edition_key}`} · {asset.asset_evidence_ids.length} 个文件</span>)}</div></article>)}</div> : <div className="media-v4-empty">这个来源没有可建立媒体库的作品。</div>}
-          {preview.issues.length > 0 && <div className="media-v4-issues">{preview.issues.map((issue) => { const draft = overrideDrafts[issue.evidence_id] || { title: '', mediaType: 'tv' as const, season: '1', episode: '1' }; return <div key={`${issue.code}-${issue.evidence_id}`}><strong>{issue.code}</strong><span>{issue.message}</span><div className="media-v4-override-row"><Input aria-label="修正作品标题" value={draft.title} placeholder="作品标题" onChange={(_, data) => setOverrideDrafts((current) => ({ ...current, [issue.evidence_id]: { ...draft, title: data.value } }))} /><Dropdown aria-label="修正媒体类型" value={draft.mediaType === 'movie' ? '电影' : '剧集'} selectedOptions={[draft.mediaType]} onOptionSelect={(_, data) => data.optionValue && setOverrideDrafts((current) => ({ ...current, [issue.evidence_id]: { ...draft, mediaType: data.optionValue as 'tv' | 'movie' } }))}><Option value="tv">剧集</Option><Option value="movie">电影</Option></Dropdown>{draft.mediaType === 'tv' && <><Input aria-label="修正季度" value={draft.season} placeholder="季度" onChange={(_, data) => setOverrideDrafts((current) => ({ ...current, [issue.evidence_id]: { ...draft, season: data.value } }))} /><Input aria-label="修正集号" value={draft.episode} placeholder="集号" onChange={(_, data) => setOverrideDrafts((current) => ({ ...current, [issue.evidence_id]: { ...draft, episode: data.value } }))} /></>}<Button appearance="secondary" disabled={busy !== ''} onClick={() => void applyOverride(issue.evidence_id)}>应用修正</Button></div></div> })}</div>}
+          {preview.issues.length > 0 && <div className="media-v4-issues">{preview.issues.map((issue) => { const draft = overrideDrafts[issue.evidence_id] || { title: '', mediaType: 'tv' as const, season: '1', episode: '1' }; return <div key={`${issue.code}-${issue.evidence_id}`}><strong>{issue.code}</strong><span>{issue.message}</span><div className="media-v4-override-row"><Input aria-label="修正作品标题" value={draft.title} placeholder="作品标题" onChange={(_, data) => setOverrideDrafts((current) => ({ ...current, [issue.evidence_id]: { ...draft, title: data.value } }))} /><Select aria-label="修正媒体类型" value={draft.mediaType} onChange={(event) => setOverrideDrafts((current) => ({ ...current, [issue.evidence_id]: { ...draft, mediaType: event.currentTarget.value as 'tv' | 'movie' } }))}><option value="tv">剧集</option><option value="movie">电影</option></Select>{draft.mediaType === 'tv' && <><Input aria-label="修正季度" value={draft.season} placeholder="季度" onChange={(_, data) => setOverrideDrafts((current) => ({ ...current, [issue.evidence_id]: { ...draft, season: data.value } }))} /><Input aria-label="修正集号" value={draft.episode} placeholder="集号" onChange={(_, data) => setOverrideDrafts((current) => ({ ...current, [issue.evidence_id]: { ...draft, episode: data.value } }))} /></>}<Button appearance="secondary" disabled={busy !== ''} onClick={() => void applyOverride(issue.evidence_id)}>应用修正</Button></div></div> })}</div>}
           <div className="media-v4-command-row media-v4-confirm-row"><div><strong>{preview.issues.length > 0 ? '需要先处理识别问题' : '识别结果可以建立媒体库'}</strong><span>确认后将生成镜像、获取媒体信息并更新媒体库。</span></div><Button className="media-primary-command" appearance="primary" icon={<Database24Regular />} disabled={busy !== '' || preview.issues.length > 0 || preview.status === 'confirmed'} onClick={() => void confirmRevision()}>{busy === 'confirm' ? <><Spinner size="tiny" />正在建立</> : preview.status === 'confirmed' ? '已建立媒体库' : '确认并建立媒体库'}</Button></div>
         </>}
       </section>}
