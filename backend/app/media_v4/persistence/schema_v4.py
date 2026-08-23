@@ -254,6 +254,17 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         )
         """,
         """
+        CREATE TABLE revision_issues (
+            revision_id TEXT NOT NULL REFERENCES import_revisions(revision_id) ON DELETE CASCADE,
+            issue_id TEXT NOT NULL,
+            code TEXT NOT NULL,
+            evidence_id TEXT NOT NULL DEFAULT '',
+            message TEXT NOT NULL,
+            resolved INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(revision_id, issue_id)
+        )
+        """,
+        """
         CREATE TABLE jobs (
             job_id TEXT PRIMARY KEY,
             job_type TEXT NOT NULL,
