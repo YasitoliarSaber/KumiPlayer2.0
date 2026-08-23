@@ -733,6 +733,17 @@ def _refresh_source_summary_from_works(source_summary: dict, source: str, works:
 
 def _deduplicate_library_works(works: list[WorkIndex]) -> list[WorkIndex]:
     """Deduplicate directory cards and merge only strongly matched works."""
+    # P0-3 兜底：canonical_work_id 为空（legacy/旧数据）时，仅对 standalone
+    # 用规范化标题+年份生成 canonical，让同一作品跨 unit/boundary 合并成一张卡
+    # （用户报告：刀剑神域外传 7 张、中二病 3 张、咒术回战 2 张全因 canonical 空而未合并）。
+    # main_series/season 保持 legacy 行为（按 series_group/directory 分卡，不兜底）。
+    from app.recognition.media import _make_canonical_work_id
+    for work in works:
+        if not getattr(work, "canonical_work_id", "") and work.card_type == "standalone":
+            work.canonical_work_id = _make_canonical_work_id(
+                work.source, work.title, work.year, work.card_type
+            )
+
     selected: dict[tuple[str, ...], WorkIndex] = {}
     order: list[tuple[str, ...]] = []
     for work in works:

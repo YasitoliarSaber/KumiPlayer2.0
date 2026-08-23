@@ -355,8 +355,18 @@ def _build_work_index(
     media_type = _normalize_media_type(item, scrape_info)
     show_type = _normalize_show_type(item, media_type)
 
+    # 从 item 取 canonical_work_id；为空（legacy/旧数据）时用规范化标题+年份
+    # 兜底生成，让同一作品跨 unit/boundary 合并成一张卡（问题5根因修复）。
+    canonical_value = str(getattr(item, "canonical_work_id", "") or "")
+    if not canonical_value:
+        from app.recognition.media import _make_canonical_work_id
+        canonical_value = _make_canonical_work_id(
+            item.source, item.work_title or item.series_group or "", item.year, item.card_type
+        )
+
     return WorkIndex(
         work_id=library_work_id,
+        canonical_work_id=canonical_value,
         title=display_title,
         original_title=display_original,
         year=display_year,
