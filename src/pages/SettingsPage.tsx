@@ -2,9 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Button, Spinner } from '@fluentui/react-components';
 import {
   Database,
-  Download,
   ExternalLink,
-  HeartHandshake,
   KeyRound,
   Network,
   Palette,
@@ -20,7 +18,6 @@ import { configApi, type MediaPathValidationResponse, type MpvRuntimeStatus, typ
 import { openlistApi, type OpenListConfigPayload, type OpenListDiscoverItem, type OpenListRouteItem } from '../api/openlist';
 import type { OpenListRoute, ProviderId } from '../api/types';
 import { tasksApi } from '../api/tasks';
-import { exportErrorLogText } from '../api/errorLog';
 import type { TaskRecord } from '../api/types';
 import { useUiStore, type AppearanceMode } from '../stores/ui';
 import { BANGUMI_ACCESS_TOKEN_URL, getTmdbCredentialError, TMDB_API_SETTINGS_URL } from '../config/credentials';
@@ -28,7 +25,7 @@ import DecodedImage from '../components/ui/DecodedImage';
 import OpenListSettingsPanel from '../components/settings/OpenListSettingsPanel';
 import OpenListSourceRoutes from '../components/settings/OpenListSourceRoutes';
 import '../styles/settings-media-sources.css';
-type SettingsTab = 'appearance' | 'sources' | 'openlist' | 'scrape' | 'player' | 'bangumi' | 'support';
+type SettingsTab = 'appearance' | 'sources' | 'openlist' | 'scrape' | 'player' | 'bangumi';
 type SourceKey = 'pan115' | 'baidu' | 'local';
 type OpenListDraft = Pick<OpenListConfigPayload, 'server_url' | 'remote_root' | 'mount_root' | 'username' | 'password'> & {
   cache_ttl: string;
@@ -42,7 +39,6 @@ const sectionTabs: Array<{ key: SettingsTab; label: string; summary: string; ico
   { key: 'scrape', label: '元数据与图片', summary: 'TMDB、AniList 与刮削', icon: KeyRound },
   { key: 'player', label: '播放', summary: 'mpv 与连续播放', icon: PlaySquare },
   { key: 'appearance', label: '外观', summary: '主题、卡片与显示密度', icon: Palette },
-  { key: 'support', label: '应用与支持', summary: '网络、初始引导与支持', icon: HeartHandshake },
 ];
 
 const sourceLabels: Record<SourceKey | 'all' | 'openlist', string> = {
@@ -225,11 +221,16 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
     body.style.scrollBehavior = 'auto';
     try {
       target.scrollIntoView({ behavior: 'auto', block: 'start' });
-      if (typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 760px)').matches) {
+      const scrollRoot = document.querySelector<HTMLElement>('.app-main');
+      if (scrollRoot) {
+        const isNarrow = typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 760px)').matches;
         const outline = document.querySelector<HTMLElement>('.settings-outline');
-        const outlineHeight = Math.max(Math.ceil(outline?.getBoundingClientRect().height ?? 0), 72);
-        document.querySelector<HTMLElement>('.app-main')?.scrollBy({
-          top: -(outlineHeight + 12),
+        const topOffset = isNarrow
+          ? Math.max(Math.ceil(outline?.getBoundingClientRect().height ?? 0), 72) + 12
+          : 32;
+        const targetTop = target.getBoundingClientRect().top - scrollRoot.getBoundingClientRect().top + scrollRoot.scrollTop;
+        scrollRoot.scrollTo({
+          top: Math.max(0, targetTop - topOffset),
           behavior: 'auto',
         });
       }
@@ -282,11 +283,6 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
   const checkMpvRuntime = () => runAction('检测内置播放器', async () => {
     await loadMpvRuntime();
     report('内置播放器状态已刷新');
-  });
-
-  const openMpvConfigDir = () => runAction('打开 MPV 配置目录', async () => {
-    const result = await configApi.openMpvConfigDir();
-    report(`已打开 MPV 配置目录：${result.config_dir}`);
   });
 
   const loadConfig = async () => {
@@ -405,6 +401,14 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
           </div>
           <div className="settings-actions">
             <GhostButton onClick={() => testConfig('tmdb')}>测试 TMDB 连接</GhostButton>
+          </div>
+        </SettingsSection>
+      )}
+      {config && (
+        <SettingsSection title="网络访问">
+          <div className="settings-field-list">
+            <ConfigRow label="网络代理" value={config.proxy_url} onSave={(value) => saveConfig({ proxy_url: value })} />
+            <span className="field-help">代理只用于访问 TMDB、AniList 等外部服务；OpenList 的局域网连接在「OpenList 设置」中单独管理。</span>
           </div>
         </SettingsSection>
       )}
@@ -555,6 +559,17 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
           )}
         </SettingsSection>
       )}
+      <SettingsSection title="重新配置基础来源">
+        <div className="settings-support-row">
+          <div>
+            <strong>重新检查镜像与媒体根目录</strong>
+            <p>使用当前配置重新进入引导并逐项验证。不会清空现有配置，中途退出也不会影响当前媒体库。</p>
+          </div>
+          <GhostButton onClick={() => onOpenSetup?.()} disabled={!onOpenSetup}>
+            <RotateCcw size={16} aria-hidden="true" />重新进入初始引导
+          </GhostButton>
+        </div>
+      </SettingsSection>
     </PanelStack>
   );
 
@@ -567,18 +582,16 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
           <div className="settings-field-list">
             <div className="mpv-runtime-card">
               <div className="mpv-runtime-head">
-                <strong>{mpvRuntime?.version || '内置播放器'}</strong>
-                {mpvRuntime?.available
-                  ? <span className="mpv-runtime-badge ok">可用</span>
-                  : <span className="mpv-runtime-badge error">缺失</span>}
+                <strong>{mpvRuntime?.available && mpvRuntime.manifest_valid && mpvRuntime.files_valid && mpvRuntime.configuration_available ? '内置播放器已就绪' : '正在确认内置播放器'}</strong>
+                <span className={`mpv-runtime-badge ${mpvRuntime?.available && mpvRuntime.manifest_valid && mpvRuntime.files_valid && mpvRuntime.configuration_available ? 'ok' : 'error'}`}>
+                  {mpvRuntime?.available && mpvRuntime.manifest_valid && mpvRuntime.files_valid && mpvRuntime.configuration_available ? '可用' : '需检查'}
+                </span>
               </div>
-              {mpvRuntime?.architecture && (
-                <div className="mpv-runtime-meta">{mpvRuntime.architecture}{mpvRuntime.target_triple ? ` · ${mpvRuntime.target_triple}` : ''}{mpvRuntime.distribution_status === 'development-only' ? ' · 本地开发状态' : ''}</div>
-              )}
-              <div className="mpv-runtime-meta">
-                配置：{mpvRuntime?.configuration_available ? '就绪' : '缺失'} · 脚本：{mpvRuntime?.scripts_available ? '就绪' : '缺失'} · 清单：{mpvRuntime?.manifest_valid ? '有效' : '无效'} · 文件：{mpvRuntime?.files_valid ? '校验通过' : '校验失败'}
+              <div className="mpv-runtime-message">
+                {mpvRuntime?.available && mpvRuntime.manifest_valid && mpvRuntime.files_valid && mpvRuntime.configuration_available
+                  ? 'KumiPlayer 会使用内置播放器和自己的播放配置，不会改写你的全局 MPV。'
+                  : '重新检测可确认内置播放器是否完整；如仍无法使用，请修复应用安装后重试。'}
               </div>
-              {mpvRuntime?.message && <div className="mpv-runtime-message">{mpvRuntime.message}</div>}
             </div>
             <ToggleRow label="自动播放下一集" active={config.auto_play_next_episode} onChange={() => saveConfig({ auto_play_next_episode: !config.auto_play_next_episode })} />
             <ToggleRow label="播放心跳" active={config.heartbeat_enabled} onChange={() => saveConfig({ heartbeat_enabled: !config.heartbeat_enabled })} />
@@ -588,7 +601,6 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
           <div className="settings-actions">
             <GhostButton onClick={() => checkMpvRuntime()} disabled={activeAction !== null}>{activeAction === '检测内置播放器' ? '检测中…' : '重新检测内置播放器'}</GhostButton>
             <GhostButton onClick={() => goPlayerTuning()}>播放器调节（Anime4K 默认效果）</GhostButton>
-            <GhostButton onClick={() => openMpvConfigDir()} busy={activeAction === '打开 MPV 配置目录'}>打开 MPV 配置目录</GhostButton>
           </div>
         </SettingsSection>
       )}
@@ -686,89 +698,6 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
     );
   };
 
-  const renderSupport = () => (
-    <PanelStack>
-      <SectionIntro title="应用与支持" description="网络、初始环境与后续支持方式。" />
-      {config && (
-        <SettingsSection title="网络">
-          <div className="settings-field-list">
-            <ConfigRow label="网络代理" value={config.proxy_url} onSave={(value) => saveConfig({ proxy_url: value })} />
-            <span className="field-help">代理用于访问 TMDB 等外部服务；OpenList 局域网连接不使用代理。</span>
-          </div>
-        </SettingsSection>
-      )}
-      <SettingsSection title="初始设置引导">
-        <div className="settings-support-row">
-          <div>
-            <strong>重新配置播放器、镜像与媒体来源</strong>
-            <p>使用当前配置重新进入完整引导并逐项验证。进入引导不会清空现有配置，中途退出也不会影响当前软件使用。</p>
-          </div>
-          <GhostButton onClick={() => onOpenSetup?.()} disabled={!onOpenSetup}>
-            <RotateCcw size={16} aria-hidden="true" />重新进入初始引导
-          </GhostButton>
-        </div>
-      </SettingsSection>
-      <SettingsSection title="问题记录与导出">
-        <div className="settings-support-row">
-          <div>
-            <strong>错误日志</strong>
-            <p>导入、刮削和任务错误全部如实记录在本机日志文件中（data/logs/error/）。点击导出可下载完整日志文本，便于分析问题。</p>
-          </div>
-          <GhostButton onClick={() => void runAction('导出错误日志', async () => {
-            const text = await exportErrorLogText(90);
-            const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-            const url = URL.createObjectURL(blob);
-            const anchor = document.createElement('a');
-            const date = new Date().toISOString().slice(0, 10);
-            anchor.href = url;
-            anchor.download = `kumiplayer-error-log-${date}.txt`;
-            document.body.appendChild(anchor);
-            anchor.click();
-            document.body.removeChild(anchor);
-            URL.revokeObjectURL(url);
-            report('错误日志已导出');
-          })}>
-            <Download size={16} aria-hidden="true" />导出错误日志
-          </GhostButton>
-        </div>
-      </SettingsSection>
-      <SettingsSection title="构建来源">
-        <div className="settings-support-row">
-          <div>
-            <strong>KumiPlayer 构建标识</strong>
-            <p className="build-provenance">
-              <span className="build-provenance-line">
-                <span className="build-provenance-key">版本</span>
-                <span className="build-provenance-val">{typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'unknown'}</span>
-              </span>
-              <span className="build-provenance-line">
-                <span className="build-provenance-key">提交</span>
-                <span className="build-provenance-val build-provenance-sha">{typeof __BUILD_SHA__ !== 'undefined' ? __BUILD_SHA__ : 'unknown'}</span>
-              </span>
-              <span className="build-provenance-line">
-                <span className="build-provenance-key">分支</span>
-                <span className="build-provenance-val">{typeof __BUILD_BRANCH__ !== 'undefined' ? __BUILD_BRANCH__ : 'unknown'}</span>
-              </span>
-              <span className="build-provenance-line">
-                <span className="build-provenance-key">构建</span>
-                <span className="build-provenance-val">{typeof __BUILD_TIME__ !== 'undefined' ? __BUILD_TIME__.replace('T', ' ').slice(0, 16) : 'unknown'}</span>
-              </span>
-            </p>
-          </div>
-        </div>
-      </SettingsSection>
-      <SettingsSection title="支持与赞助">
-        <div className="settings-support-row">
-          <div>
-            <strong>支持 KumiPlayer</strong>
-            <p>博客与 GitHub 地址将在后续开放。正式地址确定前，不会跳转到临时或无效页面。</p>
-          </div>
-          <GhostButton onClick={() => undefined} disabled>内容稍后开放</GhostButton>
-        </div>
-      </SettingsSection>
-    </PanelStack>
-  );
-
   const contentByTab: Record<SettingsTab, ReactNode> = {
     appearance: renderAppearance(),
     sources: renderSources(),
@@ -776,7 +705,6 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
     scrape: renderScrape(),
     player: renderPlayer(),
     bangumi: renderBangumi(),
-    support: renderSupport(),
   };
 
   return (
@@ -808,7 +736,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
         <nav className="settings-outline" aria-label="设置分类">
           <div className="settings-outline-heading">
             <strong>设置</strong>
-            <span>KumiPlayer 偏好与服务</span>
+            <span>连接、媒体与播放偏好</span>
           </div>
           <div className="settings-outline-nav">
             {sectionTabs.map((tab) => {

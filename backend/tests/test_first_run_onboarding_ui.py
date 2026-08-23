@@ -11,7 +11,7 @@ def test_app_gates_normal_shell_behind_first_run_setup():
 
 def test_first_run_page_contains_required_zero_start_steps():
     page = (ROOT / "src" / "pages" / "FirstRunSetup.tsx").read_text(encoding="utf-8")
-    for text in ["内置播放器", "镜像目录", "媒体来源", "验证并完成"]:
+    for text in ["内置播放器", "镜像目录", "媒体来源", "验证并完成", "SourceEvidence"]:
         assert text in page
     # 首次引导不再要求用户选择外部 MPV 路径，改为自动检测内置播放器
     assert "pickFolder" in page
@@ -39,6 +39,16 @@ def test_first_run_explains_and_links_official_credential_types():
     assert "https://next.bgm.tv/demo/access-token" in credentials
 
 
+def test_first_run_reflects_v4_source_flow_without_runtime_metadata():
+    page = (ROOT / "src" / "pages" / "FirstRunSetup.tsx").read_text(encoding="utf-8")
+
+    assert "OpenList 可在完成后添加" in page
+    assert "并不替代首次配置的可访问媒体根目录" in page
+    assert "mpvStatus.version" not in page
+    assert "mpvStatus.architecture" not in page
+    assert "distribution_status" not in page
+
+
 def test_settings_can_reenter_setup_without_resetting_first_run_state():
     app = (ROOT / "src" / "App.tsx").read_text(encoding="utf-8")
     settings = (ROOT / "src" / "pages" / "SettingsPage.tsx").read_text(encoding="utf-8")
@@ -53,10 +63,10 @@ def test_settings_can_reenter_setup_without_resetting_first_run_state():
     assert "退出引导" in setup
 
 
-def test_settings_reserves_support_section_without_fake_links():
+def test_settings_omits_support_and_build_metadata_from_regular_preferences():
     settings = (ROOT / "src" / "pages" / "SettingsPage.tsx").read_text(encoding="utf-8")
 
-    assert "应用与支持" in settings
-    assert "支持与赞助" in settings
-    assert "博客与 GitHub 地址将在后续开放" in settings
-    assert "内容稍后开放" in settings
+    assert "应用与支持" not in settings
+    assert "支持与赞助" not in settings
+    assert "KumiPlayer 构建标识" not in settings
+    assert "__BUILD_SHA__" not in settings

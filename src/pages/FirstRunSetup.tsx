@@ -66,7 +66,12 @@ export default function FirstRunSetup({ initialConfig, onComplete, mode = 'first
     if (selected) update(key, selected);
   };
 
-  const mpvReady = Boolean(mpvStatus?.available && mpvStatus.manifest_valid && mpvStatus.files_valid);
+  const mpvReady = Boolean(
+    mpvStatus?.available
+    && mpvStatus.manifest_valid
+    && mpvStatus.files_valid
+    && mpvStatus.configuration_available,
+  );
 
   const goNext = () => {
     if (step === 1 && !mpvReady) {
@@ -131,10 +136,10 @@ export default function FirstRunSetup({ initialConfig, onComplete, mode = 'first
                 <span className="first-run-hero-icon"><Sparkles size={28} /></span>
                 <p className="first-run-eyebrow">{isReconfigure ? '重新检查 KumiPlayer 配置' : '欢迎使用 KumiPlayer'}</p>
                 <h1>{isReconfigure ? '重新配置基础环境' : '先完成几项基础设置'}</h1>
-                <p>真实视频始终保留在你的网盘或本地目录中。KumiPlayer 只创建可管理的镜像、元数据和播放记录。</p>
+                <p>真实视频始终保留在你的网盘或本地目录中。KumiPlayer 会先记录扫描到的 SourceEvidence，再建立可确认的媒体图谱、镜像、元数据和播放记录。</p>
                 <div className="first-run-principles">
-                  <article><ShieldCheck size={20} /><div><strong>安装版已备好应用环境</strong><span>支持 Windows 10 / 11；后端、内置播放器和功能插件随软件安装，缺少 WebView2 时安装器会联网补齐。</span></div></article>
                   <article><ShieldCheck size={20} /><div><strong>不移动真实媒体</strong><span>路径检查只读取文件和目录信息。</span></div></article>
+                  <article><Database size={20} /><div><strong>来源先记录，再整理</strong><span>本地目录、挂载网盘和目录树会进入同一条媒体整理链路，后续仍可在媒体管理中确认与修正。</span></div></article>
                   <article><Play size={20} /><div><strong>内置干净 MPV</strong><span>KumiPlayer 使用自己维护的播放器与配置，不读取或改写你的全局 MPV。</span></div></article>
                   <article><Database size={20} /><div><strong>配置可以随时修改</strong><span>完成后仍可在设置与媒体管理中调整。</span></div></article>
                 </div>
@@ -154,12 +159,7 @@ export default function FirstRunSetup({ initialConfig, onComplete, mode = 'first
                 {mpvStatus && (
                   <div className={`first-run-result ${mpvReady ? 'success' : 'error'}`}>
                     <strong>{mpvReady ? '内置播放器已就绪' : '播放器运行时缺失或损坏'}</strong>
-                    <span>{mpvStatus.message}</span>
-                    <small>
-                      {mpvStatus.version || '版本未知'}
-                      {mpvStatus.architecture ? ` · ${mpvStatus.architecture}` : ''}
-                      {mpvStatus.distribution_status === 'development-only' ? ' · 本地开发状态' : ''}
-                    </small>
+                    <span>{mpvReady ? 'KumiPlayer 会使用内置播放器和自己的播放配置。' : mpvStatus.message}</span>
                   </div>
                 )}
                 <button className="first-run-secondary" onClick={checkMpv} disabled={checkingMpv}>{checkingMpv ? '正在检测…' : <><RefreshCw size={14} />重新检测</>}</button>
@@ -171,13 +171,17 @@ export default function FirstRunSetup({ initialConfig, onComplete, mode = 'first
               <div className="first-run-panel">
                 <p className="first-run-eyebrow">存储</p>
                 <h1>镜像目录与媒体来源</h1>
-                <p>镜像目录保存 .strm 和刮削元数据。下面只需配置你实际使用的来源，其他来源可以留空。</p>
+                <p>镜像目录保存 .strm 和刮削元数据。请选择至少一个实际可访问的本地或已挂载网盘根目录；其他来源可以留空。</p>
                 <SetupPathField label="镜像目录（必填）" value={form.mirror_dir} placeholder="选择用于保存镜像的文件夹" onChange={(value) => update('mirror_dir', value)} onPick={() => chooseDirectory('mirror_dir', '选择镜像目录')} />
                 <div className="first-run-source-grid">
                   <SetupPathField label="115 网盘挂载根目录" value={form.pan115_root || ''} placeholder="例如 H:\\115open" onChange={(value) => update('pan115_root', value)} onPick={() => chooseDirectory('pan115_root', '选择 115 网盘挂载根目录')} compact />
                   <SetupPathField label="百度网盘挂载位置" value={form.baidu_root || ''} placeholder="例如 H:\\百度网盘" onChange={(value) => update('baidu_root', value)} onPick={() => chooseDirectory('baidu_root', '选择百度网盘挂载位置')} compact />
                   <SetupPathField label="本地媒体根目录" value={form.local_root || ''} placeholder="你的本地影视目录" onChange={(value) => update('local_root', value)} onPick={() => chooseDirectory('local_root', '选择本地媒体根目录')} compact />
                   <SetupPathField label="目录树文件目录（可选）" value={form.directory_tree_dir || ''} placeholder="保存网盘目录树 TXT 的文件夹" onChange={(value) => update('directory_tree_dir', value)} onPick={() => chooseDirectory('directory_tree_dir', '选择目录树文件目录')} compact />
+                </div>
+                <div className="first-run-path-example">
+                  <strong>OpenList 可在完成后添加</strong>
+                  <span>请在「OpenList 设置」中配置连接、远端根目录和内容路由；它并不替代首次配置的可访问媒体根目录。</span>
                 </div>
                 {form.baidu_root?.trim() && (
                   <div className="first-run-path-example">
@@ -195,7 +199,7 @@ export default function FirstRunSetup({ initialConfig, onComplete, mode = 'first
                 <h1>验证并完成</h1>
                 <p>后端会重新验证内置播放器、镜像目录和媒体来源。任何一项失败都不会写入半完成配置。</p>
                 <div className="first-run-summary">
-                  <SummaryRow label="内置播放器" value={mpvStatus?.version || (mpvReady ? '已就绪' : '未就绪')} ok={mpvReady} />
+                  <SummaryRow label="内置播放器" value={mpvReady ? '已就绪' : '未就绪'} ok={mpvReady} />
                   <SummaryRow label="镜像目录" value={form.mirror_dir} ok={Boolean(form.mirror_dir?.trim())} />
                   <SummaryRow label="媒体来源" value={`已配置 ${sourceCount} 个来源`} ok={sourceCount > 0} />
                 </div>
