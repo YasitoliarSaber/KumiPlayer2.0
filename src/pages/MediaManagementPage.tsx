@@ -265,6 +265,16 @@ export default function MediaManagementPage() {
 
   useEffect(() => { void loadPresets(); }, []);
 
+  // P1-2（步骤2）：persist 恢复兜底——退出重进后 step 若停在
+  // confirm/workbench/background 但无 planId（entries 是会话级数据已重置），
+  // 回退到 import（用户可从卡片列表 resumePreset 恢复实时进度，问题 3.3）。
+  useEffect(() => {
+    if (step === 'import' || step === 'maintenance') return;
+    if (activeEntry?.planId || backgroundImport) return;
+    setStep('import');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => () => deletePreviewAbortRef.current?.abort(), []);
 
   useEffect(() => {

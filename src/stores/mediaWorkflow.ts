@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 import type { ImportPreview, SourcePathValidation, TaskRecord } from '../api/types';
 
 export type MediaWorkflowSource = 'pan115' | 'baidu' | 'local' | 'openlist';
@@ -60,36 +61,51 @@ function createEntry(): MediaWorkflowEntry {
 
 const initialEntry = createEntry();
 
-export const useMediaWorkflowStore = create<MediaWorkflowState>((set, get) => ({
-  step: 'import',
-  source: 'local',
-  family: 'anime',
-  importScope: '',
-  entries: [initialEntry],
-  activeEntryId: initialEntry.id,
-  task: null,
-  taskKind: null,
-  backgroundImport: null,
-  pendingDroppedTreePath: null,
-  setStep: (step) => set({ step }),
-  setSource: (source) => set((state) => state.source === source
-    ? { source }
-    : { source, importScope: '' }),
-  setFamily: (family) => set((state) => state.family === family
-    ? { family }
-    : { family, importScope: '' }),
-  setImportScope: (importScope) => set({ importScope }),
-  setEntries: (entries) => set((state) => ({
-    entries: typeof entries === 'function' ? entries(state.entries) : entries,
-  })),
-  setActiveEntryId: (activeEntryId) => set({ activeEntryId }),
-  setTask: (task) => set({ task }),
-  setTaskKind: (taskKind) => set({ taskKind }),
-  setBackgroundImport: (backgroundImport) => set({ backgroundImport }),
-  queueDroppedTreePath: (pendingDroppedTreePath) => set({ pendingDroppedTreePath }),
-  consumeDroppedTreePath: () => {
-    const path = get().pendingDroppedTreePath;
-    if (path) set({ pendingDroppedTreePath: null });
-    return path;
-  },
-}));
+export const useMediaWorkflowStore = create<MediaWorkflowState>()(
+  persist(
+    (set, get) => ({
+      step: 'import',
+      source: 'local',
+      family: 'anime',
+      importScope: '',
+      entries: [initialEntry],
+      activeEntryId: initialEntry.id,
+      task: null,
+      taskKind: null,
+      backgroundImport: null,
+      pendingDroppedTreePath: null,
+      setStep: (step) => set({ step }),
+      setSource: (source) => set((state) => state.source === source
+        ? { source }
+        : { source, importScope: '' }),
+      setFamily: (family) => set((state) => state.family === family
+        ? { family }
+        : { family, importScope: '' }),
+      setImportScope: (importScope) => set({ importScope }),
+      setEntries: (entries) => set((state) => ({
+        entries: typeof entries === 'function' ? entries(state.entries) : entries,
+      })),
+      setActiveEntryId: (activeEntryId) => set({ activeEntryId }),
+      setTask: (task) => set({ task }),
+      setTaskKind: (taskKind) => set({ taskKind }),
+      setBackgroundImport: (backgroundImport) => set({ backgroundImport }),
+      queueDroppedTreePath: (pendingDroppedTreePath) => set({ pendingDroppedTreePath }),
+      consumeDroppedTreePath: () => {
+        const path = get().pendingDroppedTreePath;
+        if (path) set({ pendingDroppedTreePath: null });
+        return path;
+      },
+    }),
+    {
+      name: 'kumiplayer-media-workflow',
+      // 只持久化导航级配置；entries/task/backgroundImport 是会话级数据，
+      // 退出重进后从后端 TaskRecord/preset 恢复实时状态（问题 3.3）。
+      partialize: (state) => ({
+        step: state.step,
+        source: state.source,
+        family: state.family,
+        importScope: state.importScope,
+      }),
+    },
+  ),
+);
