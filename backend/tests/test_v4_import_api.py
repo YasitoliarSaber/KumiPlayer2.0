@@ -67,6 +67,43 @@ def test_preview_confirm_and_library_use_revision_work_and_job_identities(tmp_pa
     assert library.json()["cards"][0]["title"] == "Show"
 
 
+def test_confirmed_source_has_a_reopenable_card_with_live_job_summary(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    payload = _payload("rev-source-card")
+    payload.update({
+        "source_display_name": "本地动画库",
+        "source_locator": "D:\\Media\\Anime",
+        "playback_locator": "D:\\Media\\Anime",
+    })
+
+    assert client.post("/api/v4/imports/preview", json=payload).status_code == 200
+    assert client.post("/api/v4/imports/rev-source-card/confirm").status_code == 200
+
+    response = client.get("/api/v4/sources/libraries")
+    assert response.status_code == 200, response.text
+    cards = response.json()["cards"]
+    assert len(cards) == 1
+    card = cards[0]
+    assert card["root_id"] == "root-api"
+    assert card["revision_id"] == "rev-source-card"
+    assert card["display_name"] == "本地动画库"
+    assert card["source_locator"] == "D:\\Media\\Anime"
+    assert card["evidence_count"] == 1
+    assert card["work_count"] == 1
+    assert card["job_summary"]["total"] > 0
+    assert card["job_summary"]["queued"] > 0
+    assert card["can_resume"] is True
+
+
+def test_source_card_list_omits_unconfirmed_drafts(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    assert client.post("/api/v4/imports/preview", json=_payload("rev-draft-only")).status_code == 200
+
+    response = client.get("/api/v4/sources/libraries")
+    assert response.status_code == 200
+    assert response.json()["cards"] == []
+
+
 def test_preview_with_unknown_title_returns_review_issue_and_confirm_conflict(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     payload = _payload("rev-review")
@@ -113,6 +150,48 @@ def test_hybrid_tree_scan_reuses_the_openlist_root_identity(tmp_path, monkeypatc
     )
     assert result["entries"][0]["ingest_method"] == "directory_tree"
     assert result["entries"][0]["relative_path"] == "Show/Show.S01E01.mkv"
+
+
+def test_tree_scan_preserves_quark_as_the_content_provider(tmp_path):
+    from app.api import media_v4
+
+    tree = tmp_path / "quark-tree.txt"
+    tree.write_text("Show/Show.S01E01.mkv\n", encoding="utf-8")
+
+    result = media_v4.scan_source(media_v4.SourceScanRequest(
+        source="tree",
+        tree_file=str(tree),
+        provider="quark",
+    ))
+
+    assert result["entries"][0]["provider"] == "quark"
+
+
+def test_explicit_openlist_incremental_requires_a_confirmed_txt_baseline(monkeypatch):
+    from fastapi import HTTPException
+
+    from app.api import media_v4
+
+    config = SimpleNamespace(
+        openlist_server_url="https://openlist.example.test",
+        openlist_remote_root="/",
+        openlist_mount_root="X:\\OpenList",
+        openlist_routes=[],
+    )
+    monkeypatch.setattr(media_v4, "load_config", lambda: config)
+    monkeypatch.setattr(media_v4, "resolve_openlist_credentials", lambda: ("kumi", "secret", "available"))
+    monkeypatch.setattr(media_v4, "_confirmed_source_evidence", lambda _root_id: [])
+
+    with pytest.raises(HTTPException) as exc_info:
+        media_v4.scan_source(media_v4.SourceScanRequest(
+            source="openlist",
+            root_path="/Anime",
+            provider="pan115",
+            scan_mode="incremental",
+        ))
+
+    assert exc_info.value.status_code == 409
+    assert "TXT 基线" in exc_info.value.detail
 
 
 def test_openlist_auto_scan_rebuilds_missing_checkpoint_from_confirmed_revision(monkeypatch):

@@ -12,7 +12,7 @@ from app.media_v4.domain.models import SourceEvidence
 def provider_to_source(provider_id: str) -> str:
     """把内容提供商映射为纯解析所需的来源语义。"""
 
-    if provider_id in {"pan115", "baidu", "local"}:
+    if provider_id in {"pan115", "baidu", "quark", "other", "local"}:
         return provider_id
     return "openlist"
 

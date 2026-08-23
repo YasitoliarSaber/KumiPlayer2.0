@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
+import os
 import re
 import uuid
 from pathlib import Path, PurePosixPath
@@ -37,6 +39,50 @@ _UNICODE_TREE_LINE = re.compile(
 _UNICODE_PREFIX_TOKEN = re.compile(r"(?:│ {2,3})|(?: {3,4})")
 _PAN115_ROOT_LINE = re.compile(r"^\|[—-]{2}(?P<name>.+)$")
 _PAN115_TREE_LINE = re.compile(r"^(?P<prefix>(?:\| )*)\|-(?P<name>.+)$")
+
+_WINDOWS_DRIVE_TYPES = {
+    0: "unknown",
+    1: "invalid",
+    2: "removable",
+    3: "fixed",
+    4: "remote",
+    5: "cdrom",
+    6: "ramdisk",
+}
+_VIRTUAL_FILESYSTEM_MARKERS = ("fuse", "winfsp", "webdav", "rclone", "cloud")
+
+
+def _windows_volume_profile(path: str | Path) -> tuple[str, str]:
+    """返回 Windows 卷类型与文件系统名，供本地扫描拒绝网盘映射。"""
+
+    if os.name != "nt":
+        return "unknown", ""
+    anchor = Path(path).expanduser().anchor
+    if not anchor:
+        return "unknown", ""
+    drive_type = _WINDOWS_DRIVE_TYPES.get(ctypes.windll.kernel32.GetDriveTypeW(anchor), "unknown")
+    filesystem_name = ctypes.create_unicode_buffer(261)
+    ok = ctypes.windll.kernel32.GetVolumeInformationW(
+        anchor,
+        None,
+        0,
+        None,
+        None,
+        None,
+        filesystem_name,
+        len(filesystem_name),
+    )
+    return drive_type, filesystem_name.value if ok else ""
+
+
+def _ensure_physical_local_volume(path: str | Path) -> None:
+    drive_type, filesystem_name = _windows_volume_profile(path)
+    normalized_filesystem = filesystem_name.casefold()
+    if drive_type == "remote" or any(marker in normalized_filesystem for marker in _VIRTUAL_FILESYSTEM_MARKERS):
+        raise ValueError(
+            "本地目录只支持本机物理磁盘；检测到网盘挂载或虚拟文件系统，"
+            "请改用目录树 TXT 或 OpenList 导入"
+        )
 
 
 def _tree_node(line: str) -> tuple[int, str, bool] | None:
@@ -79,7 +125,9 @@ def openlist_root_id(server_url: str, username: str, remote_root: str) -> str:
 
 
 def scan_local_directory(root_path: str | Path) -> tuple[str, str, list]:
-    root = Path(root_path).expanduser().resolve()
+    candidate = Path(root_path).expanduser()
+    _ensure_physical_local_volume(candidate)
+    root = candidate.resolve()
     if not root.is_dir():
         raise NotADirectoryError(str(root))
     root_id = _root_id(root)
@@ -118,9 +166,10 @@ def parse_directory_tree_file(
     provider: str,
     source_root: str = "",
 ) -> tuple[str, list]:
-    path = Path(file_path).expanduser().resolve()
-    if not path.is_file():
-        raise FileNotFoundError(str(path))
+    # 目录树可能位于 WebDAV/CloudDrive 等虚拟盘。此类盘符可以正常打开文件，
+    # 但不一定实现 Windows 最终路径解析；导入合同只要求 TXT 可读，不要求
+    # 底层卷支持 resolve/stat。
+    path = Path(file_path).expanduser()
     try:
         text = path.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError:

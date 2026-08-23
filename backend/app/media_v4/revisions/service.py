@@ -106,6 +106,7 @@ class V4RevisionService:
         scan_id: str = "",
         source_provider: str = "local",
         ingest_method: str = "local_scan",
+        source_metadata: dict[str, str] | None = None,
         _publish: bool = False,
         _override_payloads: dict[str, dict] | None = None,
     ) -> ResolvedMediaGraph:
@@ -121,16 +122,48 @@ class V4RevisionService:
 
         graph = self.resolver.resolve(entries)
         override_payloads = _override_payloads or {}
+        source_metadata = source_metadata or {}
         created_at = _now()
 
         with self.database.connect() as conn:
             conn.execute(
                 """
-                INSERT OR IGNORE INTO source_roots(
-                    root_id, provider, ingest_method, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?)
+                INSERT INTO source_roots(
+                    root_id, provider, ingest_method, source_locator, playback_locator,
+                    route_id, display_name, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(root_id) DO UPDATE SET
+                    provider = excluded.provider,
+                    ingest_method = excluded.ingest_method,
+                    source_locator = CASE
+                        WHEN excluded.source_locator != '' THEN excluded.source_locator
+                        ELSE source_roots.source_locator
+                    END,
+                    playback_locator = CASE
+                        WHEN excluded.playback_locator != '' THEN excluded.playback_locator
+                        ELSE source_roots.playback_locator
+                    END,
+                    route_id = CASE
+                        WHEN excluded.route_id != '' THEN excluded.route_id
+                        ELSE source_roots.route_id
+                    END,
+                    display_name = CASE
+                        WHEN excluded.display_name != '' THEN excluded.display_name
+                        ELSE source_roots.display_name
+                    END,
+                    updated_at = excluded.updated_at
                 """,
-                (root_id, source_provider, ingest_method, created_at, created_at),
+                (
+                    root_id,
+                    source_provider,
+                    ingest_method,
+                    str(source_metadata.get("source_locator") or ""),
+                    str(source_metadata.get("playback_locator") or ""),
+                    str(source_metadata.get("route_id") or ""),
+                    str(source_metadata.get("display_name") or ""),
+                    created_at,
+                    created_at,
+                ),
             )
             existing_scan = conn.execute(
                 "SELECT scan_id FROM source_scans WHERE scan_id = ?",

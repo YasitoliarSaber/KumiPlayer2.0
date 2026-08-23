@@ -92,12 +92,21 @@ describe('OpenListSettingsPanel', () => {
     expect((cacheLabel.closest('details') as HTMLDetailsElement | null)?.open).toBe(false);
   });
 
-  test('已保存凭据时凭据编辑区默认折叠', () => {
+  test('已保存凭据时仍显示掩码输入框，且不会回传已保存密码', () => {
     renderPanel();
     fireEvent.click(screen.getByText('管理连接'));
-    expect(screen.getByText('更新账号或密码')).toBeTruthy();
-    // 用户名/密码输入框不可见（需点击展开）
-    expect(screen.queryByPlaceholderText('留空 = 使用已保存信息；填写 = 更新')).toBeNull();
+    expect(screen.getByPlaceholderText('••••••••（已保存，输入后更新）')).toBeTruthy();
+    expect(screen.getByText(/已保存的密码不会回传到界面/)).toBeTruthy();
+  });
+
+  test('眼睛按钮只显示本次新输入的密码', () => {
+    renderPanel();
+    fireEvent.click(screen.getByText('管理连接'));
+    const password = screen.getByPlaceholderText('••••••••（已保存，输入后更新）') as HTMLInputElement;
+    fireEvent.change(password, { target: { value: 'new-password' } });
+    expect(password.type).toBe('password');
+    fireEvent.click(screen.getByRole('button', { name: '显示本次输入密码' }));
+    expect(password.type).toBe('text');
   });
 
   test('remote-affecting 修改显示“验证并保存”', () => {

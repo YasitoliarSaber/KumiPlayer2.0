@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Button, Checkbox, Input, MessageBar, MessageBarBody, Select, Spinner, Switch } from '@fluentui/react-components'
+import { useEffect, useMemo, useState } from 'react'
+import { Button, Checkbox, Input, MessageBar, MessageBarBody, Select, Spinner } from '@fluentui/react-components'
 import {
   ArrowReset24Regular,
   ArrowSync24Regular,
@@ -12,12 +12,23 @@ import {
   FolderOpen24Regular,
   ScanObject24Regular,
 } from '@fluentui/react-icons'
-import { mediaV4Api, type V4Job, type V4Preview, type V4SourceEvidence } from '../api/mediaV4'
+import { mediaV4Api, type V4Job, type V4Preview, type V4SourceEvidence, type V4SourceLibraryCard } from '../api/mediaV4'
+import { configApi, type PublicConfig } from '../api/config'
+import { openlistApi } from '../api/openlist'
+import type { OpenListRoute, ProviderId } from '../api/types'
+import OpenListFolderBrowser from '../components/media/OpenListFolderBrowser'
 import { pickDirectoryTreeFile, pickFolder } from '../platform/folderPicker'
 import { useMediaWorkflowStore } from '../stores/mediaWorkflow'
+import { useUiStore } from '../stores/ui'
 
 type ImportKind = 'local' | 'tree' | 'openlist' | 'hybrid'
 type OverrideDraft = { title: string; mediaType: 'tv' | 'movie'; season: string; episode: string }
+type SourceCardMetadata = {
+  source_display_name: string
+  source_locator: string
+  playback_locator: string
+  source_route_id: string
+}
 
 const ACTIVE_REVISION_KEY = 'kumiplayer.media-v4.active-revision'
 
@@ -27,16 +38,22 @@ const SOURCE_OPTIONS: Array<{
   description: string
   icon: typeof Folder24Regular
 }> = [
-  { kind: 'local', label: '本地目录', description: '扫描电脑或已挂载网盘中的媒体文件', icon: Folder24Regular },
+  { kind: 'local', label: '本地目录', description: '仅扫描本机物理磁盘中的媒体文件', icon: Folder24Regular },
   { kind: 'tree', label: '目录树 TXT', description: '导入 115、百度或 OpenList 导出的目录清单', icon: DocumentText24Regular },
   { kind: 'openlist', label: 'OpenList', description: '直接扫描已配置的远端目录', icon: Cloud24Regular },
   { kind: 'hybrid', label: '目录树 + OpenList 增量', description: 'TXT 建立大库基线，OpenList 分批核对变化', icon: ArrowSync24Regular },
 ]
 
-const PROVIDER_OPTIONS = [
-  { value: 'local', label: '本地挂载' },
-  { value: 'pan115', label: '115 网盘' },
-  { value: 'baidu', label: '百度网盘' },
+const PROVIDER_OPTIONS: Array<{
+  value: Exclude<ProviderId, 'local' | 'other'>
+  label: string
+  mark: string
+  website: string
+  websiteLabel: string
+}> = [
+  { value: 'pan115', label: '115 网盘', mark: '115', website: 'https://115.com/', websiteLabel: '前往 115 官网生成目录树' },
+  { value: 'baidu', label: '百度网盘', mark: '百', website: 'https://pan.baidu.com/', websiteLabel: '前往百度网盘官网' },
+  { value: 'quark', label: '夸克网盘', mark: '夸', website: 'https://pan.quark.cn/', websiteLabel: '前往夸克网盘官网' },
 ]
 
 const JOB_LABELS: Record<string, string> = {
@@ -55,62 +72,50 @@ const JOB_STATUS_LABELS: Record<string, string> = {
   cancelled: '已取消',
 }
 
-const PATH_CONFIG: Record<ImportKind, {
-  title: string
-  description: string
-  ariaLabel: string
-  name: string
-  placeholder: string
-}> = {
-  local: {
-    title: '媒体目录',
-    description: '选择包含视频文件的文件夹；也支持已挂载的网盘目录。',
-    ariaLabel: '媒体目录',
-    name: 'media_path',
-    placeholder: '例如 D:\\动画',
-  },
-  tree: {
-    title: '目录树文件',
-    description: '选择从 115、百度或 OpenList 导出的 TXT 目录清单。',
-    ariaLabel: '目录树 TXT 文件',
-    name: 'tree_file',
-    placeholder: '例如 D:\\媒体清单\\动画.txt',
-  },
-  openlist: {
-    title: '远端目录',
-    description: '留空时使用 OpenList 设置中的远端根目录。',
-    ariaLabel: 'OpenList 远端目录',
-    name: 'openlist_remote_root',
-    placeholder: '例如 /动画（可留空）',
-  },
-  hybrid: {
-    title: '基线目录树',
-    description: '首次通过 TXT 建立大库基线，后续再由 OpenList 核对变化。',
-    ariaLabel: '首次目录树 TXT 文件',
-    name: 'hybrid_tree_file',
-    placeholder: '例如 D:\\媒体清单\\动画.txt',
-  },
-}
-
-function SettingRow({ title, description, children, controlClassName = '' }: {
-  title: string
-  description: string
-  children: ReactNode
-  controlClassName?: string
-}) {
-  return (
-    <div className="media-v4-setting-row">
-      <div className="media-v4-setting-copy">
-        <strong>{title}</strong>
-        <span>{description}</span>
-      </div>
-      <div className={`media-v4-setting-control ${controlClassName}`.trim()}>{children}</div>
-    </div>
-  )
-}
+const IMPORT_STEPS = [
+  { label: '选择来源', icon: FolderOpen24Regular },
+  { label: '检查识别', icon: ScanObject24Regular },
+  { label: '建立媒体库', icon: Database24Regular },
+]
 
 function createRevisionId() {
   return `rev-${crypto.randomUUID()}`
+}
+
+function routeForPath(routes: OpenListRoute[], remotePath: string) {
+  const normalized = (remotePath || '/').replace(/\\/g, '/').replace(/\/+$/, '') || '/'
+  return routes
+    .filter((route) => route.enabled && (normalized === route.remote_prefix || normalized.startsWith(`${route.remote_prefix}/`)))
+    .sort((left, right) => right.remote_prefix.length - left.remote_prefix.length)[0]
+}
+
+function finalPathSegment(path: string) {
+  const parts = path.replace(/\\/g, '/').split('/').filter(Boolean)
+  return parts.at(-1) || ''
+}
+
+function ProviderPicker({ value, onChange }: {
+  value: Exclude<ProviderId, 'local' | 'other'>
+  onChange: (provider: Exclude<ProviderId, 'local' | 'other'>) => void
+}) {
+  return (
+    <div className="media-v4-provider-picker" role="group" aria-label="内容来源">
+      {PROVIDER_OPTIONS.map((option) => (
+        <button
+          type="button"
+          className={value === option.value ? 'selected' : ''}
+          aria-label={option.label}
+          aria-pressed={value === option.value}
+          onClick={() => onChange(option.value)}
+          key={option.value}
+        >
+          <span className={`media-v4-provider-mark provider-${option.value}`} aria-hidden="true">{option.mark}</span>
+          <span><strong>{option.label}</strong><small>目录树中的实际内容来源</small></span>
+          {value === option.value && <CheckmarkCircle24Filled aria-hidden="true" />}
+        </button>
+      ))}
+    </div>
+  )
 }
 
 function episodeLabel(episode: V4Preview['episodes'][number]) {
@@ -123,12 +128,16 @@ function episodeLabel(episode: V4Preview['episodes'][number]) {
 export default function MediaManagementPage() {
   const pendingDroppedTreePath = useMediaWorkflowStore((state) => state.pendingDroppedTreePath)
   const consumeDroppedTreePath = useMediaWorkflowStore((state) => state.consumeDroppedTreePath)
+  const goSettings = useUiStore((state) => state.goSettings)
   const [kind, setKind] = useState<ImportKind>('local')
   const [path, setPath] = useState('')
-  const [provider, setProvider] = useState('local')
-  const [sourceRoot, setSourceRoot] = useState('')
+  const [provider, setProvider] = useState<Exclude<ProviderId, 'local' | 'other'>>('pan115')
   const [remoteRoot, setRemoteRoot] = useState('')
-  const [fullScan, setFullScan] = useState(false)
+  const [config, setConfig] = useState<PublicConfig | null>(null)
+  const [routes, setRoutes] = useState<OpenListRoute[]>([])
+  const [remoteBrowsing, setRemoteBrowsing] = useState(false)
+  const [sourceCards, setSourceCards] = useState<V4SourceLibraryCard[]>([])
+  const [sourceCardsLoading, setSourceCardsLoading] = useState(true)
   const [revisionId, setRevisionId] = useState('')
   const [scan, setScan] = useState<{
     root_id: string
@@ -136,6 +145,7 @@ export default function MediaManagementPage() {
     entries: V4SourceEvidence[]
     scan_mode?: 'local' | 'tree_snapshot' | 'tree_baseline' | 'incremental' | 'full'
     scan_stats?: { requested_directories?: number; rolling_verified?: number; changed_directories?: number }
+    source_metadata: SourceCardMetadata
   } | null>(null)
   const [preview, setPreview] = useState<V4Preview | null>(null)
   const [jobs, setJobs] = useState<V4Job[]>([])
@@ -143,6 +153,45 @@ export default function MediaManagementPage() {
   const [error, setError] = useState('')
   const [allowEmpty, setAllowEmpty] = useState(false)
   const [overrideDrafts, setOverrideDrafts] = useState<Record<string, OverrideDraft>>({})
+
+  useEffect(() => {
+    let alive = true
+    void Promise.all([
+      configApi.getConfig(),
+      openlistApi.getRoutes().catch(() => ({ routes: [] as OpenListRoute[] })),
+    ]).then(([nextConfig, routeResult]) => {
+      if (!alive) return
+      setConfig(nextConfig)
+      setRoutes(routeResult.routes.length > 0 ? routeResult.routes : nextConfig.openlist_routes || [])
+      setPath((current) => current || nextConfig.local_root || '')
+      setRemoteRoot((current) => current || nextConfig.openlist_remote_root || '/')
+    }).catch((cause) => {
+      if (alive) setError(cause instanceof Error ? cause.message : '无法读取媒体来源设置')
+    })
+    return () => { alive = false }
+  }, [])
+
+  const refreshSourceCards = async () => {
+    setSourceCardsLoading(true)
+    try {
+      const result = await mediaV4Api.sourceLibraries()
+      setSourceCards(result.cards)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法读取已导入媒体库')
+    } finally {
+      setSourceCardsLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void refreshSourceCards()
+  }, [])
+
+  useEffect(() => {
+    if (!sourceCards.some((card) => card.can_resume)) return
+    const timer = window.setInterval(() => { void refreshSourceCards() }, 1500)
+    return () => window.clearInterval(timer)
+  }, [sourceCards])
 
   useEffect(() => {
     if (!pendingDroppedTreePath) return
@@ -182,9 +231,65 @@ export default function MediaManagementPage() {
   }, [preview])
 
   const activeStep = jobs.length > 0 ? 2 : scan ? 1 : 0
-  const canScan = kind === 'openlist' || Boolean(path.trim())
-  const pathConfig = PATH_CONFIG[kind]
-  const showReset = kind !== 'local' || Boolean(path || sourceRoot || remoteRoot || scan || preview || jobs.length || error)
+  const selectedRemoteRoute = routeForPath(routes, remoteRoot)
+  const canScan = kind === 'openlist'
+    ? Boolean(config?.openlist_configured && remoteRoot && selectedRemoteRoute)
+    : kind === 'hybrid'
+      ? Boolean(path.trim() && config?.openlist_configured && remoteRoot && selectedRemoteRoute)
+      : Boolean(path.trim())
+  const showReset = kind !== 'local' || Boolean(scan || preview || jobs.length || error)
+
+  const providerRoot = (providerId: ProviderId, remotePath = '') => {
+    const matchedRoute = routeForPath(routes, remotePath)
+    if (matchedRoute?.provider_id === providerId && matchedRoute.local_path) return matchedRoute.local_path
+    if (providerId === 'pan115') return config?.pan115_root || ''
+    if (providerId === 'baidu') return config?.baidu_root || ''
+    return routes.find((route) => route.enabled && route.provider_id === providerId && route.local_path)?.local_path || ''
+  }
+  const providerOption = PROVIDER_OPTIONS.find((option) => option.value === provider) || PROVIDER_OPTIONS[0]
+  const sourceCardMetadata = (
+    sourceKind: ImportKind,
+    selectedProvider: ProviderId,
+    selectedSourceRoot: string,
+  ): SourceCardMetadata => {
+    const route = routeForPath(routes, remoteRoot)
+    const providerLabel = selectedProvider === 'other'
+      ? '其他远程来源'
+      : PROVIDER_OPTIONS.find((option) => option.value === selectedProvider)?.label || '本地媒体'
+    if (sourceKind === 'local') {
+      const name = finalPathSegment(path) || '本地媒体库'
+      return {
+        source_display_name: `${name} 媒体库`,
+        source_locator: path,
+        playback_locator: path,
+        source_route_id: '',
+      }
+    }
+    if (sourceKind === 'tree') {
+      const name = finalPathSegment(path).replace(/\.[^.]+$/, '') || `${providerLabel} 媒体库`
+      return {
+        source_display_name: `${providerLabel} · ${name}`,
+        source_locator: path,
+        playback_locator: selectedSourceRoot,
+        source_route_id: '',
+      }
+    }
+    const directory = finalPathSegment(remoteRoot) || '根目录'
+    return {
+      source_display_name: route?.label || `${providerLabel} · ${directory}`,
+      source_locator: remoteRoot,
+      playback_locator: selectedSourceRoot,
+      source_route_id: route?.route_id || '',
+    }
+  }
+
+  const handleRemotePathChange = (nextPath: string) => {
+    setRemoteRoot(nextPath)
+    const matchedRoute = routeForPath(routes, nextPath)
+    if (matchedRoute?.provider_id && matchedRoute.provider_id !== 'local' && matchedRoute.provider_id !== 'other') {
+      setProvider(matchedRoute.provider_id)
+    }
+  }
 
   const clearResultState = () => {
     setScan(null)
@@ -200,11 +305,9 @@ export default function MediaManagementPage() {
   const selectSourceKind = (nextKind: ImportKind) => {
     if (nextKind === kind) return
     setKind(nextKind)
-    setPath('')
-    setSourceRoot('')
-    setRemoteRoot('')
-    setFullScan(false)
-    setProvider('local')
+    setPath(nextKind === 'local' ? config?.local_root || '' : '')
+    setRemoteRoot(config?.openlist_remote_root || '/')
+    setProvider('pan115')
     clearResultState()
   }
 
@@ -216,14 +319,17 @@ export default function MediaManagementPage() {
     if (selected) setPath(selected)
   }
 
-  const chooseSourceRoot = async () => {
-    const selected = await pickFolder(sourceRoot, '选择本地挂载根目录')
-    if (selected) setSourceRoot(selected)
-  }
-
-  const scanSource = async () => {
-    if (kind !== 'openlist' && !path.trim()) {
+  const scanSource = async (action: 'primary' | 'incremental' = 'primary') => {
+    if (kind !== 'openlist' && action !== 'incremental' && !path.trim()) {
       setError(kind === 'local' ? '请先选择本地媒体目录' : '请先选择目录树 TXT')
+      return
+    }
+    if ((kind === 'openlist' || kind === 'hybrid' || action === 'incremental') && !config?.openlist_configured) {
+      setError('请先在设置页完成 OpenList 连接配置')
+      return
+    }
+    if ((kind === 'openlist' || kind === 'hybrid' || action === 'incremental') && !routeForPath(routes, remoteRoot)) {
+      setError('请先在 OpenList 浏览器中进入一个已配置内容来源的目录')
       return
     }
     setBusy('scan')
@@ -235,15 +341,26 @@ export default function MediaManagementPage() {
     setOverrideDrafts({})
     localStorage.removeItem(ACTIVE_REVISION_KEY)
     try {
+      const requestSource = action === 'incremental' ? 'openlist' : kind
+      const selectedProvider: ProviderId = requestSource === 'local'
+        ? 'local'
+        : requestSource === 'openlist' || kind === 'hybrid'
+          ? routeForPath(routes, remoteRoot)?.provider_id || 'other'
+          : provider
+      const selectedSourceRoot = requestSource === 'tree' || requestSource === 'hybrid'
+        ? providerRoot(selectedProvider, remoteRoot)
+        : requestSource === 'local' ? path : routeForPath(routes, remoteRoot)?.local_path || ''
+      const metadata = sourceCardMetadata(kind, selectedProvider, selectedSourceRoot)
       const result = await mediaV4Api.scan({
-        source: kind,
-        root_path: kind === 'local' ? path : kind === 'openlist' ? path : kind === 'hybrid' ? remoteRoot : sourceRoot || 'tree',
-        tree_file: kind === 'tree' || kind === 'hybrid' ? path : '',
-        provider: kind === 'local' ? 'local' : provider,
-        source_root: kind === 'tree' ? sourceRoot : '',
-        scan_mode: kind === 'openlist' && fullScan ? 'full' : 'auto',
+        source: requestSource,
+        root_path: requestSource === 'local' ? path : requestSource === 'openlist' || kind === 'hybrid' ? remoteRoot : providerRoot(provider) || 'tree',
+        tree_file: requestSource === 'tree' || requestSource === 'hybrid' ? path : '',
+        provider: selectedProvider,
+        source_root: requestSource === 'tree' || requestSource === 'hybrid' ? selectedSourceRoot : '',
+        scan_mode: action === 'incremental' ? 'incremental' : requestSource === 'openlist' ? 'full' : 'auto',
       })
-      setScan(result)
+      const nextScan = { ...result, source_metadata: metadata }
+      setScan(nextScan)
       setAllowEmpty(false)
       if (result.entries.length > 0) {
         const previewResult = await mediaV4Api.preview({
@@ -252,6 +369,7 @@ export default function MediaManagementPage() {
           scan_id: result.scan_id,
           entries: result.entries,
           allow_empty: false,
+          ...metadata,
         })
         setPreview(previewResult)
       }
@@ -278,6 +396,7 @@ export default function MediaManagementPage() {
         scan_id: scan.scan_id,
         entries: scan.entries,
         allow_empty: allowEmpty,
+        ...scan.source_metadata,
       })
       setRevisionId(nextRevisionId)
       setPreview(result)
@@ -297,6 +416,7 @@ export default function MediaManagementPage() {
       setJobs(result.jobs)
       localStorage.setItem(ACTIVE_REVISION_KEY, revisionId)
       setPreview({ ...preview, status: 'confirmed' })
+      void refreshSourceCards()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '确认导入失败')
     } finally {
@@ -337,12 +457,24 @@ export default function MediaManagementPage() {
 
   const startNewImport = () => {
     setKind('local')
-    setPath('')
-    setProvider('local')
-    setSourceRoot('')
-    setRemoteRoot('')
-    setFullScan(false)
+    setPath(config?.local_root || '')
+    setProvider('pan115')
+    setRemoteRoot(config?.openlist_remote_root || '/')
     clearResultState()
+  }
+
+  const resumeSourceCard = async (card: V4SourceLibraryCard) => {
+    setError('')
+    try {
+      const result = await mediaV4Api.status(card.revision_id)
+      setRevisionId(card.revision_id)
+      setJobs(result.jobs)
+      setScan(null)
+      setPreview(null)
+      localStorage.setItem(ACTIVE_REVISION_KEY, card.revision_id)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法读取该媒体库的导入进度')
+    }
   }
 
   return (
@@ -356,14 +488,38 @@ export default function MediaManagementPage() {
         {showReset && <Button className="media-v4-new-import" appearance="subtle" icon={<ArrowReset24Regular />} onClick={startNewImport}>重新开始</Button>}
       </header>
 
+      {(sourceCardsLoading || sourceCards.length > 0) && <section className="media-v4-source-libraries" aria-label="已导入媒体库">
+        <div className="media-v4-source-libraries-heading">
+          <div><span>已导入媒体库</span><h2>来源卡</h2><p>每张卡代表一个已确认的媒体来源，可随时回到该次导入的真实任务进度。</p></div>
+          <Button appearance="subtle" icon={<ArrowSync24Regular />} disabled={sourceCardsLoading} onClick={() => void refreshSourceCards()}>刷新状态</Button>
+        </div>
+        {sourceCardsLoading && sourceCards.length === 0 ? <div className="media-v4-source-card-loading"><Spinner size="small" />正在读取媒体库…</div> : <div className="media-v4-source-library-grid">
+          {sourceCards.map((card) => {
+            const pending = card.job_summary.queued + card.job_summary.running
+            const progress = card.job_summary.total === 0 ? 100 : Math.round(((card.job_summary.succeeded + card.job_summary.failed + card.job_summary.cancelled) / card.job_summary.total) * 100)
+            return <article className={`media-v4-library-source-card ${card.can_resume ? 'active' : 'settled'}`} key={card.root_id}>
+              <div className="media-v4-library-source-card-top"><span className="media-v4-provider-mark" aria-hidden="true">{card.provider === 'pan115' ? '115' : card.provider === 'baidu' ? '百' : card.provider === 'quark' ? '夸' : card.provider === 'local' ? '本' : '远'}</span><span>{card.ingest_method === 'local_scan' ? '本地来源' : card.ingest_method === 'directory_tree' ? '目录树基线' : 'OpenList 来源'}</span></div>
+              <strong title={card.display_name}>{card.display_name}</strong>
+              <span className="media-v4-source-card-locator" title={card.source_locator || card.playback_locator}>{card.source_locator || card.playback_locator || '已确认的媒体来源'}</span>
+              <div className="media-v4-source-card-stats"><span>{card.work_count} 部作品</span><span>{card.asset_count} 个文件</span><span>{card.evidence_count} 条来源证据</span></div>
+              <div className="media-v4-source-card-progress"><div><span>{card.can_resume ? `${pending ? '正在处理' : '有失败任务'} · ${progress}%` : '上次导入已处理完毕'}</span><span>{card.job_summary.total} 个任务</span></div><i aria-hidden="true"><b style={{ width: `${progress}%` }} /></i></div>
+              <Button appearance={card.can_resume ? 'primary' : 'secondary'} onClick={() => void resumeSourceCard(card)}>{card.can_resume ? '查看进度' : '查看上次导入'}</Button>
+            </article>
+          })}
+        </div>}
+      </section>}
+
       <nav className="media-v4-steps" aria-label="导入步骤">
         <ol>
-          {['选择来源', '检查识别', '建立媒体库'].map((label, index) => (
-            <li className={index < activeStep ? 'complete' : index === activeStep ? 'active' : ''} key={label} aria-current={index === activeStep ? 'step' : undefined}>
-              <span className="media-v4-step-index" aria-hidden="true">{index < activeStep ? <CheckmarkCircle24Filled /> : index + 1}</span>
-              <span>{label}</span>
-            </li>
-          ))}
+          {IMPORT_STEPS.map((step, index) => {
+            const StepIcon = step.icon
+            return (
+              <li className={index < activeStep ? 'complete' : index === activeStep ? 'active' : ''} key={step.label} aria-current={index === activeStep ? 'step' : undefined}>
+                <span className="media-v4-step-index" aria-hidden="true">{index < activeStep ? <CheckmarkCircle24Filled /> : <StepIcon />}</span>
+                <span>{step.label}</span>
+              </li>
+            )
+          })}
         </ol>
       </nav>
 
@@ -395,70 +551,100 @@ export default function MediaManagementPage() {
           })}
         </div>
 
-        <div className="media-v4-config-panel">
+        <div className={`media-v4-config-panel media-v4-workspace workspace-${kind}`}>
           <div className="media-v4-config-heading">
-            <strong>{kind === 'local' ? '配置本地目录' : kind === 'tree' ? '配置目录树清单' : kind === 'hybrid' ? '配置 TXT 基线与 OpenList 增量' : '配置 OpenList 扫描'}</strong>
-            <span>{kind === 'local' ? '支持直接输入路径，也可以从资源管理器选择。' : kind === 'tree' ? 'TXT 用于建立目录清单；挂载目录只用于补充本地播放位置。' : kind === 'hybrid' ? '首次用 TXT 建立基线；之后优先核对变化目录并分批抽查，减少整库请求。' : '留空会扫描已配置的 OpenList 根目录。'}</span>
+            <strong>{kind === 'local' ? '选择本机文件夹' : kind === 'tree' ? '导入目录树清单' : kind === 'hybrid' ? '建立基线并检查后续变化' : '浏览 OpenList 目录'}</strong>
+            <span>{kind === 'local'
+              ? '只扫描本机物理磁盘。网盘挂载请使用目录树或 OpenList。'
+              : kind === 'tree'
+                ? '选择内容来源和 TXT 文件；播放路径自动使用设置中的挂载映射。'
+                : kind === 'hybrid'
+                  ? '先用 TXT 快速建立大库基线，确认后再通过 OpenList 对同一目录执行增量检查。'
+                  : '像文件管理器一样进入目标文件夹，然后完整扫描当前目录。'}</span>
           </div>
 
-          <div className="media-v4-settings-list">
-            {kind !== 'local' && (
-              <SettingRow title="存储来源" description="选择清单中的媒体文件实际存放在哪里。" controlClassName="media-v4-select-control">
-                <Select aria-label="存储来源" name="storage_provider" value={provider} onChange={(event) => setProvider(event.currentTarget.value)}>
-                  {PROVIDER_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                </Select>
-              </SettingRow>
-            )}
-
-            <SettingRow title={pathConfig.title} description={pathConfig.description} controlClassName="media-v4-path-control">
-              <div className="media-v4-path-row">
-                <Input
-                  aria-label={pathConfig.ariaLabel}
-                  name={pathConfig.name}
-                  autoComplete="off"
-                  spellCheck={false}
-                  value={path}
-                  onChange={(_, data) => setPath(data.value)}
-                  placeholder={pathConfig.placeholder}
-                />
-                {kind !== 'openlist' && <Button appearance="secondary" icon={kind === 'local' ? <FolderOpen24Regular /> : <DocumentText24Regular />} onClick={() => void choosePath()}>{kind === 'local' ? '选择文件夹' : '选择文件'}</Button>}
-              </div>
-            </SettingRow>
-
-            {kind === 'tree' && (
-              <SettingRow title="本地播放位置" description="可选。TXT 只有相对路径时，选择对应的本机或挂载目录。" controlClassName="media-v4-path-control">
-                <div className="media-v4-path-row">
-                  <Input aria-label="本地挂载根目录（可选）" name="local_mount_root" autoComplete="off" spellCheck={false} value={sourceRoot} onChange={(_, data) => setSourceRoot(data.value)} placeholder="例如 Z:\\动画（可留空）" />
-                  <Button appearance="secondary" icon={<FolderOpen24Regular />} onClick={() => void chooseSourceRoot()}>选择文件夹</Button>
+          {kind === 'local' && (
+            <div className="media-v4-workspace-body">
+              <div className="media-v4-field-block">
+                <div className="media-v4-field-copy"><strong>本机媒体文件夹</strong><span>默认读取“设置 → 媒体来源”中的本地媒体根路径。</span></div>
+                <div className="media-v4-path-row media-v4-path-row-wide">
+                  <Input aria-label="本机媒体文件夹" name="media_path" autoComplete="off" spellCheck={false} value={path} onChange={(_, data) => setPath(data.value)} placeholder="例如 D:\\动画" />
+                  <Button appearance="secondary" icon={<FolderOpen24Regular />} onClick={() => void choosePath()}>选择文件夹</Button>
                 </div>
-              </SettingRow>
-            )}
-
-            {kind === 'hybrid' && (
-              <SettingRow title="增量扫描目录" description="必须与 TXT 清单对应；留空时使用 OpenList 设置中的远端根目录。" controlClassName="media-v4-path-control">
-                <Input aria-label="OpenList 增量目录" name="openlist_incremental_root" autoComplete="off" spellCheck={false} value={remoteRoot} onChange={(_, data) => setRemoteRoot(data.value)} placeholder="例如 /115网盘/动画（可留空）" />
-              </SettingRow>
-            )}
-
-            {kind === 'openlist' && (
-              <SettingRow title="扫描方式" description="通常只检查新增和变化内容；发现结果不完整时再使用完整扫描。" controlClassName="media-v4-switch-control">
-                <Switch
-                  aria-label="完整扫描"
-                  checked={fullScan}
-                  onChange={(_, data) => setFullScan(Boolean(data.checked))}
-                  label={fullScan ? '完整扫描' : '增量扫描'}
-                />
-              </SettingRow>
-            )}
-          </div>
-
-          <div className="media-v4-command-row">
-            <div>
-              <strong>{canScan ? '可以开始扫描' : kind === 'local' ? '还需要选择媒体目录' : '还需要选择目录树文件'}</strong>
-              <span>{canScan ? kind === 'openlist' ? '将按当前方式读取远端目录，并生成供你确认的识别结果。' : '扫描后会直接生成供你确认的识别结果。' : '填写路径或使用右侧按钮选择后即可继续。'}</span>
+              </div>
+              <div className="media-v4-command-row">
+                <div><strong>{path.trim() ? '已选择本机文件夹' : '尚未选择文件夹'}</strong><span>{path.trim() ? '扫描只读取媒体文件，不移动或改名原文件。' : '选择本机物理磁盘中的媒体文件夹后继续。'}</span></div>
+                <Button aria-label="扫描并识别" className="media-primary-command" appearance="primary" icon={<ScanObject24Regular />} disabled={busy !== '' || !canScan} onClick={() => void scanSource()}>{busy === 'scan' ? <><Spinner size="tiny" />正在扫描</> : '扫描并识别'}</Button>
+              </div>
             </div>
-            <Button aria-label="扫描并识别" className="media-primary-command" appearance="primary" icon={<ScanObject24Regular />} disabled={busy !== '' || !canScan} onClick={() => void scanSource()}>{busy === 'scan' ? <><Spinner size="tiny" />正在扫描</> : '扫描并识别'}</Button>
-          </div>
+          )}
+
+          {kind === 'tree' && (
+            <div className="media-v4-workspace-body">
+              <div className="media-v4-field-block">
+                <div className="media-v4-field-copy"><strong>内容来源</strong><span>选择 TXT 清单中的媒体实际属于哪个网盘。</span></div>
+                <ProviderPicker value={provider} onChange={setProvider} />
+                <a className="media-v4-provider-link" href={providerOption.website} target="_blank" rel="noreferrer">{providerOption.websiteLabel}<span aria-hidden="true">↗</span></a>
+              </div>
+              <div className="media-v4-field-block">
+                <div className="media-v4-field-copy"><strong>目录树 TXT 文件</strong><span>支持 115、百度、夸克和 OpenList 导出的目录清单，文件可位于网盘挂载盘。</span></div>
+                <div className="media-v4-path-row media-v4-path-row-wide">
+                  <Input aria-label="目录树 TXT 文件" name="tree_file" autoComplete="off" spellCheck={false} value={path} onChange={(_, data) => setPath(data.value)} placeholder="例如 K:\\媒体清单\\动画目录树.txt" />
+                  <Button appearance="secondary" icon={<DocumentText24Regular />} onClick={() => void choosePath()}>选择文件</Button>
+                </div>
+              </div>
+              <div className="media-v4-mapping-note">
+                <Database24Regular aria-hidden="true" />
+                <div><strong>播放路径由设置自动匹配</strong><span>{providerRoot(provider) ? <>播放路径将使用设置中的 <code title={providerRoot(provider)}>{providerRoot(provider)}</code></> : '当前来源尚未配置可用挂载路径。'}</span></div>
+                {!providerRoot(provider) && <Button appearance="subtle" onClick={goSettings}>前往设置</Button>}
+              </div>
+              <div className="media-v4-command-row">
+                <div><strong>{path.trim() ? '目录树已就绪' : '尚未选择 TXT 文件'}</strong><span>{path.trim() ? `将按${providerOption.label}来源生成识别结果。` : '选择目录树文件后即可扫描。'}</span></div>
+                <Button aria-label="扫描并识别" className="media-primary-command" appearance="primary" icon={<ScanObject24Regular />} disabled={busy !== '' || !canScan} onClick={() => void scanSource()}>{busy === 'scan' ? <><Spinner size="tiny" />正在扫描</> : '扫描并识别'}</Button>
+              </div>
+            </div>
+          )}
+
+          {kind === 'openlist' && (
+            <div className="media-v4-workspace-body">
+              <OpenListFolderBrowser configured={Boolean(config?.openlist_configured)} initialPath={config?.openlist_remote_root || '/'} onLoadingChange={setRemoteBrowsing} onPathChange={handleRemotePathChange} onGoSettings={goSettings} />
+              <div className="media-v4-mapping-note">
+                <Cloud24Regular aria-hidden="true" />
+                <div><strong>{selectedRemoteRoute ? selectedRemoteRoute.label : '当前目录尚未匹配内容路由'}</strong><span>{selectedRemoteRoute ? `内容来源：${PROVIDER_OPTIONS.find((item) => item.value === selectedRemoteRoute.provider_id)?.label || '其他远程来源'}；播放位置由已保存路由推导。` : '请先进入一个已配置内容来源的目录，才能开始扫描。'}</span></div>
+                {!selectedRemoteRoute && <Button appearance="subtle" onClick={goSettings}>配置来源路由</Button>}
+              </div>
+              <div className="media-v4-command-row">
+                <div><strong>完整扫描当前文件夹</strong><span>本入口只扫描当前选择的 OpenList 目录；增量更新请使用“目录树 + OpenList 增量”。</span></div>
+                <Button aria-label="扫描此文件夹并识别" className="media-primary-command" appearance="primary" icon={<ScanObject24Regular />} disabled={busy !== '' || remoteBrowsing || !canScan} onClick={() => void scanSource()}>{busy === 'scan' ? <><Spinner size="tiny" />正在扫描</> : remoteBrowsing ? '正在切换目录' : '扫描此文件夹并识别'}</Button>
+              </div>
+            </div>
+          )}
+
+          {kind === 'hybrid' && (
+            <div className="media-v4-workspace-body">
+              <div className="media-v4-hybrid-grid">
+                <div className="media-v4-field-block">
+                  <div className="media-v4-field-copy"><span className="media-v4-action-index">首次</span><strong>选择 TXT 基线</strong><span>目录树负责快速建立大库的完整基线。</span></div>
+                  <ProviderPicker value={provider} onChange={setProvider} />
+                  <div className="media-v4-path-row media-v4-path-row-wide">
+                    <Input aria-label="首次目录树 TXT 文件" name="hybrid_tree_file" autoComplete="off" spellCheck={false} value={path} onChange={(_, data) => setPath(data.value)} placeholder="例如 K:\\媒体清单\\动画目录树.txt" />
+                    <Button appearance="secondary" icon={<DocumentText24Regular />} onClick={() => void choosePath()}>选择文件</Button>
+                  </div>
+                </div>
+                <div className="media-v4-field-block">
+                  <div className="media-v4-field-copy"><span className="media-v4-action-index">后续</span><strong>选择同一 OpenList 目录</strong><span>确认 TXT 基线后，增量只核对新增和变化目录。</span></div>
+                  <OpenListFolderBrowser configured={Boolean(config?.openlist_configured)} initialPath={config?.openlist_remote_root || '/'} onLoadingChange={setRemoteBrowsing} onPathChange={handleRemotePathChange} onGoSettings={goSettings} />
+                </div>
+              </div>
+              <div className="media-v4-command-row media-v4-hybrid-actions">
+                <div><strong>两个动作互不混淆</strong><span>第一次建立并确认基线；以后从同一来源卡进入时执行增量扫描。</span></div>
+                <div className="media-v4-command-buttons">
+                  <Button aria-label="建立 TXT 基线" appearance="secondary" icon={<DocumentText24Regular />} disabled={busy !== '' || remoteBrowsing || !canScan} onClick={() => void scanSource()}>{busy === 'scan' ? <Spinner size="tiny" /> : remoteBrowsing ? '正在切换目录' : '建立 TXT 基线'}</Button>
+                  <Button aria-label="增量扫描" className="media-primary-command" appearance="primary" icon={<ArrowSync24Regular />} disabled={busy !== '' || remoteBrowsing || !config?.openlist_configured || !remoteRoot} onClick={() => void scanSource('incremental')}>{busy === 'scan' ? <><Spinner size="tiny" />正在扫描</> : remoteBrowsing ? '正在切换目录' : '增量扫描'}</Button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </section>
 

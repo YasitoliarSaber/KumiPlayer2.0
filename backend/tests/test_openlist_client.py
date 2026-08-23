@@ -404,6 +404,12 @@ class TestPathNameValidation:
 # ============================================================
 
 class TestLogin:
+    def test_client_does_not_route_openlist_through_environment_proxy(self):
+        client = OpenListClient("http://localhost:5244", "user", "secret-pass")
+
+        with client._client() as http_client:
+            assert http_client._trust_env is False
+
     def test_login_success_returns_token(self):
         def handler(request: httpx.Request) -> httpx.Response:
             assert request.url.path == "/api/auth/login"
@@ -420,6 +426,14 @@ class TestLogin:
 
         client = make_client(handler)
         with pytest.raises(OpenListAuthError):
+            client.login()
+
+    def test_login_gateway_failure_is_not_reported_as_bad_credentials(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return _json_response(502, {"message": "bad gateway"})
+
+        client = make_client(handler)
+        with pytest.raises(OpenListNetworkError):
             client.login()
 
     def test_login_failure_preserves_safe_message(self):

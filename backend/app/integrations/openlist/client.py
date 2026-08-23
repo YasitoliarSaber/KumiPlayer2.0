@@ -333,6 +333,9 @@ class OpenListClient:
             "base_url": self.server_url,
             "timeout": httpx.Timeout(self.timeout, connect=self.connect_timeout),
             "follow_redirects": False,
+            # OpenList 地址由用户显式配置，尤其常见 localhost/LAN 服务。
+            # 不继承系统 HTTP(S)_PROXY，避免本机请求被代理成 502 或泄露认证。
+            "trust_env": False,
         }
         if self._transport is not None:
             kwargs["transport"] = self._transport
@@ -612,6 +615,8 @@ class OpenListClient:
         body = self._decode_body(response)
         if response.status_code == 429 or int(body.get("code", 200)) == 429:
             raise OpenListRateLimitedError()
+        if response.status_code in (500, 502, 503, 504):
+            raise OpenListNetworkError("OpenList 服务暂时不可用，请稍后重试")
         if response.status_code != 200 or body.get("code") != 200:
             raise OpenListAuthError(_safe_auth_message(body))
         data = body.get("data")

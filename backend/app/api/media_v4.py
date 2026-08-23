@@ -73,6 +73,10 @@ class PreviewRequest(BaseModel):
     scan_id: str = Field(min_length=1)
     entries: list[EntryRequest] = Field(default_factory=list)
     allow_empty: bool = False
+    source_display_name: str = ""
+    source_locator: str = ""
+    playback_locator: str = ""
+    source_route_id: str = ""
 
 
 class PlaybackProgressRequest(BaseModel):
@@ -98,7 +102,7 @@ class SourceScanRequest(BaseModel):
     tree_file: str = ""
     provider: str = "local"
     source_root: str = ""
-    scan_mode: Literal["auto", "full"] = "auto"
+    scan_mode: Literal["auto", "full", "incremental"] = "auto"
 
 
 class OverrideRequest(BaseModel):
@@ -168,7 +172,11 @@ def scan_source(request: SourceScanRequest):
     try:
         effective_scan_mode: str = request.source
         scan_stats: dict[str, int] = {}
-        content_provider = request.provider if request.provider in {"local", "pan115", "baidu"} else "unknown"
+        content_provider = (
+            request.provider
+            if request.provider in {"local", "pan115", "baidu", "quark", "other"}
+            else "unknown"
+        )
         if request.source == "hybrid":
             effective_scan_mode = "tree_baseline"
             from app.api.openlist_v4 import _remote_root
@@ -217,7 +225,12 @@ def scan_source(request: SourceScanRequest):
             root_id = openlist_root_id(config.openlist_server_url, username, remote_root)
             baseline = _confirmed_source_evidence(root_id)
             state = load_active_state(root_id)
-            if request.scan_mode != "full" and baseline:
+            if request.scan_mode == "incremental" and not baseline:
+                raise HTTPException(
+                    status_code=409,
+                    detail="此 OpenList 目录还没有已确认的 TXT 基线，请先建立并确认 TXT 基线",
+                )
+            if request.scan_mode == "incremental" or (request.scan_mode == "auto" and baseline):
                 if not state or state.get("remote_root") != remote_root:
                     state = build_tree_baseline_state(root_id, remote_root, baseline)
                 effective_scan_mode = "incremental"
@@ -276,6 +289,12 @@ def preview(request: PreviewRequest):
             parsed,
             root_id=request.root_id,
             scan_id=request.scan_id,
+            source_metadata={
+                "display_name": request.source_display_name,
+                "source_locator": request.source_locator,
+                "playback_locator": request.playback_locator,
+                "route_id": request.source_route_id,
+            },
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -337,6 +356,105 @@ def get_import(revision_id: str):
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"revision 不存在: {revision_id}") from exc
     return {"revision_id": revision_id, "status": status, "jobs": service.list_jobs(revision_id)}
+
+
+@router.get("/sources/libraries")
+def list_source_libraries():
+    """列出已确认来源根及其最新 revision 的任务进度。
+
+    来源卡只读地投影 V4 authoritative tables；它不是作品卡，也不会通过
+    刮削反向推导来源归属。
+    """
+
+    with get_database().connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                sr.root_id,
+                sr.provider,
+                sr.ingest_method,
+                sr.source_locator,
+                sr.playback_locator,
+                sr.route_id,
+                sr.display_name,
+                sr.enabled,
+                sr.created_at AS root_created_at,
+                sr.updated_at AS root_updated_at,
+                ir.revision_id,
+                ir.status AS revision_status,
+                ir.created_at AS revision_created_at,
+                ir.confirmed_at,
+                (
+                    SELECT COUNT(*) FROM revision_evidence re
+                    WHERE re.revision_id = ir.revision_id
+                ) AS evidence_count,
+                (
+                    SELECT COUNT(DISTINCT rb.work_id) FROM revision_bindings rb
+                    WHERE rb.revision_id = ir.revision_id AND rb.work_id != ''
+                ) AS work_count,
+                (
+                    SELECT COUNT(DISTINCT rb.asset_id) FROM revision_bindings rb
+                    WHERE rb.revision_id = ir.revision_id AND rb.asset_id IS NOT NULL
+                ) AS asset_count
+            FROM source_roots sr
+            JOIN import_revisions ir ON ir.revision_id = (
+                SELECT latest.revision_id
+                FROM import_revisions latest
+                WHERE latest.root_id = sr.root_id AND latest.status = 'confirmed'
+                ORDER BY latest.confirmed_at DESC, latest.created_at DESC, latest.revision_id DESC
+                LIMIT 1
+            )
+            ORDER BY ir.confirmed_at DESC, sr.updated_at DESC, sr.root_id
+            """
+        ).fetchall()
+        revision_ids = [row["revision_id"] for row in rows]
+        summaries = {
+            row["revision_id"]: {
+                "total": int(row["total"]),
+                "queued": int(row["queued"]),
+                "running": int(row["running"]),
+                "succeeded": int(row["succeeded"]),
+                "failed": int(row["failed"]),
+                "cancelled": int(row["cancelled"]),
+            }
+            for row in conn.execute(
+                """
+                SELECT
+                    revision_id,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued,
+                    SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
+                    SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) AS succeeded,
+                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled
+                FROM jobs
+                WHERE revision_id IN ({placeholders})
+                GROUP BY revision_id
+                """.format(placeholders=",".join("?" for _ in revision_ids)),
+                revision_ids,
+            ).fetchall()
+        } if revision_ids else []
+
+    cards = []
+    for row in rows:
+        summary = summaries.get(row["revision_id"], {
+            "total": 0,
+            "queued": 0,
+            "running": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+        })
+        cards.append({
+            **dict(row),
+            "display_name": row["display_name"] or row["source_locator"] or f"{row['provider']} 媒体库",
+            "evidence_count": int(row["evidence_count"]),
+            "work_count": int(row["work_count"]),
+            "asset_count": int(row["asset_count"]),
+            "job_summary": summary,
+            "can_resume": summary["queued"] > 0 or summary["running"] > 0 or summary["failed"] > 0,
+        })
+    return {"cards": cards}
 
 
 @router.get("/jobs")

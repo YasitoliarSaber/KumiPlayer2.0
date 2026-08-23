@@ -78,6 +78,33 @@ export interface V4LibraryCard {
   asset_count: number
 }
 
+export interface V4SourceLibraryCard {
+  root_id: string
+  provider: string
+  ingest_method: string
+  source_locator: string
+  playback_locator: string
+  route_id: string
+  display_name: string
+  enabled: number
+  revision_id: string
+  revision_status: string
+  revision_created_at: string
+  confirmed_at: string
+  evidence_count: number
+  work_count: number
+  asset_count: number
+  can_resume: boolean
+  job_summary: {
+    total: number
+    queued: number
+    running: number
+    succeeded: number
+    failed: number
+    cancelled: number
+  }
+}
+
 export const mediaV4Api = {
   scan: (request: {
     source?: string
@@ -85,7 +112,7 @@ export const mediaV4Api = {
     tree_file?: string
     provider?: string
     source_root?: string
-    scan_mode?: 'auto' | 'full'
+    scan_mode?: 'auto' | 'full' | 'incremental'
   }) => api.post<{
     root_id: string
     scan_id: string
@@ -100,6 +127,10 @@ export const mediaV4Api = {
     scan_id: string
     entries: V4SourceEvidence[]
     allow_empty?: boolean
+    source_display_name?: string
+    source_locator?: string
+    playback_locator?: string
+    source_route_id?: string
   }) => api.post<V4Preview>('/api/v4/imports/preview', request),
 
   confirm: (revisionId: string) =>
@@ -110,6 +141,8 @@ export const mediaV4Api = {
 
   status: (revisionId: string) =>
     api.get<{ revision_id: string; status: string; jobs: V4Job[] }>(`/api/v4/imports/${encodeURIComponent(revisionId)}`),
+
+  sourceLibraries: () => api.get<{ cards: V4SourceLibraryCard[] }>('/api/v4/sources/libraries'),
 
   enqueueScrape: (revisionId: string) =>
     api.post<{ revision_id: string; jobs: V4Job[] }>(`/api/v4/imports/${encodeURIComponent(revisionId)}/scrape`),

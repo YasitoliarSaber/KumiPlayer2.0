@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, expect, test, vi } from 'vitest';
-import MediaManagementPage from '../../src/pages/MediaManagementPage';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { beforeEach, expect, test, vi } from 'vitest'
+import MediaManagementPage from '../../src/pages/MediaManagementPage'
 
 const api = vi.hoisted(() => ({
   scan: vi.fn(),
@@ -8,28 +8,38 @@ const api = vi.hoisted(() => ({
   confirm: vi.fn(),
   status: vi.fn(),
   overrideEvidence: vi.fn(),
-}));
+  sourceLibraries: vi.fn(),
+}))
+const config = vi.hoisted(() => ({ getConfig: vi.fn() }))
+const openlist = vi.hoisted(() => ({ browse: vi.fn(), getRoutes: vi.fn() }))
+const goSettings = vi.hoisted(() => vi.fn())
 
-vi.mock('../../src/api/mediaV4', () => ({ mediaV4Api: api }));
+vi.mock('../../src/api/mediaV4', () => ({ mediaV4Api: api }))
+vi.mock('../../src/api/config', () => ({ configApi: config }))
+vi.mock('../../src/api/openlist', () => ({ openlistApi: openlist }))
 vi.mock('../../src/platform/folderPicker', () => ({
   pickDirectoryTreeFile: vi.fn(),
   pickFolder: vi.fn(),
-}));
+}))
 vi.mock('../../src/stores/mediaWorkflow', () => ({
   useMediaWorkflowStore: (selector: (state: unknown) => unknown) => selector({
     pendingDroppedTreePath: '',
     consumeDroppedTreePath: vi.fn(),
   }),
-}));
+}))
+vi.mock('../../src/stores/ui', () => ({
+  useUiStore: (selector: (state: { goSettings: typeof goSettings }) => unknown) => selector({ goSettings }),
+}))
+
+const routes = [
+  { route_id: 'route-115', label: '115 动画', remote_prefix: '/115/Anime', provider_id: 'pan115', enabled: true, local_path: 'K:\\115网盘\\动画', local_available: true },
+  { route_id: 'route-quark', label: '夸克动画', remote_prefix: '/Quark/Anime', provider_id: 'quark', enabled: true, local_path: 'K:\\夸克网盘\\动画', local_available: true },
+]
 
 beforeEach(() => {
-  localStorage.clear();
-  api.scan.mockReset();
-  api.preview.mockReset();
-  api.confirm.mockReset();
-  api.status.mockReset();
-  api.overrideEvidence.mockReset();
-  api.scan.mockResolvedValue({ root_id: 'root-local', scan_id: 'scan-1', entries: [] });
+  localStorage.clear()
+  vi.clearAllMocks()
+  api.scan.mockResolvedValue({ root_id: 'root-local', scan_id: 'scan-1', entries: [] })
   api.preview.mockResolvedValue({
     revision_id: 'rev-preview',
     status: 'draft',
@@ -37,74 +47,134 @@ beforeEach(() => {
     episodes: [],
     work_assets: [],
     issues: [],
-  });
-});
+  })
+  api.sourceLibraries.mockResolvedValue({ cards: [] })
+  api.status.mockResolvedValue({ revision_id: 'rev-existing', status: 'confirmed', jobs: [] })
+  config.getConfig.mockResolvedValue({
+    pan115_root: 'K:\\115网盘',
+    baidu_root: 'K:\\百度网盘',
+    local_root: 'D:\\Media',
+    openlist_configured: true,
+    openlist_remote_root: '/',
+    openlist_mount_root: 'K:\\',
+    openlist_routes: routes,
+  })
+  openlist.getRoutes.mockResolvedValue({ routes })
+  openlist.browse.mockImplementation(async (path = '') => ({
+    path: path || '/',
+    parent_path: path && path !== '/' ? '/' : null,
+    remote_root: '/',
+    entries: path === '/115/Anime'
+      ? []
+      : [{ name: 'Anime', is_dir: true, size: null, modified: null, remote_path: '/115/Anime' }],
+    page: 1,
+    per_page: 100,
+    total: path === '/115/Anime' ? 0 : 1,
+    has_more: false,
+    cache: { cached: false, status: 'fresh', refreshing: false, refresh_failed: false, fetched_at: null, expires_at: null },
+  }))
+})
 
-test('导入工作台用可见来源卡和连续步骤呈现主流程', () => {
-  render(<MediaManagementPage />);
+test('本地目录读取设置中的默认路径并只表达本机物理磁盘', async () => {
+  render(<MediaManagementPage />)
 
-  expect(screen.getByRole('navigation', { name: '导入步骤' })).toBeVisible();
-  expect(screen.getByRole('button', { name: '本地目录' })).toHaveAttribute('aria-pressed', 'true');
-  expect(screen.getByRole('button', { name: '目录树 TXT' })).toHaveAttribute('aria-pressed', 'false');
-  expect(screen.getByRole('button', { name: 'OpenList' })).toHaveAttribute('aria-pressed', 'false');
-  expect(screen.getByRole('button', { name: '目录树 + OpenList 增量' })).toHaveAttribute('aria-pressed', 'false');
-  expect(screen.getByRole('button', { name: '扫描并识别' })).toBeDisabled();
-  expect(screen.queryByRole('button', { name: '重新开始' })).not.toBeInTheDocument();
-  expect(screen.getByRole('textbox', { name: '媒体目录' })).toHaveAttribute('name', 'media_path');
-  expect(screen.getByRole('textbox', { name: '媒体目录' })).toHaveAttribute('autocomplete', 'off');
-});
+  expect(screen.getByRole('navigation', { name: '导入步骤' })).toBeVisible()
+  expect(screen.getByRole('button', { name: '本地目录' })).toHaveAttribute('aria-pressed', 'true')
+  expect(screen.getByText('仅扫描本机物理磁盘中的媒体文件')).toBeVisible()
+  expect(await screen.findByRole('textbox', { name: '本机媒体文件夹' })).toHaveValue('D:\\Media')
+  expect(screen.queryByText('还需要选择媒体目录')).not.toBeInTheDocument()
+  expect(screen.queryByText(/已挂载网盘中的媒体文件/)).not.toBeInTheDocument()
+})
 
-test('切换来源会清空不兼容路径并只展示当前来源字段', () => {
-  render(<MediaManagementPage />);
+test('目录树使用真实网盘提供商、官网入口和设置中的播放映射', async () => {
+  render(<MediaManagementPage />)
+  fireEvent.click(screen.getByRole('button', { name: '目录树 TXT' }))
 
-  const localPath = screen.getByRole('textbox', { name: '媒体目录' });
-  fireEvent.change(localPath, { target: { value: 'D:\\Anime' } });
-  expect(screen.getByRole('button', { name: '扫描并识别' })).toBeEnabled();
+  expect(await screen.findByRole('button', { name: '115 网盘' })).toHaveAttribute('aria-pressed', 'true')
+  expect(screen.getByRole('button', { name: '百度网盘' })).toBeVisible()
+  expect(screen.getByRole('button', { name: '夸克网盘' })).toBeVisible()
+  expect(screen.queryByRole('combobox', { name: '存储来源' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('textbox', { name: '本地挂载根目录（可选）' })).not.toBeInTheDocument()
+  expect(screen.getByRole('link', { name: /前往 115 官网/ })).toHaveAttribute('href', 'https://115.com/')
+  expect(screen.getByText(/播放路径将使用设置中的/)).toBeVisible()
 
-  fireEvent.click(screen.getByRole('button', { name: '目录树 TXT' }));
-  expect(screen.getByRole('textbox', { name: '目录树 TXT 文件' })).toHaveValue('');
-  const providerSelect = screen.getByRole('combobox', { name: '存储来源' });
-  expect(providerSelect).toBeVisible();
-  expect(providerSelect.tagName).toBe('SELECT');
-  expect(providerSelect).toHaveAttribute('name', 'storage_provider');
-  expect(screen.getByRole('textbox', { name: '本地挂载根目录（可选）' })).toBeVisible();
-  expect(screen.getByRole('button', { name: '选择文件' })).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: '夸克网盘' }))
+  expect(screen.getByRole('link', { name: /前往夸克网盘官网/ })).toHaveAttribute('href', 'https://pan.quark.cn/')
+  fireEvent.change(screen.getByRole('textbox', { name: '目录树 TXT 文件' }), {
+    target: { value: 'K:\\夸克网盘\\动画\\目录树.txt' },
+  })
+  fireEvent.click(screen.getByRole('button', { name: '扫描并识别' }))
 
-  fireEvent.click(screen.getByRole('button', { name: 'OpenList' }));
-  expect(screen.queryByRole('textbox', { name: '目录树 TXT 文件' })).not.toBeInTheDocument();
-  expect(screen.getByRole('textbox', { name: 'OpenList 远端目录' })).toHaveValue('');
-  expect(screen.getByRole('button', { name: '扫描并识别' })).toBeEnabled();
-});
+  await waitFor(() => expect(api.scan).toHaveBeenCalledWith(expect.objectContaining({
+    source: 'tree',
+    provider: 'quark',
+    source_root: 'K:\\夸克网盘\\动画',
+  })))
+})
 
-test('混合来源用 TXT 建立基线并绑定后续 OpenList 增量目录', async () => {
-  render(<MediaManagementPage />);
+test('OpenList 使用文件夹浏览并始终执行当前目录完整扫描', async () => {
+  render(<MediaManagementPage />)
+  fireEvent.click(screen.getByRole('button', { name: 'OpenList' }))
 
-  fireEvent.click(screen.getByRole('button', { name: '目录树 + OpenList 增量' }));
+  expect(await screen.findByRole('region', { name: 'OpenList 目录浏览器' })).toBeVisible()
+  expect(screen.queryByRole('switch', { name: '完整扫描' })).not.toBeInTheDocument()
+  expect(screen.queryByText('增量扫描')).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '扫描此文件夹并识别' })).toBeDisabled()
+  fireEvent.click(await screen.findByRole('button', { name: '打开文件夹 Anime' }))
+  await waitFor(() => expect(openlist.browse).toHaveBeenCalledWith('/115/Anime', 1, false, 100))
+  await screen.findByText(/当前目录：\/115\/Anime/)
+  fireEvent.click(screen.getByRole('button', { name: '扫描此文件夹并识别' }))
+
+  await waitFor(() => expect(api.scan).toHaveBeenCalledWith(expect.objectContaining({
+    source: 'openlist',
+    root_path: '/115/Anime',
+    provider: 'pan115',
+    scan_mode: 'full',
+  })))
+})
+
+test('OpenList 未进入内容来源路由时不会猜测默认网盘提供商', async () => {
+  render(<MediaManagementPage />)
+  fireEvent.click(screen.getByRole('button', { name: 'OpenList' }))
+
+  expect(await screen.findByText('当前目录尚未匹配内容路由')).toBeVisible()
+  expect(screen.getByText('请先进入一个已配置内容来源的目录，才能开始扫描。')).toBeVisible()
+  expect(screen.getByRole('button', { name: '扫描此文件夹并识别' })).toBeDisabled()
+})
+
+test('混合入口分别提供 TXT 基线与显式 OpenList 增量动作', async () => {
+  render(<MediaManagementPage />)
+  fireEvent.click(screen.getByRole('button', { name: '目录树 + OpenList 增量' }))
   fireEvent.change(screen.getByRole('textbox', { name: '首次目录树 TXT 文件' }), {
-    target: { value: 'D:\\Lists\\anime.txt' },
-  });
-  fireEvent.change(screen.getByRole('textbox', { name: 'OpenList 增量目录' }), {
-    target: { value: '/Anime' },
-  });
-  fireEvent.click(screen.getByRole('button', { name: '扫描并识别' }));
+    target: { value: 'K:\\115网盘\\动画\\目录树.txt' },
+  })
+  fireEvent.click(await screen.findByRole('button', { name: '打开文件夹 Anime' }))
+  await screen.findByText(/当前目录：\/115\/Anime/)
+  fireEvent.click(screen.getByRole('button', { name: '建立 TXT 基线' }))
 
-  await waitFor(() => expect(api.scan).toHaveBeenCalledWith({
+  await waitFor(() => expect(api.scan).toHaveBeenCalledWith(expect.objectContaining({
     source: 'hybrid',
-    root_path: '/Anime',
-    tree_file: 'D:\\Lists\\anime.txt',
-    provider: 'local',
-    source_root: '',
+    root_path: '/115/Anime',
+    tree_file: 'K:\\115网盘\\动画\\目录树.txt',
+    provider: 'pan115',
     scan_mode: 'auto',
-  }));
-});
+  })))
+
+  api.scan.mockClear()
+  fireEvent.click(screen.getByRole('button', { name: '增量扫描' }))
+  await waitFor(() => expect(api.scan).toHaveBeenCalledWith(expect.objectContaining({
+    source: 'openlist',
+    root_path: '/115/Anime',
+    provider: 'pan115',
+    scan_mode: 'incremental',
+  })))
+})
 
 test('本地来源路径有效后提交统一 V4 扫描请求', async () => {
-  render(<MediaManagementPage />);
-
-  fireEvent.change(screen.getByRole('textbox', { name: '媒体目录' }), {
-    target: { value: 'D:\\Anime' },
-  });
-  fireEvent.click(screen.getByRole('button', { name: '扫描并识别' }));
+  render(<MediaManagementPage />)
+  const input = await screen.findByRole('textbox', { name: '本机媒体文件夹' })
+  fireEvent.change(input, { target: { value: 'D:\\Anime' } })
+  fireEvent.click(screen.getByRole('button', { name: '扫描并识别' }))
 
   await waitFor(() => expect(api.scan).toHaveBeenCalledWith({
     source: 'local',
@@ -113,23 +183,25 @@ test('本地来源路径有效后提交统一 V4 扫描请求', async () => {
     provider: 'local',
     source_root: '',
     scan_mode: 'auto',
-  }));
-  expect(screen.getByRole('heading', { name: '检查识别结果' })).toBeVisible();
-});
+  }))
+})
 
-test('OpenList 可显式要求本次完整远端校验', async () => {
-  render(<MediaManagementPage />);
+test('来源卡展示持久化进度并可恢复查看任务', async () => {
+  api.sourceLibraries.mockResolvedValue({
+    cards: [{
+      root_id: 'root-baidu-anime', provider: 'baidu', ingest_method: 'directory_tree',
+      source_locator: 'K:\\百度网盘\\动画', playback_locator: 'K:\\百度网盘\\动画', route_id: 'route-baidu',
+      display_name: '百度动画库', revision_id: 'rev-existing', revision_status: 'confirmed',
+      revision_created_at: '2026-08-24T00:00:00Z', confirmed_at: '2026-08-24T00:00:00Z',
+      evidence_count: 120, work_count: 30, asset_count: 120, can_resume: true,
+      job_summary: { total: 4, queued: 2, running: 1, succeeded: 1, failed: 0, cancelled: 0 },
+    }],
+  })
+  render(<MediaManagementPage />)
 
-  fireEvent.click(screen.getByRole('button', { name: 'OpenList' }));
-  expect(screen.queryByRole('button', { name: /clear/i })).not.toBeInTheDocument();
-  expect(screen.getByText('通常只检查新增和变化内容；发现结果不完整时再使用完整扫描。')).toBeVisible();
-  expect(screen.getByText('增量扫描')).toBeVisible();
-  fireEvent.click(screen.getByRole('switch', { name: '完整扫描' }));
-  expect(screen.getByText('完整扫描')).toBeVisible();
-  fireEvent.click(screen.getByRole('button', { name: '扫描并识别' }));
-
-  await waitFor(() => expect(api.scan).toHaveBeenCalledWith(expect.objectContaining({
-    source: 'openlist',
-    scan_mode: 'full',
-  })));
-});
+  expect(await screen.findByRole('region', { name: '已导入媒体库' })).toBeVisible()
+  expect(screen.getByText('百度动画库')).toBeVisible()
+  expect(screen.getByText('30 部作品')).toBeVisible()
+  fireEvent.click(screen.getByRole('button', { name: '查看进度' }))
+  await waitFor(() => expect(api.status).toHaveBeenCalledWith('rev-existing'))
+})

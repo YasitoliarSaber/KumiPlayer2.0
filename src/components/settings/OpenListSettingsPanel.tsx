@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@fluentui/react-components';
-import { CheckCircle, Info, X, XCircle } from 'lucide-react';
+import { CheckCircle, Eye, EyeOff, Info, X, XCircle } from 'lucide-react';
 import { openlistApi, type OpenListConfigPayload, type OpenListTestConnectionPayload, type OpenListTestResult, type OpenListTelemetrySummary } from '../../api/openlist';
 import type { PublicConfig } from '../../api/config';
 
@@ -151,7 +151,7 @@ export default function OpenListSettingsPanel({
     if (noticeKind === 'error') clearNotice();
   };
   const [editorOpen, setEditorOpen] = useState(false);
-  const [credentialsOpen, setCredentialsOpen] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
   const [allowOpenlistHttp, setAllowOpenlistHttp] = useState(false);
   const [actionLock, setActionLock] = useState<string | null>(null);
   const [telemetry, setTelemetry] = useState<OpenListTelemetrySummary | null>(null);
@@ -189,11 +189,6 @@ export default function OpenListSettingsPanel({
   const remoteAffectingDirty = dirtyKeys.some((key) => REMOTE_AFFECTING_KEYS.includes(key));
   const localOnlyDirty = dirtyKeys.length > 0 && !remoteAffectingDirty;
   const hasDirty = dirtyKeys.length > 0;
-
-  // 未配置时暴露初始设置（用户名密码输入框可见）
-  useEffect(() => {
-    if (!saved) setCredentialsOpen(true);
-  }, [saved]);
 
   const busy = actionLock !== null || Boolean(externalBusy);
 
@@ -345,31 +340,26 @@ export default function OpenListSettingsPanel({
 
           <div className="sources-credentials-block">
             {saved ? (
-              <>
-                <div className="sources-credentials-status">
-                  登录信息已保存
-                  {config.openlist_username_masked ? `（当前用户名：${config.openlist_username_masked}）` : ''}
-                </div>
-                <Button appearance="secondary" size="small" onClick={() => setCredentialsOpen((v) => !v)} className="settings-ghost-btn fluent-settings-btn">
-                  {credentialsOpen ? '收起账号密码' : '更新账号或密码'}
-                </Button>
-              </>
+              <div className="sources-credentials-status">
+                登录信息已保存；填写以下两项可一起更新账号密码。
+              </div>
             ) : (
               <div className="sources-credentials-status">尚未保存登录信息</div>
             )}
-            {(credentialsOpen || !saved) && (
-              <div className="settings-field-list">
-                <label className="settings-config-row">
-                  <span>用户名</span>
-                  <input type="text" value={draft.username} onChange={(event) => handleDraftChange('username', event.target.value)} className="settings-input" placeholder={saved ? '留空 = 使用已保存信息；填写 = 更新' : 'OpenList 用户名'} autoComplete="username" />
-                </label>
-                <label className="settings-config-row">
-                  <span>密码</span>
-                  <input type="password" value={draft.password} onChange={(event) => handleDraftChange('password', event.target.value)} className="settings-input" placeholder={saved ? '留空 = 使用已保存信息；填写 = 更新' : 'OpenList 密码'} autoComplete="current-password" />
-                </label>
-                <div className="sources-credentials-status">更换用户名或密码时，需要同时填写新的用户名与密码。</div>
-              </div>
-            )}
+            <div className="settings-field-list">
+              <label className="settings-config-row">
+                <span>用户名</span>
+                <input type="text" value={draft.username} onChange={(event) => handleDraftChange('username', event.target.value)} className="settings-input" placeholder={saved ? (config.openlist_username_masked || '已保存用户名') : 'OpenList 用户名'} autoComplete="username" />
+              </label>
+              <label className="settings-config-row">
+                <span>密码</span>
+                <span className="sources-password-input">
+                  <input type={showNewPassword ? 'text' : 'password'} value={draft.password} onChange={(event) => handleDraftChange('password', event.target.value)} className="settings-input" placeholder={saved ? '••••••••（已保存，输入后更新）' : 'OpenList 密码'} autoComplete="current-password" />
+                  <button type="button" aria-label={showNewPassword ? '隐藏本次输入密码' : '显示本次输入密码'} title={showNewPassword ? '隐藏本次输入密码' : '显示本次输入密码'} onClick={() => setShowNewPassword((value) => !value)}>{showNewPassword ? <EyeOff size={16} /> : <Eye size={16} />}</button>
+                </span>
+              </label>
+              <div className="sources-credentials-status">已保存的密码不会回传到界面；眼睛仅显示本次新输入的密码。更换账号或密码时，需要同时填写新的用户名和密码。</div>
+            </div>
             {skipVerificationOffered && (
               <div className="sources-openlist-actions">
                 <Button appearance="secondary" size="small" onClick={handleSaveSkipVerification} className="settings-ghost-btn fluent-settings-btn" disabled={Boolean(busy)}>
