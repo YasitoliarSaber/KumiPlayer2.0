@@ -48,6 +48,11 @@ def _safe_resolve(path: Path) -> Path:
         return Path(os.path.abspath(os.fspath(path.expanduser())))
 
 
+def _is_link_or_junction(path: Path) -> bool:
+    is_junction = getattr(path, "is_junction", None)
+    return path.is_symlink() or bool(is_junction and is_junction())
+
+
 def _configured_source_roots() -> list[Path]:
     config = load_config()
     values = (
@@ -63,7 +68,10 @@ def _is_protected(path: Path) -> bool:
     resolved = _safe_resolve(path)
     if resolved.parent == resolved or resolved == _safe_resolve(Path.home()):
         return True
-    return any(resolved == root or root in resolved.parents for root in _configured_source_roots())
+    return any(
+        resolved == root or root in resolved.parents or resolved in root.parents
+        for root in _configured_source_roots()
+    )
 
 
 def _validate_data_dir(data_dir: Path) -> Path:
@@ -74,12 +82,15 @@ def _validate_data_dir(data_dir: Path) -> Path:
 
 
 def _validate_external_mirror(data_dir: Path, mirror_root: Path) -> Path | None:
+    expanded = Path(os.path.abspath(os.fspath(mirror_root.expanduser())))
+    if _is_link_or_junction(expanded):
+        raise ResetProtectionError(f"镜像目录不能是符号链接或目录联接: {expanded}")
     resolved = _safe_resolve(mirror_root)
     if resolved == data_dir:
         return None
     if _is_protected(resolved):
-        raise ResetProtectionError(f"镜像目录受保护，拒绝重置: {resolved}")
-    if resolved == resolved.anchor or resolved.parent == resolved:
+        raise ResetProtectionError(f"镜像目录与来源目录重叠或属于受保护路径，拒绝重置: {resolved}")
+    if resolved.parent == resolved:
         raise ResetProtectionError(f"镜像目录不能是磁盘根: {resolved}")
     return resolved
 
@@ -127,8 +138,8 @@ def apply_reset() -> dict:
             continue
         if path.parent == data_dir and path.name not in MANAGED_DATA_ENTRIES:
             raise ResetProtectionError(f"目标不在 V4 白名单: {path}")
-        if path.is_symlink():
-            raise ResetProtectionError(f"符号链接不允许作为重置目标: {path}")
+        if _is_link_or_junction(path):
+            raise ResetProtectionError(f"符号链接或目录联接不允许作为重置目标: {path}")
         if _is_protected(path):
             raise ResetProtectionError(f"目标路径受保护，拒绝删除: {path}")
         if path.is_dir():

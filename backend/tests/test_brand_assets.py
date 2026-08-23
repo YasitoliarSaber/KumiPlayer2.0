@@ -1,9 +1,7 @@
-# -*- coding: utf-8 -*-
 """KumiPlayer 品牌资源及桌面壳接入回归。"""
 
 import json
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[2]
 

@@ -45,7 +45,7 @@ def validate_remote_asset_url(url: str):
     parsed = urlparse(url)
     _validate_standard_https(parsed)
     trusted = False
-    allowed_prefixes = TRUSTED_IMAGE_PATHS.get(parsed.hostname, ())
+    allowed_prefixes = TRUSTED_IMAGE_PATHS.get(parsed.hostname or "", ())
     for prefix in allowed_prefixes:
         if parsed.path.startswith(prefix):
             trusted = True

@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+from app.media_v4.jobs.metadata_artifacts import publish_metadata_artifacts
 from app.media_v4.persistence.database import V4Database
 
 
@@ -52,7 +53,13 @@ class V4ScrapeService:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def process(self, job_id: str, provider: Callable[[dict], dict]) -> None:
+    def process(
+        self,
+        job_id: str,
+        provider: Callable[[dict], dict],
+        *,
+        mirror_root=None,
+    ) -> None:
         with self.database.connect() as conn:
             job = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
             if job is None:
@@ -66,18 +73,63 @@ class V4ScrapeService:
             if revision is None or revision["status"] != "confirmed":
                 raise RuntimeError("只有 confirmed revision 才能执行刮削")
             work = conn.execute("SELECT * FROM works WHERE work_id = ?", (job["work_id"],)).fetchone()
-            if work is None:
+            if work is None and job["work_id"]:
                 raise RuntimeError("刮削任务对应的 Work 不存在")
             if job["status"] == "succeeded":
                 return
-            conn.execute("UPDATE jobs SET status = 'running', updated_at = ? WHERE job_id = ?", (_now(), job_id))
+            cursor = conn.execute(
+                """
+                UPDATE jobs SET status = 'running', attempts = attempts + 1, updated_at = ?
+                WHERE job_id = ? AND status = 'queued'
+                """,
+                (_now(), job_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("刮削任务已由其他执行器领取")
+            target = dict(work) if work is not None else {"work_id": job["work_id"]}
+            target["revision_id"] = job["revision_id"]
+            target["provider_bindings"] = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT provider, media_type, provider_id FROM provider_bindings "
+                    "WHERE work_id = ? ORDER BY provider, media_type",
+                    (job["work_id"],),
+                ).fetchall()
+            ]
+            target["episodes"] = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT e.episode_id, e.local_episode_number, e.absolute_episode_number,
+                           e.special_number, e.episode_kind, e.display_title,
+                           s.season_id, s.local_season_number, s.season_kind
+                    FROM episodes e
+                    JOIN seasons s ON s.season_id = e.season_id
+                    WHERE e.work_id = ? AND EXISTS (
+                        SELECT 1 FROM revision_bindings rb
+                        WHERE rb.revision_id = ? AND rb.episode_id = e.episode_id
+                    )
+                    ORDER BY s.local_season_number, e.local_episode_number, e.episode_id
+                    """,
+                    (job["work_id"], job["revision_id"]),
+                ).fetchall()
+            ]
 
         try:
-            result = provider(dict(work))
+            result = provider(target)
             provider_name = str(result.get("provider") or "").strip()
             provider_id = str(result.get("provider_id") or "").strip()
             if not provider_name or not provider_id:
                 raise ValueError("刮削结果缺少 provider/provider_id")
+            if mirror_root is not None and job["work_id"]:
+                publish_metadata_artifacts(
+                    self.database,
+                    revision_id=job["revision_id"],
+                    work_id=job["work_id"],
+                    target=target,
+                    metadata=result,
+                    mirror_root=mirror_root,
+                )
             now = _now()
             with self.database.connect() as conn:
                 conn.execute(
@@ -105,12 +157,58 @@ class V4ScrapeService:
                 conn.execute(
                     """
                     INSERT INTO provider_bindings(work_id, provider, media_type, provider_id)
-                    SELECT ?, ?, work_type, ? FROM works WHERE work_id = ?
+                    SELECT ?, ?, CASE WHEN work_type = 'series' THEN 'tv' ELSE 'movie' END, ?
+                    FROM works WHERE work_id = ?
                     ON CONFLICT(work_id, provider, media_type) DO UPDATE SET
                         provider_id = excluded.provider_id
                     """,
                     (job["work_id"], provider_name, provider_id, job["work_id"]),
                 )
+                valid_episode_ids = {str(item["episode_id"]) for item in target["episodes"]}
+                for mapping in result.get("episode_mappings") or []:
+                    episode_id = str(mapping.get("episode_id") or "")
+                    if episode_id not in valid_episode_ids:
+                        raise ValueError("刮削结果包含不属于当前 revision 的 Episode 映射")
+                    conn.execute(
+                        """
+                        INSERT INTO episode_provider_mappings(
+                            episode_id, provider, provider_season_number,
+                            provider_episode_number, provider_episode_id
+                        ) VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(episode_id, provider) DO UPDATE SET
+                            provider_season_number = excluded.provider_season_number,
+                            provider_episode_number = excluded.provider_episode_number,
+                            provider_episode_id = excluded.provider_episode_id
+                        """,
+                        (
+                            episode_id,
+                            provider_name,
+                            mapping.get("provider_season_number"),
+                            mapping.get("provider_episode_number"),
+                            str(mapping.get("provider_episode_id") or ""),
+                        ),
+                    )
+                valid_season_ids = {str(item["season_id"]) for item in target["episodes"]}
+                for mapping in result.get("season_mappings") or []:
+                    season_id = str(mapping.get("season_id") or "")
+                    if season_id not in valid_season_ids:
+                        raise ValueError("刮削结果包含不属于当前 revision 的 Season 映射")
+                    conn.execute(
+                        """
+                        INSERT INTO season_provider_mappings(
+                            season_id, provider, provider_season_number, provider_season_id
+                        ) VALUES (?, ?, ?, ?)
+                        ON CONFLICT(season_id, provider) DO UPDATE SET
+                            provider_season_number = excluded.provider_season_number,
+                            provider_season_id = excluded.provider_season_id
+                        """,
+                        (
+                            season_id,
+                            provider_name,
+                            mapping.get("provider_season_number"),
+                            str(mapping.get("provider_season_id") or ""),
+                        ),
+                    )
                 conn.execute(
                     "UPDATE jobs SET status = 'succeeded', updated_at = ?, last_error = '' WHERE job_id = ?",
                     (now, job_id),

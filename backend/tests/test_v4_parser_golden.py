@@ -29,6 +29,7 @@ def test_parser_preserves_raw_tokens_and_returns_structured_season_episode_facts
     assert facts.episode_token_raw == "E03"
     assert facts.season_candidate == 1
     assert facts.episode_candidate == 3
+    assert facts.absolute_episode_candidate is None
     assert facts.parser_version == V4Parser.VERSION
 
 
@@ -51,3 +52,28 @@ def test_parser_never_emits_or_changes_a_work_identity():
 
     assert not hasattr(facts, "work_id")
     assert not hasattr(facts, "canonical_work_id")
+
+
+def test_parser_extracts_quality_release_group_and_content_edition_facts():
+    from app.media_v4.parsing.parser import V4Parser
+
+    facts = V4Parser().parse(
+        _evidence("Show/Show.S01E01.2160p.Extended-NoxiaAI.mkv")
+    )
+
+    assert "2160p" in facts.quality_tags
+    assert "extended" in facts.edition_tags
+    assert facts.release_group == "NoxiaAI"
+
+
+def test_parser_does_not_mistake_year_or_explicit_local_episode_for_absolute_number():
+    from app.media_v4.parsing.parser import V4Parser
+
+    explicit = V4Parser().parse(_evidence("Show/Show.S02E03.2024.1080p.mkv"))
+    uncertain = V4Parser().parse(_evidence("Show/Show.2024.1080p.mkv"))
+    bare = V4Parser().parse(_evidence("Show/Show - 13.mkv"))
+
+    assert explicit.absolute_episode_candidate is None
+    assert uncertain.absolute_episode_candidate is None
+    assert bare.absolute_episode_candidate == 13
+    assert bare.episode_token_raw == "- 13"

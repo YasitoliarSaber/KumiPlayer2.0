@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """内置 MPV 运行时的统一解析、健康检查与启动参数构造。
 
 本模块是 KumiPlayer 内置干净 MPV 的唯一事实来源：
@@ -15,7 +14,6 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 from app.core.runtime import (
     get_kumiplayer_layer_dir,
@@ -74,7 +72,7 @@ def invalidate_mpv_runtime_cache() -> None:
 
 
 def _build_file_snapshot(
-    manifest: Optional[dict],
+    manifest: dict | None,
     config_ok: bool,
     config_missing: list[str],
 ) -> dict:
@@ -172,7 +170,7 @@ def _runtime_check_path() -> Path:
     return get_data_dir() / "mpv-state" / _RUNTIME_CHECK_FILENAME
 
 
-def _load_disk_runtime_check() -> Optional[dict]:
+def _load_disk_runtime_check() -> dict | None:
     """读取上次完整校验的磁盘快照；缺失或损坏时返回 None。"""
     path = _runtime_check_path()
     if not path.is_file():
@@ -199,7 +197,7 @@ def _save_disk_runtime_check(result: dict, snapshot: dict) -> None:
         pass
 
 
-def load_runtime_manifest() -> Optional[dict]:
+def load_runtime_manifest() -> dict | None:
     """读取运行时清单，非法或缺失时返回 None。"""
     manifest_path = get_mpv_manifest_path()
     if not manifest_path.is_file():
@@ -214,7 +212,7 @@ def load_runtime_manifest() -> Optional[dict]:
     return data
 
 
-def check_runtime_files(manifest: Optional[dict]) -> tuple[bool, str]:
+def check_runtime_files(manifest: dict | None) -> tuple[bool, str]:
     """校验清单中登记的文件在运行时目录中是否存在且 SHA-256 匹配。"""
     if not manifest or not manifest.get("files"):
         return False, "运行时清单缺失或非法"
@@ -403,7 +401,7 @@ def build_mpv_playback_args(
     start_position: float = 0.0,
     window_title: str = "KumiPlayer",
     media_title: str = "",
-    playlist_paths: Optional[list[str]] = None,
+    playlist_paths: list[str] | None = None,
     first_file: str = "",
     fallback: bool = False,
 ) -> list[str]:

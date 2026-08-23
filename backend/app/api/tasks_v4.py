@@ -100,7 +100,9 @@ def cancel_task(task_id: str):
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
-        if row["status"] in {"queued", "running"}:
+        if row["status"] == "running":
+            raise HTTPException(status_code=409, detail="运行中的任务不能安全取消")
+        if row["status"] == "queued":
             conn.execute(
                 "UPDATE jobs SET status = 'cancelled', updated_at = datetime('now') WHERE job_id = ?",
                 (task_id,),
@@ -115,4 +117,43 @@ def cancel_task(task_id: str):
                 """,
                 (task_id,),
             ).fetchone()
+    return _task_payload(row)
+
+
+@router.post("/{task_id}/retry")
+def retry_task(task_id: str):
+    with get_database().connect() as conn:
+        row = conn.execute(
+            """
+            SELECT j.*, sr.provider
+            FROM jobs j
+            JOIN import_revisions ir ON ir.revision_id = j.revision_id
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            WHERE j.job_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+        if row["status"] != "failed":
+            raise HTTPException(status_code=409, detail="只有失败任务可以重试")
+        if conn.execute(
+            "SELECT status FROM import_revisions WHERE revision_id = ?",
+            (row["revision_id"],),
+        ).fetchone()[0] != "confirmed":
+            raise HTTPException(status_code=409, detail="任务所属 revision 已失效，不能重试")
+        conn.execute(
+            "UPDATE jobs SET status = 'queued', last_error = '', updated_at = datetime('now') WHERE job_id = ?",
+            (task_id,),
+        )
+        row = conn.execute(
+            """
+            SELECT j.*, sr.provider
+            FROM jobs j
+            JOIN import_revisions ir ON ir.revision_id = j.revision_id
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            WHERE j.job_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
     return _task_payload(row)

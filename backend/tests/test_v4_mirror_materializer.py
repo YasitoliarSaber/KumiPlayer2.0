@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 
 def _entry(evidence_id: str, locator: str):
     from app.media_v4.domain.models import ParsedFacts, SourceEvidence
@@ -86,3 +88,96 @@ def test_mirror_job_is_idempotent_after_success(tmp_path):
     assert first.status == "succeeded"
     assert second.status == "succeeded"
     assert len(list((tmp_path / "mirror").rglob("*.strm"))) == 1
+
+
+def test_remote_assets_without_fingerprints_get_distinct_mirror_files(tmp_path):
+    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+    from app.media_v4.jobs.mirror import V4MirrorMaterializer
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "mirror-no-fingerprint.db")
+    database.initialize()
+    pairs = []
+    for evidence_id, locator in (("remote-a", "https://example.invalid/a.mkv"), ("remote-b", "https://example.invalid/b.mkv")):
+        evidence = SourceEvidence(
+            evidence_id=evidence_id,
+            scan_id="scan-remote",
+            root_id="root-remote",
+            source_key=evidence_id,
+            relative_path=f"Show/{evidence_id}.mkv",
+            entry_kind="video",
+            provider="pan115",
+            source_locator=locator,
+            playback_locator=locator,
+        )
+        facts = ParsedFacts(
+            parsed_fact_id=f"facts-{evidence_id}",
+            evidence_id=evidence_id,
+            parser_version="fixture",
+            work_title="Show",
+            title_candidates=("Show",),
+            media_type="tv",
+            group_type="season",
+            season_candidate=1,
+            episode_candidate=1,
+        )
+        pairs.append((evidence, facts))
+
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-remote", pairs)
+    revisions.confirm("rev-remote")
+    job = next(job for job in revisions.list_jobs("rev-remote") if job["job_type"] == "materialize_mirror")
+
+    V4MirrorMaterializer(database).process(job["job_id"], tmp_path / "mirror")
+    files = sorted((tmp_path / "mirror").rglob("*.strm"))
+
+    assert len(files) == 2
+    assert {path.read_text(encoding="utf-8") for path in files} == {
+        "https://example.invalid/a.mkv",
+        "https://example.invalid/b.mkv",
+    }
+
+
+def test_remote_tree_asset_directly_generates_strm_from_stable_locator(tmp_path):
+    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+    from app.media_v4.jobs.mirror import V4MirrorMaterializer
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    evidence = SourceEvidence(
+        evidence_id="inventory-only",
+        scan_id="scan-inventory",
+        root_id="root-inventory",
+        source_key="Show/Show.S01E01.mkv",
+        relative_path="Show/Show.S01E01.mkv",
+        entry_kind="video",
+        provider="pan115",
+        source_locator="Show/Show.S01E01.mkv",
+        playback_locator="",
+    )
+    facts = ParsedFacts(
+        parsed_fact_id="facts-inventory",
+        evidence_id=evidence.evidence_id,
+        parser_version="fixture",
+        work_title="Show",
+        title_candidates=("Show",),
+        media_type="tv",
+        group_type="season",
+        season_candidate=1,
+        episode_candidate=1,
+    )
+    database = V4Database(tmp_path / "inventory.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-inventory", [(evidence, facts)])
+    revisions.confirm("rev-inventory")
+    job = next(
+        item for item in revisions.list_jobs("rev-inventory") if item["job_type"] == "materialize_mirror"
+    )
+
+    result = V4MirrorMaterializer(database).process(job["job_id"], tmp_path / "mirror")
+
+    assert result.status == "succeeded"
+    assert len(result.artifact_paths) == 1
+    assert Path(result.artifact_paths[0]).read_text(encoding="utf-8") == "Show/Show.S01E01.mkv"

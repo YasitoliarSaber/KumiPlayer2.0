@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """桌面标题栏必须与主内容滚动容器分层。"""
 
 from pathlib import Path

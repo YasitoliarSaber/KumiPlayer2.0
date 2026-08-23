@@ -148,3 +148,35 @@ def test_title_change_on_same_source_lineage_keeps_work_identity(tmp_path):
 
     assert len(works) == 1
     assert works[0]["preferred_title"] == "New Title"
+
+
+def test_projection_uses_latest_scrape_metadata_and_real_sources(tmp_path):
+    from app.media_v4.jobs.scrape import V4ScrapeService
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.projection.library import V4LibraryProjection
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "projection-metadata.db")
+    database.initialize()
+    service = V4RevisionService(database)
+    service.create_draft("rev-metadata", [_entry("ev-meta")])
+    service.confirm("rev-metadata")
+    scrape_job = next(job for job in service.list_jobs("rev-metadata") if job["job_type"] == "scrape_work")
+    V4ScrapeService(database).process(
+        scrape_job["job_id"],
+        lambda _target: {
+            "provider": "tmdb",
+            "provider_id": "42",
+            "title": "Online Title",
+            "original_title": "Original",
+            "plot": "Plot",
+            "rating": 8.4,
+            "genres": ["Animation"],
+            "poster_url": "https://image.tmdb.org/t/p/w780/poster.jpg",
+        },
+    )
+
+    card = V4LibraryProjection(database).rebuild().cards[0]
+    assert card["title"] == "Online Title"
+    assert card["metadata"]["original_title"] == "Original"
+    assert card["metadata"]["sources"] == ["local"]

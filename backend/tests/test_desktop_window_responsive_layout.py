@@ -1,9 +1,7 @@
-# -*- coding: utf-8 -*-
 """桌面窗口和媒体管理页必须在紧凑尺寸下保持可用。"""
 
 import json
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[2]
 

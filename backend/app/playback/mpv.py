@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """mpv 进程启动与管理"""
 
 import ctypes
@@ -7,7 +6,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 from app.core.runtime import get_mpv_config_dir, get_mpv_executable
 from app.playback.mpv_runtime import (
@@ -15,7 +14,6 @@ from app.playback.mpv_runtime import (
     check_mpv_runtime,
     get_mpv_manifest_path,
     load_runtime_manifest,
-    check_runtime_files,
 )
 
 SW_SHOW = 5
@@ -54,9 +52,9 @@ class PROCESSENTRY32(ctypes.Structure):
 
 def start_mpv(
     strm_path: str,
-    mpv_path: Optional[str] = None,
+    mpv_path: str | None = None,
     *,
-    playlist_paths: Optional[list[str]] = None,
+    playlist_paths: list[str] | None = None,
     ipc_server: str = "",
     start_position: float = 0.0,
     display_title: str = "",
@@ -91,7 +89,7 @@ def start_mpv(
             status = check_mpv_runtime(verify_files=True)
         if not status["available"]:
             raise RuntimeError(
-                f"KumiPlayer 内置 MPV 缺失或损坏，无法启动播放"
+                "KumiPlayer 内置 MPV 缺失或损坏，无法启动播放"
             )
         if not status["manifest_valid"]:
             raise RuntimeError(
@@ -112,7 +110,7 @@ def start_mpv(
 
     # 使用参数列表，不使用 shell=True。mpv 自己保存同一文件的退出位置，
     # 前端仍只展示“继续播放第 X 集”，不暴露具体时间点。
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
     }
@@ -164,9 +162,9 @@ def _clean_display_title(title: str) -> str:
 def _build_mpv_args(
     mpv_path: Path,
     strm_path: str,
-    window_title: Optional[str] = None,
+    window_title: str | None = None,
     *,
-    playlist_paths: Optional[list[str]] = None,
+    playlist_paths: list[str] | None = None,
     ipc_server: str = "",
     start_position: float = 0.0,
     media_title: str = "",
@@ -185,9 +183,9 @@ def _build_mpv_args(
 def _build_fallback_mpv_args(
     mpv_path: Path,
     strm_path: str,
-    window_title: Optional[str] = None,
+    window_title: str | None = None,
     *,
-    playlist_paths: Optional[list[str]] = None,
+    playlist_paths: list[str] | None = None,
     ipc_server: str = "",
     start_position: float = 0.0,
     media_title: str = "",
@@ -224,7 +222,6 @@ def get_kumiplayer_mpv_integration() -> dict:
     """返回非敏感的 KumiPlayer 内置 MPV 功能状态（版本、清单、运行文件、配置与脚本）。"""
     from app.playback.mpv_runtime import (
         check_mpv_runtime,
-        load_runtime_manifest,
     )
 
     status = check_mpv_runtime(verify_files=False)
@@ -250,7 +247,7 @@ def _exited_immediately(process: subprocess.Popen) -> bool:
     return isinstance(status, int)
 
 
-def _windows_startupinfo() -> Optional[object]:
+def _windows_startupinfo() -> Any | None:
     if os.name != "nt":
         return None
     startupinfo = subprocess.STARTUPINFO()

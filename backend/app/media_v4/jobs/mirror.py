@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from app.media_v4.jobs.paths import work_directory_name
 from app.media_v4.persistence.database import V4Database
 
 
@@ -48,11 +49,14 @@ class V4MirrorMaterializer:
             if revision is None or revision["status"] != "confirmed":
                 raise RuntimeError("只有 confirmed revision 才能生成镜像")
             if job["status"] == "succeeded":
-                paths = conn.execute(
-                    "SELECT target_path FROM artifacts WHERE revision_id = ? AND artifact_type = 'mirror'",
-                    (job["revision_id"],),
+                existing_paths = conn.execute(
+                    """
+                    SELECT target_path FROM artifacts
+                    WHERE revision_id = ? AND work_id = ? AND artifact_type = 'mirror'
+                    """,
+                    (job["revision_id"], job["work_id"]),
                 ).fetchall()
-                return MaterializeResult("succeeded", tuple(row["target_path"] for row in paths))
+                return MaterializeResult("succeeded", tuple(row["target_path"] for row in existing_paths))
             rows = conn.execute(
                 """
                 SELECT DISTINCT
@@ -60,25 +64,67 @@ class V4MirrorMaterializer:
                     w.preferred_title,
                     s.local_season_number, s.season_kind,
                     e.local_episode_number, e.special_number,
-                    a.asset_id, a.fingerprint, a.playback_locator, a.source_locator
+                    a.asset_id, a.fingerprint, a.playback_locator, a.source_locator,
+                    0 AS is_movie
                 FROM revision_bindings rb
                 JOIN works w ON w.work_id = rb.work_id
                 JOIN episodes e ON e.episode_id = rb.episode_id
                 JOIN seasons s ON s.season_id = e.season_id
-                JOIN assets a ON a.evidence_id = rb.evidence_id
+                JOIN assets a ON a.asset_id = rb.asset_id
                 WHERE rb.revision_id = ? AND rb.work_id = ?
                 ORDER BY e.episode_id, a.asset_id
                 """,
                 (job["revision_id"], job["work_id"]),
             ).fetchall()
+            movie_rows = conn.execute(
+                """
+                SELECT DISTINCT
+                    rb.revision_id, rb.work_id, NULL AS episode_id,
+                    w.preferred_title,
+                    NULL AS local_season_number, '' AS season_kind,
+                    NULL AS local_episode_number, NULL AS special_number,
+                    a.asset_id, a.fingerprint, a.playback_locator, a.source_locator,
+                    1 AS is_movie
+                FROM revision_bindings rb
+                JOIN works w ON w.work_id = rb.work_id
+                JOIN assets a ON a.asset_id = rb.asset_id
+                JOIN work_assets wa ON wa.work_id = rb.work_id AND wa.asset_id = rb.asset_id
+                WHERE rb.revision_id = ? AND rb.work_id = ? AND rb.episode_id IS NULL
+                ORDER BY a.asset_id
+                """,
+                (job["revision_id"], job["work_id"]),
+            ).fetchall()
+            rows = [*rows, *movie_rows]
             if not rows:
                 raise RuntimeError("confirmed revision 没有可物化 Asset")
-            conn.execute("UPDATE jobs SET status = 'running', updated_at = ? WHERE job_id = ?", (_now(), job_id))
+            cursor = conn.execute(
+                """
+                UPDATE jobs SET status = 'running', attempts = attempts + 1, updated_at = ?
+                WHERE job_id = ? AND status = 'queued'
+                """,
+                (_now(), job_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("镜像任务已由其他执行器领取")
 
         paths: list[str] = []
         try:
             for row in rows:
-                work_dir = _safe_segment(row["preferred_title"], "未命名作品")
+                work_dir = work_directory_name(str(row["work_id"]))
+                asset_identity = row["fingerprint"] or row["asset_id"]
+                asset_tag = _safe_segment(asset_identity[-10:], "asset")
+                locator = row["playback_locator"] or row["source_locator"]
+                if row["is_movie"]:
+                    target = root / work_dir / f"movie-{asset_tag}.strm"
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+                    try:
+                        temporary.write_text(locator, encoding="utf-8", newline="\n")
+                        temporary.replace(target)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+                    paths.append(str(target))
+                    continue
                 season_number = int(row["local_season_number"] or 0)
                 if row["season_kind"] == "special" or season_number == 0:
                     season_dir = "Specials"
@@ -86,13 +132,14 @@ class V4MirrorMaterializer:
                 else:
                     season_dir = f"Season {season_number:02d}"
                     episode_name = f"S{season_number:02d}E{int(row['local_episode_number'] or 0):02d}"
-                asset_tag = _safe_segment((row["fingerprint"] or "asset")[-10:], "asset")
                 target = root / work_dir / season_dir / f"{episode_name}-{asset_tag}.strm"
                 target.parent.mkdir(parents=True, exist_ok=True)
-                temporary = target.with_name(target.name + ".tmp")
-                locator = row["playback_locator"] or row["source_locator"]
-                temporary.write_text(locator, encoding="utf-8", newline="\n")
-                temporary.replace(target)
+                temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+                try:
+                    temporary.write_text(locator, encoding="utf-8", newline="\n")
+                    temporary.replace(target)
+                finally:
+                    temporary.unlink(missing_ok=True)
                 paths.append(str(target))
             with self.database.connect() as conn:
                 now = _now()
@@ -107,8 +154,8 @@ class V4MirrorMaterializer:
                         (str(uuid.uuid4()), job["revision_id"], job["work_id"], path, now, now),
                     )
                 conn.execute(
-                    "UPDATE jobs SET status = 'succeeded', updated_at = ?, last_error = '' WHERE job_id = ?",
-                    (now, job_id),
+                    "UPDATE jobs SET status = 'succeeded', updated_at = ?, last_error = ? WHERE job_id = ?",
+                    (now, "", job_id),
                 )
             return MaterializeResult("succeeded", tuple(paths))
         except Exception as exc:

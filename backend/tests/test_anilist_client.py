@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """AniList client tests."""
 
 from types import SimpleNamespace

@@ -49,6 +49,8 @@ class V4Repository:
                     evidence.presence_state,
                 ),
             )
+        if self.get_source_evidence(evidence.evidence_id) != evidence:
+            raise ValueError(f"不可变 SourceEvidence 冲突: {evidence.evidence_id}")
 
     def get_source_evidence(self, evidence_id: str) -> SourceEvidence:
         with self.database.connect() as conn:
@@ -136,6 +138,8 @@ class V4Repository:
                     json.dumps(facts.warnings, ensure_ascii=False),
                 ),
             )
+        if self.get_parsed_facts(facts.parsed_fact_id) != facts:
+            raise ValueError(f"不可变 ParsedFacts 冲突: {facts.parsed_fact_id}")
 
     def get_parsed_facts(self, parsed_fact_id: str) -> ParsedFacts:
         with self.database.connect() as conn:

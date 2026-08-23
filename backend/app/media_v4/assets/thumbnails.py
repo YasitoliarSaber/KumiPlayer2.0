@@ -52,10 +52,9 @@ def _generate(source: Path, target: Path, width: int) -> bool:
     try:
         with os.fdopen(fd, "wb") as temp_file:
             with Image.open(source) as image:
-                if image.mode not in ("RGB", "RGBA", "L"):
-                    image = image.convert("RGB")
-                image.thumbnail((width, width * 2), Image.LANCZOS)
-                image.save(temp_file, "WEBP", quality=85, method=4)
+                working = image if image.mode in ("RGB", "RGBA", "L") else image.convert("RGB")
+                working.thumbnail((width, width * 2), Image.Resampling.LANCZOS)
+                working.save(temp_file, "WEBP", quality=85, method=4)
             temp_file.flush()
             os.fsync(temp_file.fileno())
         os.replace(temp_name, target)

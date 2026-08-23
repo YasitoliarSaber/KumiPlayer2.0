@@ -1,9 +1,7 @@
-# -*- coding: utf-8 -*-
 """锁定用户确认的详情页连续背景，防止旧材质规则再次覆盖。"""
 
 import re
 from pathlib import Path
-
 
 CSS_PATH = Path(__file__).resolve().parents[2] / "src" / "index.css"
 

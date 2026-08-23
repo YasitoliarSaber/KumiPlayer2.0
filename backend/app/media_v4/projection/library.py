@@ -45,10 +45,10 @@ class V4LibraryProjection:
             if generation is None:
                 return None
             cards = tuple(
-                dict(row)
+                self._decode_card(dict(row))
                 for row in conn.execute(
                     """
-                    SELECT work_id, title, year, media_type, episode_count, asset_count
+                    SELECT work_id, title, year, media_type, episode_count, asset_count, metadata_json
                     FROM library_cards WHERE generation_id = ? ORDER BY title COLLATE NOCASE, work_id
                     """,
                     (generation_id,),
@@ -69,31 +69,69 @@ class V4LibraryProjection:
                         w.preferred_title AS title,
                         w.year,
                         CASE WHEN w.work_type = 'series' THEN 'tv' ELSE 'movie' END AS media_type,
-                        COUNT(DISTINCT e.episode_id) AS episode_count,
-                        COUNT(DISTINCT ea.asset_id) AS asset_count
+                        CASE WHEN w.work_type = 'series' THEN (
+                            SELECT COUNT(DISTINCT rb.episode_id)
+                            FROM revision_bindings rb
+                            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                            WHERE rb.work_id = w.work_id AND rb.episode_id IS NOT NULL
+                              AND ir.status = 'confirmed'
+                        ) ELSE CASE WHEN EXISTS (
+                            SELECT 1 FROM revision_bindings rb
+                            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                            WHERE rb.work_id = w.work_id AND rb.episode_id IS NULL
+                              AND rb.asset_id IS NOT NULL AND ir.status = 'confirmed'
+                        ) THEN 1 ELSE 0 END END AS episode_count,
+                        (
+                            SELECT COUNT(DISTINCT rb.asset_id)
+                            FROM revision_bindings rb
+                            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                            WHERE rb.work_id = w.work_id AND rb.asset_id IS NOT NULL
+                              AND ir.status = 'confirmed'
+                        ) AS asset_count,
+                        COALESCE((
+                            SELECT sb.metadata_json FROM scrape_bindings sb
+                            JOIN import_revisions sir ON sir.revision_id = sb.revision_id
+                            WHERE sb.work_id = w.work_id AND sir.status = 'confirmed'
+                            ORDER BY sb.updated_at DESC, sb.binding_id DESC LIMIT 1
+                        ), '{}') AS scraped_metadata_json,
+                        COALESCE((
+                            SELECT GROUP_CONCAT(DISTINCT provider) FROM (
+                                SELECT se.provider
+                                FROM revision_bindings rb
+                                JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                                JOIN assets a ON a.asset_id = rb.asset_id
+                                JOIN source_evidence se ON se.evidence_id = a.evidence_id
+                                WHERE rb.work_id = w.work_id AND ir.status = 'confirmed'
+                            )
+                        ), '') AS source_providers
                     FROM works w
-                    LEFT JOIN episodes e ON e.work_id = w.work_id
-                    LEFT JOIN episode_assets ea ON ea.episode_id = e.episode_id
                     WHERE EXISTS (
                         SELECT 1 FROM revision_bindings rb
                         JOIN import_revisions ir ON ir.revision_id = rb.revision_id
                         WHERE rb.work_id = w.work_id AND ir.status = 'confirmed'
                     )
-                    GROUP BY w.work_id, w.preferred_title, w.year, w.work_type
                     ORDER BY title COLLATE NOCASE, w.work_id
                     """
                 ).fetchall()
-                cards = tuple(
-                    {
+                cards_list = []
+                for row in rows:
+                    try:
+                        metadata = json.loads(row["scraped_metadata_json"] or "{}")
+                    except (TypeError, ValueError):
+                        metadata = {}
+                    metadata["sources"] = sorted(
+                        filter(None, str(row["source_providers"] or "").split(","))
+                    )
+                    cards_list.append({
                         "work_id": row["work_id"],
-                        "title": row["title"],
-                        "year": row["year"],
+                        "title": metadata.get("title") or row["title"],
+                        "year": metadata.get("year") or row["year"],
                         "media_type": row["media_type"],
                         "episode_count": row["episode_count"],
                         "asset_count": row["asset_count"],
-                    }
-                    for row in rows
-                )
+                        "metadata": metadata,
+                    })
+                cards = tuple(cards_list)
                 digest = hashlib.sha256(
                     json.dumps(cards, ensure_ascii=False, sort_keys=True).encode("utf-8")
                 ).hexdigest()
@@ -106,8 +144,8 @@ class V4LibraryProjection:
                         """
                         INSERT INTO library_cards(
                             generation_id, work_id, title, year, media_type,
-                            episode_count, asset_count
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                            episode_count, asset_count, metadata_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             generation_id,
@@ -117,6 +155,7 @@ class V4LibraryProjection:
                             card["media_type"],
                             card["episode_count"],
                             card["asset_count"],
+                            json.dumps(card["metadata"], ensure_ascii=False, sort_keys=True),
                         ),
                     )
                 conn.execute(
@@ -128,8 +167,21 @@ class V4LibraryProjection:
                     "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                     (generation_id,),
                 )
+                conn.execute(
+                    "DELETE FROM library_generations WHERE generation_id != ?",
+                    (generation_id,),
+                )
                 conn.commit()
                 return LibrarySnapshot(generation_id, digest, cards)
             except Exception:
                 conn.rollback()
                 raise
+
+    @staticmethod
+    def _decode_card(card: dict) -> dict:
+        try:
+            card["metadata"] = json.loads(card.pop("metadata_json") or "{}")
+        except (TypeError, ValueError):
+            card.pop("metadata_json", None)
+            card["metadata"] = {}
+        return card

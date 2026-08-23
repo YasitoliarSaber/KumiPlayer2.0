@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """HeartbeatManager 测试"""
 
 import os
@@ -50,9 +49,9 @@ def test_disconnect_sets_disconnected():
 
 def test_heartbeat_enabled_false_no_shutdown():
     """heartbeat_enabled=false 不触发 shutdown"""
-    from app.system.heartbeat import HeartbeatManager
-    from app.core.config import AppConfig, invalidate_config_cache
     import app.core.config as cfg
+    from app.core.config import AppConfig
+    from app.system.heartbeat import HeartbeatManager
 
     # 设置 heartbeat_enabled=false
     old = cfg._cached_config
@@ -72,9 +71,9 @@ def test_heartbeat_enabled_false_no_shutdown():
 
 def test_disconnect_within_timeout_no_shutdown():
     """连接断开未超过 heartbeat_timeout 不触发 shutdown"""
-    from app.system.heartbeat import HeartbeatManager
-    from app.core.config import AppConfig
     import app.core.config as cfg
+    from app.core.config import AppConfig
+    from app.system.heartbeat import HeartbeatManager
 
     old = cfg._cached_config
     cfg._cached_config = AppConfig(heartbeat_enabled=True, heartbeat_timeout=30)
@@ -93,9 +92,9 @@ def test_disconnect_within_timeout_no_shutdown():
 
 def test_auto_shutdown_default_false_no_shutdown():
     """默认不因心跳超时自动退出后端"""
-    from app.system.heartbeat import HeartbeatManager
-    from app.core.config import AppConfig
     import app.core.config as cfg
+    from app.core.config import AppConfig
+    from app.system.heartbeat import HeartbeatManager
 
     old = cfg._cached_config
     cfg._cached_config = AppConfig(heartbeat_enabled=True, heartbeat_timeout=10)
@@ -117,9 +116,9 @@ def test_auto_shutdown_default_false_no_shutdown():
 
 def test_monitor_timeout_starts_before_first_websocket_connection():
     """桌面前端未能连上时，后端也不能永久残留。"""
-    from app.system.heartbeat import HeartbeatManager
-    from app.core.config import AppConfig
     import app.core.config as cfg
+    from app.core.config import AppConfig
+    from app.system.heartbeat import HeartbeatManager
 
     old = cfg._cached_config
     cfg._cached_config = AppConfig(
@@ -146,9 +145,9 @@ def test_monitor_timeout_starts_before_first_websocket_connection():
 
 def test_disconnect_timeout_no_playing_triggers_shutdown():
     """连接断开超过 heartbeat_timeout 且未播放 → 触发 shutdown"""
-    from app.system.heartbeat import HeartbeatManager
-    from app.core.config import AppConfig
     import app.core.config as cfg
+    from app.core.config import AppConfig
+    from app.system.heartbeat import HeartbeatManager
 
     old = cfg._cached_config
     cfg._cached_config = AppConfig(
@@ -178,9 +177,9 @@ def test_disconnect_timeout_no_playing_triggers_shutdown():
 
 def test_disconnect_timeout_playing_no_shutdown():
     """连接断开超过 heartbeat_timeout 但正在播放 → 不触发 shutdown"""
-    from app.system.heartbeat import HeartbeatManager
-    from app.core.config import AppConfig
     import app.core.config as cfg
+    from app.core.config import AppConfig
+    from app.system.heartbeat import HeartbeatManager
 
     old = cfg._cached_config
     cfg._cached_config = AppConfig(
@@ -207,9 +206,9 @@ def test_disconnect_timeout_playing_no_shutdown():
 
 def test_disconnect_timeout_busy_task_no_shutdown():
     """连接断开超过 heartbeat_timeout 但后台任务运行中 → 不触发 shutdown"""
-    from app.system.heartbeat import HeartbeatManager
-    from app.core.config import AppConfig
     import app.core.config as cfg
+    from app.core.config import AppConfig
+    from app.system.heartbeat import HeartbeatManager
 
     old = cfg._cached_config
     cfg._cached_config = AppConfig(
@@ -237,9 +236,9 @@ def test_disconnect_timeout_busy_task_no_shutdown():
 
 def test_disconnect_timeout_parent_alive_no_shutdown():
     """桌面父进程仍存活时，心跳断开不能误杀后端。"""
-    from app.system.heartbeat import HeartbeatManager
-    from app.core.config import AppConfig
     import app.core.config as cfg
+    from app.core.config import AppConfig
+    from app.system.heartbeat import HeartbeatManager
 
     old = cfg._cached_config
     cfg._cached_config = AppConfig(
@@ -276,9 +275,9 @@ def test_current_desktop_parent_process_is_detected(monkeypatch):
 
 def test_active_heartbeat_timeout_triggers_shutdown():
     """active connection 心跳超时且未播放 → 触发 shutdown"""
-    from app.system.heartbeat import HeartbeatManager
-    from app.core.config import AppConfig
     import app.core.config as cfg
+    from app.core.config import AppConfig
+    from app.system.heartbeat import HeartbeatManager
 
     old = cfg._cached_config
     cfg._cached_config = AppConfig(
@@ -305,9 +304,9 @@ def test_active_heartbeat_timeout_triggers_shutdown():
 
 def test_shutdown_only_once():
     """同一次超时只触发一次 shutdown_callback"""
-    from app.system.heartbeat import HeartbeatManager
-    from app.core.config import AppConfig
     import app.core.config as cfg
+    from app.core.config import AppConfig
+    from app.system.heartbeat import HeartbeatManager
 
     old = cfg._cached_config
     cfg._cached_config = AppConfig(
@@ -363,9 +362,9 @@ def test_multi_connect_one_disconnect():
 
 def test_playing_blocks_then_later_shutdown():
     """超时时正在播放不退出，播放结束后下一轮 monitor 可退出"""
-    from app.system.heartbeat import HeartbeatManager
-    from app.core.config import AppConfig
     import app.core.config as cfg
+    from app.core.config import AppConfig
+    from app.system.heartbeat import HeartbeatManager
 
     old = cfg._cached_config
     cfg._cached_config = AppConfig(

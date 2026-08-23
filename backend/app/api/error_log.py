@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """错误日志 API
 
 GET  /api/error-log           — 获取错误列表
@@ -7,7 +6,6 @@ POST /api/error-log/resolve   — 标记单条已处理
 POST /api/error-log/resolve-all — 批量标记已处理
 """
 
-from typing import Optional
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -22,9 +20,9 @@ class ResolveRequest(BaseModel):
 
 
 class ResolveAllRequest(BaseModel):
-    source: Optional[str] = None
-    stage: Optional[str] = None
-    category: Optional[str] = None
+    source: str | None = None
+    stage: str | None = None
+    category: str | None = None
 
 
 @router.get("")

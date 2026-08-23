@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """基于 TMDB/官方资料核验过的真实目录回归。"""
 
 from app.recognition.media import recognize_media

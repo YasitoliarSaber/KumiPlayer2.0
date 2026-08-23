@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """安装版运行目录与用户数据隔离测试。"""
 
 from app.core import config as core_config

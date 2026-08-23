@@ -68,3 +68,42 @@ def test_missing_identity_becomes_review_issue_instead_of_path_hash_identity():
 
     assert graph.works == ()
     assert any(issue.code == "work_identity_missing" for issue in graph.issues)
+
+
+def test_generic_category_directory_does_not_merge_different_works_on_confirmation(tmp_path):
+    from dataclasses import replace
+
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "category.db")
+    database.initialize()
+    first_evidence, first_facts = _pair(
+        "ev-a", provider="pan115", title="Show A", year=2024
+    )
+    second_evidence, second_facts = _pair(
+        "ev-b", provider="pan115", title="Show B", year=2024
+    )
+    first_evidence = replace(
+        first_evidence,
+        root_id="shared-root",
+        scan_id="shared-scan",
+        relative_path="动画/Show A/Show A.S01E01.mkv",
+    )
+    second_evidence = replace(
+        second_evidence,
+        root_id="shared-root",
+        scan_id="shared-scan",
+        relative_path="动画/Show B/Show B.S01E01.mkv",
+    )
+
+    service = V4RevisionService(database)
+    service.create_draft(
+        "rev-category",
+        [(first_evidence, first_facts), (second_evidence, second_facts)],
+    )
+    service.confirm("rev-category")
+
+    with database.connect() as conn:
+        works = conn.execute("SELECT preferred_title FROM works ORDER BY preferred_title").fetchall()
+    assert [row["preferred_title"] for row in works] == ["Show A", "Show B"]

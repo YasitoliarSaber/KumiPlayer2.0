@@ -1,8 +1,6 @@
-# -*- coding: utf-8 -*-
 """桌面端主滚动条的视觉回归检查。"""
 
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[2]
 

@@ -20,38 +20,40 @@ class WatchStatusRequest(BaseModel):
 
 
 def _card_payload(card: dict) -> dict:
+    metadata = card.get("metadata") or {}
     media_type = card["media_type"] if card["media_type"] in {"tv", "movie"} else "tv"
     show_type = "anime_series" if media_type == "tv" else "anime_movie"
+    sources = metadata.get("sources") or ["local"]
     return {
         "work_id": card["work_id"],
         "title": card["title"],
-        "original_title": card["title"],
+        "original_title": metadata.get("original_title") or card["title"],
         "year": card["year"],
-        "title_provenance": "online",
-        "rating": 0,
-        "plot": "",
-        "genres": [],
-        "studios": [],
+        "title_provenance": "online" if metadata.get("provider") not in {None, "", "local"} else "local",
+        "rating": metadata.get("rating") or 0,
+        "plot": metadata.get("plot") or "",
+        "genres": metadata.get("genres") or [],
+        "studios": metadata.get("studios") or [],
         "media_type": media_type,
         "show_type": show_type,
-        "source": "local",
-        "sources": ["local"],
+        "source": sources[0],
+        "sources": sources,
         "card_type": "main_series" if media_type == "tv" else "standalone",
         "episodes": [],
         "seasons": [],
         "episode_count": card["episode_count"],
         "asset_count": card["asset_count"],
         "source_locations": {},
-        "poster_path": "",
-        "fanart_path": "",
-        "local_poster_path": "",
-        "local_fanart_path": "",
+        "poster_path": metadata.get("poster_url") or "",
+        "fanart_path": metadata.get("fanart_url") or "",
+        "local_poster_path": metadata.get("local_poster_path") or "",
+        "local_fanart_path": metadata.get("local_fanart_path") or "",
         "clearlogo_path": "",
         "dir_path": "",
         "related_works": [],
         "tags": [],
         "last_played": None,
-        "metadata_state": "ready",
+        "metadata_state": metadata.get("metadata_state") or ("ready" if metadata else "pending"),
     }
 
 
@@ -63,9 +65,11 @@ def _library_snapshot():
 
 @router.get("")
 def get_library(compact: bool = False, source: str | None = None):
-    del compact, source
+    del compact
     snapshot = _library_snapshot()
     works = [_card_payload(card) for card in snapshot.cards]
+    if source and source != "all":
+        works = [work for work in works if source in work["sources"]]
     return {
         "works": works,
         "summary": {
@@ -81,30 +85,87 @@ def get_library(compact: bool = False, source: str | None = None):
 @router.get("/works/{work_id}")
 def get_work_detail(work_id: str):
     with get_database().connect() as conn:
-        work = conn.execute("SELECT * FROM works WHERE work_id = ?", (work_id,)).fetchone()
+        work = conn.execute(
+            """
+            SELECT w.* FROM works w
+            WHERE w.work_id = ? AND EXISTS (
+                SELECT 1 FROM revision_bindings rb
+                JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                WHERE rb.work_id = w.work_id AND ir.status = 'confirmed'
+            )
+            """,
+            (work_id,),
+        ).fetchone()
         if work is None:
             raise HTTPException(status_code=404, detail=f"作品不存在: {work_id}")
         seasons = conn.execute(
-            "SELECT * FROM seasons WHERE work_id = ? ORDER BY local_season_number, season_id",
+            """
+            SELECT s.* FROM seasons s
+            WHERE s.work_id = ? AND EXISTS (
+                SELECT 1 FROM revision_bindings rb
+                JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                JOIN episodes e ON e.episode_id = rb.episode_id
+                WHERE e.season_id = s.season_id AND ir.status = 'confirmed'
+            )
+            ORDER BY s.local_season_number, s.season_id
+            """,
             (work_id,),
         ).fetchall()
         episodes = conn.execute(
             """
-            SELECT e.*, s.local_season_number, s.season_kind, s.title AS season_title,
+            SELECT DISTINCT e.*, s.local_season_number, s.season_kind, s.title AS season_title,
                    a.asset_id, a.root_id, a.playback_locator, a.source_locator,
-                   a.availability_state, sr.provider
-            FROM episodes e
+                   a.availability_state, se.provider
+            FROM revision_bindings rb
+            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+            JOIN episodes e ON e.episode_id = rb.episode_id
             JOIN seasons s ON s.season_id = e.season_id
-            LEFT JOIN episode_assets ea ON ea.episode_id = e.episode_id
-            LEFT JOIN assets a ON a.asset_id = ea.asset_id
-            LEFT JOIN source_roots sr ON sr.root_id = a.root_id
-            WHERE e.work_id = ?
-            ORDER BY s.local_season_number, e.local_episode_number, e.episode_id, a.asset_id
+            JOIN assets a ON a.asset_id = rb.asset_id
+            JOIN source_evidence se ON se.evidence_id = a.evidence_id
+            WHERE e.work_id = ? AND ir.status = 'confirmed'
+            ORDER BY s.local_season_number, e.local_episode_number, e.episode_id,
+                     CASE WHEN a.availability_state = 'available' THEN 0 ELSE 1 END,
+                     CASE WHEN se.provider = 'local' THEN 0 ELSE 1 END,
+                     CASE lower(a.resolution)
+                         WHEN '4k' THEN 4000 WHEN 'uhd' THEN 4000
+                         ELSE CAST(replace(replace(lower(a.resolution), 'p', ''), 'i', '') AS INTEGER)
+                     END DESC,
+                     a.fingerprint, a.asset_id
+            """,
+            (work_id,),
+        ).fetchall()
+        movie_assets = conn.execute(
+            """
+            SELECT a.asset_id, a.playback_locator, a.source_locator,
+                   a.availability_state, se.provider
+            FROM revision_bindings rb
+            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+            JOIN assets a ON a.asset_id = rb.asset_id
+            JOIN source_evidence se ON se.evidence_id = a.evidence_id
+            WHERE rb.work_id = ? AND rb.episode_id IS NULL
+              AND rb.asset_id IS NOT NULL AND ir.status = 'confirmed'
+            ORDER BY CASE WHEN a.availability_state = 'available' THEN 0 ELSE 1 END,
+                     CASE WHEN se.provider = 'local' THEN 0 ELSE 1 END,
+                     CASE lower(a.resolution)
+                         WHEN '4k' THEN 4000 WHEN 'uhd' THEN 4000
+                         ELSE CAST(replace(replace(lower(a.resolution), 'p', ''), 'i', '') AS INTEGER)
+                     END DESC,
+                     a.fingerprint, a.asset_id
             """,
             (work_id,),
         ).fetchall()
         watch_row = conn.execute(
             "SELECT * FROM tracking_states WHERE work_id = ? AND provider = 'local'",
+            (work_id,),
+        ).fetchone()
+        scrape_row = conn.execute(
+            """
+            SELECT sb.metadata_json
+            FROM scrape_bindings sb
+            JOIN import_revisions ir ON ir.revision_id = sb.revision_id
+            WHERE sb.work_id = ? AND ir.status = 'confirmed'
+            ORDER BY sb.updated_at DESC, sb.binding_id DESC LIMIT 1
+            """,
             (work_id,),
         ).fetchone()
 
@@ -148,6 +209,35 @@ def get_work_detail(work_id: str):
         source_locations.setdefault(provider, []).append(row["source_locator"] or locator)
 
     episode_payload = list(episode_map.values())
+    if work["work_type"] == "movie" and movie_assets:
+        assets = []
+        for row in movie_assets:
+            locator = row["playback_locator"] or row["source_locator"] or ""
+            provider = row["provider"] or "local"
+            assets.append({
+                "asset_id": row["asset_id"],
+                "playback_locator": locator,
+                "availability": row["availability_state"] or "available",
+                "source": provider,
+            })
+            source_locations.setdefault(provider, []).append(row["source_locator"] or locator)
+        first = assets[0]
+        episode_payload = [{
+            "episode_id": f"movie:{work_id}",
+            "work_id": work_id,
+            "season_number": 0,
+            "episode_number": 1,
+            "absolute_episode_number": None,
+            "special_number": None,
+            "title": work["preferred_title"],
+            "group_type": "movie",
+            "kind": "movie",
+            "playback_locator": first["playback_locator"],
+            "asset_id": first["asset_id"],
+            "source": first["source"],
+            "availability": first["availability"],
+            "assets": assets,
+        }]
     season_payload = [
         {
             "season_id": season["season_id"],
@@ -166,36 +256,41 @@ def get_work_detail(work_id: str):
     media_type = "tv" if work["work_type"] == "series" else "movie"
     show_type = "anime_series" if media_type == "tv" else "anime_movie"
     watch_status = _watch_payload(dict(watch_row)) if watch_row else None
+    try:
+        metadata = json.loads(scrape_row["metadata_json"] or "{}") if scrape_row else {}
+    except (TypeError, ValueError):
+        metadata = {}
+    sources = sorted({item["source"] for item in episode_payload}) or ["local"]
     payload = {
         "work_id": work["work_id"],
-        "title": work["preferred_title"],
-        "original_title": work["original_title"] or work["preferred_title"],
-        "year": work["year"],
-        "title_provenance": "online",
-        "rating": 0,
-        "plot": "",
-        "genres": [],
-        "studios": [],
+        "title": metadata.get("title") or work["preferred_title"],
+        "original_title": metadata.get("original_title") or work["original_title"] or work["preferred_title"],
+        "year": metadata.get("year") or work["year"],
+        "title_provenance": "online" if metadata.get("provider") not in {None, "", "local"} else "local",
+        "rating": metadata.get("rating") or 0,
+        "plot": metadata.get("plot") or "",
+        "genres": metadata.get("genres") or [],
+        "studios": metadata.get("studios") or [],
         "media_type": media_type,
         "show_type": show_type,
-        "source": episode_payload[0]["source"] if episode_payload else "local",
-        "sources": sorted({item["source"] for item in episode_payload}) or ["local"],
+        "source": sources[0],
+        "sources": sources,
         "card_type": "main_series" if media_type == "tv" else "standalone",
         "episodes": episode_payload,
         "seasons": season_payload,
         "episode_count": len({item["episode_id"] for item in episode_payload}),
         "asset_count": sum(len(item["assets"]) for item in episode_payload),
         "source_locations": {key: sorted(set(values)) for key, values in source_locations.items()},
-        "poster_path": "",
-        "fanart_path": "",
-        "local_poster_path": "",
-        "local_fanart_path": "",
+        "poster_path": metadata.get("poster_url") or "",
+        "fanart_path": metadata.get("fanart_url") or "",
+        "local_poster_path": metadata.get("local_poster_path") or "",
+        "local_fanart_path": metadata.get("local_fanart_path") or "",
         "clearlogo_path": "",
         "dir_path": "",
         "related_works": [],
         "tags": [],
         "last_played": None,
-        "metadata_state": "ready",
+        "metadata_state": metadata.get("metadata_state") or ("ready" if metadata else "pending"),
         "watch_status": watch_status,
     }
     return payload
@@ -243,7 +338,14 @@ def patch_watch_status(work_id: str, request: WatchStatusRequest):
     if request.status is not None and request.status not in {"", "watching", "watched", "on_hold", "dropped"}:
         raise HTTPException(status_code=400, detail="未知观看状态")
     with get_database().connect() as conn:
-        exists = conn.execute("SELECT 1 FROM works WHERE work_id = ?", (work_id,)).fetchone()
+        exists = conn.execute(
+            """
+            SELECT 1 FROM revision_bindings rb
+            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+            WHERE rb.work_id = ? AND ir.status = 'confirmed' LIMIT 1
+            """,
+            (work_id,),
+        ).fetchone()
     if exists is None:
         raise HTTPException(status_code=404, detail="作品不存在")
     with get_database().connect() as conn:
@@ -260,13 +362,16 @@ def patch_watch_status(work_id: str, request: WatchStatusRequest):
     from app.media_v4.tracking.store import V4TrackingStore
 
     store = V4TrackingStore(get_database())
-    store.save_state(
-        work_id,
-        "local",
-        provider_id="",
-        last_watched_episode=None,
-        metadata=metadata,
-    )
+    try:
+        store.save_state(
+            work_id,
+            "local",
+            provider_id="",
+            last_watched_episode=None,
+            metadata=metadata,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="作品不存在或已经失效") from exc
     return _watch_payload(store.get_state(work_id, "local"))
 
 

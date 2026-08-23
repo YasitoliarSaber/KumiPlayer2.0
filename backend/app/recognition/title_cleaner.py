@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """作品名清洗规则
 
 从作品容器目录名中提取干净的 work_title。
@@ -7,7 +6,6 @@
 
 import re
 from dataclasses import dataclass, field
-from typing import List
 
 # 状态词
 _STATUS_WORDS = ["（将更新）", "(将更新)", "（更新中）", "(更新中)"]
@@ -74,8 +72,8 @@ class TitleCleanResult:
     changed: bool = False
     confidence_delta: str = ""  # 清洗后置信度变化
     needs_review: bool = False
-    warnings: List[str] = field(default_factory=list)
-    applied_rules: List[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    applied_rules: list[str] = field(default_factory=list)
 
 
 def _is_tech_token(token: str) -> bool:
@@ -122,7 +120,7 @@ def _is_fansub_token(token: str) -> bool:
     return False
 
 
-def _select_best_token(tokens: List[str]) -> tuple[str, bool]:
+def _select_best_token(tokens: list[str]) -> tuple[str, bool]:
     """从方括号 token 中选择最像作品名的
 
     返回:
@@ -225,7 +223,7 @@ def clean_work_title_container(container: str) -> TitleCleanResult:
         if no_brackets:
             # 有剩余文本，使用剩余文本
             cleaned = no_brackets
-            applied.append(f"去掉方括号标签，保留剩余文本")
+            applied.append("去掉方括号标签，保留剩余文本")
         else:
             # 去掉方括号后为空，从 token 中选择
             selected, needs_review = _select_best_token(brackets)
@@ -251,7 +249,7 @@ def clean_work_title_container(container: str) -> TitleCleanResult:
         new_cleaned = pat.sub("", cleaned).strip()
         if new_cleaned != cleaned:
             cleaned = new_cleaned
-            applied.append(f"去掉末尾年份")
+            applied.append("去掉末尾年份")
             break
 
     # 5. 空白归一化

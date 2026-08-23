@@ -6,16 +6,14 @@ KumiPlayer 内置干净 MPV，通过 --config-dir 加载自有配置并自动加
 
 import hashlib
 import json
-import os
 from pathlib import Path
-from typing import Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app
 from app.core.config import invalidate_config_cache
+from app.main import app
 
 
 @pytest.fixture
@@ -26,7 +24,6 @@ def client():
 
 @pytest.fixture
 def temp_config(tmp_path, monkeypatch):
-    from app.core.config import CONFIG_FILE
 
     config_file = tmp_path / "config.json"
     monkeypatch.setattr("app.core.config.CONFIG_FILE", config_file)
@@ -65,7 +62,7 @@ def _write_kumiplayer_layer(root: Path) -> Path:
     return layer
 
 
-def _make_manifest(runtime_dir: Path, file_count: int = 1, override_sha256: str = "", extra_files: Optional[list[tuple[str, str]]] = None) -> Path:
+def _make_manifest(runtime_dir: Path, file_count: int = 1, override_sha256: str = "", extra_files: list[tuple[str, str]] | None = None) -> Path:
     """为测试运行时生成合法清单。
 
     override_sha256 不为空时，mpv.exe 的 sha256 使用该值而非全零。
@@ -520,7 +517,7 @@ def test_mpv_runtime_cache_avoids_redundant_hash_computation(tmp_path, monkeypat
 
 def test_mpv_runtime_cache_invalidates_on_file_tamper(tmp_path, monkeypatch):
     """篡改 mpv.exe 后缓存应失效，播放链路须重新校验并阻止 Popen。"""
-    from app.playback import mpv_runtime, mpv
+    from app.playback import mpv, mpv_runtime
 
     runtime_dir, config_dir = _setup_runtime(tmp_path, monkeypatch)
 
@@ -548,7 +545,7 @@ def test_mpv_runtime_cache_invalidates_on_file_tamper(tmp_path, monkeypatch):
 
 def test_mpv_runtime_cache_invalidates_on_dll_tamper(tmp_path, monkeypatch):
     """篡改清单中已登记的 DLL 后缓存应失效，Popen 不被调用。"""
-    from app.playback import mpv_runtime, mpv
+    from app.playback import mpv_runtime
 
     runtime_dir = tmp_path / "runtime"
     runtime_dir.mkdir(parents=True)
@@ -595,7 +592,7 @@ def test_mpv_runtime_cache_invalidates_on_dll_tamper(tmp_path, monkeypatch):
 
 def test_mpv_runtime_cache_invalidates_on_config_change(tmp_path, monkeypatch):
     """修改 mpv.conf 后缓存应失效，播放链路须重新校验并阻止 Popen。"""
-    from app.playback import mpv_runtime, mpv
+    from app.playback import mpv_runtime
 
     runtime_dir, config_dir = _setup_runtime(tmp_path, monkeypatch)
 

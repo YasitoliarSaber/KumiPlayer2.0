@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """宽屏设置大纲应在右侧留白内居中。"""
 
 from pathlib import Path

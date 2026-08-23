@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 """kumiplayer_anime4k.lua 链映射验证：所有模式×质量组合引用的 shader 必须随包存在。"""
 
-import re
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

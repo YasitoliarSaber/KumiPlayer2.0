@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """小型 JSON 状态文件的原子写入工具。"""
 
 import json
@@ -27,7 +26,9 @@ def _replace_with_retry(temp_name: str, path: Path) -> None:
             last_error = exc
             if attempt + 1 < _REPLACE_RETRIES:
                 time.sleep(_REPLACE_RETRY_DELAY)
-    raise last_error
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("原子替换未执行")
 
 
 def write_json_atomic(path: Path, data: Any) -> None:

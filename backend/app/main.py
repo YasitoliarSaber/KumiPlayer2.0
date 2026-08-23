@@ -57,6 +57,9 @@ async def lifespan(app: FastAPI):
     finally:
         stop_jobs.set()
         await job_worker
+        from app.media_v4.playback.session import get_v4_playback_manager
+
+        get_v4_playback_manager(database).stop()
         manager.stop_monitor()
 
 

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """M04R 作品名清洗规则测试"""
 
 import sys
@@ -452,7 +451,7 @@ def test_fansub_not_series_group():
     assert "BeanSub" not in guess.series_group, f"series_group 含字幕组标签: {guess.series_group}"
     assert "BDRip" not in guess.series_group, f"series_group 含技术标签: {guess.series_group}"
     assert "01-47" not in guess.series_group, f"series_group 含集数范围: {guess.series_group}"
-    assert "BeanSub" not in (guess.belongs_to_series or ""), f"belongs_to_series 含字幕组标签"
+    assert "BeanSub" not in (guess.belongs_to_series or ""), "belongs_to_series 含字幕组标签"
 
 
 def test_bracket_movie_file_uses_concrete_title():

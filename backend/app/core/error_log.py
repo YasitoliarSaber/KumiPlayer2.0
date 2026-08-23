@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """统一错误日志
 
 全局错误日志入口，覆盖 import_plan / scrape / mirror 全流程。
@@ -25,9 +24,8 @@
 
 import json
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
 
 from app.core.atomic_json import write_text_atomic
 from app.core.data_lock import DATA_WRITE_LOCK
@@ -57,7 +55,7 @@ def log_error(
     message: str,
     level: str = "error",
     source: str = "",
-    context: Optional[dict] = None,
+    context: dict | None = None,
 ) -> str:
     """写入一条错误日志
 
@@ -85,7 +83,7 @@ def log_error(
     }
 
     _append_to_daily_file(entry)
-    return entry["id"]
+    return str(entry["id"])
 
 
 def _append_to_daily_file(entry: dict) -> None:
@@ -191,20 +189,20 @@ def _delete_error_unlocked(error_id: str) -> bool:
 
 
 def purge_errors(
-    source: Optional[str] = None,
-    stage: Optional[str] = None,
-    category: Optional[str] = None,
-    resolved: Optional[bool] = None,
+    source: str | None = None,
+    stage: str | None = None,
+    category: str | None = None,
+    resolved: bool | None = None,
 ) -> int:
     with DATA_WRITE_LOCK:
         return _purge_errors_unlocked(source, stage, category, resolved)
 
 
 def _purge_errors_unlocked(
-    source: Optional[str] = None,
-    stage: Optional[str] = None,
-    category: Optional[str] = None,
-    resolved: Optional[bool] = None,
+    source: str | None = None,
+    stage: str | None = None,
+    category: str | None = None,
+    resolved: bool | None = None,
 ) -> int:
     """删除匹配条件的错误日志。None 表示该条件不过滤。"""
     log_dir = _get_error_log_dir()
@@ -238,10 +236,10 @@ def _purge_errors_unlocked(
 
 def _matches_purge(
     entry: dict,
-    source: Optional[str],
-    stage: Optional[str],
-    category: Optional[str],
-    resolved: Optional[bool],
+    source: str | None,
+    stage: str | None,
+    category: str | None,
+    resolved: bool | None,
 ) -> bool:
     if source and source != "all" and entry.get("source") != source:
         return False
@@ -254,12 +252,12 @@ def _matches_purge(
     return True
 
 
-def resolve_all(stage: Optional[str] = None, category: Optional[str] = None) -> int:
+def resolve_all(stage: str | None = None, category: str | None = None) -> int:
     with DATA_WRITE_LOCK:
         return _resolve_all_unlocked(stage, category)
 
 
-def _resolve_all_unlocked(stage: Optional[str] = None, category: Optional[str] = None) -> int:
+def _resolve_all_unlocked(stage: str | None = None, category: str | None = None) -> int:
     """批量标记为已处理
 
     参数:

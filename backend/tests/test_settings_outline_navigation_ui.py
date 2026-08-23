@@ -1,8 +1,6 @@
-# -*- coding: utf-8 -*-
 """设置页大纲点击应直接定位，不能沿途激活中间菜单。"""
 
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[2]
 

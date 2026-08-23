@@ -1,8 +1,8 @@
-# -*- coding: utf-8 -*-
 """TMDB 客户端测试（mock，不真实请求 TMDB）"""
 
-import pytest
 from unittest.mock import MagicMock
+
+import pytest
 
 from app.scrape.tmdb_client import (
     TMDBAuthError,

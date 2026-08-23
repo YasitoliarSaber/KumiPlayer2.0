@@ -38,14 +38,24 @@ def get_tracking(work_id: str):
 @router.patch("/works/{work_id}")
 def save_tracking(work_id: str, request: TrackingRequest):
     with get_database().connect() as conn:
-        exists = conn.execute("SELECT 1 FROM works WHERE work_id = ?", (work_id,)).fetchone()
+        exists = conn.execute(
+            """
+            SELECT 1 FROM revision_bindings rb
+            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+            WHERE rb.work_id = ? AND ir.status = 'confirmed' LIMIT 1
+            """,
+            (work_id,),
+        ).fetchone()
     if exists is None:
         raise HTTPException(status_code=404, detail="作品不存在")
-    V4TrackingStore(get_database()).save_state(
-        work_id,
-        request.provider,
-        provider_id=request.provider_id,
-        last_watched_episode=request.last_watched_episode,
-        metadata=request.metadata,
-    )
+    try:
+        V4TrackingStore(get_database()).save_state(
+            work_id,
+            request.provider,
+            provider_id=request.provider_id,
+            last_watched_episode=request.last_watched_episode,
+            metadata=request.metadata,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="作品不存在或已经失效") from exc
     return V4TrackingStore(get_database()).get_state(work_id, request.provider)

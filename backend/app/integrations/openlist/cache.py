@@ -120,7 +120,7 @@ def content_hash(entries: list[dict]) -> str:
                     str(entry.get("remote_path") or ""),
                     "d" if entry.get("is_dir") else "f",
                     str(entry.get("size") if entry.get("size") is not None else ""),
-                    str(int(entry.get("modified")) if entry.get("modified") is not None else ""),
+                    str(int(float(entry["modified"])) if entry.get("modified") is not None else ""),
                 )
             )
         )

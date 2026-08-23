@@ -25,6 +25,30 @@ class V4PlaybackStore:
         completed: bool,
     ) -> None:
         with self.database.connect() as conn:
+            if episode_id == f"movie:{work_id}":
+                binding = conn.execute(
+                    """
+                    SELECT 1 FROM revision_bindings rb
+                    JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                    WHERE rb.work_id = ? AND rb.episode_id IS NULL AND rb.asset_id = ?
+                      AND ir.status = 'confirmed'
+                    LIMIT 1
+                    """,
+                    (work_id, asset_id),
+                ).fetchone()
+            else:
+                binding = conn.execute(
+                    """
+                    SELECT 1 FROM revision_bindings rb
+                    JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                    WHERE rb.work_id = ? AND rb.episode_id = ? AND rb.asset_id = ?
+                      AND ir.status = 'confirmed'
+                    LIMIT 1
+                    """,
+                    (work_id, episode_id, asset_id),
+                ).fetchone()
+            if binding is None:
+                raise KeyError((work_id, episode_id, asset_id))
             conn.execute(
                 """
                 INSERT INTO playback_progress(

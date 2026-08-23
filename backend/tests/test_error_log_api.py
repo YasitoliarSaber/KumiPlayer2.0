@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """错误日志删除与清空测试"""
 
 import sys
@@ -75,6 +74,7 @@ def test_error_log_export_returns_full_text(tmp_path, monkeypatch):
 
     monkeypatch.setattr(error_log, "_get_error_log_dir", lambda: tmp_path)
     from fastapi.testclient import TestClient
+
     from app.main import app
 
     error_log.log_error(

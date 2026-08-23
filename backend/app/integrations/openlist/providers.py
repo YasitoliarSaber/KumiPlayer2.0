@@ -165,7 +165,7 @@ def provider_for_remote(
     return route.route_id, route.provider_id
 
 
-def derive_remote_path(mount_root: str, remote_root: str, local_path: str) -> "str | None":
+def derive_remote_path(mount_root: str, remote_root: str, local_path: str) -> str | None:
     """由本地挂载路径反推远端路径（``derive_local_path`` 的逆向）。
 
     自动联动用：TXT 导入记录的 ``local_locator``（挂载根下的本地路径）+

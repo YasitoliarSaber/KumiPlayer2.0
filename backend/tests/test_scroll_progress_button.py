@@ -1,9 +1,7 @@
-# -*- coding: utf-8 -*-
 """全局滚动进度与返回顶部控件的结构和视觉契约。"""
 
 import re
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[2]
 APP_SHELL_PATH = ROOT / "src" / "components" / "shell" / "AppShell.tsx"

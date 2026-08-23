@@ -159,7 +159,7 @@ class BangumiClient:
     ) -> dict[str, Any]:
         if not keyword.strip():
             raise BangumiError("搜索关键词不能为空", status_code=400)
-        body = {"keyword": keyword.strip(), "sort": "match"}
+        body: dict[str, Any] = {"keyword": keyword.strip(), "sort": "match"}
         if subject_types:
             body["filter"] = {"type": subject_types}
         return self._request(

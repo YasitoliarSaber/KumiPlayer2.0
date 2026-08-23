@@ -141,9 +141,9 @@ def set_token(req: TokenRequest):
     now = _now_iso()
     save_account_snapshot(BangumiAccountSnapshot(
         user_id=me.get("id"),
-        username=me.get("username"),
-        nickname=me.get("nickname"),
-        avatar_url=_avatar_url(me.get("avatar")),
+        username=str(me.get("username") or ""),
+        nickname=str(me.get("nickname") or ""),
+        avatar_url=_avatar_url(me.get("avatar")) or "",
         sign=me.get("sign", ""),
         auth_status="valid",
         connectivity="online",

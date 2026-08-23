@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """经官方资料或 TMDB 核实的少量结构例外与译名别名。
 
 这里仅保存自动规则无法可靠推导、且已核验的事实。通用命名解析仍由
@@ -196,11 +195,11 @@ def match_verified_series_special(
         and "友谊是时间的窃贼" in path_text
     ) or "friends are thieves of time" in path_text:
         episode_match = re.search(r"S00E(\d+)", file_text, re.IGNORECASE)
-        special_number = int(episode_match.group(1)) if episode_match else None
+        matched_special_number: int | None = int(episode_match.group(1)) if episode_match else None
         return _series_special(
             "莉可丽丝",
             154494,
-            special_number,
+            matched_special_number,
             "友谊是时间的窃贼",
             "已核实为《莉可丽丝》六篇短篇动画",
         )

@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.paths import get_mirror_root
+from app.media_v4.jobs.cleanup import V4ArtifactCleanup
+from app.media_v4.jobs.metadata import default_metadata_provider
 from app.media_v4.jobs.mirror import MaterializeResult, V4MirrorMaterializer
+from app.media_v4.jobs.scrape import V4ScrapeService
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.projection.library import LibrarySnapshot, V4LibraryProjection
 
@@ -23,12 +27,20 @@ class JobRunResult:
 class V4JobRunner:
     """执行 V4 outbox 中可以本地完成的任务。"""
 
-    _LOCAL_JOB_TYPES = frozenset({"materialize_mirror", "refresh_projection"})
+    _LOCAL_JOB_TYPES = frozenset({
+        "materialize_mirror",
+        "scrape_work",
+        "refresh_projection",
+        "cleanup_superseded_artifacts",
+    })
 
-    def __init__(self, database: V4Database):
+    def __init__(self, database: V4Database, metadata_provider: Callable[[dict], dict] | None = None):
         self.database = database
         self.materializer = V4MirrorMaterializer(database)
+        self.cleanup = V4ArtifactCleanup(database)
+        self.scrape = V4ScrapeService(database)
         self.projection = V4LibraryProjection(database)
+        self.metadata_provider = metadata_provider or default_metadata_provider
 
     def process_job(self, job_id: str, *, mirror_root: str | Path | None = None) -> JobRunResult:
         with self.database.connect() as conn:
@@ -37,14 +49,36 @@ class V4JobRunner:
             raise KeyError(job_id)
         if job["status"] == "succeeded":
             return JobRunResult(job_id, job["job_type"], "succeeded")
+        if job["status"] != "queued":
+            raise ValueError(f"任务状态不可执行: {job['status']}")
         if job["job_type"] not in self._LOCAL_JOB_TYPES:
-            raise ValueError(f"任务需要显式 provider 执行: {job['job_type']}")
+            raise ValueError(f"未知 V4 任务: {job['job_type']}")
+        with self.database.connect() as conn:
+            revision = conn.execute(
+                "SELECT status FROM import_revisions WHERE revision_id = ?",
+                (job["revision_id"],),
+            ).fetchone()
+        if revision is None or revision["status"] != "confirmed":
+            raise ValueError("只有 confirmed revision 的排队任务可以执行")
 
         if job["job_type"] == "materialize_mirror":
             materialized = self.materializer.process(job_id, mirror_root or get_mirror_root())
             return JobRunResult(job_id, job["job_type"], materialized.status, materialized=materialized)
 
-        self._mark_running(job_id)
+        if job["job_type"] == "scrape_work":
+            self.scrape.process(
+                job_id,
+                self.metadata_provider,
+                mirror_root=mirror_root or get_mirror_root(),
+            )
+            return JobRunResult(job_id, job["job_type"], "succeeded")
+
+        if job["job_type"] == "cleanup_superseded_artifacts":
+            self.cleanup.process(job_id, mirror_root or get_mirror_root())
+            return JobRunResult(job_id, job["job_type"], "succeeded")
+
+        if not self._mark_running(job_id):
+            raise ValueError("任务已由其他执行器领取")
         try:
             snapshot = self.projection.rebuild()
             self._mark_succeeded(job_id)
@@ -59,8 +93,18 @@ class V4JobRunner:
                 """
                 SELECT job_id
                 FROM jobs
-                WHERE status = 'queued' AND job_type IN ('materialize_mirror', 'refresh_projection')
-                ORDER BY created_at, job_id
+                WHERE status = 'queued'
+                  AND job_type IN (
+                      'materialize_mirror', 'scrape_work', 'refresh_projection',
+                      'cleanup_superseded_artifacts'
+                  )
+                ORDER BY CASE job_type
+                    WHEN 'materialize_mirror' THEN 1
+                    WHEN 'scrape_work' THEN 2
+                    WHEN 'refresh_projection' THEN 3
+                    WHEN 'cleanup_superseded_artifacts' THEN 4
+                    ELSE 9 END,
+                    created_at, job_id
                 """
             ).fetchall()
         results: list[JobRunResult] = []
@@ -68,13 +112,14 @@ class V4JobRunner:
             results.append(self.process_job(row["job_id"], mirror_root=mirror_root))
         return results
 
-    def _mark_running(self, job_id: str) -> None:
+    def _mark_running(self, job_id: str) -> bool:
         with self.database.connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 "UPDATE jobs SET status = 'running', attempts = attempts + 1, updated_at = datetime('now') "
                 "WHERE job_id = ? AND status = 'queued'",
                 (job_id,),
             )
+        return cursor.rowcount == 1
 
     def _mark_succeeded(self, job_id: str) -> None:
         with self.database.connect() as conn:

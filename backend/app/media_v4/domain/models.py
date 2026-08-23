@@ -101,6 +101,15 @@ class ResolvedEpisode:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedWorkAsset:
+    """电影等 Work 直属的内容版本及其物理 Asset。"""
+
+    work_key: str
+    edition_key: str
+    asset_evidence_ids: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True, slots=True)
 class ResolutionIssue:
     code: str
     evidence_id: str
@@ -111,4 +120,5 @@ class ResolutionIssue:
 class ResolvedMediaGraph:
     works: tuple[ResolvedWork, ...] = field(default_factory=tuple)
     episodes: tuple[ResolvedEpisode, ...] = field(default_factory=tuple)
+    work_assets: tuple[ResolvedWorkAsset, ...] = field(default_factory=tuple)
     issues: tuple[ResolutionIssue, ...] = field(default_factory=tuple)

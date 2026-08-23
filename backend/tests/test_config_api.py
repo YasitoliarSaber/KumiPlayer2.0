@@ -1,16 +1,13 @@
-# -*- coding: utf-8 -*-
 """Config API 测试"""
 
 import json
-import subprocess
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app
 from app.core.config import AppConfig, invalidate_config_cache, load_config, save_config
+from app.main import app
 
 
 @pytest.fixture
@@ -392,7 +389,6 @@ class TestPatchConfig:
 
         # 验证原值未被覆盖（需要重新读取配置）
         invalidate_config_cache()
-        new_config = AppConfig()
         # 从文件读取验证
         data = json.loads(temp_config.read_text(encoding="utf-8"))
         assert data["tmdb_bearer_token"] == "original-token"

@@ -1,8 +1,6 @@
-# -*- coding: utf-8 -*-
 """桌面内容区必须使用 WebView 原生合成滚动。"""
 
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[2]
 

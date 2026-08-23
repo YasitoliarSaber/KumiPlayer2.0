@@ -2,10 +2,11 @@
 
 
 import pytest
+from fastapi.testclient import TestClient
+
 from app.api.assets import _validate_remote_asset_url
 from app.core.config import invalidate_config_cache
 from app.main import app
-from fastapi.testclient import TestClient
 
 
 @pytest.fixture

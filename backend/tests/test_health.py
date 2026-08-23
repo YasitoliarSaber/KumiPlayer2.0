@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """健康检查与基础模型测试"""
 
 import sys
@@ -11,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 def test_health_endpoint():
     """测试健康检查端点"""
     from fastapi.testclient import TestClient
+
     from app.main import app
 
     client = TestClient(app)
@@ -23,6 +23,7 @@ def test_health_endpoint():
 
 def test_health_endpoint_reports_desktop_runtime_identity(monkeypatch):
     from fastapi.testclient import TestClient
+
     from app.main import app
 
     monkeypatch.setenv("KUMIPLAYER_RUNTIME_KIND", "bundled")
@@ -129,26 +130,26 @@ def test_reject_path_traversal():
     # 路径遍历
     try:
         reject_path_traversal("../evil")
-        assert False, "应该抛出 ValueError"
+        raise AssertionError("应该抛出 ValueError")
     except ValueError:
         pass
 
     try:
         reject_path_traversal("动画/../../../etc/passwd")
-        assert False, "应该抛出 ValueError"
+        raise AssertionError("应该抛出 ValueError")
     except ValueError:
         pass
 
     # 绝对路径
     try:
         reject_path_traversal("/etc/passwd")
-        assert False, "应该抛出 ValueError"
+        raise AssertionError("应该抛出 ValueError")
     except ValueError:
         pass
 
     try:
         reject_path_traversal("C:\\Windows\\System32")
-        assert False, "应该抛出 ValueError"
+        raise AssertionError("应该抛出 ValueError")
     except ValueError:
         pass
 
@@ -156,6 +157,7 @@ def test_reject_path_traversal():
 def test_safe_join():
     """测试安全路径拼接"""
     from pathlib import Path
+
     from app.core.paths import safe_join
 
     base = Path("/data/mirror")
@@ -167,7 +169,7 @@ def test_safe_join():
     # 路径遍历
     try:
         safe_join(base, "115", "../..", "evil")
-        assert False, "应该抛出 ValueError"
+        raise AssertionError("应该抛出 ValueError")
     except ValueError:
         pass
 

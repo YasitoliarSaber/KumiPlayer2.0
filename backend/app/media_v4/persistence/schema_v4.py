@@ -202,7 +202,6 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             absolute_episode_number INTEGER,
             special_number INTEGER,
             episode_kind TEXT NOT NULL DEFAULT 'regular',
-            edition_key TEXT NOT NULL DEFAULT 'default',
             display_title TEXT NOT NULL DEFAULT ''
         )
         """,
@@ -225,7 +224,7 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             display_name TEXT NOT NULL DEFAULT '',
             duration_hint INTEGER,
             evidence_json TEXT NOT NULL DEFAULT '{}',
-            CHECK ((episode_id IS NOT NULL) OR (work_id IS NOT NULL)),
+            CHECK ((episode_id IS NOT NULL) != (work_id IS NOT NULL)),
             UNIQUE(episode_id, edition_key),
             UNIQUE(work_id, edition_key)
         )
@@ -260,19 +259,39 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         )
         """,
         """
+        CREATE TABLE work_assets (
+            work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE CASCADE,
+            edition_id TEXT REFERENCES editions(edition_id) ON DELETE SET NULL,
+            asset_id TEXT NOT NULL REFERENCES assets(asset_id) ON DELETE CASCADE,
+            role TEXT NOT NULL DEFAULT 'source',
+            preference_rank INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(work_id, asset_id)
+        )
+        """,
+        """
         CREATE TABLE import_revisions (
             revision_id TEXT PRIMARY KEY,
             root_id TEXT NOT NULL REFERENCES source_roots(root_id) ON DELETE CASCADE,
             scan_id TEXT NOT NULL REFERENCES source_scans(scan_id) ON DELETE CASCADE,
             resolver_version TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'draft',
+            status TEXT NOT NULL DEFAULT 'draft'
+                CHECK (status IN ('draft', 'confirmed', 'executing', 'completed', 'failed', 'superseded')),
             graph_digest TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             confirmed_at TEXT NOT NULL DEFAULT ''
         )
         """,
         """
+        CREATE TABLE revision_evidence (
+            revision_id TEXT NOT NULL REFERENCES import_revisions(revision_id) ON DELETE CASCADE,
+            evidence_id TEXT NOT NULL REFERENCES source_evidence(evidence_id) ON DELETE RESTRICT,
+            parsed_fact_id TEXT NOT NULL REFERENCES parsed_facts(parsed_fact_id) ON DELETE RESTRICT,
+            PRIMARY KEY(revision_id, evidence_id)
+        )
+        """,
+        """
         CREATE TABLE revision_bindings (
+            binding_id TEXT PRIMARY KEY,
             revision_id TEXT NOT NULL REFERENCES import_revisions(revision_id) ON DELETE CASCADE,
             evidence_id TEXT NOT NULL REFERENCES source_evidence(evidence_id) ON DELETE RESTRICT,
             work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE RESTRICT,
@@ -284,7 +303,7 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             decision_source TEXT NOT NULL DEFAULT 'resolver',
             reasons_json TEXT NOT NULL DEFAULT '[]',
             override_json TEXT NOT NULL DEFAULT '{}',
-            PRIMARY KEY(revision_id, evidence_id)
+            UNIQUE(revision_id, evidence_id, episode_id, edition_id, asset_id)
         )
         """,
         """
@@ -296,6 +315,15 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             message TEXT NOT NULL,
             resolved INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(revision_id, issue_id)
+        )
+        """,
+        """
+        CREATE TABLE revision_overrides (
+            revision_id TEXT NOT NULL REFERENCES import_revisions(revision_id) ON DELETE CASCADE,
+            evidence_id TEXT NOT NULL REFERENCES source_evidence(evidence_id) ON DELETE RESTRICT,
+            overrides_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(revision_id, evidence_id)
         )
         """,
         """
@@ -319,7 +347,8 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             revision_id TEXT NOT NULL REFERENCES import_revisions(revision_id) ON DELETE CASCADE,
             work_id TEXT NOT NULL DEFAULT '',
             idempotency_key TEXT NOT NULL UNIQUE,
-            status TEXT NOT NULL DEFAULT 'queued',
+            status TEXT NOT NULL DEFAULT 'queued'
+                CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
             attempts INTEGER NOT NULL DEFAULT 0,
             last_error TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
@@ -418,7 +447,7 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         BEFORE UPDATE ON revision_bindings
         WHEN EXISTS (
             SELECT 1 FROM import_revisions
-            WHERE revision_id = OLD.revision_id AND status = 'confirmed'
+            WHERE revision_id = OLD.revision_id AND status != 'draft'
         )
         BEGIN
             SELECT RAISE(ABORT, 'confirmed revision bindings are immutable');
@@ -429,17 +458,102 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         BEFORE DELETE ON revision_bindings
         WHEN EXISTS (
             SELECT 1 FROM import_revisions
-            WHERE revision_id = OLD.revision_id AND status = 'confirmed'
+            WHERE revision_id = OLD.revision_id AND status != 'draft'
         )
         BEGIN
             SELECT RAISE(ABORT, 'confirmed revision bindings are immutable');
         END
         """,
+        """
+        CREATE TRIGGER v4_confirmed_evidence_update_guard
+        BEFORE UPDATE ON revision_evidence
+        WHEN EXISTS (
+            SELECT 1 FROM import_revisions
+            WHERE revision_id = OLD.revision_id AND status != 'draft'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'confirmed revision evidence is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER v4_confirmed_evidence_delete_guard
+        BEFORE DELETE ON revision_evidence
+        WHEN EXISTS (
+            SELECT 1 FROM import_revisions
+            WHERE revision_id = OLD.revision_id AND status != 'draft'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'confirmed revision evidence is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER v4_confirmed_override_write_guard
+        BEFORE INSERT ON revision_overrides
+        WHEN EXISTS (
+            SELECT 1 FROM import_revisions
+            WHERE revision_id = NEW.revision_id AND status != 'draft'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'only draft revision accepts overrides');
+        END
+        """,
+        """
+        CREATE TRIGGER v4_confirmed_override_update_guard
+        BEFORE UPDATE ON revision_overrides
+        WHEN EXISTS (
+            SELECT 1 FROM import_revisions
+            WHERE revision_id = OLD.revision_id AND status != 'draft'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'only draft revision accepts overrides');
+        END
+        """,
+        """
+        CREATE TRIGGER v4_confirmed_override_delete_guard
+        BEFORE DELETE ON revision_overrides
+        WHEN EXISTS (
+            SELECT 1 FROM import_revisions
+            WHERE revision_id = OLD.revision_id AND status != 'draft'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'only draft revision accepts overrides');
+        END
+        """,
+        """
+        CREATE TRIGGER v4_confirmed_revision_snapshot_guard
+        BEFORE UPDATE ON import_revisions
+        WHEN OLD.status IN ('confirmed', 'superseded') AND (
+            NEW.root_id != OLD.root_id OR NEW.scan_id != OLD.scan_id OR
+            NEW.resolver_version != OLD.resolver_version OR NEW.graph_digest != OLD.graph_digest OR
+            NEW.created_at != OLD.created_at OR NEW.confirmed_at != OLD.confirmed_at OR
+            (OLD.status = 'confirmed' AND NEW.status NOT IN ('confirmed', 'superseded')) OR
+            (OLD.status = 'superseded' AND NEW.status != 'superseded')
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'confirmed revision snapshot is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER v4_confirmed_revision_delete_guard
+        BEFORE DELETE ON import_revisions
+        WHEN OLD.status != 'draft'
+        BEGIN
+            SELECT RAISE(ABORT, 'confirmed revision snapshot is immutable');
+        END
+        """,
         "CREATE INDEX idx_v4_evidence_root_scan ON source_evidence(root_id, scan_id)",
+        "CREATE UNIQUE INDEX uq_v4_active_revision_per_root "
+        "ON import_revisions(root_id) WHERE status = 'confirmed'",
         "CREATE INDEX idx_v4_facts_evidence ON parsed_facts(evidence_id)",
         "CREATE INDEX idx_v4_seasons_work ON seasons(work_id)",
         "CREATE INDEX idx_v4_source_bindings_lookup ON work_source_bindings(root_id, structural_key)",
         "CREATE INDEX idx_v4_episodes_season ON episodes(season_id)",
+        """
+        CREATE UNIQUE INDEX uq_v4_episode_local_identity ON episodes(
+            work_id, season_id, COALESCE(local_episode_number, -1),
+            COALESCE(special_number, -1), episode_kind
+        )
+        """,
         "CREATE INDEX idx_v4_bindings_revision ON revision_bindings(revision_id)",
         "CREATE INDEX idx_v4_jobs_status ON jobs(status, updated_at)",
     )

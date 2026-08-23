@@ -1,8 +1,6 @@
-# -*- coding: utf-8 -*-
 """分集标题与发行参数的保守判定。"""
 
 import re
-
 
 _TECH_TOKENS = {
     "bd", "bdrip", "bluray", "blu-ray", "web", "webdl", "webrip",

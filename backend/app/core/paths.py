@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """路径清洗与安全文件名工具
 
 公共路径入口：项目根、数据目录、镜像目录、缓存目录。
@@ -7,7 +6,6 @@
 
 import os
 from pathlib import Path
-from typing import Optional
 
 from app.core.runtime import get_default_data_dir
 
@@ -74,7 +72,7 @@ def safe_join(base: Path, *parts: str) -> Path:
     try:
         result.resolve().relative_to(base.resolve())
     except ValueError:
-        raise ValueError(f"路径越界: {result} 不在 {base} 下")
+        raise ValueError(f"路径越界: {result} 不在 {base} 下") from None
 
     return result
 
@@ -96,7 +94,7 @@ def get_data_dir() -> Path:
     return data_dir
 
 
-def get_mirror_root(mirror_root: Optional[str] = None) -> Path:
+def get_mirror_root(mirror_root: str | None = None) -> Path:
     """获取镜像根目录
 
     优先级：

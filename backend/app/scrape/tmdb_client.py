@@ -304,7 +304,7 @@ class TMDBClient:
 
     def search_tv(self, query: str, year: int | None = None) -> list[dict]:
         """搜索 TV 剧集"""
-        params = {
+        params: dict[str, str | int] = {
             "query": query,
             "language": self._language,
             "include_adult": "false",
@@ -316,7 +316,7 @@ class TMDBClient:
 
     def search_movie(self, query: str, year: int | None = None) -> list[dict]:
         """搜索电影"""
-        params = {
+        params: dict[str, str | int] = {
             "query": query,
             "language": self._language,
             "include_adult": "false",

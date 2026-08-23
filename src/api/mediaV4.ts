@@ -43,11 +43,18 @@ export interface V4ReviewIssue {
   message: string
 }
 
+export interface V4ResolvedWorkAsset {
+  work_key: string
+  edition_key: string
+  asset_evidence_ids: string[]
+}
+
 export interface V4Preview {
   revision_id: string
   status: 'draft' | 'confirmed'
   works: V4ResolvedWork[]
   episodes: V4ResolvedEpisode[]
+  work_assets: V4ResolvedWorkAsset[]
   issues: V4ReviewIssue[]
 }
 
@@ -58,6 +65,8 @@ export interface V4Job {
   work_id: string
   status: string
   idempotency_key: string
+  attempts?: number
+  last_error?: string
 }
 
 export interface V4LibraryCard {
@@ -83,10 +92,14 @@ export const mediaV4Api = {
     root_id: string
     scan_id: string
     entries: V4SourceEvidence[]
+    allow_empty?: boolean
   }) => api.post<V4Preview>('/api/v4/imports/preview', request),
 
   confirm: (revisionId: string) =>
     api.post<{ revision_id: string; status: string; jobs: V4Job[] }>(`/api/v4/imports/${encodeURIComponent(revisionId)}/confirm`),
+
+  overrideEvidence: (revisionId: string, evidenceId: string, changes: Record<string, unknown>) =>
+    api.patch<V4Preview>(`/api/v4/imports/${encodeURIComponent(revisionId)}/evidence/${encodeURIComponent(evidenceId)}`, { changes }),
 
   status: (revisionId: string) =>
     api.get<{ revision_id: string; status: string; jobs: V4Job[] }>(`/api/v4/imports/${encodeURIComponent(revisionId)}`),

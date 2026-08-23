@@ -82,3 +82,72 @@ def test_watch_status_patch_preserves_omitted_fields_and_rescan_is_v4_projection
     assert rescan.status_code == 200
     assert rescan.json()["status"] == "succeeded"
     assert rescan.json()["task_id"].startswith("projection:")
+
+
+def test_detail_only_exposes_latest_confirmed_revision_for_same_root(tmp_path, monkeypatch):
+    client, database = _client(tmp_path, monkeypatch)
+    first = _entry("rev-old")
+    assert client.post("/api/v4/imports/preview", json=first).status_code == 200
+    assert client.post("/api/v4/imports/rev-old/confirm").status_code == 200
+
+    second = _entry("rev-new")
+    second["entries"] = [{
+        "provider": "local",
+        "ingest_method": "local_scan",
+        "relative_path": "Show/Show.S01E02.mkv",
+        "source_locator": "local://show/Show.S01E02.mkv",
+        "playback_locator": "local://show/Show.S01E02.mkv",
+    }]
+    assert client.post("/api/v4/imports/preview", json=second).status_code == 200
+    assert client.post("/api/v4/imports/rev-new/confirm").status_code == 200
+
+    with database.connect() as conn:
+        work_id = conn.execute("SELECT work_id FROM works LIMIT 1").fetchone()["work_id"]
+    detail = client.get(f"/api/library/works/{work_id}")
+    assert detail.status_code == 200
+    assert [episode["episode_number"] for episode in detail.json()["episodes"]] == [2]
+    assert detail.json()["asset_count"] == 1
+
+
+def test_library_sources_come_from_each_evidence_not_the_first_root_entry(tmp_path, monkeypatch):
+    client, _database = _client(tmp_path, monkeypatch)
+    payload = _entry("rev-mixed-provider")
+    payload["entries"][1]["provider"] = "pan115"
+
+    assert client.post("/api/v4/imports/preview", json=payload).status_code == 200
+    assert client.post("/api/v4/imports/rev-mixed-provider/confirm").status_code == 200
+    response = client.get("/api/library")
+
+    assert response.status_code == 200
+    assert response.json()["works"][0]["sources"] == ["local", "pan115"]
+
+
+def test_empty_scan_can_confirm_source_removal_and_publish_empty_library(tmp_path, monkeypatch):
+    client, database = _client(tmp_path, monkeypatch)
+    assert client.post("/api/v4/imports/preview", json=_entry("rev-populated")).status_code == 200
+    assert client.post("/api/v4/imports/rev-populated/confirm").status_code == 200
+
+    empty = {
+        "revision_id": "rev-empty",
+        "root_id": "root-library",
+        "scan_id": "scan-empty",
+        "entries": [],
+    }
+    assert client.post("/api/v4/imports/preview", json=empty).status_code == 409
+    empty["allow_empty"] = True
+    preview = client.post("/api/v4/imports/preview", json=empty)
+    assert preview.status_code == 200
+    assert preview.json()["works"] == []
+    assert client.post("/api/v4/imports/rev-empty/confirm").status_code == 200
+
+    with database.connect() as conn:
+        projection_job = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE revision_id = 'rev-empty' AND job_type = 'refresh_projection'"
+        ).fetchone()[0]
+        work_jobs = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE revision_id = 'rev-empty' AND work_id != ''"
+        ).fetchone()[0]
+    assert projection_job == 1
+    assert work_jobs == 0
+    assert client.post("/api/library/rescan").status_code == 200
+    assert client.get("/api/library").json()["works"] == []

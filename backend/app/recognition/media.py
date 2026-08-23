@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """媒体结构识别规则
 
 识别作品名、年份、Season、Special、Movie；OP/ED 直接忽略。
@@ -9,8 +8,6 @@ PV/CM/Menu/Trailer/Eyecatch 等附属视频只保留播放结构，不进入 Spe
 
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional
-
 
 # ============================================================
 # 关键词定义
@@ -204,9 +201,9 @@ class MediaGuess:
 
     work_title: str = ""
     original_title: str = ""
-    year: Optional[int] = None
+    year: int | None = None
     media_type: str = ""  # tv / movie
-    tmdb_hint_id: Optional[int] = None
+    tmdb_hint_id: int | None = None
     tmdb_hint_type: str = ""  # tv / movie
 
     series_group: str = ""
@@ -215,15 +212,15 @@ class MediaGuess:
     relation_type: str = ""  # main / movie / recap / spin_off / related
 
     group_type: str = ""  # season / special / auxiliary / ignored / movie
-    season_number: Optional[int] = None
-    episode_number: Optional[int] = None
-    special_number: Optional[int] = None
+    season_number: int | None = None
+    episode_number: int | None = None
+    special_number: int | None = None
     title: str = ""
 
     confidence: str = "medium"
     needs_review: bool = False
-    reasons: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 # ============================================================
@@ -319,7 +316,7 @@ def _extract_parent_dir(relative_path: str) -> str:
     return ""
 
 
-def _extract_parent_dirs(relative_path: str, n: int = 2) -> List[str]:
+def _extract_parent_dirs(relative_path: str, n: int = 2) -> list[str]:
     """从 relative_path 提取最近的 n 层父目录名（不含文件名）"""
     parts = relative_path.replace("\\", "/").split("/")
     # 去掉文件名，取目录部分
@@ -395,7 +392,7 @@ def _is_baidu_category_dir(dirname: str) -> bool:
     return normalized in _BAIDU_CATEGORY_DIRS_CASEFOLD
 
 
-def _source_work_index(parts: List[str], source: str) -> Optional[int]:
+def _source_work_index(parts: list[str], source: str) -> int | None:
     """Return the path segment that represents the work container."""
     if not parts:
         return None
@@ -424,7 +421,7 @@ def _is_local_collection_dir(dirname: str) -> bool:
     return any(token in lower for token in collection_tokens)
 
 
-def _extract_year_from_subwork(subwork_dir: str) -> Optional[int]:
+def _extract_year_from_subwork(subwork_dir: str) -> int | None:
     """从子作品目录名提取年份
 
     2.CLANNAD.After.Story.2008 → 2008
@@ -455,7 +452,7 @@ def _clean_work_title(raw: str) -> str:
     return title.strip()
 
 
-def _extract_tmdb_hint(text: str) -> tuple[Optional[int], str]:
+def _extract_tmdb_hint(text: str) -> tuple[int | None, str]:
     """Extract {tmdb-123} / {tmdbid=123} / [tmdbid=123] style hints."""
     from app.scrape.tmdb_hint import extract_tmdb_hint
 
@@ -472,7 +469,7 @@ def _strip_tmdb_hint(text: str) -> str:
     return strip_tmdb_hint(text)
 
 
-def _extract_year(text: str) -> Optional[int]:
+def _extract_year(text: str) -> int | None:
     """从文本中提取年份
 
     支持：.2005、(2005)、（2005）、2005、 2019（前导空格）
@@ -495,7 +492,7 @@ def _extract_year(text: str) -> Optional[int]:
     return None
 
 
-def _parse_work_title_and_year(container: str) -> tuple[str, Optional[int]]:
+def _parse_work_title_and_year(container: str) -> tuple[str, int | None]:
     """从作品容器解析作品名和年份
 
     AIR.2005 → (AIR, 2005)
@@ -582,7 +579,7 @@ def _extract_series_group_name(container: str) -> str:
 # 文件名级识别
 # ============================================================
 
-def _check_op_ed(filename: str, parent_dirs: List[str]) -> Optional[MediaGuess]:
+def _check_op_ed(filename: str, parent_dirs: list[str]) -> MediaGuess | None:
     """检查是否为 OP/ED
 
     优先级最高。使用正则边界匹配，避免 "Redline" 被 ED 子串误判。
@@ -634,7 +631,7 @@ def _extract_op_ed_title(filename: str) -> str:
     return ""
 
 
-def _check_auxiliary(filename: str, parent_dirs: List[str]) -> Optional[MediaGuess]:
+def _check_auxiliary(filename: str, parent_dirs: list[str]) -> MediaGuess | None:
     """检查是否为附属视频（PV/CM/Menu/Trailer/Eyecatch）。"""
     for pat in _AUXILIARY_PATTERNS:
         if pat.search(filename):
@@ -674,7 +671,7 @@ def _extract_auxiliary_title(filename: str) -> str:
     return ""
 
 
-def _check_standalone(filename: str, parent_dirs: List[str], work_container: str) -> Optional[MediaGuess]:
+def _check_standalone(filename: str, parent_dirs: list[str], work_container: str) -> MediaGuess | None:
     """检查是否为独立卡片（剧场版/总集篇/外传）
 
     只检查文件名和比作品容器更深的父目录，不从系列容器名中匹配关键词。
@@ -738,7 +735,7 @@ def _extract_bracket_movie_title(filename: str) -> str:
     if not movie_positions:
         return ""
 
-    ordered_indexes: List[int] = []
+    ordered_indexes: list[int] = []
     for pos in movie_positions:
         ordered_indexes.extend([pos - 1, pos + 1])
     ordered_indexes.extend(range(len(tokens)))
@@ -779,9 +776,9 @@ def _clean_bracket_movie_title_token(token: str) -> str:
 
 def _check_spin_off_episode(
     filename: str,
-    parent_dirs: List[str],
+    parent_dirs: list[str],
     subwork_dir: str,
-) -> Optional[MediaGuess]:
+) -> MediaGuess | None:
     """检查外传 TV 系列的正片/SP 条目。
 
     “外传”是独立卡片关系，但不等于 movie。若文件名本身带季集证据，
@@ -822,11 +819,11 @@ def _check_spin_off_episode(
 def _check_local_collection_subwork(
     filename: str,
     relative_path: str,
-    parent_dirs: List[str],
+    parent_dirs: list[str],
     subwork_dir: str,
     work_container: str,
     local_series_container: str,
-) -> Optional[MediaGuess]:
+) -> MediaGuess | None:
     """识别本地合集里的独立子作品。
 
     本地库常见结构是：
@@ -908,7 +905,7 @@ def _extract_release_movie_title(filename: str) -> str:
     # 方括号内容通常是字幕组、编码、分辨率等发布标签。
     plain = re.sub(r"[\[【][^\]】]*[\]】]", " ", stem)
     plain = plain.replace("_", " ")
-    plain = re.sub(r"\s+", " ", plain).strip(" ._- ")
+    plain = re.sub(r"\s+", " ", plain).strip(" ._-")
     if not plain or not re.search(r"[A-Za-z\u4e00-\u9fff]", plain):
         return ""
     return plain
@@ -959,8 +956,8 @@ def _check_movie_fallback(
     top_category: str,
     filename: str,
     work_container: str,
-    year: Optional[int],
-) -> Optional[MediaGuess]:
+    year: int | None,
+) -> MediaGuess | None:
     """检查目录语义明确的电影条目。
 
     动画电影分类，或“带年份容器 + 文件名无季集结构”的单文件式条目，
@@ -1031,10 +1028,10 @@ def _looks_like_release_file(filename: str) -> bool:
 
 def _check_path_context_special(
     relative_path: str,
-    parent_dirs: List[str],
+    parent_dirs: list[str],
     subwork_dir: str,
     work_container: str,
-) -> Optional[MediaGuess]:
+) -> MediaGuess | None:
     """检查路径上下文中的特殊内容标记
 
     优先级高于文件名集号识别。
@@ -1120,7 +1117,7 @@ def _check_path_context_special(
     return None
 
 
-def _check_explicit_filename_special(filename: str, parent_dirs: List[str]) -> Optional[MediaGuess]:
+def _check_explicit_filename_special(filename: str, parent_dirs: list[str]) -> MediaGuess | None:
     """文件名里的明确 SP/OVA/OAD/Lite 标记优先于父目录电影上下文。
 
     例如剧场版目录里可能附带 [SP02] 映像特典；这种应进番剧 Special，
@@ -1131,7 +1128,7 @@ def _check_explicit_filename_special(filename: str, parent_dirs: List[str]) -> O
     return _check_sps(filename, parent_dirs)
 
 
-def _check_sps(filename: str, parent_dirs: List[str]) -> Optional[MediaGuess]:
+def _check_sps(filename: str, parent_dirs: list[str]) -> MediaGuess | None:
     """检查是否为 Special（OVA/AD/Special/半集等）
 
     使用正则边界匹配，避免 "SPY x FAMILY" 被 SP 子串误判。
@@ -1191,7 +1188,7 @@ def _check_sps(filename: str, parent_dirs: List[str]) -> Optional[MediaGuess]:
     return None
 
 
-def _check_season_episode(filename: str, parent_dirs: Optional[List[str]] = None) -> Optional[MediaGuess]:
+def _check_season_episode(filename: str, parent_dirs: list[str] | None = None) -> MediaGuess | None:
     """检查是否为正片季集（SxxExx 模式）"""
     parent_dirs = parent_dirs or []
     # SxxExx 模式
@@ -1221,7 +1218,7 @@ def _check_season_episode(filename: str, parent_dirs: Optional[List[str]] = None
     return None
 
 
-def _plain_parent_season_override(filename_season: int, parent_dirs: List[str]) -> Optional[int]:
+def _plain_parent_season_override(filename_season: int, parent_dirs: list[str]) -> int | None:
     """Return a plain Season-dir override when it clearly conflicts with SxxEyy.
 
     Imported scraped libraries sometimes contain files named S02E01 inside a
@@ -1248,7 +1245,7 @@ def _plain_parent_season_override(filename_season: int, parent_dirs: List[str]) 
     return plain_season
 
 
-def _plain_season_dir_number(dirname: str) -> Optional[int]:
+def _plain_season_dir_number(dirname: str) -> int | None:
     name = (dirname or "").strip()
     patterns = [
         re.compile(r"^Season\s*0?([1-9]\d?)$", re.IGNORECASE),
@@ -1292,7 +1289,7 @@ def _extract_local_episode_title_after(filename: str, marker_end: int) -> str:
     return title
 
 
-def _check_chinese_season_episode(filename: str, parent_dirs: List[str]) -> Optional[MediaGuess]:
+def _check_chinese_season_episode(filename: str, parent_dirs: list[str]) -> MediaGuess | None:
     """检查中文季号 + 集数模式：第1季 01、第4季 异界战争 00"""
     # 文件名中的中文季号 + 后续集号：
     # 刀剑神域 第4季 爱丽丝篇 异界战争 01 [简体内嵌].mkv
@@ -1405,7 +1402,7 @@ def _check_chinese_season_episode(filename: str, parent_dirs: List[str]) -> Opti
     return None
 
 
-def _check_bare_episode(filename: str, parent_dirs: List[str]) -> Optional[MediaGuess]:
+def _check_bare_episode(filename: str, parent_dirs: list[str]) -> MediaGuess | None:
     """检查裸集数模式
 
     支持：
@@ -1512,7 +1509,7 @@ def _check_bare_episode(filename: str, parent_dirs: List[str]) -> Optional[Media
     return None
 
 
-def _normalize_bare_episode_number(ep_str: str, parent_dirs: List[str], filename: str = "") -> tuple[int, int, str, str]:
+def _normalize_bare_episode_number(ep_str: str, parent_dirs: list[str], filename: str = "") -> tuple[int, int, str, str]:
     """Normalize bare numeric episode names using path context and SSEE forms.
 
     Examples:
@@ -1545,7 +1542,7 @@ def _normalize_bare_episode_number(ep_str: str, parent_dirs: List[str], filename
     return season, episode, confidence, f"从上下文推断为第{season}季第{episode}集"
 
 
-def _check_attached_episode(filename: str, parent_dirs: List[str]) -> Optional[MediaGuess]:
+def _check_attached_episode(filename: str, parent_dirs: list[str]) -> MediaGuess | None:
     """检查标题与集数直接相连的模式。
 
     例如：上伊那牡丹醉姿如百合09.mp4 → S01E09。
@@ -1580,7 +1577,7 @@ def _check_attached_episode(filename: str, parent_dirs: List[str]) -> Optional[M
     )
 
 
-def _check_bracket_episode(filename: str, parent_dirs: List[str]) -> Optional[MediaGuess]:
+def _check_bracket_episode(filename: str, parent_dirs: list[str]) -> MediaGuess | None:
     """检查方括号集数模式：[01]"""
     ep_str = _find_bracket_episode_token(filename)
     if not ep_str:
@@ -1647,7 +1644,7 @@ def _find_bracket_episode_token(filename: str) -> str:
     return ""
 
 
-def _infer_season_from_context(parent_dirs: List[str]) -> Optional[int]:
+def _infer_season_from_context(parent_dirs: list[str]) -> int | None:
     """从父目录上下文推断季号"""
     # 子目录中的 S2/S02 是最强证据，优先于用于排序的“3.”前缀。
     for parent in reversed(parent_dirs):
@@ -1689,7 +1686,7 @@ def _infer_season_from_context(parent_dirs: List[str]) -> Optional[int]:
     return None
 
 
-def _infer_explicit_s_marker(text: str) -> Optional[int]:
+def _infer_explicit_s_marker(text: str) -> int | None:
     """从明确 S2/S02 标记推断季号，不处理标题末尾裸数字。"""
     if not text:
         return None
@@ -1704,7 +1701,7 @@ def _infer_explicit_s_marker(text: str) -> Optional[int]:
     return None
 
 
-def _infer_numbered_title_season(parent: str) -> Optional[int]:
+def _infer_numbered_title_season(parent: str) -> int | None:
     """从字幕组季度目录推断季号。
 
     常见目录：
@@ -1731,7 +1728,7 @@ def _infer_numbered_title_season(parent: str) -> Optional[int]:
     return int(m.group(1))
 
 
-def _check_parent_dir_season(parent_dirs: List[str]) -> Optional[int]:
+def _check_parent_dir_season(parent_dirs: list[str]) -> int | None:
     """从父目录提取季号（用于补充推断）"""
     return _infer_season_from_context(parent_dirs)
 
@@ -1745,7 +1742,7 @@ def recognize_media(
     relative_path: str,
     source: str = "pan115",
     existing_work_title: str = "",
-    existing_year: Optional[int] = None,
+    existing_year: int | None = None,
     root_container: str = "",
 ) -> MediaGuess:
     """识别单个视频文件的媒体结构
@@ -1964,13 +1961,13 @@ def _enrich_guess(
     guess: MediaGuess,
     source: str,
     work_title: str,
-    year: Optional[int],
+    year: int | None,
     original_title: str,
     series_group: str,
     subwork_dir: str,
-    clean_warnings: List[str],
+    clean_warnings: list[str],
     clean_needs_review: bool,
-    tmdb_hint_id: Optional[int] = None,
+    tmdb_hint_id: int | None = None,
     tmdb_hint_type: str = "",
     skip_finalize: bool = False,
 ) -> None:
@@ -2070,7 +2067,7 @@ def _attach_local_collection_subwork_identity(
     guess.reasons.append("本地合集中的子作品标题不同，附属视频归到独立关联作品")
 
 
-def _finalize_guess(guess: MediaGuess, work_title: str, year: Optional[int]) -> None:
+def _finalize_guess(guess: MediaGuess, work_title: str, year: int | None) -> None:
     """最终化 guess：只补充置信度，不生成作品身份。"""
     # 置信度调整
     if not work_title:

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """AniList artwork normalization tests."""
 
 import sys
@@ -6,7 +5,7 @@ from pathlib import Path
 
 scripts_dir = Path(__file__).resolve().parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
-from repair.normalize_anilist_assets import normalize_anilist_assets
+from repair.normalize_anilist_assets import normalize_anilist_assets  # noqa: E402
 
 
 def test_normalize_anilist_assets_uses_tmdb_canonical_names(tmp_path):

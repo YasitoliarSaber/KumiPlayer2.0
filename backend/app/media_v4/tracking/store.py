@@ -26,6 +26,16 @@ class V4TrackingStore:
         metadata: dict | None = None,
     ) -> None:
         with self.database.connect() as conn:
+            active_work = conn.execute(
+                """
+                SELECT 1 FROM revision_bindings rb
+                JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                WHERE rb.work_id = ? AND ir.status = 'confirmed' LIMIT 1
+                """,
+                (work_id,),
+            ).fetchone()
+            if active_work is None:
+                raise KeyError(work_id)
             conn.execute(
                 """
                 INSERT INTO tracking_states(

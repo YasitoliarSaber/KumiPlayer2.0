@@ -77,3 +77,35 @@ def test_conflicting_absolute_numbers_do_not_split_a_local_episode():
     assert len(graph.episodes) == 1
     assert graph.episodes[0].asset_evidence_ids == ("ev-abs-a", "ev-abs-b")
     assert any(issue.code == "absolute_episode_conflict" for issue in graph.issues)
+
+
+def test_episode_range_expands_to_each_local_episode_without_losing_asset():
+    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+    from app.media_v4.resolution.resolver import MediaResolver
+
+    evidence = SourceEvidence(
+        evidence_id="ev-range",
+        scan_id="scan-range",
+        root_id="root-range",
+        source_key="ev-range",
+        relative_path="Show/Show.S01E01-E03.mkv",
+        entry_kind="video",
+        provider="local",
+    )
+    facts = ParsedFacts(
+        parsed_fact_id="facts-range",
+        evidence_id=evidence.evidence_id,
+        parser_version="fixture",
+        work_title="Show",
+        title_candidates=("Show",),
+        media_type="tv",
+        group_type="season",
+        season_candidate=1,
+        episode_candidate=1,
+        episode_range=(1, 3),
+    )
+
+    graph = MediaResolver().resolve([(evidence, facts)])
+
+    assert [episode.local_episode_number for episode in graph.episodes] == [1, 2, 3]
+    assert all(episode.asset_evidence_ids == ("ev-range",) for episode in graph.episodes)

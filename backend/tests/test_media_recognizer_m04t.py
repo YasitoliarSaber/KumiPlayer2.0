@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """M04T 路径上下文特殊内容优先级返修测试"""
 
 import sys
@@ -77,8 +76,8 @@ def test_recap_preserves_title():
         relative_path="动画/CLANNAD.S1-S2+SP+OVA/5.CLANNAD总集篇：在那苍绿的树下.2009/[MAI] Clannad After Story [24].mkv",
     )
     assert guess.group_type == "special"
-    assert guess.title != "", f"title 不应为空"
-    assert guess.original_title != "", f"original_title 不应为空"
+    assert guess.title != "", "title 不应为空"
+    assert guess.original_title != "", "original_title 不应为空"
     assert guess.year == 2009
 
 

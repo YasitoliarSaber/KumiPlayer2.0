@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.media_v4 import get_database
+from app.media_v4.playback.session import get_v4_playback_manager
 from app.media_v4.playback.store import V4PlaybackStore
 
 router = APIRouter(prefix="/api/playback", tags=["playback"])
@@ -33,10 +34,20 @@ class ProgressMarkRequest(BaseModel):
     completed: bool
 
 
-def _default_asset(episode_id: str, asset_id: str = "") -> dict:
+def _default_asset(episode_id: str, asset_id: str = "", work_id: str = "") -> dict:
     database = get_database()
     with database.connect() as conn:
-        if asset_id:
+        if episode_id == f"movie:{work_id}":
+            row = conn.execute(
+                """
+                SELECT a.asset_id, a.playback_locator, a.source_locator
+                FROM work_assets wa JOIN assets a ON a.asset_id = wa.asset_id
+                WHERE wa.work_id = ? AND (? = '' OR a.asset_id = ?)
+                ORDER BY wa.preference_rank, a.asset_id LIMIT 1
+                """,
+                (work_id, asset_id, asset_id),
+            ).fetchone()
+        elif asset_id:
             row = conn.execute(
                 """
                 SELECT a.asset_id, a.playback_locator, a.source_locator
@@ -62,33 +73,34 @@ def _default_asset(episode_id: str, asset_id: str = "") -> dict:
 @router.post("/play")
 def play(request: PlayRequest):
     try:
-        asset = _default_asset(request.episode_id, request.asset_id)
+        session = get_v4_playback_manager(get_database()).play(
+            request.work_id,
+            request.episode_id,
+            request.asset_id,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="剧集或 Asset 不存在") from exc
-    return {
-        "session_id": f"v4:{request.episode_id}:{asset['asset_id']}",
-        "status": "ready",
-        "work_id": request.work_id,
-        "episode_id": request.episode_id,
-        "asset_id": asset["asset_id"],
-        "playback_locator": asset["playback_locator"] or asset["source_locator"],
-    }
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return session
 
 
 @router.post("/stop")
 def stop():
-    return {"status": "stopped"}
+    return get_v4_playback_manager(get_database()).stop()
 
 
 @router.get("/status")
 def status():
-    return {"status": "idle", "session": None}
+    return get_v4_playback_manager(get_database()).status()
 
 
 @router.post("/progress")
 def report_progress(request: ProgressRequest):
     try:
-        asset = _default_asset(request.episode_id, request.asset_id)
+        asset = _default_asset(request.episode_id, request.asset_id, request.work_id)
         V4PlaybackStore(get_database()).save_progress(
             request.work_id,
             request.episode_id,

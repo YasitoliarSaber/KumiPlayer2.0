@@ -158,3 +158,36 @@ def test_persisted_facts_and_confirmed_bindings_are_sql_immutable(tmp_path):
             conn.execute("UPDATE revision_bindings SET confidence = 'low' WHERE revision_id = 'rev-immutable'")
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute("DELETE FROM revision_bindings WHERE revision_id = 'rev-immutable'")
+
+
+def test_reusing_immutable_identity_with_different_payload_is_rejected(tmp_path):
+    from dataclasses import replace
+
+    from app.media_v4.domain.models import SourceEvidence
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.persistence.repositories import V4Repository
+
+    database = V4Database(tmp_path / "immutable-conflict.db")
+    database.initialize()
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO source_roots(root_id, provider, ingest_method, created_at, updated_at) "
+            "VALUES ('root', 'local', 'scan', 'now', 'now')"
+        )
+        conn.execute(
+            "INSERT INTO source_scans(scan_id, root_id, generation, status) "
+            "VALUES ('scan', 'root', 1, 'completed')"
+        )
+    evidence = SourceEvidence(
+        evidence_id="same-id",
+        scan_id="scan",
+        root_id="root",
+        source_key="Show/file.mkv",
+        relative_path="Show/file.mkv",
+        entry_kind="video",
+    )
+    repository = V4Repository(database)
+    repository.save_source_evidence(evidence)
+
+    with pytest.raises(ValueError, match="SourceEvidence 冲突"):
+        repository.save_source_evidence(replace(evidence, relative_path="Other/file.mkv"))

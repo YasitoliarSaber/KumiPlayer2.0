@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """WebSocket 心跳 API 测试"""
 
 import json
@@ -8,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi.testclient import TestClient
+
 from app.main import app
 
 
@@ -21,7 +21,7 @@ def test_ws_connect():
     _cleanup()
     try:
         client = TestClient(app)
-        with client.websocket_connect("/ws/heartbeat") as ws:
+        with client.websocket_connect("/ws/heartbeat"):
             # 连接成功
             from app.system.heartbeat import get_heartbeat_manager
             state = get_heartbeat_manager().get_state()
@@ -81,8 +81,8 @@ def test_ws_heartbeat_enabled_still_acks():
     """heartbeat_enabled=false 时连接仍可 ack"""
     _cleanup()
     try:
-        from app.core.config import AppConfig
         import app.core.config as cfg
+        from app.core.config import AppConfig
 
         old = cfg._cached_config
         cfg._cached_config = AppConfig(heartbeat_enabled=False)

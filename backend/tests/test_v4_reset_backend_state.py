@@ -66,3 +66,25 @@ def test_source_root_and_symlink_targets_are_rejected(tmp_path, monkeypatch):
     with pytest.raises(reset.ResetProtectionError):
         reset.apply_reset()
     assert (source_root / "video.mkv").exists()
+
+
+def test_parent_of_source_root_is_never_a_reset_target(tmp_path, monkeypatch):
+    import pytest
+
+    from app.maintenance import reset_backend_state_v4 as reset
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(exist_ok=True)
+    mirror_parent = tmp_path / "media"
+    source_root = mirror_parent / "anime"
+    source_root.mkdir(parents=True)
+    source_file = source_root / "episode.mkv"
+    source_file.write_bytes(b"source")
+
+    monkeypatch.setattr(reset, "get_data_dir", lambda: data_dir)
+    monkeypatch.setattr(reset, "get_mirror_root", lambda: mirror_parent)
+    monkeypatch.setattr(reset, "_configured_source_roots", lambda: [source_root.resolve()])
+
+    with pytest.raises(reset.ResetProtectionError, match="来源目录"):
+        reset.apply_reset()
+    assert source_file.exists()

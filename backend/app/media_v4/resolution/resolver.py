@@ -12,6 +12,7 @@ from app.media_v4.domain.models import (
     ResolvedEpisode,
     ResolvedMediaGraph,
     ResolvedWork,
+    ResolvedWorkAsset,
     SourceEvidence,
 )
 
@@ -56,9 +57,20 @@ class MediaResolver:
     def resolve(self, entries: list[tuple[SourceEvidence, ParsedFacts]]) -> ResolvedMediaGraph:
         work_rows: OrderedDict[str, dict] = OrderedDict()
         episode_rows: OrderedDict[tuple, dict] = OrderedDict()
+        work_asset_rows: OrderedDict[tuple[str, str], list[str]] = OrderedDict()
         issues: list[ResolutionIssue] = []
 
         for evidence, facts in entries:
+            if not facts.is_importable or facts.is_auxiliary:
+                continue
+            if facts.needs_review:
+                issues.append(
+                    ResolutionIssue(
+                        code="parsed_facts_need_review",
+                        evidence_id=evidence.evidence_id,
+                        message="解析结果标记为需要人工复核，确认前必须处理",
+                    )
+                )
             key = _work_key(facts)
             if not key:
                 issues.append(
@@ -82,73 +94,89 @@ class MediaResolver:
             if evidence.evidence_id not in work["evidence_ids"]:
                 work["evidence_ids"].append(evidence.evidence_id)
 
+            edition_key = _edition_key(facts)
+            if facts.media_type == "movie" or facts.group_type == "movie":
+                movie_assets = work_asset_rows.setdefault((key, edition_key), [])
+                if evidence.evidence_id not in movie_assets:
+                    movie_assets.append(evidence.evidence_id)
+                continue
+
+            local_season: int | None
+            local_episodes: tuple[int | None, ...]
             if facts.group_type == "special" or facts.special_candidate:
                 local_season = 0
-                local_episode = None
+                local_episodes = (None,)
                 special_number = facts.special_number or facts.episode_candidate
                 season_kind = "special"
                 episode_kind = "special"
             else:
                 local_season = facts.season_candidate
-                local_episode = facts.episode_candidate
+                if facts.episode_range and facts.episode_range[0] <= facts.episode_range[1]:
+                    local_episodes = tuple(range(facts.episode_range[0], facts.episode_range[1] + 1))
+                else:
+                    local_episodes = (facts.episode_candidate,)
                 special_number = None
                 season_kind = "regular"
                 episode_kind = "regular" if facts.group_type == "season" else facts.group_type or "unknown"
 
-            edition_key = _edition_key(facts)
-            # A local SxxExx identity is authoritative for grouping.  Absolute
-            # numbering is retained as a fact and cannot split the same local
-            # episode; when no local number exists, absolute numbering is the
-            # only available episode key and therefore remains in the key.
-            absolute_group_key = facts.absolute_episode_candidate if local_episode is None else None
-            episode_key = "|".join(
-                (
-                    key,
-                    str(local_season),
-                    str(local_episode),
-                    str(absolute_group_key),
-                    str(special_number),
-                    edition_key,
-                )
-            )
-            episode_identity = (key, local_season, local_episode, absolute_group_key, special_number, edition_key)
-            existing_episode = episode_rows.get(episode_identity)
-            if (
-                existing_episode is not None
-                and existing_episode["absolute_episode_number"] is not None
-                and facts.absolute_episode_candidate is not None
-                and existing_episode["absolute_episode_number"] != facts.absolute_episode_candidate
-            ):
-                issues.append(
-                    ResolutionIssue(
-                        code="absolute_episode_conflict",
-                        evidence_id=evidence.evidence_id,
-                        message="同一 Local Episode 出现冲突的绝对集号，已保留为独立事实并需要复核",
+            for local_episode in local_episodes:
+                # Local numbering is authoritative. Absolute numbering only
+                # participates in identity when no local episode number exists.
+                absolute_group_key = facts.absolute_episode_candidate if local_episode is None else None
+                episode_key = "|".join(
+                    (
+                        key,
+                        str(local_season),
+                        str(local_episode),
+                        str(absolute_group_key),
+                        str(special_number),
                     )
                 )
-            if (
-                existing_episode is not None
-                and existing_episode["absolute_episode_number"] is None
-                and facts.absolute_episode_candidate is not None
-            ):
-                existing_episode["absolute_episode_number"] = facts.absolute_episode_candidate
-            episode = episode_rows.setdefault(
-                episode_identity,
-                {
-                    "episode_key": episode_key,
-                    "work_key": key,
-                    "local_season_number": local_season,
-                    "local_episode_number": local_episode,
-                    "absolute_episode_number": facts.absolute_episode_candidate,
-                    "season_kind": season_kind,
-                    "episode_kind": episode_kind,
-                    "special_number": special_number,
-                    "edition_key": edition_key,
-                    "asset_ids": [],
-                },
-            )
-            if evidence.evidence_id not in episode["asset_ids"]:
-                episode["asset_ids"].append(evidence.evidence_id)
+                episode_identity = (
+                    key,
+                    local_season,
+                    local_episode,
+                    absolute_group_key,
+                    special_number,
+                    edition_key,
+                )
+                existing_episode = episode_rows.get(episode_identity)
+                if (
+                    existing_episode is not None
+                    and existing_episode["absolute_episode_number"] is not None
+                    and facts.absolute_episode_candidate is not None
+                    and existing_episode["absolute_episode_number"] != facts.absolute_episode_candidate
+                ):
+                    issues.append(
+                        ResolutionIssue(
+                            code="absolute_episode_conflict",
+                            evidence_id=evidence.evidence_id,
+                            message="同一 Local Episode 出现冲突的绝对集号，已保留为独立事实并需要复核",
+                        )
+                    )
+                if (
+                    existing_episode is not None
+                    and existing_episode["absolute_episode_number"] is None
+                    and facts.absolute_episode_candidate is not None
+                ):
+                    existing_episode["absolute_episode_number"] = facts.absolute_episode_candidate
+                episode = episode_rows.setdefault(
+                    episode_identity,
+                    {
+                        "episode_key": episode_key,
+                        "work_key": key,
+                        "local_season_number": local_season,
+                        "local_episode_number": local_episode,
+                        "absolute_episode_number": facts.absolute_episode_candidate,
+                        "season_kind": season_kind,
+                        "episode_kind": episode_kind,
+                        "special_number": special_number,
+                        "edition_key": edition_key,
+                        "asset_ids": [],
+                    },
+                )
+                if evidence.evidence_id not in episode["asset_ids"]:
+                    episode["asset_ids"].append(evidence.evidence_id)
 
         works = tuple(
             ResolvedWork(
@@ -175,4 +203,17 @@ class MediaResolver:
             )
             for row in episode_rows.values()
         )
-        return ResolvedMediaGraph(works=works, episodes=episodes, issues=tuple(issues))
+        work_assets = tuple(
+            ResolvedWorkAsset(
+                work_key=work_key,
+                edition_key=edition_key,
+                asset_evidence_ids=tuple(asset_ids),
+            )
+            for (work_key, edition_key), asset_ids in work_asset_rows.items()
+        )
+        return ResolvedMediaGraph(
+            works=works,
+            episodes=episodes,
+            work_assets=work_assets,
+            issues=tuple(issues),
+        )

@@ -1,8 +1,6 @@
-# -*- coding: utf-8 -*-
 """桌面标题栏返回与侧栏布局回归。"""
 
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[2]
 

@@ -7,6 +7,7 @@ import json
 import re
 import unicodedata
 import uuid
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
@@ -28,7 +29,38 @@ def _normalize_title(value: str) -> str:
 
 def _structural_key(relative_path: str) -> str:
     parts = PurePosixPath(relative_path.replace("\\", "/")).parts
-    return _normalize_title(parts[0] if len(parts) > 1 else PurePosixPath(relative_path).stem)
+    directories = parts[:-1]
+    generic = {
+        "动画",
+        "新番",
+        "剧集",
+        "电影",
+        "动漫",
+        "番剧",
+        "影视",
+        "动画电影",
+        "已完结",
+        "完结",
+        "全部",
+        "网盘",
+        "115网盘",
+        "百度网盘",
+        "刮削好的动画",
+        "media",
+        "video",
+        "tv",
+        "anime",
+        "movies",
+        "series",
+        "shows",
+    }
+    season_dir = re.compile(r"(?i)^(?:season\s*\d+|s\d+|第\s*\d+\s*季|specials?|sps?|s00)$")
+    for part in reversed(directories):
+        normalized = _normalize_title(part)
+        if not normalized or normalized in generic or season_dir.fullmatch(normalized):
+            continue
+        return normalized
+    return ""
 
 
 class RevisionBlockedError(RuntimeError):
@@ -43,21 +75,52 @@ class V4RevisionService:
         self.repository = V4Repository(database)
         self.resolver = MediaResolver()
 
+    _OVERRIDE_FIELDS = frozenset({
+        "work_title",
+        "original_title",
+        "series_group",
+        "title_candidates",
+        "year_candidate",
+        "media_type",
+        "group_type",
+        "season_candidate",
+        "episode_candidate",
+        "absolute_episode_candidate",
+        "special_candidate",
+        "special_number",
+        "tmdb_hint_id",
+        "tmdb_hint_type",
+        "edition_tags",
+        "needs_review",
+        "is_importable",
+        "is_auxiliary",
+    })
+
     def create_draft(
         self,
         revision_id: str,
         entries: list[tuple[SourceEvidence, ParsedFacts]],
         *,
         resolver_version: str = "v4-resolver-1",
+        root_id: str = "",
+        scan_id: str = "",
+        source_provider: str = "local",
+        ingest_method: str = "local_scan",
+        _publish: bool = False,
+        _override_payloads: dict[str, dict] | None = None,
     ) -> ResolvedMediaGraph:
-        if not entries:
-            raise ValueError("revision 至少需要一个来源事实")
-        if any(evidence.root_id != entries[0][0].root_id for evidence, _ in entries):
+        if entries and any(evidence.root_id != entries[0][0].root_id for evidence, _ in entries):
             raise ValueError("同一 revision 不能混合多个来源根")
+        if entries:
+            root_id = entries[0][0].root_id
+            scan_id = entries[0][0].scan_id
+            source_provider = entries[0][0].provider
+            ingest_method = entries[0][0].ingest_method
+        if not root_id or not scan_id:
+            raise ValueError("空 revision 必须明确提供 root_id 和 scan_id")
 
         graph = self.resolver.resolve(entries)
-        root_id = entries[0][0].root_id
-        scan_id = entries[0][0].scan_id
+        override_payloads = _override_payloads or {}
         created_at = _now()
 
         with self.database.connect() as conn:
@@ -67,7 +130,7 @@ class V4RevisionService:
                     root_id, provider, ingest_method, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (root_id, entries[0][0].provider, entries[0][0].ingest_method, created_at, created_at),
+                (root_id, source_provider, ingest_method, created_at, created_at),
             )
             existing_scan = conn.execute(
                 "SELECT scan_id FROM source_scans WHERE scan_id = ?",
@@ -88,25 +151,27 @@ class V4RevisionService:
 
         # Facts are immutable. Re-observing the same evidence is idempotent and
         # never replaces the previously parsed payload.
-        for evidence, facts in entries:
-            self.repository.save_source_evidence(evidence)
-            self.repository.save_parsed_facts(facts)
+        if not _publish:
+            for evidence, facts in entries:
+                self.repository.save_source_evidence(evidence)
+                self.repository.save_parsed_facts(facts)
 
         graph_digest = hashlib.sha256(
             json.dumps(
-                {
-                    "works": [work.work_key for work in graph.works],
-                    "episodes": [episode.episode_key for episode in graph.episodes],
-                },
+                asdict(graph),
                 sort_keys=True,
+                ensure_ascii=False,
             ).encode("utf-8")
         ).hexdigest()
         facts_by_evidence = {evidence.evidence_id: facts for evidence, facts in entries}
-        episode_by_evidence = {
-            evidence_id: episode
-            for episode in graph.episodes
-            for evidence_id in episode.asset_evidence_ids
-        }
+        episodes_by_evidence: dict[str, list] = {}
+        for episode in graph.episodes:
+            for evidence_id in episode.asset_evidence_ids:
+                episodes_by_evidence.setdefault(evidence_id, []).append(episode)
+        work_assets_by_evidence: dict[str, list] = {}
+        for work_asset in graph.work_assets:
+            for evidence_id in work_asset.asset_evidence_ids:
+                work_assets_by_evidence.setdefault(evidence_id, []).append(work_asset)
 
         with self.database.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -131,6 +196,47 @@ class V4RevisionService:
                     """,
                     (revision_id, root_id, scan_id, resolver_version, graph_digest, created_at),
                 )
+                for evidence, facts in entries:
+                    conn.execute(
+                        """
+                        INSERT INTO revision_evidence(revision_id, evidence_id, parsed_fact_id)
+                        VALUES (?, ?, ?)
+                        """,
+                        (revision_id, evidence.evidence_id, facts.parsed_fact_id),
+                    )
+                for evidence_id, payload in override_payloads.items():
+                    conn.execute(
+                        """
+                        INSERT INTO revision_overrides(
+                            revision_id, evidence_id, overrides_json, created_at
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            revision_id,
+                            evidence_id,
+                            json.dumps(payload, ensure_ascii=False),
+                            created_at,
+                        ),
+                    )
+
+                if not _publish:
+                    for index, issue in enumerate(graph.issues):
+                        conn.execute(
+                            """
+                            INSERT INTO revision_issues(
+                                revision_id, issue_id, code, evidence_id, message
+                            ) VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (
+                                revision_id,
+                                f"issue-{index}",
+                                issue.code,
+                                issue.evidence_id,
+                                issue.message,
+                            ),
+                        )
+                    conn.commit()
+                    return graph
 
                 work_ids: dict[str, str] = {}
                 for work in graph.works:
@@ -300,30 +406,93 @@ class V4RevisionService:
                 for evidence, facts in entries:
                     if not facts.tmdb_hint_id or not facts.tmdb_hint_type:
                         continue
-                    episode = episode_by_evidence.get(evidence.evidence_id)
-                    work_key = episode.work_key if episode is not None else next(
+                    episodes = episodes_by_evidence.get(evidence.evidence_id, [])
+                    episode_candidate = episodes[0] if episodes else None
+                    work_key = episode_candidate.work_key if episode_candidate is not None else next(
                         (work.work_key for work in graph.works if evidence.evidence_id in work.source_evidence_ids),
                         "",
                     )
                     if not work_key:
                         continue
+                    work_id = work_ids[work_key]
+                    provider_id = str(facts.tmdb_hint_id)
+                    identity_owner = conn.execute(
+                        """
+                        SELECT work_id FROM provider_bindings
+                        WHERE provider = 'tmdb' AND media_type = ? AND provider_id = ?
+                        """,
+                        (facts.tmdb_hint_type, provider_id),
+                    ).fetchone()
+                    work_binding = conn.execute(
+                        """
+                        SELECT provider_id FROM provider_bindings
+                        WHERE work_id = ? AND provider = 'tmdb' AND media_type = ?
+                        """,
+                        (work_id, facts.tmdb_hint_type),
+                    ).fetchone()
+                    if identity_owner is not None and identity_owner["work_id"] != work_id:
+                        raise RevisionBlockedError("TMDB 身份已经属于另一个作品，拒绝静默合并")
+                    if work_binding is not None and work_binding["provider_id"] != provider_id:
+                        raise RevisionBlockedError("作品已经绑定另一个 TMDB 身份，拒绝静默覆盖")
                     conn.execute(
                         """
-                        INSERT OR IGNORE INTO provider_bindings(
+                        INSERT INTO provider_bindings(
                             work_id, provider, media_type, provider_id
                         ) VALUES (?, 'tmdb', ?, ?)
+                        ON CONFLICT(work_id, provider, media_type) DO NOTHING
                         """,
                         (
-                            work_ids[work_key],
+                            work_id,
                             facts.tmdb_hint_type,
-                            str(facts.tmdb_hint_id),
+                            provider_id,
                         ),
                     )
 
                 episode_ids: dict[str, str] = {}
                 season_ids: dict[tuple[str, int | None, str], str] = {}
-                edition_ids: dict[str, str] = {}
+                edition_ids: dict[tuple[str, str], str | None] = {}
                 asset_ids: dict[tuple[str, str], str] = {}
+
+                def ensure_asset(evidence_id: str) -> str:
+                    evidence_row = conn.execute(
+                        "SELECT * FROM source_evidence WHERE evidence_id = ?",
+                        (evidence_id,),
+                    ).fetchone()
+                    if evidence_row is None:
+                        raise ValueError(f"缺少 Asset 来源事实: {evidence_id}")
+                    asset_row = conn.execute(
+                        "SELECT asset_id FROM assets WHERE evidence_id = ?",
+                        (evidence_id,),
+                    ).fetchone()
+                    if asset_row is not None:
+                        return str(asset_row["asset_id"])
+                    facts = facts_by_evidence[evidence_id]
+                    asset_id = str(uuid.uuid4())
+                    conn.execute(
+                        """
+                        INSERT INTO assets(
+                            asset_id, evidence_id, root_id, source_locator,
+                            playback_locator, fingerprint, size, mtime,
+                            resolution, release_group, version_tags_json,
+                            availability_state
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            asset_id,
+                            evidence_id,
+                            evidence_row["root_id"],
+                            evidence_row["source_locator"],
+                            evidence_row["playback_locator"],
+                            evidence_row["fingerprint"],
+                            evidence_row["size"],
+                            evidence_row["mtime"],
+                            facts.quality_tags[0] if facts.quality_tags else "",
+                            facts.release_group,
+                            json.dumps(facts.quality_tags, ensure_ascii=False),
+                            "available" if evidence_row["presence_state"] == "present" else "missing",
+                        ),
+                    )
+                    return asset_id
 
                 for episode in graph.episodes:
                     work_id = work_ids[episode.work_key]
@@ -356,7 +525,7 @@ class V4RevisionService:
                         WHERE work_id = ? AND season_id = ?
                           AND local_episode_number IS ?
                           AND special_number IS ?
-                          AND episode_kind = ? AND edition_key = ?
+                          AND episode_kind = ?
                         """,
                         (
                             work_id,
@@ -364,7 +533,6 @@ class V4RevisionService:
                             episode.local_episode_number,
                             episode.special_number,
                             episode.episode_kind,
-                            episode.edition_key,
                         ),
                     ).fetchone()
                     if episode_row is None:
@@ -374,7 +542,7 @@ class V4RevisionService:
                             INSERT INTO episodes(
                                 episode_id, work_id, season_id, local_episode_number,
                                 absolute_episode_number, special_number, episode_kind,
-                                edition_key
+                                display_title
                             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
@@ -385,65 +553,34 @@ class V4RevisionService:
                                 episode.absolute_episode_number,
                                 episode.special_number,
                                 episode.episode_kind,
-                                episode.edition_key,
+                                "",
                             ),
                         )
                     else:
                         episode_id = str(episode_row["episode_id"])
                     episode_ids[episode.episode_key] = episode_id
 
-                    edition_row = conn.execute(
-                        "SELECT edition_id FROM editions WHERE episode_id = ? AND edition_key = ?",
-                        (episode_id, episode.edition_key),
-                    ).fetchone()
-                    if edition_row is None:
-                        edition_id = str(uuid.uuid4())
-                        conn.execute(
-                            """
-                            INSERT INTO editions(edition_id, episode_id, edition_key, display_name)
-                            VALUES (?, ?, ?, ?)
-                            """,
-                            (edition_id, episode_id, episode.edition_key, episode.edition_key),
-                        )
-                    else:
-                        edition_id = str(edition_row["edition_id"])
-                    edition_ids[episode.episode_key] = edition_id
-
-                    for evidence_id in episode.asset_evidence_ids:
-                        evidence_row = conn.execute(
-                            "SELECT * FROM source_evidence WHERE evidence_id = ?",
-                            (evidence_id,),
+                    edition_id = None
+                    if episode.edition_key != "default":
+                        edition_row = conn.execute(
+                            "SELECT edition_id FROM editions WHERE episode_id = ? AND edition_key = ?",
+                            (episode_id, episode.edition_key),
                         ).fetchone()
-                        if evidence_row is None:
-                            raise ValueError(f"缺少 Asset 来源事实: {evidence_id}")
-                        asset_row = conn.execute(
-                            "SELECT asset_id FROM assets WHERE evidence_id = ?",
-                            (evidence_id,),
-                        ).fetchone()
-                        if asset_row is None:
-                            asset_id = str(uuid.uuid4())
+                        if edition_row is None:
+                            edition_id = str(uuid.uuid4())
                             conn.execute(
                                 """
-                                INSERT INTO assets(
-                                    asset_id, evidence_id, root_id, source_locator,
-                                    playback_locator, fingerprint, size, mtime,
-                                    availability_state
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                INSERT INTO editions(edition_id, episode_id, edition_key, display_name)
+                                VALUES (?, ?, ?, ?)
                                 """,
-                                (
-                                    asset_id,
-                                    evidence_id,
-                                    evidence_row["root_id"],
-                                    evidence_row["source_locator"],
-                                    evidence_row["playback_locator"],
-                                    evidence_row["fingerprint"],
-                                    evidence_row["size"],
-                                    evidence_row["mtime"],
-                                    evidence_row["presence_state"],
-                                ),
+                                (edition_id, episode_id, episode.edition_key, episode.edition_key),
                             )
                         else:
-                            asset_id = str(asset_row["asset_id"])
+                            edition_id = str(edition_row["edition_id"])
+                    edition_ids[(episode.episode_key, episode.edition_key)] = edition_id
+
+                    for evidence_id in episode.asset_evidence_ids:
+                        asset_id = ensure_asset(evidence_id)
                         asset_ids[(episode.episode_key, evidence_id)] = asset_id
                         conn.execute(
                             """
@@ -453,30 +590,85 @@ class V4RevisionService:
                             (episode_id, edition_id, asset_id),
                         )
 
+                work_edition_ids: dict[tuple[str, str], str | None] = {}
+                work_asset_ids: dict[tuple[str, str, str], str] = {}
+                for work_asset in graph.work_assets:
+                    work_id = work_ids[work_asset.work_key]
+                    edition_id = None
+                    if work_asset.edition_key != "default":
+                        edition_row = conn.execute(
+                            "SELECT edition_id FROM editions WHERE work_id = ? AND edition_key = ?",
+                            (work_id, work_asset.edition_key),
+                        ).fetchone()
+                        if edition_row is None:
+                            edition_id = str(uuid.uuid4())
+                            conn.execute(
+                                """
+                                INSERT INTO editions(edition_id, work_id, edition_key, display_name)
+                                VALUES (?, ?, ?, ?)
+                                """,
+                                (edition_id, work_id, work_asset.edition_key, work_asset.edition_key),
+                            )
+                        else:
+                            edition_id = str(edition_row["edition_id"])
+                    work_edition_ids[(work_asset.work_key, work_asset.edition_key)] = edition_id
+                    for evidence_id in work_asset.asset_evidence_ids:
+                        asset_id = ensure_asset(evidence_id)
+                        work_asset_ids[(work_asset.work_key, work_asset.edition_key, evidence_id)] = asset_id
+                        conn.execute(
+                            "INSERT OR IGNORE INTO work_assets(work_id, edition_id, asset_id) VALUES (?, ?, ?)",
+                            (work_id, edition_id, asset_id),
+                        )
+
                 for evidence, _facts in entries:
-                    episode = episode_by_evidence.get(evidence.evidence_id)
-                    if episode is None:
-                        continue
+                    bound_episodes = episodes_by_evidence.get(evidence.evidence_id, [])
                     facts = facts_by_evidence[evidence.evidence_id]
-                    conn.execute(
-                        """
-                        INSERT INTO revision_bindings(
-                            revision_id, evidence_id, work_id, season_id, episode_id,
-                            edition_id, asset_id, confidence, reasons_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            revision_id,
-                            evidence.evidence_id,
-                            work_ids[episode.work_key],
-                            season_ids[(episode.work_key, episode.local_season_number, episode.season_kind)],
-                            episode_ids[episode.episode_key],
-                            edition_ids[episode.episode_key],
-                            asset_ids[(episode.episode_key, evidence.evidence_id)],
-                            facts.confidence,
-                            json.dumps(facts.reasons, ensure_ascii=False),
-                        ),
-                    )
+                    for episode in bound_episodes:
+                        conn.execute(
+                            """
+                            INSERT INTO revision_bindings(
+                                binding_id, revision_id, evidence_id, work_id, season_id,
+                                episode_id, edition_id, asset_id, confidence, decision_source,
+                                reasons_json, override_json
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                str(uuid.uuid4()),
+                                revision_id,
+                                evidence.evidence_id,
+                                work_ids[episode.work_key],
+                                season_ids[(episode.work_key, episode.local_season_number, episode.season_kind)],
+                                episode_ids[episode.episode_key],
+                                edition_ids[(episode.episode_key, episode.edition_key)],
+                                asset_ids[(episode.episode_key, evidence.evidence_id)],
+                                facts.confidence,
+                                "manual_override" if evidence.evidence_id in override_payloads else "resolver",
+                                json.dumps(facts.reasons, ensure_ascii=False),
+                                json.dumps(override_payloads.get(evidence.evidence_id, {}), ensure_ascii=False),
+                            ),
+                        )
+                    for work_asset in work_assets_by_evidence.get(evidence.evidence_id, []):
+                        conn.execute(
+                            """
+                            INSERT INTO revision_bindings(
+                                binding_id, revision_id, evidence_id, work_id,
+                                edition_id, asset_id, confidence, decision_source,
+                                reasons_json, override_json
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                str(uuid.uuid4()),
+                                revision_id,
+                                evidence.evidence_id,
+                                work_ids[work_asset.work_key],
+                                work_edition_ids[(work_asset.work_key, work_asset.edition_key)],
+                                work_asset_ids[(work_asset.work_key, work_asset.edition_key, evidence.evidence_id)],
+                                facts.confidence,
+                                "manual_override" if evidence.evidence_id in override_payloads else "resolver",
+                                json.dumps(facts.reasons, ensure_ascii=False),
+                                json.dumps(override_payloads.get(evidence.evidence_id, {}), ensure_ascii=False),
+                            ),
+                        )
 
                 for index, issue in enumerate(graph.issues):
                     conn.execute(
@@ -486,6 +678,29 @@ class V4RevisionService:
                         """,
                         (revision_id, f"issue-{index}", issue.code, issue.evidence_id, issue.message),
                     )
+                conn.execute(
+                    """
+                    UPDATE import_revisions
+                    SET status = 'superseded'
+                    WHERE root_id = ? AND revision_id != ? AND status = 'confirmed'
+                    """,
+                    (root_id, revision_id),
+                )
+                conn.execute(
+                    """
+                    UPDATE jobs SET status = 'cancelled', updated_at = ?
+                    WHERE status = 'queued' AND revision_id IN (
+                        SELECT revision_id FROM import_revisions
+                        WHERE root_id = ? AND status = 'superseded'
+                    )
+                    """,
+                    (created_at, root_id),
+                )
+                conn.execute(
+                    "UPDATE import_revisions SET status = 'confirmed', confirmed_at = ? WHERE revision_id = ?",
+                    (created_at, revision_id),
+                )
+                self._enqueue_execution_jobs(conn, revision_id, set(work_ids.values()), created_at)
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -502,63 +717,254 @@ class V4RevisionService:
             raise KeyError(revision_id)
         return row["status"]
 
-    def confirm(self, revision_id: str) -> None:
-        now = _now()
+    def apply_override(
+        self,
+        revision_id: str,
+        evidence_id: str,
+        changes: dict,
+    ) -> ResolvedMediaGraph:
+        unknown = set(changes) - self._OVERRIDE_FIELDS
+        if unknown:
+            raise ValueError("不允许修正字段: " + ", ".join(sorted(unknown)))
+        if not changes:
+            raise ValueError("人工修正不能为空")
+        normalized = self._normalize_override(changes)
         with self.database.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                revision = conn.execute(
-                    "SELECT status FROM import_revisions WHERE revision_id = ?",
-                    (revision_id,),
-                ).fetchone()
-                if revision is None:
-                    raise KeyError(revision_id)
-                unresolved = conn.execute(
-                    "SELECT 1 FROM revision_issues WHERE revision_id = ? AND resolved = 0 LIMIT 1",
-                    (revision_id,),
-                ).fetchone()
-                if unresolved is not None:
-                    raise RevisionBlockedError("revision 仍有 review issue，不能确认")
-                if revision["status"] not in {"draft", "confirmed"}:
-                    raise RuntimeError(f"revision 状态不可确认: {revision['status']}")
-                conn.execute(
-                    "UPDATE import_revisions SET status = 'confirmed', confirmed_at = ? WHERE revision_id = ?",
-                    (now, revision_id),
-                )
-                work_rows = conn.execute(
-                    "SELECT DISTINCT work_id FROM revision_bindings WHERE revision_id = ?",
-                    (revision_id,),
-                ).fetchall()
-                for row in work_rows:
-                    work_id = row["work_id"]
-                    conn.execute(
-                        """
-                        INSERT OR IGNORE INTO jobs(
-                            job_id, job_type, revision_id, work_id, idempotency_key,
-                            created_at, updated_at
-                        ) VALUES (?, 'materialize_mirror', ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            str(uuid.uuid4()),
-                            revision_id,
-                            work_id,
-                            f"materialize_mirror:{revision_id}:{work_id}",
-                            now,
-                            now,
-                        ),
-                    )
+            revision = conn.execute(
+                "SELECT status, root_id, scan_id FROM import_revisions WHERE revision_id = ?",
+                (revision_id,),
+            ).fetchone()
+            if revision is None:
+                raise KeyError(revision_id)
+            if revision["status"] != "draft":
+                raise RuntimeError("只有 draft revision 可以人工修正")
+            member = conn.execute(
+                "SELECT 1 FROM revision_evidence WHERE revision_id = ? AND evidence_id = ?",
+                (revision_id, evidence_id),
+            ).fetchone()
+            if member is None:
+                raise KeyError(evidence_id)
+            existing = conn.execute(
+                "SELECT overrides_json FROM revision_overrides WHERE revision_id = ? AND evidence_id = ?",
+                (revision_id, evidence_id),
+            ).fetchone()
+            merged = json.loads(existing["overrides_json"] or "{}") if existing is not None else {}
+            merged.update(normalized)
+            conn.execute(
+                """
+                INSERT INTO revision_overrides(
+                    revision_id, evidence_id, overrides_json, created_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(revision_id, evidence_id) DO UPDATE SET
+                    overrides_json = excluded.overrides_json
+                """,
+                (revision_id, evidence_id, json.dumps(merged, ensure_ascii=False), _now()),
+            )
+        entries = self._load_revision_entries(revision_id)
+        graph = self.resolver.resolve(entries)
+        with self.database.connect() as conn:
+            conn.execute("DELETE FROM revision_issues WHERE revision_id = ?", (revision_id,))
+            for index, issue in enumerate(graph.issues):
                 conn.execute(
                     """
-                    INSERT OR IGNORE INTO jobs(
-                        job_id, job_type, revision_id, idempotency_key, created_at, updated_at
-                    ) VALUES (?, 'refresh_projection', ?, ?, ?, ?)
+                    INSERT INTO revision_issues(revision_id, issue_id, code, evidence_id, message)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
-                    (str(uuid.uuid4()), revision_id, f"refresh_projection:{revision_id}", now, now),
+                    (revision_id, f"issue-{index}", issue.code, issue.evidence_id, issue.message),
                 )
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+        return graph
+
+    @staticmethod
+    def _normalize_override(changes: dict) -> dict:
+        normalized = dict(changes)
+        text_fields = {
+            "work_title",
+            "original_title",
+            "series_group",
+            "media_type",
+            "group_type",
+            "tmdb_hint_type",
+        }
+        for key in text_fields & normalized.keys():
+            if not isinstance(normalized[key], str):
+                raise ValueError(f"人工修正字段 {key} 必须是字符串")
+            normalized[key] = normalized[key].strip()
+        if normalized.get("media_type") not in {None, "", "tv", "movie"}:
+            raise ValueError("media_type 只能是 tv 或 movie")
+        if normalized.get("tmdb_hint_type") not in {None, "", "tv", "movie"}:
+            raise ValueError("tmdb_hint_type 只能是 tv 或 movie")
+        if normalized.get("group_type") not in {
+            None,
+            "",
+            "season",
+            "special",
+            "movie",
+            "unknown",
+        }:
+            raise ValueError("group_type 不是允许的媒体分组")
+        for key in ("title_candidates", "edition_tags"):
+            if key not in normalized:
+                continue
+            value = normalized[key]
+            if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
+                raise ValueError(f"人工修正字段 {key} 必须是字符串数组")
+            normalized[key] = [item.strip() for item in value if item.strip()]
+        numeric_fields = {
+            "year_candidate",
+            "season_candidate",
+            "episode_candidate",
+            "absolute_episode_candidate",
+            "special_number",
+            "tmdb_hint_id",
+        }
+        for key in numeric_fields & normalized.keys():
+            value = normalized[key]
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+                raise ValueError(f"人工修正字段 {key} 必须是整数或 null")
+            if value is not None and value < 0:
+                raise ValueError(f"人工修正字段 {key} 不能为负数")
+        year = normalized.get("year_candidate")
+        if year is not None and not 1800 <= year <= 2200:
+            raise ValueError("year_candidate 超出允许范围")
+        tmdb_id = normalized.get("tmdb_hint_id")
+        if tmdb_id is not None and tmdb_id <= 0:
+            raise ValueError("tmdb_hint_id 必须大于 0")
+        for key in ("special_candidate", "needs_review", "is_importable", "is_auxiliary"):
+            if key in normalized and not isinstance(normalized[key], bool):
+                raise ValueError(f"人工修正字段 {key} 必须是布尔值")
+        return normalized
+
+    def _load_revision_entries(self, revision_id: str) -> list[tuple[SourceEvidence, ParsedFacts]]:
+        with self.database.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT re.evidence_id, re.parsed_fact_id,
+                       COALESCE(ro.overrides_json, '{}') AS overrides_json
+                FROM revision_evidence re
+                LEFT JOIN revision_overrides ro
+                  ON ro.revision_id = re.revision_id AND ro.evidence_id = re.evidence_id
+                WHERE re.revision_id = ?
+                ORDER BY re.evidence_id
+                """,
+                (revision_id,),
+            ).fetchall()
+        entries = []
+        tuple_fields = {"title_candidates", "edition_tags"}
+        for row in rows:
+            evidence = self.repository.get_source_evidence(row["evidence_id"])
+            facts = self.repository.get_parsed_facts(row["parsed_fact_id"])
+            overrides = json.loads(row["overrides_json"] or "{}")
+            for key in tuple_fields:
+                if key in overrides:
+                    overrides[key] = tuple(overrides[key] or ())
+            entries.append((evidence, replace(facts, **overrides)))
+        return entries
+
+    def _load_override_payloads(self, revision_id: str) -> dict[str, dict]:
+        with self.database.connect() as conn:
+            rows = conn.execute(
+                "SELECT evidence_id, overrides_json FROM revision_overrides WHERE revision_id = ?",
+                (revision_id,),
+            ).fetchall()
+        return {
+            str(row["evidence_id"]): json.loads(row["overrides_json"] or "{}")
+            for row in rows
+        }
+
+    def confirm(self, revision_id: str) -> None:
+        with self.database.connect() as conn:
+            revision = conn.execute(
+                "SELECT status, root_id, scan_id FROM import_revisions WHERE revision_id = ?",
+                (revision_id,),
+            ).fetchone()
+            if revision is None:
+                raise KeyError(revision_id)
+            if revision["status"] == "confirmed":
+                return
+            if revision["status"] != "draft":
+                raise RuntimeError(f"revision 状态不可确认: {revision['status']}")
+            unresolved = conn.execute(
+                "SELECT 1 FROM revision_issues WHERE revision_id = ? AND resolved = 0 LIMIT 1",
+                (revision_id,),
+            ).fetchone()
+            if unresolved is not None:
+                raise RevisionBlockedError("revision 仍有 review issue，不能确认")
+        entries = self._load_revision_entries(revision_id)
+        override_payloads = self._load_override_payloads(revision_id)
+        self.create_draft(
+            revision_id,
+            entries,
+            root_id=str(revision["root_id"]),
+            scan_id=str(revision["scan_id"]),
+            _publish=True,
+            _override_payloads=override_payloads,
+        )
+
+    @staticmethod
+    def _enqueue_execution_jobs(conn, revision_id: str, work_ids: set[str], now: str) -> None:
+        for work_id in sorted(work_ids):
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO jobs(
+                    job_id, job_type, revision_id, work_id, idempotency_key,
+                    created_at, updated_at
+                ) VALUES (?, 'materialize_mirror', ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    revision_id,
+                    work_id,
+                    f"materialize_mirror:{revision_id}:{work_id}",
+                    now,
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO jobs(
+                    job_id, job_type, revision_id, work_id, idempotency_key,
+                    created_at, updated_at
+                ) VALUES (?, 'scrape_work', ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    revision_id,
+                    work_id,
+                    f"scrape_work:{revision_id}:{work_id}",
+                    now,
+                    now,
+                ),
+            )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO jobs(
+                job_id, job_type, revision_id, idempotency_key, created_at, updated_at
+            ) VALUES (?, 'refresh_projection', ?, ?, ?, ?)
+            """,
+            (str(uuid.uuid4()), revision_id, f"refresh_projection:{revision_id}", now, now),
+        )
+        root_id = conn.execute(
+            "SELECT root_id FROM import_revisions WHERE revision_id = ?", (revision_id,)
+        ).fetchone()[0]
+        has_superseded = conn.execute(
+            "SELECT 1 FROM import_revisions WHERE root_id = ? AND status = 'superseded' LIMIT 1",
+            (root_id,),
+        ).fetchone()
+        if has_superseded is not None:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO jobs(
+                    job_id, job_type, revision_id, idempotency_key, created_at, updated_at
+                ) VALUES (?, 'cleanup_superseded_artifacts', ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    revision_id,
+                    f"cleanup_superseded_artifacts:{revision_id}",
+                    now,
+                    now,
+                ),
+            )
 
     def list_jobs(self, revision_id: str) -> list[dict]:
         with self.database.connect() as conn:

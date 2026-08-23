@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """WebSocket 心跳端点
 
 WS /ws/heartbeat
@@ -38,7 +37,7 @@ async def heartbeat_ws(websocket: WebSocket):
             manager.receive_heartbeat()
 
             # 回复 ack
-            from datetime import datetime, timezone, timedelta
+            from datetime import datetime, timedelta, timezone
             server_time = datetime.now(timezone(timedelta(hours=8))).isoformat()
             ack = json.dumps({"type": "heartbeat_ack", "server_time": server_time})
             await websocket.send_text(ack)

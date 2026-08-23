@@ -1,12 +1,12 @@
-# -*- coding: utf-8 -*-
 """Small MPV JSON IPC client used for local playback progress tracking."""
 
 import json
 import os
 import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,7 @@ def make_ipc_server_name(session_id: str) -> str:
     return str(Path(tempfile.gettempdir()) / f"kumiplayer-{safe_id}.sock")
 
 
-def read_mpv_progress(ipc_server: str, timeout: float = 0.5) -> Optional[tuple[float, float, int]]:
+def read_mpv_progress(ipc_server: str, timeout: float = 0.5) -> tuple[float, float, int] | None:
     """Read progress and the active playlist position from mpv.
 
     Returns None while mpv is still starting or when the IPC pipe is unavailable.
@@ -53,9 +53,9 @@ def observe_mpv_progress(ipc_server: str, timeout: float = 0.5) -> Iterator[MpvP
         (4, "pause"),
     )
     pending_requests = {100 + observation_id for observation_id, _name in observations}
-    playlist_position: Optional[int] = None
-    position: Optional[float] = None
-    duration: Optional[float] = None
+    playlist_position: int | None = None
+    position: float | None = None
+    duration: float | None = None
     media_path = ""
     force_next_checkpoint = False
 
@@ -119,6 +119,9 @@ def observe_mpv_progress(ipc_server: str, timeout: float = 0.5) -> Iterator[MpvP
             should_emit = property_name == "time-pos" or (property_name == "pause" and value is True)
             if not has_complete_sample or not should_emit:
                 continue
+            assert position is not None
+            assert duration is not None
+            assert playlist_position is not None
 
             force_checkpoint = force_next_checkpoint
             force_next_checkpoint = False
@@ -235,7 +238,7 @@ def _open_windows_named_pipe(pipe_name: str, timeout: float):
     return open(fd, "r+b", buffering=0, closefd=True)
 
 
-def _get_property(pipe, property_name: str, request_id: int) -> Optional[float]:
+def _get_property(pipe, property_name: str, request_id: int) -> float | None:
     response = _send_command(pipe, ["get_property", property_name], request_id)
     if response.get("error") != "success":
         return None

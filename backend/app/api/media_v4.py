@@ -7,7 +7,9 @@ from dataclasses import asdict
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.core.config import load_config, resolve_openlist_credentials
 from app.core.paths import get_data_dir
+from app.integrations.openlist.models import OpenListError
 from app.media_v4.jobs.runner import V4JobRunner
 from app.media_v4.jobs.scrape import V4ScrapeService
 from app.media_v4.parsing.parser import V4Parser
@@ -16,7 +18,13 @@ from app.media_v4.playback.store import V4PlaybackStore
 from app.media_v4.projection.library import V4LibraryProjection
 from app.media_v4.revisions.service import RevisionBlockedError, V4RevisionService
 from app.media_v4.sources.adapters import SourceEntry, to_source_evidence
-from app.media_v4.sources.scanner import parse_directory_tree_file, scan_local_directory
+from app.media_v4.sources.scanner import (
+    openlist_root_id,
+    parse_directory_tree_file,
+    scan_local_directory,
+    scan_openlist_directory,
+    tree_root_id,
+)
 from app.media_v4.tracking.store import V4TrackingStore
 
 router = APIRouter(prefix="/api/v4", tags=["media-v4"])
@@ -52,7 +60,8 @@ class PreviewRequest(BaseModel):
     revision_id: str = Field(min_length=1)
     root_id: str = Field(min_length=1)
     scan_id: str = Field(min_length=1)
-    entries: list[EntryRequest] = Field(min_length=1)
+    entries: list[EntryRequest] = Field(default_factory=list)
+    allow_empty: bool = False
 
 
 class PlaybackProgressRequest(BaseModel):
@@ -80,6 +89,10 @@ class SourceScanRequest(BaseModel):
     source_root: str = ""
 
 
+class OverrideRequest(BaseModel):
+    changes: dict
+
+
 def get_database() -> V4Database:
     global _database
     if _database is None:
@@ -92,6 +105,7 @@ def _graph_to_dict(graph) -> dict:
     return {
         "works": [asdict(work) for work in graph.works],
         "episodes": [asdict(episode) for episode in graph.episodes],
+        "work_assets": [asdict(asset) for asset in graph.work_assets],
         "issues": [asdict(issue) for issue in graph.issues],
     }
 
@@ -127,23 +141,42 @@ def _make_entries(request: PreviewRequest):
 
 @router.post("/sources/scan")
 def scan_source(request: SourceScanRequest):
-    if not request.tree_file and not request.root_path.strip():
+    if request.source != "openlist" and not request.tree_file and not request.root_path.strip():
         raise HTTPException(status_code=400, detail="来源路径不能为空")
     try:
+        content_provider = request.provider if request.provider in {"local", "pan115", "baidu"} else "unknown"
         if request.tree_file:
-            root_id = request.root_path or "root_" + request.provider
+            root_id = tree_root_id(request.provider, request.source_root, request.tree_file)
             scan_id, evidence = parse_directory_tree_file(
                 request.tree_file,
                 root_id=root_id,
-                provider=request.provider,
+                provider=content_provider,
                 source_root=request.source_root,
+            )
+        elif request.source == "openlist":
+            from app.api.openlist_v4 import _client, _configured_routes, _remote_root
+
+            config = load_config()
+            username, _password, credential_state = resolve_openlist_credentials()
+            if credential_state == "unavailable":
+                raise HTTPException(status_code=503, detail="本机凭据管理器暂时不可用，请稍后重试")
+            if not config.openlist_mount_root:
+                raise HTTPException(status_code=409, detail="OpenList 导入需要先配置本地挂载根，才能建立可播放 Asset")
+            remote_root = request.root_path.strip() or _remote_root(config)
+            root_id = openlist_root_id(config.openlist_server_url, username, remote_root)
+            scan_id, evidence = scan_openlist_directory(
+                _client(config),
+                remote_root=remote_root,
+                mapping_root=_remote_root(config),
+                mount_root=config.openlist_mount_root,
+                root_id=root_id,
+                default_provider=content_provider,
+                routes=_configured_routes(config),
             )
         else:
             root_id, scan_id, evidence = scan_local_directory(request.root_path)
-    except (FileNotFoundError, NotADirectoryError, OSError) as exc:
+    except (FileNotFoundError, NotADirectoryError, OSError, OpenListError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"来源扫描失败: {exc}") from exc
-    if not evidence:
-        raise HTTPException(status_code=422, detail="来源中没有发现可导入的视频文件")
     return {
         "root_id": root_id,
         "scan_id": scan_id,
@@ -154,12 +187,19 @@ def scan_source(request: SourceScanRequest):
 @router.post("/imports/preview")
 def preview(request: PreviewRequest):
     database = get_database()
+    if not request.entries and not request.allow_empty:
+        raise HTTPException(status_code=409, detail="空来源必须由用户明确确认后才能替代当前 revision")
     evidence = _make_entries(request)
     parser = V4Parser()
     parsed = [(item, parser.parse(item)) for item in evidence]
     service = V4RevisionService(database)
     try:
-        graph = service.create_draft(request.revision_id, parsed)
+        graph = service.create_draft(
+            request.revision_id,
+            parsed,
+            root_id=request.root_id,
+            scan_id=request.scan_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {
@@ -174,7 +214,7 @@ def confirm(revision_id: str):
     service = V4RevisionService(get_database())
     try:
         service.confirm(revision_id)
-    except RevisionBlockedError as exc:
+    except (RevisionBlockedError, ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"revision 不存在: {revision_id}") from exc
@@ -183,6 +223,21 @@ def confirm(revision_id: str):
         "status": service.get_status(revision_id),
         "jobs": service.list_jobs(revision_id),
     }
+
+
+@router.patch("/imports/{revision_id}/evidence/{evidence_id}")
+def override_evidence(revision_id: str, evidence_id: str, request: OverrideRequest):
+    try:
+        graph = V4RevisionService(get_database()).apply_override(
+            revision_id,
+            evidence_id,
+            request.changes,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="revision 或 evidence 不存在") from exc
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"revision_id": revision_id, "status": "draft", **_graph_to_dict(graph)}
 
 
 @router.get("/imports/{revision_id}")
@@ -222,6 +277,7 @@ def run_job(job_id: str):
         "status": result.status,
         "generation_id": result.snapshot.generation_id if result.snapshot else "",
         "artifact_paths": list(result.materialized.artifact_paths) if result.materialized else [],
+        "warnings": list(result.materialized.errors) if result.materialized else [],
     }
 
 
@@ -283,6 +339,8 @@ def save_tracking_state(request: TrackingStateRequest):
             last_watched_episode=request.last_watched_episode,
             metadata=request.metadata,
         )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="追踪作品不存在或已经失效") from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return V4TrackingStore(get_database()).get_state(request.work_id, request.provider)

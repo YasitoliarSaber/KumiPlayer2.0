@@ -15,7 +15,24 @@ from app.recognition.media import recognize_media
 
 _SEASON_TOKEN = re.compile(r"(?i)(S\d{1,2})")
 _EPISODE_TOKEN = re.compile(r"(?i)(E\d{1,3})(?:\s*[-~]\s*E?(\d{1,3}))?")
-_ABSOLUTE_TOKEN = re.compile(r"(?i)(?:EP?\s*)?(\d{1,3})(?:\s*[-~]\s*(\d{1,3}))?")
+_ABSOLUTE_TOKEN = re.compile(
+    r"(?ix)(?:"
+    r"(?<![a-z0-9])EP\s*(?P<ep>\d{1,3})(?!\d)"
+    r"|[\[【(]\s*(?P<bracket>\d{1,3})\s*[\]】)]"
+    r"|\s[-–—]\s*(?P<dash>\d{1,3})(?!\d)"
+    r"|\s(?P<trailing>\d{1,3})\s*$"
+    r")"
+)
+_QUALITY_TOKENS = re.compile(
+    r"(?i)(?<![a-z0-9])(2160p|1080p|1080i|720p|4k|uhd|hdr10\+?|dolby[ ._-]?vision)(?![a-z0-9])"
+)
+_EDITION_TOKENS = (
+    (re.compile(r"(?i)(?:director(?:'s)?[ ._-]?cut|导演剪辑版)"), "director-cut"),
+    (re.compile(r"(?i)(?:extended(?:[ ._-]?edition)?|加长版)"), "extended"),
+    (re.compile(r"(?i)(?:remaster(?:ed)?|重制版)"), "remastered"),
+    (re.compile(r"(?i)(?:theatrical(?:[ ._-]?cut)?|院线版)"), "theatrical"),
+)
+_RELEASE_GROUP = re.compile(r"-([A-Za-z0-9][A-Za-z0-9_.-]{1,40})$")
 
 
 def _unique_non_empty(values: tuple[str, ...]) -> tuple[str, ...]:
@@ -57,14 +74,22 @@ class V4Parser:
         if episode_match and episode_match.group(2):
             episode_range = (int(episode_match.group(1)[1:]), int(episode_match.group(2)))
 
-        absolute_candidate = guess.episode_number
+        absolute_candidate = None
         if not episode_match:
-            absolute_match = _ABSOLUTE_TOKEN.search(filename)
-            if absolute_match and absolute_match.group(1):
-                absolute_candidate = int(absolute_match.group(1))
+            absolute_match = _ABSOLUTE_TOKEN.search(PurePosixPath(filename).stem)
+            if absolute_match:
+                raw_absolute = next(value for value in absolute_match.groupdict().values() if value)
+                absolute_candidate = int(raw_absolute)
+                episode_token = absolute_match.group(0).strip()
 
         group_type = guess.group_type or "unknown"
         is_auxiliary = group_type in {"auxiliary", "ignored"}
+        stem = PurePosixPath(filename).stem
+        quality_tags = tuple(
+            dict.fromkeys(match.group(1).lower() for match in _QUALITY_TOKENS.finditer(stem))
+        )
+        edition_tags = tuple(tag for pattern, tag in _EDITION_TOKENS if pattern.search(stem))
+        release_match = _RELEASE_GROUP.search(stem)
         title_candidates = _unique_non_empty(
             (guess.work_title, guess.series_group, guess.original_title)
         )
@@ -93,9 +118,9 @@ class V4Parser:
             special_number=guess.special_number,
             tmdb_hint_id=guess.tmdb_hint_id,
             tmdb_hint_type=guess.tmdb_hint_type,
-            release_group="",
-            edition_tags=(),
-            quality_tags=(),
+            release_group=release_match.group(1) if release_match else "",
+            edition_tags=edition_tags,
+            quality_tags=quality_tags,
             confidence=guess.confidence,
             needs_review=guess.needs_review,
             is_importable=not is_auxiliary,

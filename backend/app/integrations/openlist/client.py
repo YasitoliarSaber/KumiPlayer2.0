@@ -643,7 +643,7 @@ class OpenListClient:
         if self._preauthenticate_list_requests and not self._token:
             self.login()
         try:
-            page = self._list_dir_request(remote_path, page, per_page, refresh=refresh)
+            result_page = self._list_dir_request(remote_path, page, per_page, refresh=refresh)
         except OpenListSourceCoolingDownError:
             # 第一保险：本地准入拒绝（冷却拦截）不是上游失败，直接 re-raise，
             # 不调用 _report_failure（record_failure 对 source_cooling_down
@@ -656,7 +656,7 @@ class OpenListClient:
             self._report_failure("unknown")
             raise
         self._report_success()
-        return page
+        return result_page
 
     def _list_dir_request(
         self,

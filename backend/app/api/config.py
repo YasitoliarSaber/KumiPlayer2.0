@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """配置 API 端点
 
 GET   /api/config              获取脱敏配置
@@ -15,7 +14,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -26,9 +25,9 @@ from app.core.config import (
     save_config,
 )
 from app.core.runtime import get_default_mirror_dir, get_mpv_config_dir, get_mpv_runtime_dir
+from app.integrations.bangumi import BangumiClient, BangumiError
 from app.playback.mpv_runtime import check_mpv_runtime
 from app.scrape.tmdb_client import TMDBClient
-from app.integrations.bangumi import BangumiClient, BangumiError
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 _MEDIA_PATH_PROBE_TIMEOUT_SECONDS = 4
@@ -55,42 +54,42 @@ class ConfigPatch(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    mpv_path: Optional[str] = None
-    server_port: Optional[int] = Field(default=None, ge=1, le=65535)
-    mirror_dir: Optional[str] = None
-    pan115_root: Optional[str] = None
-    baidu_root: Optional[str] = None
-    local_root: Optional[str] = None
-    directory_tree_dir: Optional[str] = None
-    openlist_server_url: Optional[str] = None
-    openlist_remote_root: Optional[str] = None
-    openlist_mount_root: Optional[str] = None
-    openlist_username: Optional[str] = None
-    openlist_password: Optional[str] = None
-    openlist_cache_ttl_minutes: Optional[int] = None
-    openlist_prefetch_limit: Optional[int] = None
-    tmdb_bearer_token: Optional[str] = None
-    tmdb_language: Optional[str] = None
-    tmdb_certification_regions: Optional[str] = None
-    anilist_enabled: Optional[bool] = None
-    anilist_rate_limit: Optional[float] = None
-    anilist_timeout: Optional[int] = None
-    deepseek_api_key: Optional[str] = None
-    tmdb_rate_limit: Optional[float] = None
-    tmdb_max_retries: Optional[int] = None
-    tmdb_timeout: Optional[int] = None
-    bangumi_access_token: Optional[str] = None
-    bangumi_user_agent: Optional[str] = None
-    auto_play_next_episode: Optional[bool] = None
-    mpv_anime4k_mode: Optional[str] = None
-    mpv_anime4k_quality: Optional[str] = None
-    series_card_image_mode: Optional[str] = None
-    poster_size: Optional[int] = None
-    heartbeat_enabled: Optional[bool] = None
-    heartbeat_timeout: Optional[int] = None
-    proxy_url: Optional[str] = None
-    artwork_storage_mode: Optional[str] = None
-    auto_shutdown_on_heartbeat_timeout: Optional[bool] = None
+    mpv_path: str | None = None
+    server_port: int | None = Field(default=None, ge=1, le=65535)
+    mirror_dir: str | None = None
+    pan115_root: str | None = None
+    baidu_root: str | None = None
+    local_root: str | None = None
+    directory_tree_dir: str | None = None
+    openlist_server_url: str | None = None
+    openlist_remote_root: str | None = None
+    openlist_mount_root: str | None = None
+    openlist_username: str | None = None
+    openlist_password: str | None = None
+    openlist_cache_ttl_minutes: int | None = None
+    openlist_prefetch_limit: int | None = None
+    tmdb_bearer_token: str | None = None
+    tmdb_language: str | None = None
+    tmdb_certification_regions: str | None = None
+    anilist_enabled: bool | None = None
+    anilist_rate_limit: float | None = None
+    anilist_timeout: int | None = None
+    deepseek_api_key: str | None = None
+    tmdb_rate_limit: float | None = None
+    tmdb_max_retries: int | None = None
+    tmdb_timeout: int | None = None
+    bangumi_access_token: str | None = None
+    bangumi_user_agent: str | None = None
+    auto_play_next_episode: bool | None = None
+    mpv_anime4k_mode: str | None = None
+    mpv_anime4k_quality: str | None = None
+    series_card_image_mode: str | None = None
+    poster_size: int | None = None
+    heartbeat_enabled: bool | None = None
+    heartbeat_timeout: int | None = None
+    proxy_url: str | None = None
+    artwork_storage_mode: str | None = None
+    auto_shutdown_on_heartbeat_timeout: bool | None = None
 
 
 class SetupCompleteRequest(BaseModel):
@@ -122,7 +121,7 @@ def _probe_media_path_states(
         {"kind": "dir", "path": str(root)},
         *({"kind": "file", "path": str(path)} for path in sample_paths),
     ]
-    run_kwargs = {}
+    run_kwargs: dict[str, Any] = {}
     create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     if create_no_window:
         run_kwargs["creationflags"] = create_no_window
@@ -165,7 +164,7 @@ def get_config():
 
 def _ensure_writable_directory(path: Path) -> None:
     """创建目录并执行一次无残留的写入验证。"""
-    probe_path: Optional[Path] = None
+    probe_path: Path | None = None
     try:
         path.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(

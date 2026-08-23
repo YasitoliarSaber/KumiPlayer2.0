@@ -1,9 +1,7 @@
-# -*- coding: utf-8 -*-
 """桌面发布链路的静态回归检查。"""
 
 import subprocess
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[2]
 
