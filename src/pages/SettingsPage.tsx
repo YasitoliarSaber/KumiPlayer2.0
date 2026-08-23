@@ -6,6 +6,7 @@ import {
   ExternalLink,
   HeartHandshake,
   KeyRound,
+  Network,
   Palette,
   PlaySquare,
   RotateCcw,
@@ -27,7 +28,7 @@ import DecodedImage from '../components/ui/DecodedImage';
 import OpenListSettingsPanel from '../components/settings/OpenListSettingsPanel';
 import OpenListSourceRoutes from '../components/settings/OpenListSourceRoutes';
 import '../styles/settings-media-sources.css';
-type SettingsTab = 'appearance' | 'sources' | 'scrape' | 'player' | 'bangumi' | 'support';
+type SettingsTab = 'appearance' | 'sources' | 'openlist' | 'scrape' | 'player' | 'bangumi' | 'support';
 type SourceKey = 'pan115' | 'baidu' | 'local';
 type OpenListDraft = Pick<OpenListConfigPayload, 'server_url' | 'remote_root' | 'mount_root' | 'username' | 'password'> & {
   cache_ttl: string;
@@ -36,7 +37,8 @@ type OpenListDraft = Pick<OpenListConfigPayload, 'server_url' | 'remote_root' | 
 
 const sectionTabs: Array<{ key: SettingsTab; label: string; summary: string; icon: LucideIcon }> = [
   { key: 'bangumi', label: '账户与同步', summary: 'Bangumi 登录与观看同步', icon: UserRound },
-  { key: 'sources', label: '媒体来源', summary: 'OpenList、本地与目录树来源', icon: Database },
+  { key: 'sources', label: '媒体来源', summary: '本地、网盘与目录树来源', icon: Database },
+  { key: 'openlist', label: 'OpenList 设置', summary: '连接、远端目录与内容路由', icon: Network },
   { key: 'scrape', label: '元数据与图片', summary: 'TMDB、AniList 与刮削', icon: KeyRound },
   { key: 'player', label: '播放', summary: 'mpv 与连续播放', icon: PlaySquare },
   { key: 'appearance', label: '外观', summary: '主题、卡片与显示密度', icon: Palette },
@@ -223,6 +225,14 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
     body.style.scrollBehavior = 'auto';
     try {
       target.scrollIntoView({ behavior: 'auto', block: 'start' });
+      if (typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 760px)').matches) {
+        const outline = document.querySelector<HTMLElement>('.settings-outline');
+        const outlineHeight = Math.max(Math.ceil(outline?.getBoundingClientRect().height ?? 0), 72);
+        document.querySelector<HTMLElement>('.app-main')?.scrollBy({
+          top: -(outlineHeight + 12),
+          behavior: 'auto',
+        });
+      }
     } finally {
       root.style.scrollBehavior = previousRootBehavior;
       body.style.scrollBehavior = previousBodyBehavior;
@@ -367,7 +377,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
           ] as Array<{ id: AppearanceMode; name: string; colors: string[] }>).map((theme) => (
             <button key={theme.id} className={`appearance-card ${appearanceMode === theme.id ? 'active' : ''}`} onClick={() => setAppearanceMode(theme.id)}>
               <span className="appearance-preview">
-                {theme.colors.map((color) => <i key={color} style={{ background: color }} />)}
+                {theme.colors.map((color, index) => <i key={`${theme.id}-${index}`} style={{ background: color }} />)}
               </span>
               <strong>{theme.name}</strong>
               <span className="appearance-state">{appearanceMode === theme.id ? '正在使用' : '切换主题'}</span>
@@ -434,11 +444,11 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
     </PanelStack>
   );
 
-  const renderSources = () => (
+  const renderOpenList = () => (
     <PanelStack>
-      <SectionIntro title="媒体来源" description="管理 OpenList 连接、来源目录与本地扫描根目录。" />
+      <SectionIntro title="OpenList 设置" description="管理 OpenList 连接、远端根目录与内容路由。" />
       {config && (
-        <SettingsSection title="OpenList">
+        <SettingsSection title="连接与远端根目录">
           <OpenListSettingsPanel
             config={config}
             draft={openlistDraft}
@@ -473,7 +483,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
         </SettingsSection>
       )}
       {config && (
-        <SettingsSection title="来源目录">
+        <SettingsSection title="内容路由">
           <OpenListSourceRoutes
             configured={config.openlist_configured}
             routes={openlistRoutes}
@@ -501,6 +511,12 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
           />
         </SettingsSection>
       )}
+    </PanelStack>
+  );
+
+  const renderSources = () => (
+    <PanelStack>
+      <SectionIntro title="媒体来源" description="管理本地、115、百度和目录树的扫描根目录与镜像位置。" />
       {config && (
         <SettingsSection title="来源根目录">
           <div className="sources-root-panel">
@@ -756,6 +772,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
   const contentByTab: Record<SettingsTab, ReactNode> = {
     appearance: renderAppearance(),
     sources: renderSources(),
+    openlist: renderOpenList(),
     scrape: renderScrape(),
     player: renderPlayer(),
     bangumi: renderBangumi(),
