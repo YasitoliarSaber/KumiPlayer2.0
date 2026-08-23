@@ -6090,6 +6090,59 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .media-source-choice strong { overflow: hidden; color: var(--text); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
 .media-source-choice small { overflow: hidden; color: var(--text-secondary); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .media-source-choice > svg { flex: 0 0 auto; }
+/* P1-4：导入模式选择（WinSettingsCard 风格，三列布局：图标+文本 → 右操作区） */
+.media-import-mode-picker { margin-bottom: 4px; }
+.media-import-mode-list { display: grid; gap: 10px; }
+.media-import-mode-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 64px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--surface-raised) 36%, transparent);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.media-import-mode-card:hover:not(:disabled):not(:active) {
+  border-color: color-mix(in srgb, var(--accent-strong) 36%, var(--border));
+  background: color-mix(in srgb, var(--surface-raised) 62%, transparent);
+}
+.media-import-mode-card:active:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-strong) 14%, transparent);
+}
+.media-import-mode-card.selected {
+  border-color: color-mix(in srgb, var(--accent-strong) 66%, var(--border));
+  color: var(--accent-strong);
+  background: color-mix(in srgb, var(--accent-strong) 9%, transparent);
+}
+.media-import-mode-card.blocked {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.media-import-mode-icon { display: inline-flex; flex: 0 0 auto; }
+.media-import-mode-text { display: grid; flex: 1 1 auto; gap: 3px; min-width: 0; }
+.media-import-mode-text strong { display: flex; align-items: center; gap: 8px; overflow: hidden; color: var(--text); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.media-import-mode-text small { overflow: hidden; color: var(--text-secondary); font-size: 11px; line-height: 1.4; }
+.media-import-mode-recommended {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface-raised));
+  color: var(--accent-strong);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.media-import-mode-arrow { flex: 0 0 auto; color: var(--text-tertiary); font-size: 18px; }
+.media-import-mode-card.selected .media-import-mode-arrow { color: var(--accent-strong); }
 .media-import-setup-copy { display: flex; align-items: flex-start; gap: 14px; }
 .media-import-setup-copy > div { display: grid; gap: 5px; }
 .media-import-setup-copy h3 { margin: 0; font-size: 17px; }
@@ -11790,6 +11843,8 @@ body,
   .media-stage-header { align-items: stretch; flex-direction: column; }
   .media-stage-header-actions { align-items: stretch; }
   .media-source-choice-grid { grid-template-columns: 1fr; }
+  .media-import-mode-card { align-items: stretch; flex-direction: column; }
+  .media-import-mode-arrow { display: none; }
   .media-plan-keyfacts { width: 100%; }
   .media-plan-keyfacts > div { flex: 1 1 0; min-width: 0; padding-right: 16px; margin-right: 16px; }
   .media-task-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

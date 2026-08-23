@@ -4,6 +4,8 @@ import type { ImportPreview, SourcePathValidation, TaskRecord } from '../api/typ
 
 export type MediaWorkflowSource = 'pan115' | 'baidu' | 'local' | 'openlist';
 export type MediaWorkflowStep = 'import' | 'confirm' | 'workbench' | 'background' | 'maintenance';
+/** P1-4：导入模式（顶层概念）——local / tree / tree_openlist / openlist */
+export type MediaWorkflowIngestMode = 'local' | 'tree' | 'tree_openlist' | 'openlist';
 export type MediaWorkflowEntryStatus = 'idle' | 'parsing' | 'parsed' | 'failed';
 export type MediaWorkflowFamily = 'anime' | 'live';
 export type MediaWorkflowImportScope = '' | 'seasonal';
@@ -33,6 +35,8 @@ export interface BackgroundImportSession {
 
 interface MediaWorkflowState {
   step: MediaWorkflowStep;
+  /** P1-4：导入模式（顶层概念），决定来源/连接方式组合 */
+  ingestMode: MediaWorkflowIngestMode;
   source: MediaWorkflowSource;
   family: MediaWorkflowFamily;
   importScope: MediaWorkflowImportScope;
@@ -43,6 +47,7 @@ interface MediaWorkflowState {
   backgroundImport: BackgroundImportSession | null;
   pendingDroppedTreePath: string | null;
   setStep: (step: MediaWorkflowStep) => void;
+  setIngestMode: (mode: MediaWorkflowIngestMode) => void;
   setSource: (source: MediaWorkflowSource) => void;
   setFamily: (family: MediaWorkflowFamily) => void;
   setImportScope: (scope: MediaWorkflowImportScope) => void;
@@ -65,6 +70,7 @@ export const useMediaWorkflowStore = create<MediaWorkflowState>()(
   persist(
     (set, get) => ({
       step: 'import',
+      ingestMode: 'local',
       source: 'local',
       family: 'anime',
       importScope: '',
@@ -75,6 +81,7 @@ export const useMediaWorkflowStore = create<MediaWorkflowState>()(
       backgroundImport: null,
       pendingDroppedTreePath: null,
       setStep: (step) => set({ step }),
+      setIngestMode: (ingestMode) => set({ ingestMode }),
       setSource: (source) => set((state) => state.source === source
         ? { source }
         : { source, importScope: '' }),
@@ -102,6 +109,7 @@ export const useMediaWorkflowStore = create<MediaWorkflowState>()(
       // 退出重进后从后端 TaskRecord/preset 恢复实时状态（问题 3.3）。
       partialize: (state) => ({
         step: state.step,
+        ingestMode: state.ingestMode,
         source: state.source,
         family: state.family,
         importScope: state.importScope,

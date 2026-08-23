@@ -45,6 +45,7 @@ import MediaPlanSummary from '../components/media/MediaPlanSummary';
 import MediaStageHeader from '../components/media/MediaStageHeader';
 import MediaTaskWorkbench, { isMirrorTaskReady } from '../components/media/MediaTaskWorkbench';
 import MediaBackgroundImportStatus from '../components/media/MediaBackgroundImportStatus';
+import ImportModePicker from '../components/media/ImportModePicker';
 import { pickFolder, pickDirectoryTreeFile } from '../platform/folderPicker';
 
 const flowSteps: Array<Exclude<WorkflowStep, 'maintenance' | 'background'>> = ['import', 'confirm', 'workbench'];
@@ -134,6 +135,8 @@ export default function MediaManagementPage() {
   const backgroundImport = useMediaWorkflowStore((state) => state.backgroundImport);
   const pendingDroppedTreePath = useMediaWorkflowStore((state) => state.pendingDroppedTreePath);
   const setStep = useMediaWorkflowStore((state) => state.setStep);
+  const ingestMode = useMediaWorkflowStore((state) => state.ingestMode);
+  const setIngestMode = useMediaWorkflowStore((state) => state.setIngestMode);
   const setSource = useMediaWorkflowStore((state) => state.setSource);
   const setFamily = useMediaWorkflowStore((state) => state.setFamily);
   const setImportScope = useMediaWorkflowStore((state) => state.setImportScope);
@@ -1924,24 +1927,24 @@ export default function MediaManagementPage() {
             <input ref={treeUploadRef} className="media-tree-file-input" type="file" accept=".txt,.tree,.log,text/plain" onChange={(event) => { const file = event.target.files?.[0]; if (file) void importTreeFile(file); }} />
             {importModeActive && (<>
             <section className={`media-import-setup${family === 'anime' && importScope === 'seasonal' ? ' seasonal-risk' : ''}`} aria-label={source === 'local' ? '本地媒体导入设置' : '首次导入目录树'}>
-              <div className="media-source-choice-grid" aria-label="媒体来源">
-                {sourceOptions.map((option) => {
-                  const SourceIcon = option.value === 'local' ? HardDrive : Cloud;
-                  return (
-                    <button
-                      type="button"
-                      key={option.value}
-                      className={`media-source-choice${source === option.value ? ' selected' : ''}`}
-                      aria-pressed={source === option.value}
-                      onClick={() => setSource(option.value)}
-                    >
-                      <SourceIcon size={20} />
-                      <span><strong>{option.label}</strong><small>{option.value === 'local' ? '电脑硬盘或局域网目录' : option.value === 'pan115' ? '导入已导出的 115 目录树' : option.value === 'baidu' ? '导入已导出的百度网盘目录树' : '浏览 OpenList 远端目录并选择多个目录批量导入'}</small></span>
-                      {source === option.value && <CheckCircle2 size={17} />}
-                    </button>
-                  );
-                })}
-              </div>
+              {/* P1-4：导入模式选择（WinSettingsCard 风格卡片）。
+                  模式 2/3 都基于 pan115/baidu（TXT 目录树），差别在是否叠加
+                  OpenList 增量；模式 3 选中后用户可在下方选 115/百度。 */}
+              <ImportModePicker
+                source={source}
+                ingestMode={ingestMode}
+                onSetIngestMode={(mode) => {
+                  setIngestMode(mode);
+                  // 模式 → 默认来源（模式 2/3 为 pan115，用户可在媒体分类下再选 115/百度）
+                  if (mode === 'local') setSource('local');
+                  else if (mode === 'openlist') setSource('openlist');
+                  else if (mode === 'tree' || mode === 'tree_openlist') {
+                    if (source !== 'pan115' && source !== 'baidu') setSource('pan115');
+                  }
+                }}
+                openlistConfigured={openlistConfigured}
+                onGoSettings={goSettings}
+              />
               <div className="media-source-controls">
                 <label><span>媒体分类</span><select value={family} onChange={(event) => setFamily(event.target.value as MediaWorkflowFamily)}>{familyOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
                 {family === 'anime' && <label className={importScope === 'seasonal' ? 'seasonal-risk-field' : ''}><span>作品状态</span><select value={importScope} onChange={(event) => setImportScope(event.target.value as '' | 'seasonal')}><option value="">已完结（推荐）</option><option value="seasonal" disabled={source === 'openlist'}>新番（追更中）{source === 'openlist' ? '（暂不支持）' : ''}</option></select></label>}

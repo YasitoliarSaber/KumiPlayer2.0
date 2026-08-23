@@ -7,6 +7,7 @@ const settingsPage = readFileSync(new URL('../src/pages/SettingsPage.tsx', impor
 const openlistApi = readFileSync(new URL('../src/api/openlist.ts', import.meta.url), 'utf8');
 const mediaWorkflow = readFileSync(new URL('../src/stores/mediaWorkflow.ts', import.meta.url), 'utf8');
 const backgroundImportStatus = readFileSync(new URL('../src/components/media/MediaBackgroundImportStatus.tsx', import.meta.url), 'utf8');
+const importModePicker = readFileSync(new URL('../src/components/media/ImportModePicker.tsx', import.meta.url), 'utf8');
 const types = readFileSync(new URL('../src/api/types.ts', import.meta.url), 'utf8');
 const backendOpenlistApi = readFileSync(new URL('../backend/app/api/openlist.py', import.meta.url), 'utf8');
 const backendClient = readFileSync(new URL('../backend/app/integrations/openlist/client.py', import.meta.url), 'utf8');
@@ -21,7 +22,8 @@ const libraryStorePy = readFileSync(new URL('../backend/app/library/store.py', i
 
 test('媒体管理页提供 OpenList 连接来源入口（不再是“夸克试点”单来源）', () => {
   assert.match(mediaPage, /\{ value: 'openlist', label: 'OpenList 连接' \}/);
-  assert.match(mediaPage, /浏览 OpenList 远端目录并选择多个目录批量导入/);
+  // P1-4：描述文本随模式卡片移入 ImportModePicker
+  assert.match(importModePicker, /浏览 OpenList 远端目录，直接选择目录批量导入/);
   assert.match(mediaPage, /media-openlist-browser/);
 });
 
