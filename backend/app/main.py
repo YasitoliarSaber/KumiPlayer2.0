@@ -1,5 +1,6 @@
 """KumiPlayer 2.0 FastAPI 应用入口"""
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -15,62 +16,48 @@ from app.api.bangumi import router as bangumi_router
 from app.api.config import router as config_router
 from app.api.error_log import router as error_log_router
 from app.api.heartbeat import router as heartbeat_router
-from app.api.imports import router as imports_router
-from app.api.library import router as library_router
-from app.api.media_presets import router as media_presets_router
-from app.api.mirror import router as mirror_router
-from app.api.openlist import router as openlist_router
-from app.api.playback import router as playback_router
-from app.api.scrape import router as scrape_router
-from app.api.sources import router as sources_router
+from app.api.library_v4 import router as library_router
+from app.api.media_v4 import router as media_v4_router
+from app.api.openlist_v4 import router as openlist_router
+from app.api.playback_v4 import router as playback_router
 from app.api.system import router as system_router
-from app.api.tasks import router as tasks_router
-from app.api.tracking import router as tracking_router
+from app.api.tasks_v4 import router as tasks_router
+from app.api.tracking_v4 import router as tracking_router
 from app.core.api_security import ApiSessionMiddleware
-from app.pipeline.handlers import register_pipeline_handlers
-
-# 模块加载即注册 durable handlers：重启恢复时 JobRunner 领取任务必须能
-# 从注册表解析 job_type；注册是幂等的，lifespan 中重复调用无副作用。
-register_pipeline_handlers()
+from app.media_v4.jobs.runner import V4JobRunner
+from app.media_v4.runtime import initialize_runtime
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期：启动时初始化数据库、恢复持久任务队列和心跳监控，关闭时停止"""
-    from app.db import init_db
-    from app.db.tasks import mark_interrupted_tasks_failed
-    from app.jobs.runner import JobRunner
+    """应用生命周期：初始化 V4 唯一媒体状态源并启动心跳监控。"""
     from app.system.heartbeat import get_heartbeat_manager
 
-    # 初始化数据库
-    init_db()
-    mark_interrupted_tasks_failed()
+    database = initialize_runtime()
+    stop_jobs = asyncio.Event()
 
-    # 持久任务 worker：durable handlers 已在模块顶层注册，此处再次调用仅为防御。
-    # 独立 worker 分流：扫描（discovery_scan）、镜像（mirror_revision）、
-    # 刮削（scrape_revision）+ 媒体库重建（library_rebuild）各自专用线程；
-    # 无类型通用 worker 会抢走 pipeline job，因此这里不创建通用 worker；
-    # 同类型任务内部由 resource_key 互斥，背压由 discovery handler 内队列水位检查控制。
-    register_pipeline_handlers()
-    job_runner_scan = JobRunner(job_types=["discovery_scan"], claim_limit=1, worker_id="worker-scan")
-    job_runner_scan.start()
-    job_runner_mirror = JobRunner(job_types=["mirror_revision"], claim_limit=2, worker_id="worker-mirror")
-    job_runner_mirror.start()
-    job_runner_scrape = JobRunner(job_types=["scrape_revision"], claim_limit=1, worker_id="worker-scrape")
-    job_runner_scrape.start()
-    job_runner_library = JobRunner(job_types=["library_rebuild"], claim_limit=1, worker_id="worker-library")
-    job_runner_library.start()
+    async def run_v4_jobs() -> None:
+        runner = V4JobRunner(database)
+        while not stop_jobs.is_set():
+            try:
+                await asyncio.to_thread(runner.process_available)
+            except Exception:
+                # 单个任务会在自己的 handler 中记录失败；worker 继续消费后续任务。
+                pass
+            try:
+                await asyncio.wait_for(stop_jobs.wait(), timeout=0.25)
+            except TimeoutError:
+                continue
 
+    job_worker = asyncio.create_task(run_v4_jobs())
     manager = get_heartbeat_manager()
     manager.start_monitor()
     try:
         yield
     finally:
+        stop_jobs.set()
+        await job_worker
         manager.stop_monitor()
-        job_runner_scan.stop()
-        job_runner_mirror.stop()
-        job_runner_scrape.stop()
-        job_runner_library.stop()
 
 
 _BUNDLED_RUNTIME = os.environ.get("KUMIPLAYER_RUNTIME_KIND") == "bundled"
@@ -102,23 +89,19 @@ app.add_middleware(
     allowed_hosts=["127.0.0.1", "localhost", "testserver"],
 )
 
-# 注册路由
-app.include_router(imports_router)
-app.include_router(mirror_router)
-app.include_router(scrape_router)
+# V4 是媒体导入、执行和投影的唯一运行时入口。
 app.include_router(library_router)
-app.include_router(playback_router)
 app.include_router(heartbeat_router)
-app.include_router(sources_router)
 app.include_router(config_router)
-app.include_router(assets_router)
 app.include_router(bangumi_router)
-app.include_router(system_router)
-app.include_router(tasks_router)
 app.include_router(error_log_router)
+app.include_router(assets_router)
+app.include_router(media_v4_router)
+app.include_router(playback_router)
 app.include_router(tracking_router)
-app.include_router(media_presets_router)
+app.include_router(tasks_router)
 app.include_router(openlist_router)
+app.include_router(system_router)
 
 
 @app.get("/api/health")

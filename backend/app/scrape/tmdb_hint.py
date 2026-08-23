@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """TMDB 强绑定提示的单点解析。
 
 `{tmdb-123}` / `{tmdbid=123}` / `[tmdbid=123]` 家族（`{}` / `[]` 包裹、
@@ -8,7 +7,6 @@
 """
 
 import re
-from typing import Optional
 
 TMDB_HINT_STRIP_PATTERN = re.compile(
     r"\s*[\{\[]\s*(?:tmdb|tmdbid)\s*[-_=：:]?\s*\d+\s*[\}\]]\s*",
@@ -26,7 +24,7 @@ def strip_tmdb_hint(title: str) -> str:
     return " ".join(cleaned.split()).strip()
 
 
-def extract_tmdb_hint(title: str) -> Optional[int]:
+def extract_tmdb_hint(title: str) -> int | None:
     """提取标题中的 TMDB 强绑定 ID；无提示时返回 None。"""
     match = TMDB_HINT_EXTRACT_PATTERN.search(title or "")
     if not match:

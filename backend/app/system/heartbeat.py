@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """心跳状态管理器
 
 管理 WebSocket 连接状态、心跳超时判断、自动退出触发。
@@ -7,9 +6,9 @@
 import os
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
-from typing import Callable, Optional
+from datetime import datetime, timedelta, timezone
 
 from app.system.shutdown import request_backend_shutdown
 
@@ -19,19 +18,19 @@ def _now_iso() -> str:
 
 
 def _default_is_playing() -> bool:
-    """默认播放状态检查"""
-    try:
-        from app.playback.service import get_playback_manager
-        return get_playback_manager().status()["status"] == "playing"
-    except Exception:
-        return False
+    """V4 当前没有持久化播放会话表，播放状态由桌面播放器进程掌握。"""
+    return False
 
 
 def _default_is_busy() -> bool:
-    """后台任务运行中时不允许心跳监控自动退出后端。"""
+    """V4 durable job 运行中时不允许心跳监控自动退出后端。"""
     try:
-        from app.tasks.registry import get_task_manager
-        return get_task_manager().has_running_tasks()
+        from app.media_v4.runtime import get_database
+
+        with get_database().connect() as conn:
+            return conn.execute(
+                "SELECT 1 FROM jobs WHERE status IN ('queued', 'running') LIMIT 1"
+            ).fetchone() is not None
     except Exception:
         return False
 
@@ -108,10 +107,10 @@ class HeartbeatManager:
 
     def __init__(
         self,
-        shutdown_callback: Optional[Callable[[str], None]] = None,
-        is_playing_callback: Optional[Callable[[], bool]] = None,
-        is_busy_callback: Optional[Callable[[], bool]] = None,
-        is_parent_alive_callback: Optional[Callable[[], bool]] = None,
+        shutdown_callback: Callable[[str], None] | None = None,
+        is_playing_callback: Callable[[], bool] | None = None,
+        is_busy_callback: Callable[[], bool] | None = None,
+        is_parent_alive_callback: Callable[[], bool] | None = None,
     ):
         self._state = HeartbeatState()
         self._lock = threading.Lock()
@@ -119,7 +118,7 @@ class HeartbeatManager:
         self._is_playing = is_playing_callback or _default_is_playing
         self._is_busy = is_busy_callback or _default_is_busy
         self._is_parent_alive = is_parent_alive_callback or _default_is_parent_alive
-        self._monitor_thread: Optional[threading.Thread] = None
+        self._monitor_thread: threading.Thread | None = None
         self._monitor_stop = threading.Event()
         # 用 monotonic 避免系统时间跳变
         self._last_seen_mono: float = 0.0
@@ -162,7 +161,7 @@ class HeartbeatManager:
                 shutdown_reason=self._state.shutdown_reason,
             )
 
-    def should_shutdown(self, now: Optional[float] = None) -> bool:
+    def should_shutdown(self, now: float | None = None) -> bool:
         """判断是否应该退出
 
         参数:
@@ -254,7 +253,7 @@ class HeartbeatManager:
 
 
 # 全局单例
-_heartbeat_manager: Optional[HeartbeatManager] = None
+_heartbeat_manager: HeartbeatManager | None = None
 
 
 def get_heartbeat_manager() -> HeartbeatManager:

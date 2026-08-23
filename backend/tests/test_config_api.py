@@ -485,7 +485,7 @@ def test_media_paths_endpoint_reports_saved_mount_roots(client, temp_config, tmp
     assert resp.status_code == 200
     data = resp.json()
     # OpenList 作为正式来源一并纳入检测；未配置时返回可读的未配置状态
-    assert {item["source"] for item in data["sources"]} == {"pan115", "baidu", "openlist"}
+    assert {item["source"] for item in data["sources"]} == {"pan115", "baidu", "local", "openlist"}
     assert all("configured_root" in item for item in data["sources"])
     openlist_item = next(item for item in data["sources"] if item["source"] == "openlist")
     assert openlist_item["ok"] is False

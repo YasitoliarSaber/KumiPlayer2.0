@@ -1,8 +1,4 @@
-"""V4 的不可变来源证据和值对象。
-
-这个模块不依赖 SQLite、FastAPI 或旧 ImportPlan。解析阶段只能生成这些事实，
-不能在对象上就地套用作品身份或执行动作。
-"""
+"""V4 的不可变来源证据和值对象。"""
 
 from __future__ import annotations
 

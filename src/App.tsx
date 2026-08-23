@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { useUiStore } from './stores/ui';
 import { useLibraryStore } from './stores/library';
 import { useBangumiStore, SESSION_VERIFY_TTL_MS } from './stores/bangumi';
@@ -13,7 +13,6 @@ import CategoryPage from './pages/CategoryPage';
 import SearchPage from './pages/SearchPage';
 import LoadingState from './components/ui/loading-state';
 import { configApi, type PublicConfig } from './api/config';
-import { tasksApi } from './api/tasks';
 import { FluentProvider } from '@fluentui/react-components';
 import { getKumiFluentTheme } from './design/fluentTheme';
 import { listenForTreeFileDrop } from './platform/fileDrop';
@@ -43,10 +42,6 @@ export default function App() {
   const [appConfig, setAppConfig] = useState<PublicConfig | null>(null);
   const [configReady, setConfigReady] = useState(false);
   const [setupOverride, setSetupOverride] = useState(false);
-  const completedScrapeTaskIdsRef = useRef<Set<string>>(new Set());
-  const observedActiveScrapeTaskIdsRef = useRef<Set<string>>(new Set());
-  const scrapeLibraryRevisionByTaskRef = useRef<Map<string, number>>(new Map());
-  const scrapeWatcherStartedAtRef = useRef(Date.now());
 
   useLayoutEffect(() => {
     if (!configReady) return;
@@ -83,75 +78,6 @@ export default function App() {
   useEffect(() => {
     if (!appConfig?.setup_completed) return;
     loadLibrary();
-  }, [appConfig?.setup_completed, loadLibrary]);
-
-  useEffect(() => {
-    if (!appConfig?.setup_completed) return undefined;
-    let disposed = false;
-    let timer = 0;
-    scrapeWatcherStartedAtRef.current = Date.now();
-
-    const refreshAfterCompletedScrape = async () => {
-      // P0-6：后台标签页不轮询（不可见时避免无效网络请求拖慢前台滚动）
-      const visible = typeof document === 'undefined' || document.visibilityState === 'visible';
-      if (!visible) {
-        if (!disposed) timer = window.setTimeout(refreshAfterCompletedScrape, 30_000);
-        return;
-      }
-      let hasActiveScrape = false;
-      try {
-        const payload = await tasksApi.list({ type_prefix: 'scrape_', limit: 12 });
-        if (disposed) return;
-        const tasks = payload.tasks || [];
-        const activeTasks = tasks.filter((task) => task.status === 'pending' || task.status === 'running');
-        hasActiveScrape = activeTasks.length > 0;
-        for (const task of activeTasks) {
-          observedActiveScrapeTaskIdsRef.current.add(task.task_id);
-        }
-        const publishedDuringScrape = activeTasks.filter((task) => {
-          const result = (task.result || {}) as Record<string, unknown>;
-          const revision = Math.max(0, Number(result.library_refresh_revision || 0));
-          return revision > (scrapeLibraryRevisionByTaskRef.current.get(task.task_id) || 0);
-        });
-        if (publishedDuringScrape.length) {
-          await loadLibrary({ force: true });
-          if (!useLibraryStore.getState().error) {
-            for (const task of publishedDuringScrape) {
-              const result = (task.result || {}) as Record<string, unknown>;
-              scrapeLibraryRevisionByTaskRef.current.set(
-                task.task_id,
-                Math.max(0, Number(result.library_refresh_revision || 0)),
-              );
-            }
-          }
-        }
-        const completed = tasks.filter((task) => task.status === 'succeeded');
-        for (const task of completed) {
-          if (completedScrapeTaskIdsRef.current.has(task.task_id)) continue;
-          const finishedAt = Date.parse(task.finished_at || '');
-          const finishedInThisSession = Number.isFinite(finishedAt) && finishedAt >= scrapeWatcherStartedAtRef.current;
-          const wasObservedActive = observedActiveScrapeTaskIdsRef.current.has(task.task_id);
-          completedScrapeTaskIdsRef.current.add(task.task_id);
-          if (wasObservedActive || finishedInThisSession) {
-            await loadLibrary({ force: true });
-          }
-        }
-      } catch {
-        // 后台任务轮询不能阻断主界面；媒体管理页仍会显示更具体的任务错误。
-      } finally {
-        if (!disposed) {
-          // P0-6：有活跃刮削任务时高频轮询，空闲时降频减少无效请求
-          timer = window.setTimeout(refreshAfterCompletedScrape, hasActiveScrape ? 4000 : 30_000);
-        }
-      }
-    };
-
-    void refreshAfterCompletedScrape();
-
-    return () => {
-      disposed = true;
-      window.clearTimeout(timer);
-    };
   }, [appConfig?.setup_completed, loadLibrary]);
 
   useEffect(() => {

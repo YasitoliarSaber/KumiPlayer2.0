@@ -4,28 +4,6 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { useUiStore } from '../../src/stores/ui';
 import { useLibraryStore } from '../../src/stores/library';
 
-vi.mock('../../src/api/tracking', () => ({
-  trackingApi: {
-    list: vi.fn().mockResolvedValue({ items: [] }),
-    scanAll: vi.fn(),
-    importRoot: vi.fn(),
-    scan: vi.fn(),
-    create: vi.fn(),
-  },
-}));
-
-vi.mock('../../src/api/tasks', () => ({
-  tasksApi: {
-    get: vi.fn(),
-    list: vi.fn().mockResolvedValue({ tasks: [] }),
-    cancel: vi.fn(),
-  },
-}));
-
-vi.mock('../../src/platform/folderPicker', () => ({
-  pickFolder: vi.fn(),
-}));
-
 vi.mock('../../src/components/library/VirtualizedPosterGrid', () => ({
   default: () => <div data-testid="poster-grid" />,
 }));

@@ -5,8 +5,8 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from app.library import thumbnails as thumb
 from app.main import app
+from app.media_v4.assets import thumbnails as thumb
 
 
 @pytest.fixture

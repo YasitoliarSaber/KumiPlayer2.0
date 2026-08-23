@@ -21,7 +21,6 @@ import time
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from app.catalog import source_health
 from app.integrations.openlist.client import (
     OpenListClient,
     normalize_openlist_server_url,
@@ -42,6 +41,7 @@ from app.integrations.openlist.models import (
     OpenListTimeoutError,
     OpenListValidationError,
 )
+from app.media_v4.sources import health as source_health
 
 _logger = logging.getLogger(__name__)
 #: 探测时读取远端根的页参数（只验证可读性，不拉全量）

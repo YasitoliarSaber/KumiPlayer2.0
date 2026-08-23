@@ -102,116 +102,6 @@ def test_config_series_card_image_mode_public():
     assert public["series_card_image_mode"] == "fanart"
 
 
-def test_raw_file_model():
-    """测试 RawFile 模型可导入和实例化"""
-    from app.raw.models import RawFile, RawSnapshot
-
-    f = RawFile(
-        id="f1",
-        source="pan115",
-        relative_path="动画/冰菓.2012/视频.mkv",
-        real_path="H:\\115open\\动画\\冰菓.2012\\视频.mkv",
-        name="视频.mkv",
-        stem="视频",
-        ext=".mkv",
-        is_file=True,
-    )
-    assert f.source == "pan115"
-    assert f.ext == ".mkv"
-
-    snap = RawSnapshot(
-        snapshot_id="s1",
-        source="pan115",
-        files=[f],
-    )
-    assert len(snap.files) == 1
-
-
-def test_import_plan_model():
-    """测试 ImportPlan 模型可导入和实例化"""
-    from app.import_plan.models import ImportPlan, ImportPlanItem
-
-    item = ImportPlanItem(
-        id="i1",
-        raw_file_id="f1",
-        resource_type="video",
-        action="generate_strm",
-        work_title="冰菓",
-        confidence="high",
-    )
-    assert item.resource_type == "video"
-    assert item.action == "generate_strm"
-
-    plan = ImportPlan(
-        plan_id="p1",
-        source="pan115",
-        status="draft",
-        items=[item],
-    )
-    assert plan.status == "draft"
-    assert len(plan.items) == 1
-
-
-def test_scrape_map_model():
-    """测试 ScrapeMap 模型可导入和实例化"""
-    from app.scrape.models import ScrapeMap, ScrapeMapItem
-
-    item = ScrapeMapItem(
-        scrape_target_id="t1",
-        work_id="w1",
-        source="pan115",
-        local_title="冰菓",
-        tmdb_id=12189,
-        tmdb_type="tv",
-        selected_by="auto",
-    )
-    sm = ScrapeMap(items=[item])
-    assert sm.version == 1
-    assert len(sm.items) == 1
-
-
-def test_library_index_model():
-    """测试 LibraryIndex 模型可导入和实例化"""
-    from app.library.models import (
-        LibraryIndex, WorkIndex, SeasonIndex,
-        EpisodeIndex, RelatedWork,
-    )
-
-    ep = EpisodeIndex(
-        work_id="w1",
-        season_number=1,
-        episode_number=1,
-        title="重生",
-    )
-    season = SeasonIndex(
-        work_id="w1",
-        season_number=1,
-        group_type="season",
-        label="第1季",
-    )
-    work = WorkIndex(
-        work_id="w1",
-        title="冰菓",
-        year=2012,
-        seasons=[season],
-        episodes=[ep],
-    )
-    lib = LibraryIndex(works=[work])
-    assert len(lib.works) == 1
-    assert lib.works[0].title == "冰菓"
-
-
-def test_source_adapter_interface():
-    """测试 SourceAdapter 抽象接口不可直接实例化"""
-    from app.sources.base import SourceAdapter
-
-    try:
-        SourceAdapter()
-        assert False, "应该抛出 TypeError"
-    except TypeError:
-        pass
-
-
 def test_sanitize_filename():
     """测试文件名清洗"""
     from app.core.paths import sanitize_filename
@@ -291,11 +181,6 @@ if __name__ == "__main__":
         test_config_mask,
         test_config_mask_short_value,
         test_config_mask_deepseek_key,
-        test_raw_file_model,
-        test_import_plan_model,
-        test_scrape_map_model,
-        test_library_index_model,
-        test_source_adapter_interface,
         test_sanitize_filename,
         test_reject_path_traversal,
         test_safe_join,

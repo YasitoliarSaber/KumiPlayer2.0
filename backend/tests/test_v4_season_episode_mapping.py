@@ -62,3 +62,18 @@ def test_special_episode_is_not_simulated_by_clearing_all_episode_identity():
     assert episode.local_season_number == 0
     assert episode.special_number == 1
     assert episode.episode_kind == "special"
+
+
+def test_conflicting_absolute_numbers_do_not_split_a_local_episode():
+    from app.media_v4.resolution.resolver import MediaResolver
+
+    graph = MediaResolver().resolve(
+        [
+            _fact(evidence_id="ev-abs-a", season=2, episode=1, absolute=13),
+            _fact(evidence_id="ev-abs-b", season=2, episode=1, absolute=14),
+        ]
+    )
+
+    assert len(graph.episodes) == 1
+    assert graph.episodes[0].asset_evidence_ids == ("ev-abs-a", "ev-abs-b")
+    assert any(issue.code == "absolute_episode_conflict" for issue in graph.issues)

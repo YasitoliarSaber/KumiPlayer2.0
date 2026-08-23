@@ -4,7 +4,7 @@ import { api } from './client'
 import type { TaskRecord } from './types'
 
 export const tasksApi = {
-  // 统一任务列表：镜像、刮削、媒体库重扫、来源解析都从这里看。
+  // V4 jobs 表的唯一任务查询入口。
   list: (params?: {
     source?: string
     task_type?: string
@@ -26,19 +26,5 @@ export const tasksApi = {
   cancel: (taskId: string) =>
     api.post<TaskRecord>(`/api/tasks/${taskId}/cancel`),
 
-  // 查询镜像任务
-  getMirrorTask: (taskId: string) =>
-    api.get<TaskRecord>(`/api/mirror/tasks/${taskId}`),
-
-  // 查询刮削任务
-  getScrapeTask: (taskId: string) =>
-    api.get<TaskRecord>(`/api/scrape/tasks/${taskId}`),
-
-  // 查询媒体库任务
-  getLibraryTask: (taskId: string) =>
-    api.get<TaskRecord>(`/api/library/tasks/${taskId}`),
-
-  // 重扫媒体库
-  rescanLibrary: (source?: string) =>
-    api.post<{ task_id: string; status: string }>('/api/library/rescan', { source }),
+  rescanLibrary: () => api.post<{ task_id: string; status: string }>('/api/library/rescan'),
 }

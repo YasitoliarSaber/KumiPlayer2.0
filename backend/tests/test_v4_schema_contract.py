@@ -46,6 +46,8 @@ def test_empty_database_creates_one_strict_v4_schema(tmp_path):
         "revision_bindings",
         "jobs",
         "artifacts",
+        "source_health",
+        "openlist_telemetry",
     } <= tables
 
 

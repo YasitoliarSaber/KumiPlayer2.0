@@ -10,7 +10,7 @@ import re
 from pathlib import PurePosixPath
 
 from app.media_v4.domain.models import ParsedFacts, SourceEvidence
-from app.recognition.evidence import provider_to_source
+from app.media_v4.sources.adapters import provider_to_source
 from app.recognition.media import recognize_media
 
 _SEASON_TOKEN = re.compile(r"(?i)(S\d{1,2})")

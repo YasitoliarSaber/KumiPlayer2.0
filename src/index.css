@@ -14078,3 +14078,31 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
   max-width: 520px;
   cursor: pointer;
 }
+
+/* V4 导入页：只承载 SourceEvidence → Revision → Jobs 三个阶段。 */
+.media-v4-page { gap: 16px; }
+.media-v4-source-card, .media-v4-review-card, .media-v4-jobs-card { display: grid; gap: 16px; }
+.media-v4-controls { display: grid; grid-template-columns: minmax(150px, .3fr) minmax(280px, 1fr) minmax(200px, .7fr); gap: 12px; align-items: end; }
+.media-v4-path-field { min-width: 0; }
+.media-v4-path-row { display: flex; gap: 8px; }
+.media-v4-path-row .fui-Input { min-width: 0; flex: 1; }
+.media-v4-empty { padding: 22px; border: 1px dashed var(--border); border-radius: 8px; color: var(--text-secondary); text-align: center; }
+.media-v4-work-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.media-v4-work-card { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in srgb, var(--surface-raised) 70%, transparent); }
+.media-v4-work-card > div:first-child { display: grid; gap: 3px; }
+.media-v4-work-card strong { font-size: 16px; }
+.media-v4-work-card span { color: var(--text-secondary); font-size: 12px; }
+.media-v4-episode-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.media-v4-episode-list span { padding: 3px 7px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.media-v4-issues { display: grid; gap: 8px; }
+.media-v4-issues > div { display: grid; gap: 3px; padding: 10px 12px; border-left: 3px solid #c45b52; background: color-mix(in srgb, #c45b52 8%, transparent); }
+.media-v4-issues strong { font-size: 12px; }
+.media-v4-issues span { color: var(--text-secondary); font-size: 13px; }
+.media-v4-job-list { display: grid; gap: 8px; }
+.media-v4-job-list > div { display: grid; grid-template-columns: minmax(180px, 1fr) 100px minmax(160px, 1fr); gap: 12px; align-items: center; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
+.media-v4-job-list span { color: var(--text-secondary); font-size: 13px; }
+.media-v4-job-list code { overflow: hidden; color: var(--text-tertiary); font-size: 11px; text-overflow: ellipsis; }
+@media (max-width: 760px) {
+  .media-v4-controls { grid-template-columns: 1fr; align-items: stretch; }
+  .media-v4-job-list > div { grid-template-columns: 1fr; gap: 4px; }
+}

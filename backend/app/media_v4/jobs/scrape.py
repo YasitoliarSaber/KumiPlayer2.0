@@ -103,6 +103,15 @@ class V4ScrapeService:
                     ),
                 )
                 conn.execute(
+                    """
+                    INSERT INTO provider_bindings(work_id, provider, media_type, provider_id)
+                    SELECT ?, ?, work_type, ? FROM works WHERE work_id = ?
+                    ON CONFLICT(work_id, provider, media_type) DO UPDATE SET
+                        provider_id = excluded.provider_id
+                    """,
+                    (job["work_id"], provider_name, provider_id, job["work_id"]),
+                )
+                conn.execute(
                     "UPDATE jobs SET status = 'succeeded', updated_at = ?, last_error = '' WHERE job_id = ?",
                     (now, job_id),
                 )

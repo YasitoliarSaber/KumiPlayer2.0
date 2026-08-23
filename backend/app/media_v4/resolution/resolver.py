@@ -22,11 +22,23 @@ def _normalize_title(value: str) -> str:
     return value.strip(" ._-·:：/\\()（）【】[]{}<>《》「」『』\"'")
 
 
+def _is_placeholder_title(value: str) -> bool:
+    return _normalize_title(value) in {
+        "",
+        "unknown",
+        "untitled",
+        "n/a",
+        "na",
+        "none",
+        "null",
+    }
+
+
 def _work_key(facts: ParsedFacts) -> str:
     if facts.tmdb_hint_id and facts.tmdb_hint_type:
         return f"provider:{facts.tmdb_hint_type.casefold()}:{facts.tmdb_hint_id}"
     title = _normalize_title(facts.series_group or facts.work_title or (facts.title_candidates or ("",))[0])
-    if not title:
+    if _is_placeholder_title(title):
         return ""
     media_type = (facts.media_type or facts.group_type or "unknown").casefold()
     year = str(facts.year_candidate or "")
@@ -84,18 +96,44 @@ class MediaResolver:
                 episode_kind = "regular" if facts.group_type == "season" else facts.group_type or "unknown"
 
             edition_key = _edition_key(facts)
+            # A local SxxExx identity is authoritative for grouping.  Absolute
+            # numbering is retained as a fact and cannot split the same local
+            # episode; when no local number exists, absolute numbering is the
+            # only available episode key and therefore remains in the key.
+            absolute_group_key = facts.absolute_episode_candidate if local_episode is None else None
             episode_key = "|".join(
                 (
                     key,
                     str(local_season),
                     str(local_episode),
-                    str(facts.absolute_episode_candidate),
+                    str(absolute_group_key),
                     str(special_number),
                     edition_key,
                 )
             )
+            episode_identity = (key, local_season, local_episode, absolute_group_key, special_number, edition_key)
+            existing_episode = episode_rows.get(episode_identity)
+            if (
+                existing_episode is not None
+                and existing_episode["absolute_episode_number"] is not None
+                and facts.absolute_episode_candidate is not None
+                and existing_episode["absolute_episode_number"] != facts.absolute_episode_candidate
+            ):
+                issues.append(
+                    ResolutionIssue(
+                        code="absolute_episode_conflict",
+                        evidence_id=evidence.evidence_id,
+                        message="同一 Local Episode 出现冲突的绝对集号，已保留为独立事实并需要复核",
+                    )
+                )
+            if (
+                existing_episode is not None
+                and existing_episode["absolute_episode_number"] is None
+                and facts.absolute_episode_candidate is not None
+            ):
+                existing_episode["absolute_episode_number"] = facts.absolute_episode_candidate
             episode = episode_rows.setdefault(
-                (key, local_season, local_episode, facts.absolute_episode_candidate, special_number, edition_key),
+                episode_identity,
                 {
                     "episode_key": episode_key,
                     "work_key": key,

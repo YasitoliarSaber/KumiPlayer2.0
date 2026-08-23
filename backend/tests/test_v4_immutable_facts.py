@@ -103,3 +103,58 @@ def test_repository_round_trip_preserves_source_and_parse_payload_without_loss(t
 
     assert repository.get_source_evidence(evidence.evidence_id) == evidence
     assert repository.get_parsed_facts(facts.parsed_fact_id) == facts
+
+
+def test_persisted_facts_and_confirmed_bindings_are_sql_immutable(tmp_path):
+    import sqlite3
+
+    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.persistence.repositories import V4Repository
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "immutable.db")
+    database.initialize()
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO source_roots(root_id, provider, ingest_method, created_at, updated_at) VALUES ('r', 'local', 'scan', 'n', 'n')"
+        )
+        conn.execute(
+            "INSERT INTO source_scans(scan_id, root_id, generation, status) VALUES ('s', 'r', 1, 'completed')"
+        )
+    evidence = SourceEvidence(
+        evidence_id="ev-immutable",
+        scan_id="s",
+        root_id="r",
+        source_key="Show/S01E01.mkv",
+        relative_path="Show/S01E01.mkv",
+        entry_kind="video",
+    )
+    facts = ParsedFacts(
+        parsed_fact_id="facts-immutable",
+        evidence_id=evidence.evidence_id,
+        parser_version="v4",
+        work_title="Show",
+        title_candidates=("Show",),
+        media_type="tv",
+        group_type="season",
+        season_candidate=1,
+        episode_candidate=1,
+    )
+    repository = V4Repository(database)
+    repository.save_source_evidence(evidence)
+    repository.save_parsed_facts(facts)
+    with database.connect() as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("UPDATE source_evidence SET relative_path = 'changed' WHERE evidence_id = 'ev-immutable'")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("DELETE FROM parsed_facts WHERE parsed_fact_id = 'facts-immutable'")
+
+    service = V4RevisionService(database)
+    service.create_draft("rev-immutable", [(evidence, facts)])
+    service.confirm("rev-immutable")
+    with database.connect() as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("UPDATE revision_bindings SET confidence = 'low' WHERE revision_id = 'rev-immutable'")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("DELETE FROM revision_bindings WHERE revision_id = 'rev-immutable'")

@@ -96,8 +96,8 @@ function recentViewingPriority(
 }
 
 function recentEpisodeLabel(item: PlaybackHistoryItem) {
-  const episodeNumber = Number(item.episode_number || 0);
-  const seasonNumber = Number(item.season_number || 0);
+  const episodeNumber = Number(item.episode_number ?? 0);
+  const seasonNumber = Number(item.season_number ?? 0);
   if (episodeNumber > 0) {
     const seasonPrefix = seasonNumber > 0 ? `第 ${seasonNumber} 季 · ` : '';
     return `${seasonPrefix}最近播放第 ${episodeNumber} 集`;

@@ -9,11 +9,6 @@ import { isWorkInLibraryView } from '../utils/libraryCategories'
 import { buildAssetUrl } from '../api/assets'
 
 const LIBRARY_CACHE_KEY = 'kumiplayer-library-cache-v4'
-const LEGACY_LIBRARY_CACHE_KEYS = [
-  'kumiplayer-library-cache-v3',
-  'kumiplayer-library-cache-v2',
-  'kumiplayer-library-cache-v1',
-]
 const LIBRARY_CACHE_MAX_AGE = 1000 * 60 * 60 * 24 * 7
 const LIBRARY_CACHE_MAX_BYTES = 1_500_000
 const LIBRARY_CACHE_MAX_WORKS = 500
@@ -119,26 +114,6 @@ async function waitForDetailArtwork(work: WorkIndex, timeoutMs: number) {
   window.clearTimeout(timeoutId)
 }
 
-function deduplicateWorks(works: WorkIndex[]) {
-  const selected = new Map<string, WorkIndex>()
-  for (const work of works) {
-    // P0-3：优先用 canonical_work_id（V3 跨来源稳定身份）去重；legacy 数据无
-    // canonical 时回退 source+work_id 保持历史行为。
-    const identity = work.canonical_work_id || work.work_id
-    const key = work.canonical_work_id ? identity : `${work.source}:${identity}`
-    const previous = selected.get(key)
-    if (!previous || workCompleteness(work) >= workCompleteness(previous)) {
-      selected.set(key, work)
-    }
-  }
-  return [...selected.values()]
-}
-
-function workCompleteness(work: WorkIndex) {
-  const seasonEpisodes = (work.seasons || []).reduce((total, season) => total + (season.episode_count || 0), 0)
-  return (work.episodes?.length || 0) * 10_000 + seasonEpisodes * 10 + (work.seasons?.length || 0)
-}
-
 export const useLibraryStore = create<LibraryState>((set, get) => ({
   works: [],
   history: [],
@@ -241,7 +216,8 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     const libraryRequest = libraryApi.getLibrary({ compact: true }).then((libraryRes) => {
       if (requestId !== libraryLoadRequest) return
 
-      const works = deduplicateWorks(libraryRes.works)
+      // SQLite projection 已经保证一 Work 一卡片；前端只按 work_id 消费，不再二次合卡。
+      const works = libraryRes.works
       set({
         works,
         loaded: true,
@@ -365,9 +341,8 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     const index = works.findIndex((item) => item.work_id === workId)
     if (index >= 0) works[index] = mergeWorkDetailIntoCompact(works[index], work)
     else works.push(work)
-    const normalizedWorks = deduplicateWorks(works)
-    set({ works: normalizedWorks, selectedWorkDetail: work })
-    saveLibraryCache(normalizedWorks)
+    set({ works, selectedWorkDetail: work })
+    saveLibraryCache(works)
     return work
   },
 }))
@@ -377,7 +352,6 @@ function hydrateLibraryCache(
   get: () => LibraryState
 ) {
   if (get().loaded || get().works.length > 0 || typeof localStorage === 'undefined') return
-  clearLegacyLibraryCaches()
   try {
     const raw = localStorage.getItem(LIBRARY_CACHE_KEY)
     if (!raw) return
@@ -392,7 +366,7 @@ function hydrateLibraryCache(
       return
     }
     if (Date.now() - cached.savedAt > LIBRARY_CACHE_MAX_AGE) return
-    set({ works: deduplicateWorks(cached.works), loaded: true })
+    set({ works: cached.works, loaded: true })
   } catch {
     localStorage.removeItem(LIBRARY_CACHE_KEY)
   }
@@ -401,7 +375,6 @@ function hydrateLibraryCache(
 function saveLibraryCache(works: WorkIndex[]) {
   const generation = ++libraryCacheGeneration
   if (typeof localStorage === 'undefined') return
-  clearLegacyLibraryCaches()
   if (works.length === 0) {
     localStorage.removeItem(LIBRARY_CACHE_KEY)
     return
@@ -429,16 +402,6 @@ function saveLibraryCache(works: WorkIndex[]) {
       idleWindow.requestIdleCallback(write, { timeout: 1000 })
     } else {
       globalThis.setTimeout(write, 0)
-    }
-  } catch {
-    // ignore
-  }
-}
-
-function clearLegacyLibraryCaches() {
-  try {
-    for (const key of LEGACY_LIBRARY_CACHE_KEYS) {
-      localStorage.removeItem(key)
     }
   } catch {
     // ignore

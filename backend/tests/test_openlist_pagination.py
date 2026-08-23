@@ -66,7 +66,7 @@ class FakeOpenListClient:
 def fake_client(monkeypatch):
     FakeOpenListClient.instances = []
     FakeOpenListClient.tree = {}
-    monkeypatch.setattr("app.api.openlist.OpenListClient", FakeOpenListClient)
+    monkeypatch.setattr("app.api.openlist_v4.OpenListClient", FakeOpenListClient)
     monkeypatch.setattr("app.integrations.openlist.connection.OpenListClient", FakeOpenListClient)
     yield
 

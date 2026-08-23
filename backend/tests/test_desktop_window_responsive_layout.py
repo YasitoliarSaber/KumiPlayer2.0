@@ -63,27 +63,8 @@ def test_media_management_collapses_before_controls_can_overlap():
     assert "@container media-flow (max-width: 1080px)" in css
     assert "@container media-flow (max-width: 900px)" in css
     assert "@container media-flow (max-width: 760px)" in css
-    assert ".media-flow-grid.parse-stage" in css
-    assert "grid-template-columns: 1fr !important" in css
-    assert ".media-directory-row" in css
-    assert "grid-template-columns: 30px minmax(280px, 560px) minmax(120px, 200px) 96px 156px" in css
-    assert '"index path note status actions"' in css
-    assert '"index path status"' in css
-    assert '". note actions"' in css
-    # “先折叠、不重叠”的真实实现是容器查询降级本身，不是某条视口相关的右侧留白：
-    # 1) src/index.css 的 "Desktop main viewport boundary" 决策明确不为窗口控制预留列，
-    #    .app-main 独占 sidebar 右边缘到 right:0 的全部空间；
-    # 2) .desktop-titlebar 是 fixed / z-index 100，媒体管理的 .media-flow-header 是 .app-main
-    #    (top:40px) 内的 sticky / z-index 8，两者分处不同定位上下文，结构上不可能重叠；
-    # 3) Windows 响应式规范要求边距为 4 epx 的整数倍，而 2.5vw 在多数窗口宽度下会算出
-    #    非整数、非 4 倍数的值，与项目 4/8px 几何规范冲突。
-    # 因此这里改为直接锁住窄容器下的折叠行为：命令栏纵向堆叠、工具按钮撑满。
-    narrow_start = css.index("@container media-flow (max-width: 760px)")
-    narrow_block = css[narrow_start : css.index("@container media-flow (max-width: 480px)")]
-    assert "flex-direction: column" in narrow_block
-    assert ".media-flow-utilities .fui-Button { width: 100%; }" in narrow_block
-    # 单一 command surface 在窄容器下按行堆叠，标题/导航/维护入口不重叠
-    assert ".media-flow-command-bar {\n    grid-template-columns: 1fr;" in narrow_block
-    assert ".media-source-controls > label:last-child:nth-child(odd)" in css
-    assert 'className="media-directory-index"' in page
-    assert 'className="media-directory-note"' in page
+    assert ".media-v4-controls" in css
+    assert ".media-v4-path-row" in css
+    assert 'className="media-flow-page media-v4-page"' in page
+    assert 'className="media-stage-shell media-v4-source-card"' in page
+    assert 'className="media-stage-shell media-v4-review-card"' in page

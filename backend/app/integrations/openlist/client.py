@@ -32,7 +32,6 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from app.catalog import source_health
 from app.integrations.openlist.governor import (
     OpenListRequestGovernor,
     get_governor,
@@ -53,6 +52,7 @@ from app.integrations.openlist.models import (
     OpenListTimeoutError,
     OpenListValidationError,
 )
+from app.media_v4.sources import health as source_health
 
 # OpenList 分页上限（文档：per_page 最大 100，默认 30）
 MAX_PER_PAGE = 100

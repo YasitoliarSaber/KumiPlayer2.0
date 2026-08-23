@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """pytest 测试隔离。
 
 项目运行时配置位于项目根 data/config.json，包含真实路径和本机 token。
@@ -12,7 +11,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
 
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 _REAL_DATA_DIR = (_PROJECT_ROOT / "data").resolve()
@@ -89,17 +87,6 @@ def isolate_runtime_data(tmp_path, monkeypatch, request):
 
     monkeypatch.setenv("KUMIPLAYER_DATA_DIR", str(test_data_dir))
 
-    # Preflight 0：每测试独立 SQLite。
-    # 之前只有 env 隔离，database._db_path 首次解析后缓存 + thread-local 连接
-    # 复用，导致所有测试共享集合级 kumiplayer.db（roots/tracking_bindings/jobs
-    # 残留 → 计数类测试顺序敏感）。这里关闭连接、清空路径缓存并按当前测试
-    # 数据目录重新 init_db：每个测试拿到独立 tmp 数据库。
-    from app.db import database as db_module
-
-    db_module.close_connection()
-    db_module._db_path = None
-    db_module.init_db()
-
     for attr in ("_DATA_DIR", "_TEST_DATA_DIR"):
         if hasattr(request.module, attr):
             monkeypatch.setattr(request.module, attr, test_data_dir, raising=False)
@@ -116,21 +103,26 @@ def isolate_runtime_data(tmp_path, monkeypatch, request):
         # （_TEST_DATA_DIR 被隔离到 tmp/data，独立 db 也在此目录下）。
         # 先关闭持有 db 文件的连接（Windows 文件占用锁），删除成功后
         # 按当前 data 目录重建干净独立数据库，避免 no such table。
-        from app.db import database as db_module
-
-        db_path = db_module._db_path
-        db_inside = bool(
-            db_path is not None
-            and str(db_path.resolve()).startswith(str(target.resolve()) + os.sep)
+        db_path = target / "kumiplayer.db"
+        db_inside = any(
+            candidate.exists()
+            for candidate in (
+                db_path,
+                target / "kumiplayer.db-wal",
+                target / "kumiplayer.db-shm",
+            )
         )
-        if db_inside:
-            db_module.close_connection()
         # 关闭其他线程（TestClient portal 等）持有的 target 内 SQLite 连接
         _close_db_connections_inside(target)
         result = original_rmtree(path, *args, **kwargs)
         if db_inside:
-            db_module._db_path = None
-            db_module.init_db()
+            from app.api import media_v4
+            from app.media_v4.persistence.database import V4Database
+            from app.media_v4.runtime import get_database as get_v4_database
+
+            get_v4_database.cache_clear()
+            media_v4._database = None
+            V4Database(db_path).initialize()
         return result
 
     monkeypatch.setattr(shutil, "rmtree", guarded_rmtree)
@@ -144,13 +136,31 @@ def isolate_runtime_data(tmp_path, monkeypatch, request):
     except Exception:
         pass
 
+    # V4 是应用运行时唯一的媒体数据库。旧 fixture 曾先创建 V3 数据库，
+    # 导致 TestClient(app) 被 V4 的 ResetRequiredError 拦截。
+    from app.api import media_v4
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.runtime import get_database as get_v4_database
+
+    get_v4_database.cache_clear()
+    media_v4._database = None
+    V4Database(test_data_dir / "kumiplayer.db").initialize()
+
     try:
         yield
     finally:
         try:
-            from app.db import database as db_module
+            from app.api import media_v4
+            from app.media_v4.runtime import get_database as get_v4_database
 
-            db_module.close_connection()
+            get_v4_database.cache_clear()
+            media_v4._database = None
+        except Exception:
+            pass
+        try:
+            from app.media_v4.sources import health as source_health
+
+            source_health.close_connection()
         except Exception:
             pass
         try:
@@ -179,15 +189,5 @@ def isolate_path_config_alias(monkeypatch):
 
 @pytest.fixture(scope="session", autouse=True)
 def init_collection_db():
-    """保证集合级 SQLite 表存在（对齐生产 app lifespan 的 init_db）。
-
-    模块 1 起 api/discovery 的冷却检查（source_health.can_request）与
-    TestClient(app)（不触发 lifespan）都会访问数据库；没有独立 db fixture
-    的测试文件依赖本会话级初始化。各文件自己的 db fixture
-    （monkeypatch _db_path + init_db）仍优先生效，不受影响。
-    """
-    from app.db.database import close_connection, init_db
-
-    init_db()
+    """保留集合级 fixture 名称；实际数据库由函数级隔离 fixture 建立。"""
     yield
-    close_connection()

@@ -80,7 +80,6 @@ function PosterCard({
     setUseOriginalImage(false);
   }, [selectedImagePath, thumbnailWidth, isHorizontal, localArtworkOnly]);
 
-  const isSeasonalImport = work.import_scope === 'seasonal';
   const mediaClassName = `poster-media ${isHorizontal ? 'poster-media-horizontal' : 'poster-media-vertical'}`;
 
   return (
@@ -128,9 +127,7 @@ function PosterCard({
           {displayTitle}
         </div>
         <div className="poster-card-subtitle" style={{ color: 'var(--text-muted)' }}>
-          {isSeasonalImport
-            ? `追更中 · ${latestEpisodeLabel(work)}`
-            : recentLabel
+          {recentLabel
             ? recentLabel
             : work.show_type === 'anime_series' || work.show_type === 'live_series' 
             ? `共 ${mainSeasonCount} 季`
@@ -143,13 +140,3 @@ function PosterCard({
 }
 
 export default memo(PosterCard);
-
-function latestEpisodeLabel(work: any) {
-  const summarized = Number(work.latest_episode_number || 0);
-  if (summarized > 0) return `更新至 ${summarized} 集`;
-  const numbers = (work.episodes || [])
-    .filter((episode: any) => episode.group_type === 'season')
-    .map((episode: any) => Number(episode.episode_number || 0));
-  const latest = numbers.length ? Math.max(...numbers) : 0;
-  return latest > 0 ? `更新至 ${latest} 集` : '等待剧集';
-}

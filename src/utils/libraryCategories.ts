@@ -4,10 +4,10 @@ import type { LibraryView, SourceId } from '../stores/ui';
 export type CategoryWorkCounts = Record<LibraryView, number>;
 
 export function isSeasonalWork(work: WorkIndex): boolean {
-  const trackingState = work.tracking?.tracking_state;
-  if (trackingState === 'completed' || trackingState === 'archived') return false;
-  if (trackingState === 'tracking' || trackingState === 'paused') return true;
-  return work.import_scope === 'seasonal';
+  // V4 不再从追更绑定或导入计划推导分类。季度追更入口使用媒体管理
+  // 的统一 revision 流程，媒体库卡片只表达已确认的作品图。
+  void work;
+  return false;
 }
 
 export function isWorkInLibraryView(work: WorkIndex, view: LibraryView): boolean {

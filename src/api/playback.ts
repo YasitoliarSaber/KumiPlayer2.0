@@ -3,14 +3,30 @@
 import { api } from './client'
 import type { PlaybackHistoryItem, PlaybackSession } from './types'
 
+export type PlaybackProgressRequest = {
+  work_id: string
+  episode_id: string
+  asset_id?: string
+  position: number
+  duration: number
+  completed?: boolean
+}
+
 export const playbackApi = {
   // 播放
   play: (params: {
     work_id: string
-    episode_id?: string
-    strm_path?: string
+    episode_id: string
+    asset_id?: string
   }) =>
-    api.post<{ session_id: string; status: string }>('/api/playback/play', params),
+    api.post<{
+      session_id: string
+      status: string
+      work_id: string
+      episode_id: string
+      asset_id: string
+      playback_locator: string
+    }>('/api/playback/play', params),
 
   // 停止
   stop: () =>
@@ -30,56 +46,19 @@ export const playbackApi = {
       if (params.work_id) searchParams.set('work_id', params.work_id)
     }
     const query = searchParams.toString()
-    return api.get<{ items: PlaybackHistoryItem[]; total: number }>(
+    return api.get<{ items: PlaybackHistoryItem[] }>(
       `/api/playback/history${query ? `?${query}` : ''}`
     )
   },
 
-  // 继续播放
-  getContinue: (workId: string) =>
-    api.get<{ episode_id: string; strm_path: string; season_number: number; episode_number: number } | null>(
-      `/api/playback/continue/${workId}`
+  getProgress: (workId?: string) =>
+    api.get<{ items: PlaybackHistoryItem[] }>(
+      `/api/playback/progress${workId ? `?work_id=${encodeURIComponent(workId)}` : ''}`,
     ),
 
-  getProgress: (workId?: string) =>
-    api.get<{ items: Array<{
-      work_id: string
-      episode_id: string
-      position: number
-      duration: number
-      ratio: number
-      completed: boolean
-      updated_at: string
-      bangumi_synced: boolean
-      bangumi_error: string
-      manually_unwatched: boolean
-    }> }>(`/api/playback/progress${workId ? `?work_id=${encodeURIComponent(workId)}` : ''}`),
+  reportProgress: (params: PlaybackProgressRequest) =>
+    api.post<PlaybackHistoryItem>('/api/playback/progress', params),
 
-  reportProgress: (params: { work_id: string; episode_id: string; position: number; duration: number }) =>
-    api.post<{
-      work_id: string
-      episode_id: string
-      position: number
-      duration: number
-      ratio: number
-      completed: boolean
-      updated_at: string
-      bangumi_synced: boolean
-      bangumi_error: string
-      manually_unwatched: boolean
-    }>('/api/playback/progress', params),
-
-  markProgress: (params: { work_id: string; episode_id: string; completed: boolean }) =>
-    api.post<{
-      work_id: string
-      episode_id: string
-      position: number
-      duration: number
-      ratio: number
-      completed: boolean
-      updated_at: string
-      bangumi_synced: boolean
-      bangumi_error: string
-      manually_unwatched: boolean
-    }>('/api/playback/progress/mark', params),
+  markProgress: (params: { work_id: string; episode_id: string; asset_id?: string; completed: boolean }) =>
+    api.post<PlaybackHistoryItem>('/api/playback/progress/mark', params),
 }

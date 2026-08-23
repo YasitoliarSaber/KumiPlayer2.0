@@ -476,8 +476,8 @@ def test_bracket_movie_file_uses_concrete_title():
     assert guess.series_group == "Jujutsu_Kaisen"
 
 
-def test_subwork_year_in_work_id():
-    """子作品年份应影响 work_id 生成（work_id 用有效年份算）"""
+def test_subwork_year_is_preserved_as_a_fact():
+    """子作品年份保留为解析事实，由 V4 Resolver 决定作品身份。"""
     from app.recognition.media import recognize_media
 
     # 有子作品年份
@@ -490,8 +490,6 @@ def test_subwork_year_in_work_id():
         filename="CLANNAD.S01E01.mkv",
         relative_path="动画/CLANNAD.S1-S2+SP+OVA/CLANNAD.S01E01.mkv",
     )
-    # work_id 应不同（因为年份不同）
-    assert guess_with.work_id != guess_without.work_id, "work_id 应因年份不同而不同"
     assert guess_with.year == 2008
     assert guess_without.year is None
 
@@ -538,7 +536,7 @@ if __name__ == "__main__":
         test_integration_series_container, test_integration_fansub,
         test_original_title_preserved, test_clean_warnings_passed, test_subwork_dir_extracted,
         test_subwork_year_extracted, test_fansub_not_series_group,
-        test_subwork_year_in_work_id, test_subwork_year_no_false_warning,
+        test_subwork_year_is_preserved_as_a_fact, test_subwork_year_no_false_warning,
     ]
     passed = failed = 0
     for t in tests:

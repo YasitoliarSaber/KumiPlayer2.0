@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """模块 1 阶段 B：统一连接级请求限速（governor）聚焦测试。
 
 覆盖：
@@ -13,7 +12,6 @@ import time
 import httpx
 import pytest
 
-from app.db.database import close_connection, init_db
 from app.integrations.openlist.client import OpenListClient
 from app.integrations.openlist.governor import (
     DEFAULT_RATE_PER_SECOND,
@@ -25,17 +23,12 @@ from app.integrations.openlist.models import OpenListRiskControlError
 
 
 @pytest.fixture(autouse=True)
-def db(tmp_path, monkeypatch):
-    """临时 SQLite：governor 本身不依赖 DB，健康上报测试需要 source_health 表。"""
-    db_path = tmp_path / "governor.db"
-    monkeypatch.setattr("app.db.database._db_path", db_path)
-    import app.db.database as db_mod
+def isolate_client_pool():
+    from app.integrations.openlist.client import clear_openlist_client_pool
 
-    if hasattr(db_mod._local, "connection"):
-        db_mod._local.connection = None
-    init_db()
+    clear_openlist_client_pool()
     yield
-    close_connection()
+    clear_openlist_client_pool()
 
 
 def _json_response(status: int = 200, payload: dict | None = None) -> httpx.Response:
@@ -64,7 +57,8 @@ def _make_client(handler, password: str = "secret-pass", **kwargs) -> OpenListCl
 class TestGovernorSingleton:
     def test_default_clients_share_same_governor(self):
         """未显式指定 governor 的客户端默认共享进程级单例。"""
-        handler = lambda request: _json_response(200)
+        def handler(request):
+            return _json_response(200)
         client_a = OpenListClient(
             "https://ol.example.com", "u1", "p1",
             transport=httpx.MockTransport(handler),
@@ -94,7 +88,8 @@ class TestGovernorSingleton:
 class TestConnectionKey:
     def test_password_independent(self):
         """不同密码、相同 server/username → 相同连接键（密码绝不进入 key）。"""
-        handler = lambda request: _json_response(200)
+        def handler(request):
+            return _json_response(200)
         key_a = _make_client(handler, password="pass-1")._conn_key
         key_b = _make_client(handler, password="pass-2")._conn_key
         assert key_a == key_b
@@ -172,7 +167,7 @@ class TestAcquire:
 
 class TestHealthReporting:
     def test_success_records_healthy(self):
-        from app.catalog import source_health
+        from app.media_v4.sources import health as source_health
 
         def handler(request: httpx.Request) -> httpx.Response:
             return _json_response(200, _fs_list_payload("/", [{"name": "ok.mkv", "is_dir": False}]))
@@ -186,7 +181,7 @@ class TestHealthReporting:
         assert not record.in_cooldown
 
     def test_risk_control_failure_enters_cooldown(self):
-        from app.catalog import source_health
+        from app.media_v4.sources import health as source_health
 
         aliyun_html = (
             "<!DOCTYPE html><html><head><title>访问被阻断</title></head><body>"
@@ -212,7 +207,7 @@ class TestHealthReporting:
         assert record.state == "cooling_down"
 
     def test_login_success_records_healthy(self):
-        from app.catalog import source_health
+        from app.media_v4.sources import health as source_health
 
         def handler(request: httpx.Request) -> httpx.Response:
             return _json_response(200, {"code": 200, "message": "success", "data": {"token": "t"}})

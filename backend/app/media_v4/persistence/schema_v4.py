@@ -22,6 +22,28 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         )
         """,
         """
+        CREATE TABLE source_health (
+            source_id TEXT PRIMARY KEY,
+            state TEXT NOT NULL DEFAULT 'healthy',
+            reason_kind TEXT NOT NULL DEFAULT '',
+            consecutive_failures INTEGER NOT NULL DEFAULT 0,
+            cooldown_until REAL NOT NULL DEFAULT 0,
+            last_failure_at REAL NOT NULL DEFAULT 0,
+            last_success_at REAL NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL DEFAULT 0
+        )
+        """,
+        "CREATE INDEX idx_v4_source_health_state ON source_health(state)",
+        """
+        CREATE TABLE openlist_telemetry (
+            conn_hash TEXT NOT NULL,
+            day TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (conn_hash, day, operation)
+        )
+        """,
+        """
         CREATE TABLE source_roots (
             root_id TEXT PRIMARY KEY,
             provider TEXT NOT NULL,
@@ -113,6 +135,7 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE works (
             work_id TEXT PRIMARY KEY,
+            identity_key TEXT NOT NULL UNIQUE,
             work_type TEXT NOT NULL,
             preferred_title TEXT NOT NULL DEFAULT '',
             original_title TEXT NOT NULL DEFAULT '',
@@ -129,6 +152,16 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             language TEXT NOT NULL DEFAULT '',
             alias_type TEXT NOT NULL DEFAULT 'alternate',
             PRIMARY KEY(work_id, normalized_title, language)
+        )
+        """,
+        """
+        CREATE TABLE work_source_bindings (
+            work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE CASCADE,
+            root_id TEXT NOT NULL REFERENCES source_roots(root_id) ON DELETE CASCADE,
+            structural_key TEXT NOT NULL,
+            confidence TEXT NOT NULL DEFAULT 'medium',
+            binding_source TEXT NOT NULL DEFAULT 'resolver',
+            PRIMARY KEY(work_id, root_id, structural_key)
         )
         """,
         """
@@ -169,6 +202,7 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             absolute_episode_number INTEGER,
             special_number INTEGER,
             episode_kind TEXT NOT NULL DEFAULT 'regular',
+            edition_key TEXT NOT NULL DEFAULT 'default',
             display_title TEXT NOT NULL DEFAULT ''
         )
         """,
@@ -306,9 +340,105 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             UNIQUE(revision_id, artifact_type, target_path)
         )
         """,
+        """
+        CREATE TABLE library_generations (
+            generation_id TEXT PRIMARY KEY,
+            digest TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'building',
+            created_at TEXT NOT NULL,
+            published_at TEXT NOT NULL DEFAULT ''
+        )
+        """,
+        """
+        CREATE TABLE library_cards (
+            generation_id TEXT NOT NULL REFERENCES library_generations(generation_id) ON DELETE CASCADE,
+            work_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            year INTEGER,
+            media_type TEXT NOT NULL,
+            episode_count INTEGER NOT NULL DEFAULT 0,
+            asset_count INTEGER NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(generation_id, work_id)
+        )
+        """,
+        """
+        CREATE TABLE playback_progress (
+            episode_id TEXT NOT NULL,
+            asset_id TEXT NOT NULL,
+            work_id TEXT NOT NULL,
+            position REAL NOT NULL DEFAULT 0,
+            duration REAL NOT NULL DEFAULT 0,
+            completed INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(episode_id, asset_id)
+        )
+        """,
+        """
+        CREATE TABLE tracking_states (
+            work_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            provider_id TEXT NOT NULL DEFAULT '',
+            last_watched_episode INTEGER,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(work_id, provider)
+        )
+        """,
+        """
+        CREATE TRIGGER v4_source_evidence_immutable_update
+        BEFORE UPDATE ON source_evidence
+        BEGIN
+            SELECT RAISE(ABORT, 'source_evidence is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER v4_source_evidence_immutable_delete
+        BEFORE DELETE ON source_evidence
+        BEGIN
+            SELECT RAISE(ABORT, 'source_evidence is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER v4_parsed_facts_immutable_update
+        BEFORE UPDATE ON parsed_facts
+        BEGIN
+            SELECT RAISE(ABORT, 'parsed_facts is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER v4_parsed_facts_immutable_delete
+        BEFORE DELETE ON parsed_facts
+        BEGIN
+            SELECT RAISE(ABORT, 'parsed_facts is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER v4_confirmed_binding_update_guard
+        BEFORE UPDATE ON revision_bindings
+        WHEN EXISTS (
+            SELECT 1 FROM import_revisions
+            WHERE revision_id = OLD.revision_id AND status = 'confirmed'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'confirmed revision bindings are immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER v4_confirmed_binding_delete_guard
+        BEFORE DELETE ON revision_bindings
+        WHEN EXISTS (
+            SELECT 1 FROM import_revisions
+            WHERE revision_id = OLD.revision_id AND status = 'confirmed'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'confirmed revision bindings are immutable');
+        END
+        """,
         "CREATE INDEX idx_v4_evidence_root_scan ON source_evidence(root_id, scan_id)",
         "CREATE INDEX idx_v4_facts_evidence ON parsed_facts(evidence_id)",
         "CREATE INDEX idx_v4_seasons_work ON seasons(work_id)",
+        "CREATE INDEX idx_v4_source_bindings_lookup ON work_source_bindings(root_id, structural_key)",
         "CREATE INDEX idx_v4_episodes_season ON episodes(season_id)",
         "CREATE INDEX idx_v4_bindings_revision ON revision_bindings(revision_id)",
         "CREATE INDEX idx_v4_jobs_status ON jobs(status, updated_at)",

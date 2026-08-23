@@ -26,9 +26,7 @@ from app.core.config import (
     save_config,
 )
 from app.core.runtime import get_default_mirror_dir, get_mpv_config_dir, get_mpv_runtime_dir
-from app.media_presets.store import list_presets
 from app.playback.mpv_runtime import check_mpv_runtime
-from app.raw.store import load_latest_raw_snapshot, load_raw_snapshot
 from app.scrape.tmdb_client import TMDBClient
 from app.integrations.bangumi import BangumiClient, BangumiError
 
@@ -250,25 +248,8 @@ def patch_config(req: ConfigPatch):
 
 
 def _sync_anime4k_default_to_active_mpv(config: AppConfig) -> None:
-    """把新的 Anime4K 永久默认值通过 IPC 同步给活动播放会话。"""
-    try:
-        from app.playback.mpv_ipc import send_mpv_script_message
-        from app.playback.service import get_playback_manager
-        from app.playback.models import PlaybackSession
-
-        manager = get_playback_manager()
-        session = getattr(manager, "_current_session", None)
-        if not isinstance(session, PlaybackSession) or not session.ipc_server:
-            return
-        send_mpv_script_message(
-            session.ipc_server,
-            "kumiplayer_anime4k",
-            "set-default",
-            (config.mpv_anime4k_mode or "off", config.mpv_anime4k_quality or "balanced"),
-        )
-    except Exception:
-        # 配置保存不应因 IPC 失败而报错：当前视频保持不变，下一视频仍用新默认值
-        pass
+    """保存 V4 播放默认值；具体播放器会话只消费配置，不回写媒体事实。"""
+    del config
 
 
 def _inspect_mpv(mpv_path: str = "", *, require_file: bool = False) -> dict:
@@ -506,14 +487,14 @@ def test_deepseek():
 
 @router.post("/test/media-paths")
 def test_media_paths():
-    """轻量验证 115、百度与 OpenList 挂载路径，不打开或读取视频内容。"""
+    """轻量验证来源挂载根，不读取旧快照或媒体库计划。"""
     config = load_config()
     roots = {
         "pan115": config.pan115_root,
         "baidu": config.baidu_root,
+        "local": config.local_root,
         "openlist": config.openlist_mount_root,
     }
-    presets = list_presets()
 
     def validate_source(source: str, configured_root: str) -> dict:
         if not configured_root:
@@ -529,49 +510,27 @@ def test_media_paths():
                 "example_path": "",
                 "message": "尚未配置挂载目录",
             }
-        snapshots = [
-            snapshot
-            for preset in presets
-            if preset.source == source and preset.current_snapshot_id
-            for snapshot in [load_raw_snapshot(preset.current_snapshot_id)]
-            if snapshot is not None
-        ]
-        if not snapshots:
-            latest = load_latest_raw_snapshot(source)
-            snapshots = [latest] if latest is not None else []
-
         root = Path(configured_root).expanduser()
-        sample_paths = []
-        resolved_roots = []
-        for snapshot in snapshots:
-            resolved_roots.append(snapshot.source_root)
-            sample = next((item for item in snapshot.files if item.resource_hint == "video"), None)
-            if sample is not None:
-                sample_paths.append(Path(sample.real_path))
-        states, probe_timed_out = _probe_media_path_states(root, sample_paths)
+        states, probe_timed_out = _probe_media_path_states(root, [])
         root_ok = states[0]
-        existing_count = sum(states[1:])
-        samples_ok = not sample_paths or existing_count > 0
-        ok = root_ok and samples_ok
+        ok = root_ok
         return {
                 "source": source,
                 "ok": ok,
                 "status": "verified" if ok else ("unavailable" if not root_ok else "mismatch"),
                 "configured_root": configured_root,
-                "resolved_root": resolved_roots[0] if resolved_roots else configured_root,
+                "resolved_root": configured_root,
                 "scope_name": "",
-                "checked_count": len(sample_paths),
-                "existing_count": existing_count,
-                "example_path": str(sample_paths[0]) if sample_paths else "",
+                "checked_count": 0,
+                "existing_count": 0,
+                "example_path": "",
                 "message": (
                     f"挂载路径检测超过 {_MEDIA_PATH_PROBE_TIMEOUT_SECONDS} 秒，已停止等待"
                     if probe_timed_out
                     else
-                    f"挂载正常，当前媒体库命中 {existing_count}/{len(sample_paths)} 组代表视频"
-                    if ok and sample_paths
-                    else "挂载目录可访问，导入目录树后会继续验证视频路径" if ok
+                    "挂载目录可访问，V4 扫描时会继续记录来源证据" if ok
                     else "挂载目录不可访问" if not root_ok
-                    else "当前媒体库的视频样本均未命中，请检查挂载是否在线或路径是否变更"
+                    else "挂载目录不可访问"
                 ),
             }
 

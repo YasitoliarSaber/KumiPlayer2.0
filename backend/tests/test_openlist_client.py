@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """OpenList 客户端聚焦测试。
 
 使用 httpx.MockTransport 模拟 OpenList 服务端，覆盖：
@@ -12,7 +11,6 @@ import threading
 import httpx
 import pytest
 
-from app.catalog import source_health as _source_health_module
 from app.integrations.openlist.client import (
     OpenListClient,
     get_openlist_client,
@@ -36,6 +34,7 @@ from app.integrations.openlist.models import (
     OpenListTimeoutError,
     OpenListValidationError,
 )
+from app.media_v4.sources import health as _source_health_module
 
 #: R1（source_health 新语义）是否已落地：irrelevant kinds（auth/permission/
 #: not_found/validation/redirect/scan_limit）不累计不冷却 + 单探针原子准入。
@@ -321,28 +320,13 @@ class TestProcessClientPool:
         assert calls.count("/api/auth/login") == 1
 
 @pytest.fixture(autouse=True)
-def isolated_db(tmp_path, monkeypatch):
-    """文件级 DB 隔离：客户端每次物理请求前都会查 source_health。
-
-    没有独立 DB 的测试会落到共享的 .pytest_runtime/data/kumiplayer.db
-    （含历史冷却记录），导致 can_request 误判 cooling_down。
-    """
-    from app.db.database import close_connection, init_db
+def isolated_client_pool():
+    """每个测试只隔离 OpenList 内存会话；SQLite 由 V4 fixture 管理。"""
     from app.integrations.openlist.client import clear_openlist_client_pool
 
     clear_openlist_client_pool()
-    db_path = tmp_path / "openlist_client.db"
-    monkeypatch.setattr("app.db.database._db_path", db_path)
-    import app.db.database as db_mod
-
-    if hasattr(db_mod._local, "connection"):
-        db_mod._local.connection = None
-    init_db()
     yield
-    from app.integrations.openlist.client import clear_openlist_client_pool
-
     clear_openlist_client_pool()
-    close_connection()
 
 
 # ============================================================
@@ -684,7 +668,7 @@ class TestListDir:
 
     def test_probe_401_relogin_recovers_and_retries_request(self):
         """cooldown 到期后的唯一 probe 收到 401 时，应先解除 probe 再登录并重试。"""
-        from app.catalog import source_health
+        from app.media_v4.sources import health as source_health
 
         calls: list[str] = []
 
@@ -752,7 +736,7 @@ class TestListDir:
 
     def test_probe_401_does_not_relogin_after_new_risk_cooldown(self, monkeypatch):
         """probe 收到 401 后若同时出现新的 risk_control，login 不得穿透 cooldown。"""
-        from app.catalog import source_health
+        from app.media_v4.sources import health as source_health
 
         calls: list[str] = []
 
@@ -870,7 +854,7 @@ class TestRiskControl:
             calls.append(1)
             return httpx.Response(
                 405,
-                content="<html><body>访问被阻断，请稍后再试</body></html>".encode("utf-8"),
+                content="<html><body>访问被阻断，请稍后再试</body></html>".encode(),
                 headers={"content-type": "text/html"},
                 request=httpx.Request("POST", "http://test"),
             )
@@ -898,7 +882,7 @@ class TestRiskControl:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
                 405,
-                content="<html><body>not allowed</body></html>".encode("utf-8"),
+                content=b"<html><body>not allowed</body></html>",
                 headers={"content-type": "text/html"},
                 request=httpx.Request("POST", "http://test"),
             )
@@ -945,7 +929,7 @@ class TestSourceHealthReporting:
 
 
     def test_success_list_dir_records_healthy(self):
-        from app.catalog import source_health
+        from app.media_v4.sources import health as source_health
 
         def handler(request: httpx.Request) -> httpx.Response:
             return _json_response(200, _fs_list_payload("/", [_entry("ok.mkv")]))
@@ -961,7 +945,7 @@ class TestSourceHealthReporting:
 
     def test_429_exhausted_records_cooling_down(self):
         """429 最终失败（max_attempts=1 不再重试）→ rate_limit 冷却。"""
-        from app.catalog import source_health
+        from app.media_v4.sources import health as source_health
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(429, headers={"retry-after": "1"}, request=request)
@@ -975,7 +959,7 @@ class TestSourceHealthReporting:
         assert record.in_cooldown
 
     def test_risk_control_records_cooling_down(self):
-        from app.catalog import source_health
+        from app.media_v4.sources import health as source_health
 
         aliyun_html = (
             "<!DOCTYPE html><html><head><title>访问被阻断</title></head><body>"
@@ -1002,7 +986,7 @@ class TestSourceHealthReporting:
 
     def test_timeout_failure_accumulates_transient(self):
         """transient（timeout）不立即冷却：记录连续失败但保持可请求。"""
-        from app.catalog import source_health
+        from app.media_v4.sources import health as source_health
 
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ReadTimeout("read timeout")
@@ -1026,7 +1010,7 @@ class TestNetworkAdmission:
 
     def test_cooling_down_list_dir_zero_transport_calls(self):
         """冷却中 list_dir 直接抛 OpenListSourceCoolingDownError，物理请求数 == 0。"""
-        from app.catalog import source_health
+        from app.media_v4.sources import health as source_health
 
         calls = []
 
@@ -1047,7 +1031,7 @@ class TestNetworkAdmission:
 
     def test_cooling_down_login_zero_transport_calls(self):
         """冷却中 login 同样在准入处拦截，零物理请求。"""
-        from app.catalog import source_health
+        from app.media_v4.sources import health as source_health
 
         calls = []
 
@@ -1065,7 +1049,7 @@ class TestNetworkAdmission:
 
     def test_cooldown_expiry_probe_allows_request(self):
         """冷却到期后单探针放行：list_dir 内部第一次 can_request 转 probe 并发请求。"""
-        from app.catalog import source_health
+        from app.media_v4.sources import health as source_health
 
         calls = []
 
@@ -1089,7 +1073,7 @@ class TestNetworkAdmission:
 
     def test_probe_is_single_consumer(self):
         """冷却到期单探针：第一个调用者占用后，并发调用者仍被拒绝。"""
-        from app.catalog import source_health
+        from app.media_v4.sources import health as source_health
 
         client = make_client(lambda request: _json_response(200))
         client._token = "t"
@@ -1105,7 +1089,7 @@ class TestNetworkAdmission:
 
     def test_429_then_next_call_blocked_at_admission(self):
         """429 触发冷却后，下一次 list_dir 在准入处被拦（零请求）。"""
-        from app.catalog import source_health
+        from app.media_v4.sources import health as source_health
 
         calls = []
 
@@ -1134,7 +1118,7 @@ class TestIrrelevantKindsNoCooldown:
 
 
     def _assert_no_cooldown(self, client):
-        from app.catalog import source_health
+        from app.media_v4.sources import health as source_health
 
         record = source_health.get_health(client._conn_key)
         assert not record.in_cooldown
@@ -1193,7 +1177,7 @@ class TestFinalPatchCooldownAdmission:
 
     def test_ten_admission_denials_do_not_mutate_health(self):
         """冷却中连续 10 次 list_dir：健康状态完全不变，零物理请求。"""
-        from app.catalog import source_health
+        from app.media_v4.sources import health as source_health
 
         calls = []
 
@@ -1224,7 +1208,7 @@ class TestFinalPatchCooldownAdmission:
 
     def test_probe_404_recovers_healthy_then_next_request_allowed(self):
         """冷却到期探针返回 404：breaker 回 healthy，后续请求有资格执行。"""
-        from app.catalog import source_health
+        from app.media_v4.sources import health as source_health
 
         calls: list[str] = []
 
@@ -1282,8 +1266,7 @@ class TestFinalAdmissionGovernorOrder:
     def test_governor_wait_cooldown_blocks_transport(self):
         import threading
 
-        from app.catalog import source_health
-        from app.db import database as db_mod
+        from app.media_v4.sources import health as source_health
 
         calls: list = []
 
@@ -1318,7 +1301,7 @@ class TestFinalAdmissionGovernorOrder:
             except BaseException as exc:  # pragma: no cover
                 errors.append(exc)
             finally:
-                db_mod.close_connection()
+                source_health.close_connection()
 
         thread = threading.Thread(target=run_request)
         thread.start()
@@ -1336,7 +1319,7 @@ class TestFinalAdmissionGovernorOrder:
 
     def test_peek_deny_does_not_enter_governor(self):
         """明确未到期冷却：peek 直接拒绝，不进入限速队列、零请求。"""
-        from app.catalog import source_health
+        from app.media_v4.sources import health as source_health
 
         calls: list = []
 

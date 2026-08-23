@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from app.media_v4.persistence.schema_v4 import V4_SCHEMA_VERSION, create_schema_v4
@@ -20,7 +22,9 @@ class V4Database:
     def __init__(self, path: str | Path):
         self.path = Path(path)
 
-    def connect(self) -> sqlite3.Connection:
+    def open_connection(self) -> sqlite3.Connection:
+        """打开一个原始连接；需要长期复用的基础设施必须自行关闭。"""
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.path), check_same_thread=False)
         conn.row_factory = sqlite3.Row
@@ -29,6 +33,24 @@ class V4Database:
         conn.execute("PRAGMA synchronous = NORMAL")
         conn.execute("PRAGMA busy_timeout = 5000")
         return conn
+
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        """打开一个短生命周期连接，并在离开作用域时真正关闭它。"""
+
+        conn = self.open_connection()
+        try:
+            yield conn
+        except Exception:
+            conn.rollback()
+            raise
+        else:
+            # 保持 sqlite3.Connection 上下文管理器的直觉语义：调用方只
+            # 需要 ``with database.connect()`` 就能提交普通写入；显式事务
+            # 仍可在块内自行 BEGIN/COMMIT。
+            conn.commit()
+        finally:
+            conn.close()
 
     @staticmethod
     def _has_user_tables(conn: sqlite3.Connection) -> bool:
@@ -51,7 +73,7 @@ class V4Database:
                     f"数据库版本 {version} 属于旧后端数据架构，需要一次性重置后才能继续；"
                     "V4 不执行旧媒体数据迁移"
                 )
-            if version == self.CURRENT_SCHEMA_VERSION:
+            if version == self.CURRENT_SCHEMA_VERSION and self._has_user_tables(conn):
                 return
 
             conn.execute("BEGIN IMMEDIATE")

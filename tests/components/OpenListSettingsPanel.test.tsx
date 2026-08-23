@@ -15,9 +15,6 @@ vi.mock('../../src/api/openlist', () => ({
       total: 4,
       disclaimer: '仅统计本机到 OpenList 的请求',
     })),
-    getBindableProviders: vi.fn(async () => ({ providers: [] })),
-    bindRoot: vi.fn(),
-    rescanBoundRoot: vi.fn(),
   },
 }));
 

@@ -18,7 +18,6 @@ import { useLibraryStore } from '../stores/library';
 import { configApi, type MediaPathValidationResponse, type MpvRuntimeStatus, type PublicConfig } from '../api/config';
 import { openlistApi, type OpenListConfigPayload, type OpenListDiscoverItem, type OpenListRouteItem } from '../api/openlist';
 import type { OpenListRoute, ProviderId } from '../api/types';
-import { scrapeApi } from '../api/scrape';
 import { tasksApi } from '../api/tasks';
 import { exportErrorLogText } from '../api/errorLog';
 import type { TaskRecord } from '../api/types';
@@ -37,7 +36,7 @@ type OpenListDraft = Pick<OpenListConfigPayload, 'server_url' | 'remote_root' | 
 
 const sectionTabs: Array<{ key: SettingsTab; label: string; summary: string; icon: LucideIcon }> = [
   { key: 'bangumi', label: '账户与同步', summary: 'Bangumi 登录与观看同步', icon: UserRound },
-  { key: 'sources', label: '媒体来源', summary: 'OpenList、本地与兼容来源', icon: Database },
+  { key: 'sources', label: '媒体来源', summary: 'OpenList、本地与目录树来源', icon: Database },
   { key: 'scrape', label: '元数据与图片', summary: 'TMDB、AniList 与刮削', icon: KeyRound },
   { key: 'player', label: '播放', summary: 'mpv 与连续播放', icon: PlaySquare },
   { key: 'appearance', label: '外观', summary: '主题、卡片与显示密度', icon: Palette },
@@ -320,12 +319,6 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
     void saveConfig({ tmdb_bearer_token: value.trim() });
   };
 
-  const backfillCertifications = () => runAction('补全缺失分级', async () => {
-    const task = await scrapeApi.backfillCertifications();
-    await refreshTasks(12);
-    report(`分级补全任务已提交：${task.task_id}`);
-  });
-
   const loginBangumi = () => runAction('Bangumi 登录', async () => {
     if (!bangumiToken.trim()) throw new Error('请输入 Bangumi Access Token');
     await setToken(bangumiToken.trim());
@@ -430,9 +423,6 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
               value={config.tmdb_certification_regions}
               onSave={(value) => saveConfig({ tmdb_certification_regions: value.toUpperCase().replace(/\s+/g, '') })}
             />
-            <div className="settings-actions">
-              <GhostButton onClick={backfillCertifications}>补全缺失分级</GhostButton>
-            </div>
             <NumberRow label="TMDB 超时" value={config.tmdb_timeout} onSave={(value) => saveConfig({ tmdb_timeout: value })} />
             <NumberRow label="TMDB 重试" value={config.tmdb_max_retries} onSave={(value) => saveConfig({ tmdb_max_retries: value })} />
             <ToggleRow label="启用 AniList 辅助" active={config.anilist_enabled} onChange={() => saveConfig({ anilist_enabled: !config.anilist_enabled })} />
@@ -446,7 +436,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
 
   const renderSources = () => (
     <PanelStack>
-      <SectionIntro title="媒体来源" description="管理 OpenList 连接、来源目录与本地兼容来源。" />
+      <SectionIntro title="媒体来源" description="管理 OpenList 连接、来源目录与本地扫描根目录。" />
       {config && (
         <SettingsSection title="OpenList">
           <OpenListSettingsPanel
@@ -512,9 +502,9 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
         </SettingsSection>
       )}
       {config && (
-        <SettingsSection title="本地与兼容来源">
-          <div className="sources-legacy-panel">
-            <p className="sources-legacy-note">如果你已经通过 OpenList 管理远程网盘，通常不需要重复配置这些兼容路径。已有工作流仍可继续使用。</p>
+        <SettingsSection title="来源根目录">
+          <div className="sources-root-panel">
+            <p className="sources-root-note">这些目录只作为 V4 SourceEvidence 扫描入口，不会直接写入媒体库身份。</p>
             <div className="settings-field-list">
               <ConfigRow label="115 挂载根路径" value={config.pan115_root} onSave={(value) => saveConfig({ pan115_root: value })} />
               <ConfigRow label="百度网盘挂载位置" value={config.baidu_root} onSave={(value) => saveConfig({ baidu_root: value })} />

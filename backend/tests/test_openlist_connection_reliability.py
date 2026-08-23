@@ -40,21 +40,11 @@ def _fs_list_payload(path: str, entries: list[dict]) -> dict:
 
 
 @pytest.fixture(autouse=True)
-def isolated(tmp_path, monkeypatch):
-    """DB 隔离 + pool 清理（与 test_openlist_client 一致）。"""
-    from app.db.database import close_connection, init_db
-
+def isolated():
+    """V4 数据库由全局 fixture 隔离，这里只清空 OpenList 客户端池。"""
     clear_openlist_client_pool()
-    db_path = tmp_path / "reliability.db"
-    monkeypatch.setattr("app.db.database._db_path", db_path)
-    import app.db.database as db_mod
-
-    if hasattr(db_mod._local, "connection"):
-        db_mod._local.connection = None
-    init_db()
     yield
     clear_openlist_client_pool()
-    close_connection()
 
 
 def make_client(handler, **kwargs) -> OpenListClient:

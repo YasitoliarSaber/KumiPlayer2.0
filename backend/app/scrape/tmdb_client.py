@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """TMDB API 客户端（按 TMDB 规范重构）
 
 规范来源：KumiPlayer/docx/technical/TMDB规范.txt
@@ -20,7 +19,7 @@ import time
 import uuid
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import httpx
 
@@ -63,12 +62,12 @@ class TMDBClient:
 
     def __init__(
         self,
-        bearer_token: Optional[str] = None,
-        language: Optional[str] = None,
-        rate_limit: Optional[float] = None,
-        max_retries: Optional[int] = None,
-        timeout: Optional[int] = None,
-        _http_client: Optional[Any] = None,
+        bearer_token: str | None = None,
+        language: str | None = None,
+        rate_limit: float | None = None,
+        max_retries: int | None = None,
+        timeout: int | None = None,
+        _http_client: Any | None = None,
     ):
         config = load_config()
         self._token = bearer_token if bearer_token is not None else config.tmdb_bearer_token
@@ -79,12 +78,12 @@ class TMDBClient:
         raw_timeout = timeout if timeout is not None else config.tmdb_timeout
         self._timeout = max(3, min(int(raw_timeout or 10), 12))
         self._client = _http_client
-        self._owned_client: Optional[httpx.Client] = None
+        self._owned_client: httpx.Client | None = None
         self._last_request_time = 0.0
-        self._response_cache: Dict[Tuple[str, str, Tuple[Tuple[str, str], ...]], dict] = {}
+        self._response_cache: dict[tuple[str, str, tuple[tuple[str, str], ...]], dict] = {}
 
         # configuration 缓存
-        self._config_cache: Optional[dict] = None
+        self._config_cache: dict | None = None
 
     def _get_client(self):
         if self._client is not None:
@@ -209,7 +208,7 @@ class TMDBClient:
                 if attempt < self._max_retries - 1:
                     time.sleep(2 ** attempt)
                     continue
-                raise last_error
+                raise last_error from None
             except httpx.ConnectError as e:
                 message = str(e)
                 if "CERTIFICATE_VERIFY_FAILED" in message or "certificate verify failed" in message:
@@ -219,12 +218,12 @@ class TMDBClient:
                     raise TMDBClientError(
                         "TMDB SSL 证书校验失败：请检查代理/VPN、DNS、杀毒软件 HTTPS 扫描或网络拦截。"
                         "当前连接拿到的证书与 api.themoviedb.org 不匹配。"
-                    )
+                    ) from None
                 last_error = TMDBClientError(f"TMDB 网络连接失败: {e}")
                 if attempt < self._max_retries - 1:
                     time.sleep(2 ** attempt)
                     continue
-                raise last_error
+                raise last_error from None
             except (TMDBAuthError, TMDBRateLimitError, TMDBClientError):
                 raise
             except Exception as e:
@@ -232,12 +231,12 @@ class TMDBClient:
                 if attempt < self._max_retries - 1:
                     time.sleep(2 ** attempt)
                     continue
-                raise last_error
+                raise last_error from None
 
         raise TMDBClientError(f"TMDB 请求失败: {path}")
 
     @staticmethod
-    def _cache_key(method: str, path: str, kwargs: dict) -> Tuple[str, str, Tuple[Tuple[str, str], ...]]:
+    def _cache_key(method: str, path: str, kwargs: dict) -> tuple[str, str, tuple[tuple[str, str], ...]]:
         params = kwargs.get("params") or {}
         normalized_params = tuple(sorted((str(k), str(v)) for k, v in params.items()))
         return (method.upper(), path, normalized_params)
@@ -246,7 +245,7 @@ class TMDBClient:
     # 认证与配置
     # ============================================================
 
-    def test_authentication(self) -> Tuple[bool, str]:
+    def test_authentication(self) -> tuple[bool, str]:
         """测试 TMDB token 是否有效
 
         返回: (success, message)
@@ -303,7 +302,7 @@ class TMDBClient:
     # 搜索
     # ============================================================
 
-    def search_tv(self, query: str, year: Optional[int] = None) -> List[dict]:
+    def search_tv(self, query: str, year: int | None = None) -> list[dict]:
         """搜索 TV 剧集"""
         params = {
             "query": query,
@@ -315,7 +314,7 @@ class TMDBClient:
         data = self._request("GET", "/search/tv", params=params)
         return data.get("results", [])
 
-    def search_movie(self, query: str, year: Optional[int] = None) -> List[dict]:
+    def search_movie(self, query: str, year: int | None = None) -> list[dict]:
         """搜索电影"""
         params = {
             "query": query,
@@ -522,7 +521,7 @@ class TMDBClient:
 
         return score
 
-    def select_best_poster(self, images: dict) -> Optional[str]:
+    def select_best_poster(self, images: dict) -> str | None:
         """从图片列表中选择最佳海报
 
         返回 file_path 或 None
@@ -533,7 +532,7 @@ class TMDBClient:
         best = max(posters, key=self._score_poster)
         return best.get("file_path")
 
-    def select_best_backdrop(self, images: dict) -> Optional[str]:
+    def select_best_backdrop(self, images: dict) -> str | None:
         """从图片列表中选择最佳背景图
 
         返回 file_path 或 None
@@ -544,7 +543,7 @@ class TMDBClient:
         best = max(backdrops, key=self._score_backdrop)
         return best.get("file_path")
 
-    def select_best_logo(self, images: dict) -> Optional[str]:
+    def select_best_logo(self, images: dict) -> str | None:
         """从图片列表中选择最佳 logo
 
         返回 file_path 或 None
@@ -555,7 +554,7 @@ class TMDBClient:
         best = max(logos, key=self._score_logo)
         return best.get("file_path")
 
-    def select_best_still(self, images: dict) -> Optional[str]:
+    def select_best_still(self, images: dict) -> str | None:
         """从图片列表中选择最佳剧照
 
         返回 file_path 或 None
@@ -570,7 +569,7 @@ class TMDBClient:
     # 图片下载
     # ============================================================
 
-    def download_image(self, file_path: str, dest: Path, size: Optional[str] = None) -> bool:
+    def download_image(self, file_path: str, dest: Path, size: str | None = None) -> bool:
         """下载图片
 
         参数:

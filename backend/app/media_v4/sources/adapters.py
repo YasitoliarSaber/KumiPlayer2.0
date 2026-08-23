@@ -9,6 +9,14 @@ from dataclasses import dataclass
 from app.media_v4.domain.models import SourceEvidence
 
 
+def provider_to_source(provider_id: str) -> str:
+    """把内容提供商映射为纯解析所需的来源语义。"""
+
+    if provider_id in {"pan115", "baidu", "local"}:
+        return provider_id
+    return "openlist"
+
+
 @dataclass(frozen=True, slots=True)
 class SourceEntry:
     """来源适配器的最小输入，不包含任何作品识别结果。"""

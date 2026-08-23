@@ -7,9 +7,7 @@ PV/CM/Menu/Trailer/Eyecatch 等附属视频只保留播放结构，不进入 Spe
 不做 .strm 生成、TMDB 调用、数据库写入。
 """
 
-import hashlib
 import re
-import unicodedata
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -204,7 +202,6 @@ _SERIES_CONTAINER_INDICATORS = [
 class MediaGuess:
     """媒体识别结果（单个视频条目的识别猜测）"""
 
-    work_id: str = ""
     work_title: str = ""
     original_title: str = ""
     year: Optional[int] = None
@@ -232,50 +229,6 @@ class MediaGuess:
 # ============================================================
 # 辅助函数
 # ============================================================
-
-def _normalize_work_title(title: str) -> str:
-    """规范化作品标题，消除不影响作品身份的书写差异。
-
-    - NFKC 全角转半角（全角冒号/括号/空白 → 半角）
-    - 合并连续空白（含全角空白经 NFKC 后）为单空格
-    - 去除首尾空白与常见装饰性标点
-
-    目的：同一作品的 work_id / canonical_work_id 不因全角半角、
-    空白差异而改变，避免同一作品被拆成多张卡片（问题 5 根因之一）。
-    """
-    if not title:
-        return ""
-    text = unicodedata.normalize("NFKC", title)
-    text = re.sub(r"\s+", " ", text).strip()
-    # 冒号（半角/全角）后多余空格属于排版噪声，去除使 "标题: 副标题" 与
-    # "标题:副标题" 归一为同一写法（不压缩单词间空格，保留 "Pretty Derby"）。
-    text = re.sub(r"([：:])\s+", r"\1", text)
-    text = text.strip(" ._-·:：/\\()（）【】[]{}<>《》「」『』\"'")
-    return text
-
-
-def _make_work_id(source: str, work_title: str, year: Optional[int], card_type: str) -> str:
-    """生成稳定的 work_id（含 source，用于来源级追踪）"""
-    normalized = _normalize_work_title(work_title)
-    parts = [source, normalized, str(year) if year else "", card_type]
-    content = ":".join(parts)
-    return hashlib.md5(content.encode("utf-8")).hexdigest()
-
-
-def _make_canonical_work_id(source: str, work_title: str, year: Optional[int], card_type: str) -> str:
-    """生成跨 source 的作品合并键 canonical_work_id。
-
-    与 work_id 的区别：
-    - **不包含 source**（同一作品无论来自 pan115/baidu/openlist/local，
-      canonical_work_id 相同），用于 LibraryIndex 跨来源聚合去重；
-    - **不包含 card_type**（同一作品在不同识别路径下可能是
-      main_series / standalone，canonical 合并键不受影响）。
-    """
-    normalized = _normalize_work_title(work_title)
-    parts = [normalized, str(year) if year else ""]
-    content = ":".join(parts)
-    return hashlib.md5(content.encode("utf-8")).hexdigest()
-
 
 def _extract_work_container(relative_path: str, source: str = "pan115") -> str:
     """从 relative_path 提取作品容器（分类层的下一层）
@@ -2000,7 +1953,6 @@ def recognize_media(
         warnings=["无法识别分组类型（Season/Special/Movie）"],
     )
     if work_title:
-        guess.work_id = _make_work_id(source, work_title, year, "")
         guess.reasons.append(f"识别作品名为 {work_title}，但无法确定分组")
     else:
         guess.warnings.append("无法识别作品名")
@@ -2024,7 +1976,7 @@ def _enrich_guess(
 ) -> None:
     """为 guess 填充公共字段：work_title、year、original_title、series_group、清洗结果
 
-    顺序：先算有效年份（含子作品回退），再生成 work_id，最后 finalize。
+    顺序：先算有效年份（含子作品回退），最后 finalize；不生成作品身份。
     """
     # 1. 先算有效年份（含子作品目录回退）
     effective_year = year
@@ -2059,8 +2011,7 @@ def _enrich_guess(
     guess.tmdb_hint_id = guess.tmdb_hint_id or tmdb_hint_id
     guess.tmdb_hint_type = guess.tmdb_hint_type or tmdb_hint_type
 
-    # 3. 用有效年份生成 work_id
-    guess.work_id = _make_work_id(source, effective_work_title, effective_year, guess.card_type)
+    # 3. 保留系列归属线索；Work ID 由 V4 Resolver/Repository 负责。
     if series_group:
         guess.belongs_to_series = series_group
 
@@ -2120,7 +2071,7 @@ def _attach_local_collection_subwork_identity(
 
 
 def _finalize_guess(guess: MediaGuess, work_title: str, year: Optional[int]) -> None:
-    """最终化 guess：补充置信度和 work_id"""
+    """最终化 guess：只补充置信度，不生成作品身份。"""
     # 置信度调整
     if not work_title:
         guess.confidence = "low"
@@ -2131,7 +2082,3 @@ def _finalize_guess(guess: MediaGuess, work_title: str, year: Optional[int]) -> 
         guess.confidence = "medium"
     elif year is None and guess.confidence != "low":
         guess.confidence = "medium"
-
-    # 确保 work_id 已生成
-    if not guess.work_id:
-        guess.work_id = _make_work_id("", work_title, year, guess.card_type)

@@ -18,7 +18,7 @@ class V4Repository:
         with self.database.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO source_evidence(
+                INSERT OR IGNORE INTO source_evidence(
                     evidence_id, scan_id, root_id, provider, source_key, relative_path, entry_kind,
                     size, mtime, fingerprint, raw_file_id, ingest_method, source_route_id,
                     source_locator, playback_locator, tmdb_hint_id, tmdb_hint_type,
@@ -86,7 +86,7 @@ class V4Repository:
         with self.database.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO parsed_facts(
+                INSERT OR IGNORE INTO parsed_facts(
                     parsed_fact_id, evidence_id, parser_version, resource_type, media_type,
                     group_type, work_title, original_title, series_group, card_type,
                     relation_type, show_type, title_candidates_json,
@@ -95,7 +95,10 @@ class V4Repository:
                     episode_range_json, special_number, tmdb_hint_id, tmdb_hint_type,
                     release_group, edition_tags_json, quality_tags_json, confidence,
                     needs_review, is_importable, is_auxiliary, reasons_json, warnings_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     facts.parsed_fact_id,

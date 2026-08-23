@@ -260,7 +260,7 @@
 }
 
 /* ---------- 本地与兼容来源 ---------- */
-.sources-legacy-panel {
+.sources-root-panel {
   border: 1px solid var(--settings-border, rgba(120, 130, 145, 0.18));
   border-radius: 10px;
   padding: 12px 14px;
@@ -269,7 +269,7 @@
   gap: 10px;
 }
 
-.sources-legacy-note {
+.sources-root-note {
   font-size: 12.5px;
   color: var(--settings-muted, #8a93a2);
 }

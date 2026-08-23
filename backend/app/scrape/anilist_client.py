@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """AniList GraphQL client for public anime metadata.
 
 The public metadata endpoint does not require OAuth.  This client is kept
@@ -10,7 +9,7 @@ import logging
 import re
 import time
 from copy import deepcopy
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import httpx
 
@@ -34,18 +33,18 @@ class AniListClient:
 
     def __init__(
         self,
-        rate_limit: Optional[float] = None,
-        timeout: Optional[int] = None,
-        _http_client: Optional[Any] = None,
+        rate_limit: float | None = None,
+        timeout: int | None = None,
+        _http_client: Any | None = None,
     ):
         config = load_config()
         self._rate_limit = rate_limit if rate_limit is not None else config.anilist_rate_limit
         raw_timeout = timeout if timeout is not None else config.anilist_timeout
         self._timeout = max(3, min(int(raw_timeout or 15), 30))
         self._client = _http_client
-        self._owned_client: Optional[httpx.Client] = None
+        self._owned_client: httpx.Client | None = None
         self._last_request_time = 0.0
-        self._response_cache: Dict[Tuple[str, Tuple[Tuple[str, str], ...]], dict] = {}
+        self._response_cache: dict[tuple[str, tuple[tuple[str, str], ...]], dict] = {}
 
     def _get_client(self):
         if self._client is not None:
@@ -77,7 +76,7 @@ class AniListClient:
             time.sleep(interval - elapsed)
         self._last_request_time = time.time()
 
-    def _request(self, query: str, variables: Optional[dict] = None) -> dict:
+    def _request(self, query: str, variables: dict | None = None) -> dict:
         variables = variables or {}
         cache_key = (
             query,
@@ -121,7 +120,7 @@ class AniListClient:
         self._response_cache[cache_key] = deepcopy(data)
         return data
 
-    def search_anime(self, query: str, year: Optional[int] = None, per_page: int = 10) -> List[dict]:
+    def search_anime(self, query: str, year: int | None = None, per_page: int = 10) -> list[dict]:
         """Search public anime metadata."""
         if not query:
             return []
@@ -171,7 +170,7 @@ class AniListClient:
         return results
 
 
-def extract_tmdb_link(media: dict) -> Tuple[Optional[int], str]:
+def extract_tmdb_link(media: dict) -> tuple[int | None, str]:
     """Return (tmdb_id, tmdb_type) from AniList external links when present."""
     for link in media.get("externalLinks") or []:
         site = (link.get("site") or "").lower()

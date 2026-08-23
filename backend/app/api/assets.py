@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, Response
 from app.core.config import load_config
 from app.core.paths import get_cache_dir, get_data_dir, get_mirror_root
 from app.core.url_guard import validate_remote_asset_url
-from app.library.thumbnails import (
+from app.media_v4.assets.thumbnails import (
     DEFAULT_THUMBNAIL_WIDTH,
     THUMBNAIL_WIDTHS,
     get_or_create_thumbnail,

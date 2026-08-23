@@ -10,9 +10,9 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
-from app.db.database import get_connection
+from app.media_v4.runtime import get_database
 
 #: 本地时区（与项目其余部分一致：UTC+8）
 _LOCAL_TZ = timezone(timedelta(hours=8))
@@ -34,17 +34,17 @@ def record_request(conn_hash: str, operation: str) -> None:
     if not conn_hash or not operation:
         return
     try:
-        conn = get_connection()
-        conn.execute(
-            """
-            INSERT INTO openlist_telemetry (conn_hash, day, operation, count)
-            VALUES (?, ?, ?, 1)
-            ON CONFLICT(conn_hash, day, operation)
-            DO UPDATE SET count = count + 1
-            """,
-            (conn_hash, _today(), operation),
-        )
-        conn.commit()
+        with get_database().connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO openlist_telemetry (conn_hash, day, operation, count)
+                VALUES (?, ?, ?, 1)
+                ON CONFLICT(conn_hash, day, operation)
+                DO UPDATE SET count = count + 1
+                """,
+                (conn_hash, _today(), operation),
+            )
+            conn.commit()
     except Exception:
         # 遥测尽力而为：数据库暂不可用时不影响请求链路
         pass
@@ -53,13 +53,14 @@ def record_request(conn_hash: str, operation: str) -> None:
 def daily_counts(conn_hash: str, day: str = "") -> dict[str, int]:
     """某连接某天的遥测计数，返回 {operation: count}（无记录返回空 dict）。"""
     day = day or _today()
-    rows = get_connection().execute(
-        """
-        SELECT operation, count FROM openlist_telemetry
-        WHERE conn_hash = ? AND day = ?
-        """,
-        (conn_hash, day),
-    ).fetchall()
+    with get_database().connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT operation, count FROM openlist_telemetry
+            WHERE conn_hash = ? AND day = ?
+            """,
+            (conn_hash, day),
+        ).fetchall()
     return {str(row["operation"]): int(row["count"]) for row in rows}
 
 
