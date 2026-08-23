@@ -450,6 +450,7 @@ def confirm_root(source: str, req: ConfirmRootRequest):
     aggregate_plan = ImportPlan()
     aggregate_plan.status = "draft"
     aggregate_plan.items = []
+    item_revision_map: dict[str, str] = {}
     for row in rows:
         revision_id = str(row["revision_id"])
         current = revision_store.load_revision(revision_id)
@@ -467,6 +468,8 @@ def confirm_root(source: str, req: ConfirmRootRequest):
         plan = revision_store.load_plan(revision_id)
         if plan is None:
             raise HTTPException(status_code=409, detail=f"修订 {revision_id} 无法装载，请刷新后重试")
+        for _it in plan.items:
+            item_revision_map[_it.id] = revision_id
         aggregate_plan.items.extend(plan.items)
         if status == "draft":
             ok, _preview, validation_error = validate_confirmation(plan, force=req.force)
@@ -479,6 +482,42 @@ def confirm_root(source: str, req: ConfirmRootRequest):
                     ),
                 )
             mutation_rows.append(row)
+
+    # 全局跨 unit 重复集数收口 + 写回 DB（2026-08-23 实库回归）：
+    # per-unit recognize 时 auto_resolve 用 unit 身份只合并本 unit；同一
+    # 作品被 boundary 拆成多个 unit（如 Re:从零 新编撰版 unit 与原版 unit）
+    # 时，跨 unit 同集重复只在 aggregate 后可见。这里全局再跑一次
+    # _auto_resolve_duplicate_episodes（用 library_card_identity，同作品
+    # 路径前两段相同 → 能合并），并把被改成 ignore 的条目写回各自 draft
+    # revision，确保 enqueue_mirror 时不生成重复镜像。
+    import json as _json
+    from app.db.database import get_connection as _get_conn
+    from app.db.transactions import transaction as _tx
+    from app.recognition.plan_recognizer import _auto_resolve_duplicate_episodes
+    _before_actions = {it.id: it.action for it in aggregate_plan.items}
+    _auto_resolve_duplicate_episodes(aggregate_plan)
+    _conn = _get_conn()
+    with _tx(_conn) as _t:
+        for _it in aggregate_plan.items:
+            if _before_actions.get(_it.id) != "generate_strm" or _it.action != "ignore":
+                continue
+            _rev_id = item_revision_map.get(_it.id)
+            if not _rev_id:
+                continue
+            _fresh = _t.execute(
+                "SELECT status FROM import_revisions WHERE revision_id = ?",
+                (_rev_id,),
+            ).fetchone()
+            if _fresh is None or _fresh["status"] != "draft":
+                continue
+            _warnings_json = _json.dumps(list(_it.warnings), ensure_ascii=False)
+            _t.execute(
+                "UPDATE import_revision_items SET action='ignore', group_type='ignored', "
+                "season_number=NULL, episode_number=NULL, special_number=NULL, "
+                "needs_review=0, warnings_json=? "
+                "WHERE revision_id=? AND item_id=?",
+                (_warnings_json, _rev_id, _it.id),
+            )
 
     # 用户确认页展示的 aggregate plan 也是服务端最终执行 gate；
     # 防止每个 unit 单独合法、合并后出现跨 unit duplicate/error 的漂移。
@@ -602,6 +641,15 @@ def confirm_root_preview(source: str, root_id: str, generation: int):
     if not merged.items:
         raise HTTPException(status_code=400, detail="没有可预览的草稿修订条目")
 
+    # 全局跨 unit 重复集数收口（2026-08-23 实库回归）：
+    # per-unit recognize 时 _auto_resolve_duplicate_episodes 用 unit 身份
+    # 只在本 unit 范围合并；同一作品被 boundary 拆成多个 unit（如 Re:从零
+    # 新编撰版 unit 与原版 unit）时，跨 unit 的同集重复只在 aggregate 后
+    # 才可见。这里用 library_card_identity（路径前两段，同作品同前缀）
+    # 全局再跑一次，让 preview 不把跨 unit 重复报成 error 阻塞确认。
+    # in-memory 计算，不写 DB；确认时由 confirm_root 同样处理并写回。
+    from app.recognition.plan_recognizer import _auto_resolve_duplicate_episodes
+    _auto_resolve_duplicate_episodes(merged)
     preview = build_preview(merged)
     return {
         "plan_id": revision_ids[0],

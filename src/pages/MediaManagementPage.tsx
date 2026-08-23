@@ -661,16 +661,25 @@ export default function MediaManagementPage() {
     }
     setScanningFolder(true);
     setActionError('');
-    setUploadMessage('已提交后台识别与媒体库创建…');
+    setUploadMessage('正在扫描目录并准备确认计划…');
     try {
-      const batch = await sourcesApi.createLocalImportBatch(root, 'anime', 'seasonal');
-      setBackgroundBatch(batch);
+      const result = await sourcesApi.scanLocal(root, 'anime', 'seasonal');
+      const parsedPreview = result.preview || await importsApi.getPreview('local', result.plan_id);
+      const entry = makeEntry();
+      entry.path = root;
+      entry.note = '新番文件夹扫描';
+      entry.status = 'parsed';
+      entry.planId = result.plan_id;
+      entry.preview = parsedPreview;
+      entry.resolvedRoot = result.path_validation.resolved_root;
+      entry.pathValidation = result.path_validation;
+      setEntries([entry]);
+      setActiveEntryId(entry.id);
       setSource('local');
       setFamily('anime');
       setImportScope('seasonal');
-      setBackgroundImport({ source: 'local', batchId: batch.batch_id });
       setImportModeActive(false);
-      setStep('background');
+      setStep('confirm');
     } catch (error) {
       setActionError(`扫描新番文件夹失败：${(error as Error).message}`);
       setUploadMessage('');
@@ -1183,15 +1192,22 @@ export default function MediaManagementPage() {
     updateEntry(entry.id, { status: 'parsing', error: '' });
     try {
       if (source === 'local') {
-        const batch = await sourcesApi.createLocalImportBatch(
+        const result = await sourcesApi.scanLocal(
           path,
           family,
           family === 'anime' ? importScope : '',
         );
-        setBackgroundBatch(batch);
-        setBackgroundImport({ source: 'local', batchId: batch.batch_id });
-        setImportModeActive(false);
-        setStep('background');
+        const parsedPreview = result.preview || await importsApi.getPreview('local', result.plan_id);
+        updateEntry(entry.id, {
+          status: 'parsed',
+          planId: result.plan_id,
+          preview: parsedPreview,
+          resolvedRoot: result.path_validation.resolved_root,
+          pathValidation: result.path_validation,
+          error: '',
+        });
+        setActiveEntryId(entry.id);
+        setStep('confirm');
         return;
       }
       const result = await sourcesApi.parse(
@@ -1354,20 +1370,30 @@ export default function MediaManagementPage() {
     if (scanningFolder) return;
     setScanningFolder(true);
     setActionError('');
-    setUploadMessage(`已提交“${preset.source_root}”的后台更新…`);
+    setUploadMessage(`正在重新扫描“${preset.source_root}”并准备确认计划…`);
     try {
-      const batch = await sourcesApi.createLocalImportBatch(
+      const result = await sourcesApi.scanLocal(
         preset.source_root,
         preset.import_family,
         preset.import_scope,
       );
-      setBackgroundBatch(batch);
+      const parsedPreview = result.preview || await importsApi.getPreview('local', result.plan_id);
+      const entry = makeEntry();
+      entry.path = preset.source_root;
+      entry.note = preset.name;
+      entry.presetId = preset.preset_id;
+      entry.status = 'parsed';
+      entry.planId = result.plan_id;
+      entry.preview = parsedPreview;
+      entry.resolvedRoot = result.path_validation.resolved_root;
+      entry.pathValidation = result.path_validation;
+      setEntries([entry]);
+      setActiveEntryId(entry.id);
       setSource('local');
       setFamily(preset.import_family);
       setImportScope(preset.import_scope);
-      setBackgroundImport({ source: 'local', batchId: batch.batch_id });
       setImportModeActive(false);
-      setStep('background');
+      setStep('confirm');
     } catch (error) {
       setActionError(`重新扫描本地目录失败：${(error as Error).message}`);
       setUploadMessage('');
@@ -1948,6 +1974,9 @@ export default function MediaManagementPage() {
                 onGoSettings={goSettings}
               />
               <div className="media-source-controls">
+                {(ingestMode === 'tree' || ingestMode === 'tree_openlist') && (
+                  <label><span>网盘来源</span><select value={source} onChange={(event) => setSource(event.target.value as 'pan115' | 'baidu')}><option value="pan115">115 网盘</option><option value="baidu">百度网盘</option></select></label>
+                )}
                 <label><span>媒体分类</span><select value={family} onChange={(event) => setFamily(event.target.value as MediaWorkflowFamily)}>{familyOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
                 {family === 'anime' && <label className={importScope === 'seasonal' ? 'seasonal-risk-field' : ''}><span>作品状态</span><select value={importScope} onChange={(event) => setImportScope(event.target.value as '' | 'seasonal')}><option value="">已完结（推荐）</option><option value="seasonal" disabled={source === 'openlist'}>新番（追更中）{source === 'openlist' ? '（暂不支持）' : ''}</option></select></label>}
               </div>
@@ -2143,17 +2172,23 @@ export default function MediaManagementPage() {
               )}
             </section>
             {source === 'local' && (
-            <div className="media-directory-table" role="table" aria-label="目录树条目">
-              <div className="media-directory-row head" role="row"><span>#</span><span>目录路径</span><span>备注</span><span>状态</span><span>操作</span></div>
+            <section className="media-local-entry-list" aria-label="本地媒体目录">
+              <div className="media-local-entry-heading">
+                <div><span className="media-import-step-label">本地来源</span><strong>选择要建立媒体库的目录</strong><small>扫描只会读取目录中的媒体信息，不会移动或重命名原始视频。</small></div>
+                <span>{entries.length} 个目录</span>
+              </div>
               {entries.map((entry, index) => (
-                <div className="media-directory-row" role="row" key={entry.id}>
-                  <span className="media-directory-index">{index + 1}</span>
-                  <div className="media-directory-path-picker">
-                    <input value={entry.path} onFocus={() => setActiveEntryId(entry.id)} onChange={(event) => updateEntry(entry.id, { path: event.target.value, status: 'idle', error: '' })} placeholder="选择本地媒体目录" />
-                    <Button appearance="secondary" icon={<FolderOpen size={15} />} onClick={() => void chooseLocalFolder(entry)}>选择目录</Button>
+                <article className={`media-local-entry-card ${entry.status}`} key={entry.id}>
+                  <span className="media-local-entry-index">{index + 1}</span>
+                  <div className="media-local-entry-fields">
+                    <label><span>目录路径</span><div className="media-local-entry-path-picker">
+                      <input value={entry.path} onFocus={() => setActiveEntryId(entry.id)} onChange={(event) => updateEntry(entry.id, { path: event.target.value, status: 'idle', error: '' })} placeholder="选择本地媒体目录" />
+                      <Button appearance="secondary" icon={<FolderOpen size={15} />} onClick={() => void chooseLocalFolder(entry)}>选择目录</Button>
+                    </div></label>
+                    <label><span>备注 <em>可选</em></span><input className="media-local-entry-note" value={entry.note} onChange={(event) => updateEntry(entry.id, { note: event.target.value })} placeholder="例如：本地动画库" /></label>
                   </div>
-                  <input className="media-directory-note" value={entry.note} onChange={(event) => updateEntry(entry.id, { note: event.target.value })} placeholder="可选备注" />
-                  <span className={`media-entry-status ${entry.status}`}>{entry.status === 'parsing' && <Spinner size="tiny" />}{entry.status === 'parsed' ? '解析完成' : entry.status === 'failed' ? '解析失败' : entry.status === 'parsing' ? '解析中' : '待解析'}</span>
+                  <div className="media-local-entry-side">
+                  <span className={`media-entry-status ${entry.status}`}>{entry.status === 'parsing' && <Spinner size="tiny" />}{entry.status === 'parsed' ? '已生成确认计划' : entry.status === 'failed' ? '扫描失败' : entry.status === 'parsing' ? '正在扫描' : '等待扫描'}</span>
                   <div className="media-entry-actions">
                     <Button
                       className="media-entry-parse-button"
@@ -2162,7 +2197,7 @@ export default function MediaManagementPage() {
                       disabled={entry.status === 'parsing'}
                       onClick={() => requestEntryParse(entry)}
                     >
-                      {entry.status === 'parsed' ? '重新解析' : '解析并继续'}
+                      {entry.status === 'parsed' ? '重新扫描' : '扫描并确认'}
                     </Button>
                     <Button
                       className="media-entry-delete-button"
@@ -2174,11 +2209,12 @@ export default function MediaManagementPage() {
                       onClick={() => removeDirectoryEntry(entry.id)}
                     />
                   </div>
+                  </div>
                   {entry.error && <small className="media-entry-error">{entry.error}</small>}
-                </div>
+                </article>
               ))}
               {entries.length === 0 && <div className="media-directory-empty">尚未添加目录，请点击下方按钮添加。</div>}
-            </div>
+            </section>
             )}
             {source === 'local' && <Button appearance="secondary" icon={<Plus size={16} />} onClick={() => { const entry = makeEntry(); setEntries((items) => [...items, entry]); setActiveEntryId(entry.id); }}>添加目录条目</Button>}
             {uploadMessage && <div className="media-preset-progress">{(uploadingTree || scanningFolder) && <Spinner size="tiny" />}<span>{uploadMessage}</span></div>}
@@ -2209,7 +2245,7 @@ export default function MediaManagementPage() {
             <div><strong>{preview.summary.video_count}</strong><span>个视频</span></div>
             <div className={preview.summary.needs_review_count > 0 ? 'needs-attention' : ''}><strong>{preview.summary.needs_review_count}</strong><span>项需处理</span></div>
           </div>
-          {source !== 'local' && <PathValidationNotice resolvedRoot={activeEntry?.resolvedRoot || ''} validation={activeEntry?.pathValidation} repairLabel={source === 'openlist' ? '重新扫描远端目录' : undefined} onRepair={activeEntry?.presetId ? () => { const preset = presets.find((item) => item.preset_id === activeEntry.presetId); if (!preset) return; if (source === 'openlist') { void rescanOpenlistPreset(preset); } else { void rebindPresetRoot(preset); } } : undefined} repairing={repairingPresetId === activeEntry?.presetId} />}
+          {activeEntry?.pathValidation && <PathValidationNotice resolvedRoot={activeEntry.resolvedRoot || ''} validation={activeEntry.pathValidation} repairLabel={source === 'openlist' ? '重新扫描远端目录' : undefined} onRepair={activeEntry.presetId ? () => { const preset = presets.find((item) => item.preset_id === activeEntry.presetId); if (!preset) return; if (source === 'openlist') { void rescanOpenlistPreset(preset); } else if (source !== 'local') { void rebindPresetRoot(preset); } } : undefined} repairing={repairingPresetId === activeEntry?.presetId} />}
           <div className="media-confirm-decision-layout">
             <MediaPlanSummary preview={preview} />
             <section className="media-review-section">
@@ -2242,7 +2278,6 @@ export default function MediaManagementPage() {
           taskKind={taskKind}
           taskLogs={taskLogs}
           isScrapeTask={isScrapeTask}
-          isDurablePipelineTask={isDurablePipelineTask}
           onStart={handleWorkbenchStart}
           onNewImport={beginNewImport}
           onCancel={activeTask ? () => void cancelTask() : undefined}

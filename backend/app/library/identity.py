@@ -7,6 +7,77 @@ from pathlib import Path
 
 from app.import_plan.models import ImportPlanItem
 
+#: 自动派生的 unit 级 / 文件级 canonical（durable pipeline 早期格式）。
+#: 只有这两种格式允许在投影层按系列/作品键收敛；人工绑定、tracking 绑定、
+#: 新系列级身份（series:/standalone:）一律原样保留。
+_AUTO_UNIT_CANONICAL_RE = re.compile(r"^unit:[0-9a-f]{32}(?::sub:[0-9a-f]{12})?$")
+
+
+#: 标题首尾需剥离的弱标点（任何组合，逐字符剥离；不用 str.strip 多字符串以
+#: 避免 ruff B005 误判）。中文标点、引号、括号、分隔符都包括在内。
+_EDGE_PUNCT = " ._·-:：!！?？,，、()（）[]【】\"'“”‘’"
+_EDGE_PUNCT_RE = re.compile(f"^[{re.escape(_EDGE_PUNCT)}]+|[{re.escape(_EDGE_PUNCT)}]+$")
+
+
+def _identity_key(value: str) -> str:
+    """标题 → 稳定身份键：压缩空白、去首尾弱标点、大小写折叠。"""
+    text = " ".join(str(value or "").split())
+    text = _EDGE_PUNCT_RE.sub("", text)
+    return text.casefold()
+
+
+def series_identity_from_titles(work_title: str, series_group: str) -> str:
+    """主系列（main_series）系列级 canonical 身份。
+
+    「编号季目录」布局（如 ``作品名.S1-S3+剧场版/1.作品名.[S1].2020``）会把
+    同一系列的各季/OVA 拆成多个 MediaUnit；系列级身份保证它们共享同一
+    canonical（一张卡、一个镜像作品根）。work_title 优先（编号季目录里
+    series_group 可能被提取成 "1.立志篇." 这类碎片），series_group 兜底。
+    """
+    key = _identity_key(work_title) or _identity_key(series_group)
+    if not key:
+        return ""
+    return f"series:{key}"
+
+
+def standalone_identity_from_titles(work_title: str, series_group: str, year) -> str:
+    """standalone（剧场版/外传系列）作品级 canonical 身份。
+
+    外传 TV 系列的每一集（如 Gun Gale Online 01-25）、同一电影的多个版本
+    文件（如 剧场版：序列之争 双版本）共享同一 canonical，不再逐集/逐文件
+    拆成独立卡片。
+    """
+    key = _identity_key(work_title) or _identity_key(series_group)
+    if not key:
+        return ""
+    return f"standalone:{key}:{year or ''}"
+
+
+def effective_library_identity(
+    *,
+    card_type: str,
+    work_title: str,
+    series_group: str,
+    year,
+    canonical: str,
+) -> str:
+    """卡片有效身份：自动 unit/文件级 canonical 按系列/作品键收敛。
+
+    - canonical 为空或非自动格式（人工绑定 / tracking 绑定 / series: /
+      standalone: 新格式）→ 原样返回（保持既有行为与人工绑定优先）；
+    - main_series 且有标题证据 → ``series:{键}``；
+    - standalone 且有标题证据 → ``standalone:{键}:{年份}``；
+    - 无标题证据 → 原样返回（不弱于旧行为）。
+    """
+    canonical = str(canonical or "")
+    if not canonical or not _AUTO_UNIT_CANONICAL_RE.match(canonical):
+        return canonical
+    if str(card_type or "") == "standalone":
+        identity = standalone_identity_from_titles(work_title, series_group, year)
+    else:
+        identity = series_identity_from_titles(work_title, series_group)
+    return identity or canonical
+
 
 def _looks_like_season_dirname(value: str) -> bool:
     """判断路径段是否像季目录（S1/Season 1/第X季），这类目录不是作品根。"""

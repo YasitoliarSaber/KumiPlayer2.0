@@ -3,7 +3,8 @@
 - 逐层处理分类目录、结构目录、候选作品目录与未知目录；
 - 目录名只产生证据（recognition 层规则），视频完整相对路径提供最终识别证据；
 - unit boundary = 去除分类/季度/OVA/SP 等结构段后的稳定作品容器；
-- 同一 scope 下相同 series group 的季度与特殊内容合并到同一 unit；
+- 相同系列的季度与特殊内容可能分布在多个 MediaUnit（编号季目录布局），
+  合并发生在 canonical 身份层（series:{系列键}），由 LibraryIndex 聚合；
 - 发现作品后立即进入现有识别→revision 链路，不等待其他分类分支；
 - 证据不足或冲突 → media_units.status=needs_review，不自动建作品。
 """
@@ -718,19 +719,38 @@ def _boundary_container_name(boundary: str, root_path: str) -> str:
 def _derive_canonical_work_id(unit_id: str, item) -> str:
     """从 MediaUnit lineage 派生稳定的 canonical work 身份。
 
-    - main work（main_series 的季/SP/主条目）：``unit:{unit_id}``——
-      unit_id 由同一 root+boundary 复用生成，跨 incremental generation 稳定，
-      不依赖标题/系列名/TMDB；
-    - standalone（独立电影/外传等独立卡片）：unit 内稳定子身份
-      ``unit:{unit_id}:sub:{digest}``，digest 来自边界内相对路径
-      （不来自标题），保证同一 unit 下多个 standalone 拥有互不相同的
-      稳定 canonical ID，不会把整个 unit 强制合并成一个 canonical。
+    - main work（main_series 的季/SP/主条目）：系列级身份
+      ``series:{系列键}``——「编号季目录」布局（作品名.S1-S3/1.作品名.[S1].年份）
+      会把同一系列拆成多个 MediaUnit，系列级 canonical 保证各季/SP 跨 unit
+      合并为一张卡、共享同一镜像作品根（2026-08-23 实库回归：Re:Zero 6 张、
+      辉夜 5 张、刀剑神域 4 张重复卡均为 unit 级 canonical 拆卡）；
+    - standalone（独立电影/外传系列）：作品级身份
+      ``standalone:{标题}:{年份}``——外传 TV 系列的每一集（Gun Gale Online
+      01-25）、同一电影的多个版本文件（剧场版：序列之争 双版本）共享同一
+      canonical，不再按文件级 sub 身份逐集/逐文件拆卡；
+    - 标题证据缺失时保留旧兜底（unit 级 / 文件级 sub）。
     """
+    from app.library.identity import (
+        series_identity_from_titles,
+        standalone_identity_from_titles,
+    )
+
     canonical = str(getattr(item, "canonical_work_id", "") or "")
     if canonical:
         return canonical
-    if str(getattr(item, "card_type", "") or "") != "standalone":
+    card_type = str(getattr(item, "card_type", "") or "")
+    work_title = str(getattr(item, "work_title", "") or "")
+    series_group = str(getattr(item, "series_group", "") or "")
+    if card_type != "standalone":
+        identity = series_identity_from_titles(work_title, series_group)
+        if identity:
+            return identity
         return f"unit:{unit_id}"
+    identity = standalone_identity_from_titles(
+        work_title, series_group, getattr(item, "year", None),
+    )
+    if identity:
+        return identity
     relative = str(getattr(item, "relative_path", "") or "").replace("\\", "/")
     digest = hashlib.sha1(relative.encode("utf-8")).hexdigest()[:12]
     return f"unit:{unit_id}:sub:{digest}"

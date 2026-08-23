@@ -15,7 +15,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.import_plan.models import ImportPlan, ImportPlanItem
-from app.library.identity import _is_local_collection_root, library_card_identity
+from app.library.identity import (
+    _is_local_collection_root,
+    effective_library_identity,
+    library_card_identity,
+)
 from app.library.models import EpisodeIndex, LibraryIndex, RelatedWork, SeasonIndex, WorkIndex
 from app.library.scanner import MirrorAsset, MirrorFile, MirrorScanResult
 from app.scrape.completeness import target_already_scraped
@@ -53,7 +57,15 @@ def build_library_index(
             # CP2：索引键优先 canonical_work_id（V3 前台作品身份），
             # 不同 canonical 即使 work_id 相同也不得串线；legacy 无 canonical
             # 时保留 work_id 键兼容。
-            scrape_key = getattr(item, "canonical_work_id", "") or item.work_id
+            # 2026-08-23：自动 unit/文件级 canonical 与 plan item 一样按
+            # 系列/作品键收敛，保证合并卡能精确取到本系列各季的刮削信息。
+            scrape_key = effective_library_identity(
+                card_type=getattr(item, "card_type", ""),
+                work_title=getattr(item, "local_title", ""),
+                series_group=getattr(item, "series_group", ""),
+                year=getattr(item, "local_year", None),
+                canonical=str(getattr(item, "canonical_work_id", "") or item.work_id or ""),
+            )
             if scrape_key:
                 scrape_work_index[scrape_key] = item_dict
                 scrape_items_by_work_id[scrape_key].append(item_dict)
@@ -272,7 +284,16 @@ def _build_work_index(
     """从 ImportPlanItem 构建 WorkIndex"""
     # 标题：主系列用 series_group 聚合；独立电影必须保留具体电影标题。
     if item.card_type == "main_series":
-        title = _library_series_group(item) or item.series_group or item.work_title
+        # 2026-08-23：编号季目录布局里 series_group 可能被提取成
+        # "1.立志篇."/"TV版" 这类碎片（鬼灭之刃实库回归），不可作为
+        # 系列卡标题；过滤后回退 work_title（作品容器名，稳定）。
+        series_title = _usable_series_title(_library_series_group(item) or item.series_group)
+        title = (
+            series_title
+            or item.work_title
+            or _library_series_group(item)
+            or item.series_group
+        )
     elif item.group_type == "movie":
         title = _specific_standalone_title(item)
     else:
@@ -282,10 +303,13 @@ def _build_work_index(
     # 从 scrape_map 补充展示信息（CP6：有 canonical 身份只按 canonical 精确取，
     # 绝不跨 canonical 通过 series_group / work_id 兜底借料；legacy 无 canonical
     # 的旧计划才保留 series_group / work_id 兼容 fallback）
+    # 2026-08-23：canonical 键与 scrape 索引键同步按系列/作品级收敛，
+    # 合并卡才能取到本系列各季的刮削信息。
     canonical_id = str(getattr(item, "canonical_work_id", "") or "")
+    scrape_lookup_key = library_work_id or canonical_id
     if item.card_type == "main_series":
         if canonical_id:
-            scrape_info = scrape_work_index.get(canonical_id) or {}
+            scrape_info = scrape_work_index.get(scrape_lookup_key) or {}
         else:
             scrape_info = (
                 scrape_work_index.get(library_work_id)
@@ -295,7 +319,7 @@ def _build_work_index(
             )
     else:
         if canonical_id:
-            scrape_info = scrape_work_index.get(canonical_id) or {}
+            scrape_info = scrape_work_index.get(scrape_lookup_key) or {}
         else:
             scrape_info = (
                 scrape_work_index.get(library_work_id)
@@ -357,8 +381,12 @@ def _build_work_index(
 
     # 从 item 取 canonical_work_id；为空（legacy/旧数据）时用规范化标题+年份
     # 兜底生成，让同一作品跨 unit/boundary 合并成一张卡（问题5根因修复）。
+    # 2026-08-23：非空时与卡片身份保持一致（系列/作品级收敛后的有效身份），
+    # 保证跨来源去重键（directory_key）不会因 unit 级 canonical 再拆卡。
     canonical_value = str(getattr(item, "canonical_work_id", "") or "")
-    if not canonical_value:
+    if canonical_value:
+        canonical_value = library_work_id or canonical_value
+    else:
         from app.recognition.media import _make_canonical_work_id
         canonical_value = _make_canonical_work_id(
             item.source, item.work_title or item.series_group or "", item.year, item.card_type
@@ -1314,8 +1342,21 @@ def _mirror_work_root(item: ImportPlanItem) -> str:
 
 def _library_work_id(item: ImportPlanItem) -> str:
     """Generate one card identity for one source-side mirror directory."""
-    if getattr(item, "canonical_work_id", ""):
-        return item.canonical_work_id
+    canonical = str(getattr(item, "canonical_work_id", "") or "")
+    if canonical:
+        # 2026-08-23：自动 unit/文件级 canonical 按系列/作品键收敛——
+        # 编号季目录布局（同一系列多个 MediaUnit）与 standalone 多文件
+        # （外传系列每集一卡、电影双版本两卡）由此合并为一张卡；
+        # 人工绑定 / tracking 绑定 / 新系列级身份原样保留。
+        effective = effective_library_identity(
+            card_type=item.card_type,
+            work_title=item.work_title,
+            series_group=item.series_group,
+            year=item.year,
+            canonical=canonical,
+        )
+        if effective:
+            return effective
     # 主系列按 series_group 聚合（同一系列的季/特殊内容合并一张卡），
     # 不依赖镜像目录（target_dir 在镜像前为空，resolver 无法合并）。
     # 仅非 local 适用：local 走下方路径段逻辑（合集根合并、独立根分开）。
@@ -1371,6 +1412,32 @@ def _main_series_mirror_root(item: ImportPlanItem) -> str:
     ):
         return ""
     return f"{item.source}:{_normalize_path(str(directory.parent))}"
+
+
+#: 编号季目录名误提取的 series_group 碎片（"1.立志篇."）与结构段名（TV版）。
+_FRAGMENT_SERIES_TITLE_RE = re.compile(r"^\d+[.．]\s*")
+_GENERIC_SERIES_TITLES = frozenset({
+    "tv", "tv版", "剧场版", "正片", "main", "movie", "movies",
+    "ova", "oad", "sp", "sps", "special", "specials", "特典", "正传",
+})
+
+
+def _usable_series_title(value: str) -> str:
+    """过滤不能作为系列卡标题的 series_group 值。
+
+    编号季目录布局（``鬼灭之刃系列/1.立志篇.[S1].2019``）会把 series_group
+    提取成 ``1.立志篇.`` 这类季碎片；``TV版``/``剧场版`` 等结构段名同理。
+    这些值应回退到 work_title（作品容器名）。
+    """
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return ""
+    compact = re.sub(r"[\s._\-·:：]+", "", text).casefold()
+    if compact in _GENERIC_SERIES_TITLES:
+        return ""
+    if _FRAGMENT_SERIES_TITLE_RE.match(text):
+        return ""
+    return text
 
 
 def _library_series_group(item: ImportPlanItem) -> str:

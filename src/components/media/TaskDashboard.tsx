@@ -1,6 +1,7 @@
 import type { ImportPreview, TaskRecord } from '../../api/types';
-import type { OpenListImportBatch } from '../../api/openlist';
+import type { BackgroundImportUnit, OpenListImportBatch } from '../../api/openlist';
 import type { BackgroundImportSession } from '../../stores/mediaWorkflow';
+import type { MediaLog } from './MediaLogList';
 import MediaBackgroundImportStatus from './MediaBackgroundImportStatus';
 import MediaTaskWorkbench from './MediaTaskWorkbench';
 
@@ -17,15 +18,14 @@ interface Props {
   preview: ImportPreview | null;
   task: TaskRecord | null;
   taskKind: 'mirror' | 'scrape' | null;
-  taskLogs: Array<{ message: string; level: string; created_at?: string }>;
+  taskLogs: MediaLog[];
   /** 是否为刮削任务（scrape 类） */
   isScrapeTask: (task: TaskRecord | null) => boolean;
-  isDurablePipelineTask: (task: TaskRecord) => boolean;
   onStart: (kind: 'mirror' | 'scrape') => void;
   onNewImport: () => void;
   onCancel: (() => void) | undefined;
-  onReviewUnit: (unit: unknown) => void;
-  onRetryUnit: (unit: unknown) => void;
+  onReviewUnit: (unit: BackgroundImportUnit) => void;
+  onRetryUnit: (unit: BackgroundImportUnit) => void;
   retryingUnitId: string;
   /** legacy 工作台开始按钮是否禁用 */
   workbenchDisabled: boolean;
@@ -40,7 +40,6 @@ export default function TaskDashboard({
   taskKind,
   taskLogs,
   isScrapeTask,
-  isDurablePipelineTask,
   onStart,
   onNewImport,
   onCancel,

@@ -38,11 +38,13 @@ def test_import_family_and_local_import_scope_are_bound_to_real_parse_requests()
     sources_api = (ROOT / "src" / "api" / "sources.ts").read_text(encoding="utf-8")
 
     assert "setFamily(event.target.value as MediaWorkflowFamily)" in page
-    # createLocalImportBatch 是多行调用，用正则匹配实参（family/importScope 必须传后端）
+    # scanLocal 是多行调用，用正则匹配实参（family/importScope 必须传后端）
     assert re.search(
-        r"sourcesApi\.createLocalImportBatch\(\s*path,\s*family,\s*family === 'anime' \? importScope : ''",
+        r"sourcesApi\.scanLocal\(\s*path,\s*family,\s*family === 'anime' \? importScope : ''",
         page,
-    ), "createLocalImportBatch 必须传递 family/importScope"
+    ), "scanLocal 必须传递 family/importScope"
+    assert "importsApi.getPreview('local', result.plan_id)" in page
+    assert "setStep('confirm')" in page
 
     # parse 调用是多行的，按调用区间取切片断言实参，避免锁死缩进。
     parse_start = page.index("sourcesApi.parse(")

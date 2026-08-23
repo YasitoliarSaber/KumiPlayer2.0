@@ -96,9 +96,20 @@ def _upsert_library(revision: dict, items: list[dict], timestamp: str) -> list[s
             import_scope = str(root["import_scope"] or "")
 
     # effective canonical identity 分组：canonical 优先，legacy 缺 canonical 才用 work_id
+    # 2026-08-23：自动 unit/文件级 canonical 按系列/作品键收敛（编号季目录
+    # 多 unit、standalone 多文件由此合并为同一 library 行），人工绑定身份
+    # 原样保留。
+    from app.library.identity import effective_library_identity
+
     grouped: dict[str, str] = {}
     for item in items:
-        identity = str(item.get("canonical_work_id") or "") or str(item.get("work_id") or "")
+        identity = effective_library_identity(
+            card_type=item.get("card_type") or "",
+            work_title=item.get("work_title") or "",
+            series_group=item.get("series_group") or "",
+            year=item.get("year"),
+            canonical=str(item.get("canonical_work_id") or "") or str(item.get("work_id") or ""),
+        )
         if not identity:
             continue
         title = str(item.get("work_title") or "")

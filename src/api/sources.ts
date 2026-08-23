@@ -1,8 +1,27 @@
 // KumiPlayer 2.0 来源 API
 
 import { api } from './client'
-import type { SourceInfo, SourcePathValidation } from './types'
+import type { ImportPreview, SourceInfo, SourcePathValidation } from './types'
 import type { OpenListImportBatch } from './openlist'
+import type { MediaLibraryPreset, MediaTreeVersion } from './mediaPresets'
+
+export interface LocalScanResult {
+  snapshot_id: string
+  plan_id: string
+  source: 'local'
+  file_count: number
+  video_count: number
+  plan_status: string
+  import_family: string
+  import_scope?: '' | 'seasonal'
+  path_validation: SourcePathValidation
+  preset: MediaLibraryPreset
+  version: MediaTreeVersion
+  preview?: ImportPreview
+  reused_preset?: boolean
+  unchanged?: boolean
+  diff?: Record<string, unknown>
+}
 
 export type ImportFamily = 'anime' | 'live'
 
@@ -54,14 +73,7 @@ export const sourcesApi = {
 
   // 扫描本地
   scanLocal: (rootPath: string, importFamily?: ImportFamily, importScope?: '' | 'seasonal', autoPipeline = false, autoScrape = false) =>
-    api.post<{
-      snapshot_id: string
-      plan_id: string
-      source: string
-      file_count: number
-      video_count: number
-      plan_status: string
-      import_family: string
+    api.post<LocalScanResult & {
       task_id?: string
       task_status?: string
     }>('/api/sources/local/scan', {

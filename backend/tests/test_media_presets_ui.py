@@ -206,7 +206,7 @@ def test_baidu_seasonal_import_offers_txt_and_metadata_only_folder_scan():
     assert "目录树 TXT 批量导入" in page
     assert "扫描新番真实文件夹" in page
     assert "TXT 所在文件夹将作为实际媒体根目录" in page
-    assert "sourcesApi.createLocalImportBatch" in page
+    assert "sourcesApi.scanLocal" in page
     assert "/scan-folder" in client
     assert "只读取名称、大小和修改时间" in page
 
