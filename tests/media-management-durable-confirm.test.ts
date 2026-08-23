@@ -132,13 +132,15 @@ test('mirror→scrape 自动推进 effect 明确排除 durable mirror_revision',
 });
 
 test('durable pipeline task：工作台主按钮 disabled，不允许启动 legacy 任务', () => {
-  const workbenchAt = page.indexOf("{step === 'workbench'");
-  assert.ok(workbenchAt >= 0, 'workbench 区块不存在');
-  const workbenchBlock = page.slice(workbenchAt);
-  const disabledAt = workbenchBlock.indexOf('disabled={isScrapeTask(task) && taskKind');
-  assert.ok(disabledAt >= 0, '工作台 disabled 表达式不存在');
-  const disabledExpr = workbenchBlock.slice(disabledAt, workbenchBlock.indexOf('}', disabledAt));
-  // 两种 mode 分支都必须包含 durable pipeline 守卫
+  // P1-2（步骤6）：workbench 渲染统一到 TaskDashboard，disabled 通过
+  // workbenchDisabled prop 从页面传入 TaskDashboard。
+  const taskDashboardAt = page.indexOf('<TaskDashboard');
+  assert.ok(taskDashboardAt >= 0, 'TaskDashboard 区块不存在');
+  const taskDashboardBlock = page.slice(taskDashboardAt);
+  // 页面内 workbenchDisabled 表达式包含两个 mode 分支的 durable pipeline 守卫
+  const disabledAt = taskDashboardBlock.indexOf('workbenchDisabled=');
+  assert.ok(disabledAt >= 0, 'workbenchDisabled prop 不存在');
+  const disabledExpr = taskDashboardBlock.slice(disabledAt, disabledAt + 400);
   const durableGuardCount = (disabledExpr.match(/isDurablePipelineTask\(task\)/g) || []).length;
   assert.ok(durableGuardCount >= 2, `disabled 表达式两个 mode 分支都必须禁用 durable pipeline，实际 ${durableGuardCount} 处守卫`);
 });

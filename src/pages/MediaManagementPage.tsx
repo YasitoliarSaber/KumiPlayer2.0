@@ -45,6 +45,7 @@ import MediaPlanSummary from '../components/media/MediaPlanSummary';
 import MediaStageHeader from '../components/media/MediaStageHeader';
 import MediaTaskWorkbench, { isMirrorTaskReady } from '../components/media/MediaTaskWorkbench';
 import MediaBackgroundImportStatus from '../components/media/MediaBackgroundImportStatus';
+import TaskDashboard from '../components/media/TaskDashboard';
 import ImportModePicker from '../components/media/ImportModePicker';
 import { pickFolder, pickDirectoryTreeFile } from '../platform/folderPicker';
 
@@ -2217,7 +2218,7 @@ export default function MediaManagementPage() {
                 : !blockingPreviewIssues.length && <div className="media-confirm-empty"><CheckCircle2 size={19} /><div><strong>可以继续</strong><span>所有作品都已完成识别。</span></div></div>}
               {blockingPreviewIssues.length > 0 && <div className="media-review-blocking-list">{blockingPreviewIssues.map((issue) => <p key={issue.code}><TriangleAlert size={15} /><span>{issue.message}</span></p>)}</div>}
               <div className="media-confirm-decision-action">
-                <Button className="media-primary-command" appearance="primary" icon={<ChevronRight size={16} />} disabled={blockingPreviewIssues.length > 0 || (preview.status !== 'draft' && preview.status !== 'confirmed') || activeEntry?.pathValidation?.ok === false || activeEntry?.confirmationBlocked} onClick={() => void confirmPlan()}>{reviewItems.length ? '先确认并继续' : '确认并继续'}</Button>
+                <Button className="media-primary-command" appearance="primary" icon={<ChevronRight size={16} />} disabled={blockingPreviewIssues.length > 0 || (preview.status !== 'draft' && preview.status !== 'confirmed') || activeEntry?.pathValidation?.ok === false || activeEntry?.confirmationBlocked} onClick={() => void confirmPlan()}>{reviewItems.length ? '先确认并开始生成媒体库' : '确认并开始生成媒体库'}</Button>
               </div>
             </section>
           </div>
@@ -2230,38 +2231,28 @@ export default function MediaManagementPage() {
         </section>
       )}
 
-      {step === 'workbench' && (backgroundImport?.source === 'pan115' || backgroundImport?.source === 'baidu') && backgroundBatch && (
-        <MediaBackgroundImportStatus
-          batch={backgroundBatch}
-          source={backgroundImport.source}
-          title="创建媒体库并补充资料"
-          onReviewUnit={(unit) => void reviewUnit(unit)}
-          retryingUnitId={retryingUnitIdRef.current}
-        />
-      )}
-      {step === 'workbench' && !((backgroundImport?.source === 'pan115' || backgroundImport?.source === 'baidu') && backgroundBatch) && (preview || isScrapeTask(task)) && (
-        <MediaTaskWorkbench
-          mode={isScrapeTask(task) && taskKind === 'scrape' ? 'scrape' : 'mirror'}
-          title="创建媒体库并补充资料"
-          description="根据确认内容生成媒体库并自动补充资料。开始前最多抽样验证 3 个代表视频，镜像完整后自动开始刮削。"
+      {(step === 'workbench' || step === 'background') && (
+        <TaskDashboard
+          step={step}
+          backgroundImport={backgroundImport}
+          backgroundBatch={backgroundBatch}
+          preview={preview}
           task={task}
-          logs={taskLogs}
+          taskKind={taskKind}
+          taskLogs={taskLogs}
+          isScrapeTask={isScrapeTask}
+          isDurablePipelineTask={isDurablePipelineTask}
           onStart={handleWorkbenchStart}
           onNewImport={beginNewImport}
           onCancel={activeTask ? () => void cancelTask() : undefined}
-          startLabel={isScrapeTask(task) && taskKind === 'scrape' ? '开始补充资料' : '创建媒体库'}
-          disabled={isScrapeTask(task) && taskKind === 'scrape'
+          onReviewUnit={(unit) => void reviewUnit(unit)}
+          onRetryUnit={(unit) => void retryBackgroundUnit(unit)}
+          retryingUnitId={retryingUnitIdRef.current}
+          workbenchDisabled={isScrapeTask(task) && taskKind === 'scrape'
             ? !preview || isDurablePipelineTask(task)
             : isDurablePipelineTask(task) || !preview || preview.status !== 'confirmed' || activeEntry?.pathValidation?.ok === false}
         />
       )}
-      {step === 'background' && <MediaBackgroundImportStatus
-        batch={backgroundBatch}
-        source={backgroundImport?.source || 'local'}
-        onReviewUnit={(unit) => void reviewUnit(unit)}
-        onRetryUnit={backgroundImport?.source === 'openlist' || backgroundImport?.source === 'local' ? (unit) => void retryBackgroundUnit(unit) : undefined}
-        retryingUnitId={retryingUnitIdRef.current}
-      />}
       {step === 'maintenance' && <LibraryMaintenancePanel onCleared={() => loadPresets(true)} />}
 
       {editingItem && <div className="media-edit-backdrop" role="presentation"><section className="media-edit-dialog" role="dialog" aria-modal="true" aria-label="修正导入条目"><header><h2>处理识别结果</h2><Button appearance="subtle" onClick={() => setEditingItem(null)}>关闭</Button></header><div className="media-edit-source"><span className="media-edit-source-label">正在处理的文件</span><strong className="media-edit-source-name">{editingItem.relative_path.split('/').pop() || editingItem.relative_path}</strong><code className="media-edit-source-path" title={editingItem.relative_path}>{editingItem.relative_path}</code>{editingItem.source_size ? <span className="media-edit-source-size">大小 {formatOpenlistSize(editingItem.source_size)}</span> : null}</div><label>作品名称<input value={editDraft.work_title} onChange={(event) => setEditDraft((value) => ({ ...value, work_title: event.target.value }))} /></label><div className="media-edit-grid"><label>分组<select value={editDraft.group_type} onChange={(event) => setEditDraft((value) => ({ ...value, group_type: event.target.value }))}><option value="season">季度</option><option value="special">特别篇</option><option value="movie">电影</option><option value="ignored">忽略</option></select></label><label>季度<input type="number" value={editDraft.season_number} onChange={(event) => setEditDraft((value) => ({ ...value, season_number: event.target.value }))} /></label><label>集数<input type="number" value={editDraft.episode_number} onChange={(event) => setEditDraft((value) => ({ ...value, episode_number: event.target.value }))} /></label></div><footer><Button appearance="secondary" onClick={() => setEditingItem(null)}>取消</Button><Button appearance="primary" onClick={() => void saveItem()}>保存处理结果</Button></footer></section></div>}

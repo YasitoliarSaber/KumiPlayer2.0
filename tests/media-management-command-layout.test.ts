@@ -6,6 +6,7 @@ const page = readFileSync(new URL('../src/pages/MediaManagementPage.tsx', import
 const styles = readFileSync(new URL('../src/index.css', import.meta.url), 'utf8');
 const progress = readFileSync(new URL('../src/components/media/MediaFlowProgress.tsx', import.meta.url), 'utf8');
 const workbench = readFileSync(new URL('../src/components/media/MediaTaskWorkbench.tsx', import.meta.url), 'utf8');
+const taskDashboard = readFileSync(new URL('../src/components/media/TaskDashboard.tsx', import.meta.url), 'utf8');
 
 test('媒体导入使用三步进度导航并保留独立维护命令', () => {
   assert.match(progress, /label: '导入媒体'/);
@@ -28,15 +29,16 @@ test('顶部只有一个 command surface：header 透明，command-bar 承载全
 test('确认阶段默认可见媒体摘要，决策区与唯一主按钮同处一栏', () => {
   const confirmStage = page.slice(
     page.indexOf("{step === 'confirm' && preview && ("),
-    page.indexOf("{step === 'workbench'"),
+    page.indexOf("(step === 'workbench' || step === 'background'"),
   );
 
   assert.match(confirmStage, /<MediaStageHeader[\s\S]*title="确认内容"/);
   assert.match(confirmStage, /className="media-plan-keyfacts"/);
   assert.match(confirmStage, /<MediaPlanSummary preview=\{preview\} \/>/);
   assert.match(confirmStage, /className="media-confirm-decision-layout"/);
-  // 唯一主按钮：有可稍后处理项时显示“先确认并继续”，否则显示“确认并继续”
-  assert.match(confirmStage, />\{reviewItems\.length \? '先确认并继续' : '确认并继续'\}<\/Button>/);
+  // 唯一主按钮（问题3 简化）：有可稍后处理项时显示“先确认并开始生成媒体库”，
+  // 否则显示“确认并开始生成媒体库”
+  assert.match(confirmStage, />\{reviewItems\.length \? '先确认并开始生成媒体库' : '确认并开始生成媒体库'\}<\/Button>/);
   assert.match(confirmStage, /logs=\{preview\.parse_logs\}/);
   // 旧“查看识别详情”默认折叠设计已删除，确认页也不混入历史任务日志
   assert.doesNotMatch(confirmStage, /<summary>查看识别详情<\/summary>/);
@@ -45,12 +47,13 @@ test('确认阶段默认可见媒体摘要，决策区与唯一主按钮同处�
 });
 
 test('镜像与刮削由一个第三阶段工作台串联并自动推进', () => {
-  // RWK-44 起 workbench 渲染拆为两个独立条件：TXT 进度展示优先，
-  // 否则渲染 MediaTaskWorkbench（第三阶段工作台）串联镜像与刮削。
-  assert.match(page, /step === 'workbench'/);
-  assert.match(page, /\(preview \|\| isScrapeTask\(task\)\) && \(\s*$/m);
-  assert.match(page, /<MediaTaskWorkbench/);
-  assert.match(page, /mode=\{\s*isScrapeTask\(task\) && taskKind === 'scrape' \? 'scrape' : 'mirror'\s*\}/);
+  // P1-2（步骤6）：workbench/background 渲染统一收拢到 TaskDashboard，
+  // 对用户只暴露「刮削进度」，durable/legacy 分流在 TaskDashboard 内判断。
+  assert.match(page, /step === 'workbench' \|\| step === 'background'/);
+  assert.match(page, /<TaskDashboard/);
+  assert.match(taskDashboard, /title="刮削进度"/);
+  assert.match(taskDashboard, /MediaTaskWorkbench/);
+  assert.match(taskDashboard, /mode=\{scrapeMode \? 'scrape' : 'mirror'\}/);
   assert.match(page, /isMirrorTaskReady\(task\)[\s\S]*startTask\('scrape'\)/);
   assert.match(workbench, /SUB_STAGES/);
   assert.match(workbench, /路径抽样验证/);
@@ -60,7 +63,7 @@ test('镜像与刮削由一个第三阶段工作台串联并自动推进', () =>
 test('确认并继续在已确认状态下保持可点击，阻塞性问题与路径验证边界仍禁用', () => {
   const confirmStage = page.slice(
     page.indexOf("{step === 'confirm' && preview && ("),
-    page.indexOf("{step === 'workbench'"),
+    page.indexOf("(step === 'workbench' || step === 'background'"),
   );
   const disabledExpression = confirmStage.match(/disabled=\{([^}]+)\}/)?.[1] || '';
   // 已确认计划不再因 preview.status !== 'draft' 被禁用
