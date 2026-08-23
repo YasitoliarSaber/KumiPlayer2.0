@@ -91,6 +91,10 @@ KumiPlayer架构分析_2026-08-08.md
 *.md
 !README.md
 
+# 项目总体经验教训：作为可长期复用的项目资产纳入版本控制
+!/项目经验教训/
+!/项目经验教训/*.md
+
 # uosc_danmaku 第三方弹幕插件与运行数据（含凭据/历史），不提交
 resources/mpv-runtime/portable_config/scripts/uosc_danmaku/
 resources/mpv-runtime/portable_config/danmaku-history.json
