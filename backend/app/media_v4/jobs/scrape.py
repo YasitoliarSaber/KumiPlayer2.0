@@ -124,6 +124,21 @@ class V4ScrapeService:
             if not metadata_state:
                 metadata_state = "ready" if provider_name != "local" else "waiting_metadata"
             ready = metadata_state == "ready" and provider_name not in {"", "local"} and bool(provider_id)
+            if ready and mirror_root is None:
+                # 完整性门控必经：镜像根从配置解析，不能由调用方是否传参决定。
+                from app.core.paths import get_mirror_root
+
+                try:
+                    mirror_root = get_mirror_root()
+                except Exception:
+                    mirror_root = None
+                if not mirror_root:
+                    ready = False
+                    result = {
+                        **result,
+                        "metadata_state": "waiting_metadata",
+                        "reason": "镜像目录未配置，无法物化元数据产物",
+                    }
             valid_episode_ids = {str(item["episode_id"]) for item in target["episodes"]}
             for mapping in result.get("episode_mappings") or []:
                 episode_id = str(mapping.get("episode_id") or "")
@@ -134,7 +149,7 @@ class V4ScrapeService:
                 season_id = str(mapping.get("season_id") or "")
                 if season_id not in valid_season_ids:
                     raise ValueError("刮削结果包含不属于当前 revision 的 Season 映射")
-            if mirror_root is not None and job["work_id"] and ready:
+            if mirror_root and job["work_id"] and ready:
                 publish_metadata_artifacts(
                     self.database,
                     revision_id=job["revision_id"],
@@ -161,7 +176,9 @@ class V4ScrapeService:
                     }
                     ready = False
             now = _now()
-            binding_status = "confirmed" if ready else (metadata_state or "waiting_metadata")
+            binding_status = "confirmed" if ready else (
+                str(result.get("metadata_state") or "") or "waiting_metadata"
+            )
             binding_provider = provider_name if ready else "local"
             binding_provider_id = provider_id if ready else ""
             with self.database.connect() as conn:

@@ -1015,6 +1015,16 @@ def metadata_search(request: MetadataSearchRequest):
 
     now = _now_iso()
     with database.connect() as conn:
+        revision_row = conn.execute(
+            """
+            SELECT ir.revision_id FROM import_revisions ir
+            JOIN revision_bindings rb ON rb.revision_id = ir.revision_id
+            WHERE rb.work_id = ? AND ir.status = 'confirmed'
+            ORDER BY ir.confirmed_at DESC, ir.revision_id DESC LIMIT 1
+            """,
+            (request.work_id,),
+        ).fetchone()
+        owner_revision = str(revision_row["revision_id"]) if revision_row else ""
         conn.execute(
             "DELETE FROM revision_work_candidates WHERE work_id = ? AND evidence = 'manual_search'",
             (request.work_id,),
@@ -1028,10 +1038,11 @@ def metadata_search(request: MetadataSearchRequest):
                     candidate_id, revision_id, work_id, draft_work_key, provider,
                     provider_id, media_type, title, year, evidence, confidence, status,
                     created_at, updated_at
-                ) VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, 'manual_search', 'high', 'proposed', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual_search', 'high', 'proposed', ?, ?)
                 """,
                 (
                     candidate_id,
+                    owner_revision,
                     request.work_id,
                     str(work["identity_key"]),
                     "tmdb",

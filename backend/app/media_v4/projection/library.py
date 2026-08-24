@@ -71,6 +71,12 @@ class V4LibraryProjection:
                         w.show_type,
                         w.card_type,
                         CASE WHEN w.work_type = 'series' THEN 'tv' ELSE 'movie' END AS media_type,
+                        (
+                            SELECT ir.revision_id FROM import_revisions ir
+                            JOIN revision_bindings rb ON rb.revision_id = ir.revision_id
+                            WHERE rb.work_id = w.work_id AND ir.status = 'confirmed'
+                            ORDER BY ir.confirmed_at DESC, ir.revision_id DESC LIMIT 1
+                        ) AS revision_id,
                         CASE WHEN w.work_type = 'series' THEN (
                             SELECT COUNT(DISTINCT rb.episode_id)
                             FROM revision_bindings rb
@@ -157,7 +163,18 @@ class V4LibraryProjection:
                     binding_status = str(row["scrape_binding_status"] or "")
                     meta_state = str(metadata.get("metadata_state") or "")
                     if binding_status == "confirmed" and meta_state == "ready":
-                        state = "ready"
+                        # P-001 7.8 R8：投影重建复查 artifact 文件，不信任 JSON。
+                        from app.media_v4.jobs.completeness import assess_persisted_completeness
+
+                        complete, _reasons = assess_persisted_completeness(
+                            self.database,
+                            revision_id=str(row["revision_id"]),
+                            work_id=str(row["work_id"]),
+                            metadata=metadata,
+                        )
+                        state = "ready" if complete else "failed"
+                        if not complete:
+                            metadata["reason"] = "投影复查发现元数据产物缺失或损坏"
                     elif binding_status in {"waiting_metadata", "waiting_review", "source_unavailable", "failed"}:
                         state = binding_status
                     elif binding_status == "confirmed":

@@ -32,6 +32,35 @@ def _entry(evidence_id: str):
     return evidence, facts
 
 
+
+def _patch_scrape_env(tmp_path, monkeypatch):
+    """完整性必经：测试内显式给出镜像根与 remote artwork 配置，避免触碰真实 data/。"""
+
+    from types import SimpleNamespace
+
+    from app.media_v4.jobs import completeness as completeness_module
+    from app.media_v4.jobs import metadata_artifacts as artifacts_module
+
+    monkeypatch.setattr(artifacts_module, "load_config", lambda: SimpleNamespace(
+        artwork_storage_mode="remote", tmdb_timeout=5, proxy_url=None,
+    ))
+    monkeypatch.setattr(completeness_module, "load_config", lambda: SimpleNamespace(
+        artwork_storage_mode="remote", tmdb_timeout=5, proxy_url=None,
+    ))
+    return tmp_path / "mirror"
+
+
+def _ready_metadata(provider_id="42"):
+    return {
+        "provider": "tmdb",
+        "provider_id": provider_id,
+        "media_type": "tv",
+        "title": "Show",
+        "metadata_state": "ready",
+        "poster_url": "https://image.tmdb.org/t/p/w780/p.jpg",
+        "fanart_url": "https://image.tmdb.org/t/p/original/f.jpg",
+    }
+
 def test_scrape_targets_are_grouped_by_work_and_do_not_reparse(tmp_path, monkeypatch):
     from app.media_v4.jobs.scrape import V4ScrapeService
     from app.media_v4.persistence.database import V4Database
@@ -50,14 +79,15 @@ def test_scrape_targets_are_grouped_by_work_and_do_not_reparse(tmp_path, monkeyp
         "app.recognition.media.recognize_media",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("scrape 不得重新识别")),
     )
-    scrape.process(jobs[0]["job_id"], lambda _work: {"provider": "tmdb", "provider_id": "42", "title": "Show"})
+    mirror_root = _patch_scrape_env(tmp_path, monkeypatch)
+    scrape.process(jobs[0]["job_id"], lambda _work: _ready_metadata("42"), mirror_root=mirror_root)
 
     bindings = scrape.list_bindings("rev-scrape")
     assert len(bindings) == 1
     assert bindings[0]["provider_id"] == "42"
 
 
-def test_scrape_metadata_does_not_overwrite_local_episode_number(tmp_path):
+def test_scrape_metadata_does_not_overwrite_local_episode_number(tmp_path, monkeypatch):
     from app.media_v4.jobs.scrape import V4ScrapeService
     from app.media_v4.persistence.database import V4Database
     from app.media_v4.revisions.service import V4RevisionService
@@ -86,7 +116,9 @@ def test_scrape_metadata_does_not_overwrite_local_episode_number(tmp_path):
                 "season_id": season_id,
                 "provider_season_number": 9,
             }],
+            **_ready_metadata(),
         },
+        mirror_root=_patch_scrape_env(tmp_path, monkeypatch),
     )
 
     with database.connect() as conn:

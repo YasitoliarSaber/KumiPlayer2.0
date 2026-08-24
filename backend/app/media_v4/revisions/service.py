@@ -428,6 +428,34 @@ class V4RevisionService:
                     ).fetchone()
 
                     if existing_work is None:
+                        # P-001 7.8 R6：确认事务按冻结候选 identity 复用已有 Work
+                        # （provider+media_type+provider_id 在数据库层唯一归属一个 Work）。
+                        frozen = [
+                            item for item in candidates_by_key.get(work.work_key, [])
+                            if item.status == "confirmed"
+                            and candidate_service.supported_provider(item.provider)
+                        ]
+                        unique_frozen = {
+                            (item.provider, item.media_type, item.provider_id) for item in frozen
+                        }
+                        if len(unique_frozen) == 1:
+                            chosen = frozen[0]
+                            owner_row = conn.execute(
+                                """
+                                SELECT w.work_id FROM provider_bindings pb
+                                JOIN works w ON w.work_id = pb.work_id
+                                WHERE pb.provider = ? AND pb.media_type = ? AND pb.provider_id = ?
+                                LIMIT 1
+                                """,
+                                (chosen.provider, chosen.media_type, chosen.provider_id),
+                            ).fetchone()
+                            if owner_row is not None:
+                                existing_work = conn.execute(
+                                    "SELECT * FROM works WHERE work_id = ?",
+                                    (owner_row["work_id"],),
+                                ).fetchone()
+
+                    if existing_work is None:
                         provider_candidates = {
                             (facts.tmdb_hint_type.casefold(), str(facts.tmdb_hint_id))
                             for _evidence, facts in related_entries

@@ -45,6 +45,13 @@ def _unique_non_empty(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _normalize_filename_stem(stem: str) -> str:
+    """NFO/metadata 文件名 stem 规范化（去掉 tmdb 提示与发布标签）。"""
+
+    value = re.sub(r"[\{【\[]\s*tmdb-?\s*\d+\s*[\}】\]]", "", stem, flags=re.IGNORECASE).strip()
+    return re.sub(r"[\s._-]+", " ", value).strip()
+
+
 class V4Parser:
     """从一个 SourceEvidence 生成一个不可变 ParsedFacts。"""
 

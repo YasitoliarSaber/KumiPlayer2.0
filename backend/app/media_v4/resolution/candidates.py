@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from pathlib import PurePosixPath
 
 from app.media_v4.domain.models import (
     ParsedFacts,
@@ -38,12 +39,48 @@ class WorkCandidate:
 CandidateSearch = Callable[[str, list[str], int | None, str], list[WorkCandidate]]
 
 
+def _normalize_title(value: str) -> str:
+    import re
+    import unicodedata
+
+    normalized = unicodedata.normalize("NFKC", value or "").casefold()
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized.strip(" ._-·:：/\\()（）【】[]{}<>《》「」『』\"'")
+
+
+def _confidence_rank(confidence: str) -> int:
+    return {"high": 3, "medium": 2, "low": 1}.get(confidence, 0)
+
+
+def _score_candidate(
+    candidate: WorkCandidate,
+    work: ResolvedWork,
+    queries: list[str],
+    nfo_titles: list[str],
+) -> WorkCandidate:
+    """可解释候选评分：标题/原文精确匹配 + 年份一致 → high；否则 medium。"""
+
+    query_norms = {_normalize_title(q) for q in queries}
+    candidate_norm = _normalize_title(candidate.title)
+    exact_title = any(
+        candidate_norm == norm or candidate_norm.startswith(norm)
+        for norm in query_norms
+        if norm
+    )
+    year_ok = candidate.year is None or work.year is None or candidate.year == work.year
+    confidence = "high" if exact_title and year_ok else "medium"
+    evidence = candidate.evidence
+    if nfo_titles:
+        evidence = f"{evidence};sidecar_nfo"
+    return replace(candidate, confidence=confidence, evidence=evidence, status="proposed")
+
+
 def supported_provider(provider: str) -> bool:
     return provider in _SUPPORTED_PROVIDERS
 
 
 def build_query_inputs(work: ResolvedWork, entries: list[tuple[SourceEvidence, ParsedFacts]]) -> list[str]:
-    """构造候选查询输入，去重并过滤通用容器标题。"""
+    """构造候选查询输入，去重并过滤通用容器标题；含 sidecar NFO 标题。"""
 
     from app.media_v4.generic_container import is_generic_container_title
 
@@ -61,6 +98,37 @@ def build_query_inputs(work: ResolvedWork, entries: list[tuple[SourceEvidence, P
     if work.preferred_title and work.preferred_title not in queries:
         queries.append(work.preferred_title)
     return queries[:8]
+
+
+def _nfo_related_titles(
+    work: ResolvedWork,
+    entries: list[tuple[SourceEvidence, ParsedFacts]],
+) -> tuple[list[str], bool]:
+    """关联同目录/同 stem 的 sidecar NFO 标题，作为候选输入证据。"""
+
+    from app.media_v4.generic_container import is_generic_container_title
+    from app.media_v4.parsing.parser import _normalize_filename_stem
+
+    video_dirs: set[str] = set()
+    for evidence, _facts in entries:
+        if evidence.evidence_id in work.source_evidence_ids:
+            parts = PurePosixPath(evidence.relative_path).parts
+            video_dirs.add(PurePosixPath(*parts[:-1]).as_posix() if len(parts) > 1 else "")
+    titles: list[str] = []
+    found = False
+    for evidence, facts in entries:
+        if evidence.entry_kind != "metadata" or facts.is_importable:
+            continue
+        parts = PurePosixPath(evidence.relative_path).parts
+        parent = PurePosixPath(*parts[:-1]).as_posix() if len(parts) > 1 else ""
+        stem = _normalize_filename_stem(PurePosixPath(evidence.relative_path).stem)
+        if not stem or is_generic_container_title(stem):
+            continue
+        if parent in video_dirs or _normalize_title(stem) == _normalize_title(work.preferred_title):
+            if stem not in titles:
+                titles.append(stem)
+            found = True
+    return titles, found
 
 
 def plan_work_candidates(
@@ -109,8 +177,12 @@ def plan_work_candidates(
                 status="confirmed",
             )
             confirmed[(provider, media_type, provider_id)] = candidate
-        # 3) 在线/测试搜索候选。
+        # 3) 在线/测试搜索候选（含 sidecar NFO 标题输入）。
         queries = build_query_inputs(work, entries)
+        nfo_titles, has_nfo = _nfo_related_titles(work, entries)
+        for title in nfo_titles:
+            if title not in queries:
+                queries.append(title)
         searched: list[WorkCandidate] = []
         if queries:
             try:
@@ -122,8 +194,9 @@ def plan_work_candidates(
             if not supported_provider(candidate.provider):
                 continue
             key = (candidate.provider, candidate.media_type, candidate.provider_id)
-            if key not in candidates:
-                candidates[key] = replace(candidate, status="proposed")
+            scored = _score_candidate(candidate, work, queries, nfo_titles)
+            if key not in candidates or _confidence_rank(scored.confidence) > _confidence_rank(candidates[key].confidence):
+                candidates[key] = scored
 
         # hint 未出现在候选里时补为高置信 proposed。
         for provider, provider_id in hint_ids:
@@ -234,7 +307,10 @@ def merge_graph(graph: ResolvedMediaGraph, merge_map: dict[str, str]) -> Resolve
 
 
 def default_candidate_search(work_key: str, queries: list[str], year: int | None, media_type: str) -> list[WorkCandidate]:
-    """生产默认搜索：配置 Token 时用 TMDB；否则返回空（离线场景走 hint/既有绑定）。"""
+    """生产默认搜索：配置 Token 时用 TMDB；否则返回空（离线场景走 hint/既有绑定）。
+
+    置信度由 plan_work_candidates 按标题/年份评分，这里只返回原始候选（medium）。
+    """
 
     from app.core.config import load_config
     from app.media_v4.jobs.metadata import search_tmdb_candidates
@@ -253,7 +329,7 @@ def default_candidate_search(work_key: str, queries: list[str], year: int | None
                 title=item.get("title") or query,
                 year=item.get("year"),
                 evidence="online_search",
-                confidence="high",
+                confidence="medium",
                 status="proposed",
             ))
     return results
