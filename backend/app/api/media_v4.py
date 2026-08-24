@@ -96,6 +96,7 @@ class PreviewRequest(BaseModel):
     source_locator: str = ""
     playback_locator: str = ""
     source_route_id: str = ""
+    source_mode: str = ""
 
 
 class PlaybackProgressRequest(BaseModel):
@@ -182,6 +183,17 @@ def _confirmed_source_evidence(root_id: str):
     return V4Repository(database).list_confirmed_source_evidence(root_id)
 
 
+def _source_root_mode(root_id: str) -> str:
+    """读取来源根级模式；没有记录时返回空串，由调用方决定默认值。"""
+
+    with get_database().connect() as conn:
+        row = conn.execute(
+            "SELECT source_mode FROM source_roots WHERE root_id = ?",
+            (root_id,),
+        ).fetchone()
+    return str(row["source_mode"] or "") if row else ""
+
+
 def _configured_cloud_roots(config) -> list[str]:
     roots = [
         str(getattr(config, "pan115_root", "") or ""),
@@ -238,8 +250,14 @@ def _ensure_root_container(
     locator: str,
     route_id: str,
     root_container: str,
+    source_mode: str = "",
+    last_scan_mode: str = "",
 ) -> None:
-    """为非目录树来源写入来源根上下文，preview 据此传入解析器。"""
+    """为非目录树来源写入来源根上下文，preview 据此传入解析器。
+
+    source_mode 是来源根级权威模式，非空时覆盖、空时保留既有值；
+    last_scan_mode 只记录最近一次扫描方式。
+    """
 
     from datetime import UTC, datetime
 
@@ -249,8 +267,9 @@ def _ensure_root_container(
             """
             INSERT INTO source_roots(
                 root_id, provider, ingest_method, source_locator, playback_locator,
-                route_id, display_name, root_container, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?)
+                route_id, display_name, root_container, source_mode, last_scan_mode,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)
             ON CONFLICT(root_id) DO UPDATE SET
                 provider = excluded.provider,
                 ingest_method = excluded.ingest_method,
@@ -270,9 +289,26 @@ def _ensure_root_container(
                     WHEN excluded.root_container != '' THEN excluded.root_container
                     ELSE source_roots.root_container
                 END,
+                source_mode = CASE
+                    WHEN excluded.source_mode != '' THEN excluded.source_mode
+                    ELSE source_roots.source_mode
+                END,
+                last_scan_mode = excluded.last_scan_mode,
                 updated_at = excluded.updated_at
             """,
-            (root_id, provider, ingest_method, locator, locator, route_id, root_container, now, now),
+            (
+                root_id,
+                provider,
+                ingest_method,
+                locator,
+                locator,
+                route_id,
+                root_container,
+                source_mode,
+                last_scan_mode,
+                now,
+                now,
+            ),
         )
 
 
@@ -297,11 +333,15 @@ def _persist_tree_scan(
     root_container: str,
     evidence: list,
     resolution: TreeRootResolution,
+    source_mode: str = "",
+    last_scan_mode: str = "",
 ) -> None:
     """把目录树扫描的证据与验证事实写入事务约束的 SQLite。
 
     source_roots / source_scans / source_evidence / tree_scan_validation 一起
     成为 preview 与 confirm 的后端权威，前端回传的逐条 locator 不再被采信。
+    source_mode 显式区分纯目录树快照（tree_snapshot）与混合 TXT 基线
+    （tree_openlist），不随证据顺序变化。
     """
 
     from datetime import UTC, datetime
@@ -312,8 +352,9 @@ def _persist_tree_scan(
             """
             INSERT INTO source_roots(
                 root_id, provider, ingest_method, source_locator, playback_locator,
-                route_id, display_name, root_container, created_at, updated_at
-            ) VALUES (?, ?, 'directory_tree', ?, ?, ?, '', ?, ?, ?)
+                route_id, display_name, root_container, source_mode, last_scan_mode,
+                created_at, updated_at
+            ) VALUES (?, ?, 'directory_tree', ?, ?, ?, '', ?, ?, ?, ?, ?)
             ON CONFLICT(root_id) DO UPDATE SET
                 provider = excluded.provider,
                 ingest_method = excluded.ingest_method,
@@ -333,9 +374,25 @@ def _persist_tree_scan(
                     WHEN excluded.root_container != '' THEN excluded.root_container
                     ELSE source_roots.root_container
                 END,
+                source_mode = CASE
+                    WHEN excluded.source_mode != '' THEN excluded.source_mode
+                    ELSE source_roots.source_mode
+                END,
+                last_scan_mode = excluded.last_scan_mode,
                 updated_at = excluded.updated_at
             """,
-            (root_id, provider, effective_root, effective_root, route_id, root_container, now, now),
+            (
+                root_id,
+                provider,
+                effective_root,
+                effective_root,
+                route_id,
+                root_container,
+                source_mode,
+                last_scan_mode,
+                now,
+                now,
+            ),
         )
         existing = conn.execute(
             "SELECT generation FROM source_scans WHERE scan_id = ?", (scan_id,)
@@ -401,6 +458,7 @@ def scan_source(request: SourceScanRequest):
         raise HTTPException(status_code=400, detail=detail)
     try:
         effective_scan_mode: str = request.source
+        root_source_mode: str = ""
         scan_stats: dict[str, int] = {}
         resolution: TreeRootResolution = TreeRootResolution("", True, "", 0, 0, ())
         content_provider = (
@@ -410,6 +468,7 @@ def scan_source(request: SourceScanRequest):
         )
         if request.source == "hybrid":
             effective_scan_mode = "tree_baseline"
+            root_source_mode = "tree_openlist"
             from app.api.openlist_v4 import _configured_routes, _remote_root
 
             config = load_config()
@@ -451,6 +510,8 @@ def scan_source(request: SourceScanRequest):
                 root_container=_container_name(resolution.root or local_root),
                 evidence=evidence,
                 resolution=resolution,
+                source_mode=root_source_mode,
+                last_scan_mode=effective_scan_mode,
             )
             stage_scan_state(
                 scan_id,
@@ -458,6 +519,7 @@ def scan_source(request: SourceScanRequest):
             )
         elif request.source == "tree":
             effective_scan_mode = "tree_snapshot"
+            root_source_mode = "tree_snapshot"
             config = load_config()
             configured_roots = _configured_tree_roots(config, content_provider)
             if not configured_roots:
@@ -486,6 +548,8 @@ def scan_source(request: SourceScanRequest):
                 root_container=_container_name(effective_root),
                 evidence=evidence,
                 resolution=resolution,
+                source_mode=root_source_mode,
+                last_scan_mode=effective_scan_mode,
             )
         elif request.source == "openlist":
             from app.api.openlist_v4 import _client, _configured_routes, _remote_root
@@ -505,15 +569,19 @@ def scan_source(request: SourceScanRequest):
             root_id = openlist_root_id(config.openlist_server_url, username, remote_root)
             baseline = _confirmed_source_evidence(root_id)
             state = load_active_state(root_id)
+            existing_mode = _source_root_mode(root_id)
             if request.scan_mode == "incremental" and not baseline:
                 raise HTTPException(
                     status_code=409,
-                    detail="此 OpenList 目录还没有已确认的 TXT 基线，请先建立并确认 TXT 基线",
+                    detail="此 OpenList 目录尚无已确认基线，请先完成并确认首次完整扫描，或使用 TXT 建立大库基线",
                 )
             if request.scan_mode == "incremental" or (request.scan_mode == "auto" and baseline):
                 if not state or state.get("remote_root") != remote_root:
                     state = build_tree_baseline_state(root_id, remote_root, baseline)
                 effective_scan_mode = "incremental"
+                # 增量属于 OpenList 共同能力：已有来源模式保持不变（TXT 混合根仍是
+                # tree_openlist），未知根才默认回落到 openlist_full。
+                root_source_mode = existing_mode or "openlist_full"
                 scan_id, evidence, next_state, scan_stats = scan_openlist_incremental(
                     _client(config),
                     baseline=baseline,
@@ -526,6 +594,7 @@ def scan_source(request: SourceScanRequest):
                 stage_scan_state(scan_id, next_state)
             else:
                 effective_scan_mode = "full"
+                root_source_mode = "openlist_full"
                 directory_observations: dict[str, float | None] = {}
                 scan_id, evidence = scan_openlist_directory(
                     _client(config),
@@ -549,6 +618,8 @@ def scan_source(request: SourceScanRequest):
                 locator=remote_root,
                 route_id=route_id,
                 root_container=_container_name(remote_root),
+                source_mode=root_source_mode,
+                last_scan_mode=effective_scan_mode,
             )
         else:
             config = load_config()
@@ -564,6 +635,8 @@ def scan_source(request: SourceScanRequest):
                 locator=str(Path(request.root_path).expanduser()),
                 route_id="",
                 root_container=_container_name(request.root_path),
+                source_mode="local",
+                last_scan_mode="local",
             )
     except DirectoryTreeReadError as exc:
         raise HTTPException(status_code=400, detail=_directory_tree_error_message(exc)) from exc
@@ -581,6 +654,8 @@ def scan_source(request: SourceScanRequest):
         "scan_id": scan_id,
         "entries": [asdict(item) for item in evidence],
         "scan_mode": effective_scan_mode,
+        "source_mode": root_source_mode,
+        "last_scan_mode": effective_scan_mode,
         "scan_stats": scan_stats,
         "effective_playback_root": resolution.root,
         "path_validation": validation,
@@ -634,6 +709,7 @@ def preview(request: PreviewRequest):
                 "route_id": source_route_id,
                 "root_container": root_container,
             },
+            source_mode=request.source_mode,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -786,6 +862,8 @@ def list_source_libraries():
                 sr.root_id,
                 sr.provider,
                 sr.ingest_method,
+                sr.source_mode,
+                sr.last_scan_mode,
                 sr.source_locator,
                 sr.playback_locator,
                 sr.route_id,
@@ -861,6 +939,9 @@ def list_source_libraries():
         cards.append({
             **dict(row),
             "display_name": row["display_name"] or row["source_locator"] or f"{row['provider']} 媒体库",
+            "source_mode": row["source_mode"] or "",
+            "last_scan_mode": row["last_scan_mode"] or "",
+            "has_confirmed_baseline": True,
             "evidence_count": int(row["evidence_count"]),
             "work_count": int(row["work_count"]),
             "asset_count": int(row["asset_count"]),
@@ -873,6 +954,43 @@ def list_source_libraries():
             ),
         })
     return {"cards": cards}
+
+
+@router.get("/sources/openlist/status")
+def openlist_status(remote_root: str = ""):
+    """查询所选 OpenList 目录的来源根级状态：root_id、来源模式与是否已有已确认基线。
+
+    只读查询，不发起 OpenList 网络请求；前端据此决定展示“完整扫描并建立基线”
+    “增量扫描”还是“完整校验”，不再从 ingest_method 或路由存在性猜测入口。
+    """
+
+    from app.api.openlist_v4 import _remote_root
+
+    config = load_config()
+    username, _password, credential_state = resolve_openlist_credentials()
+    if credential_state == "unavailable":
+        raise HTTPException(status_code=503, detail="本机凭据管理器暂时不可用，请稍后重试")
+    if not config.openlist_server_url or not username:
+        raise HTTPException(status_code=400, detail="请先在设置页完成 OpenList 连接配置")
+    remote_root = normalize_remote_path(remote_root.strip() or _remote_root(config))
+    root_id = openlist_root_id(config.openlist_server_url, username, remote_root)
+    source_mode = ""
+    last_scan_mode = ""
+    with get_database().connect() as conn:
+        row = conn.execute(
+            "SELECT source_mode, last_scan_mode FROM source_roots WHERE root_id = ?",
+            (root_id,),
+        ).fetchone()
+        if row is not None:
+            source_mode = str(row["source_mode"] or "")
+            last_scan_mode = str(row["last_scan_mode"] or "")
+    return {
+        "root_id": root_id,
+        "remote_root": remote_root,
+        "source_mode": source_mode,
+        "last_scan_mode": last_scan_mode,
+        "has_confirmed_baseline": bool(_confirmed_source_evidence(root_id)),
+    }
 
 
 @router.get("/jobs")

@@ -82,6 +82,9 @@ export interface V4SourceLibraryCard {
   root_id: string
   provider: string
   ingest_method: string
+  source_mode: string
+  last_scan_mode: string
+  has_confirmed_baseline: boolean
   source_locator: string
   playback_locator: string
   route_id: string
@@ -105,6 +108,14 @@ export interface V4SourceLibraryCard {
   }
 }
 
+export interface V4OpenlistBaselineStatus {
+  root_id: string
+  remote_root: string
+  source_mode: string
+  last_scan_mode: string
+  has_confirmed_baseline: boolean
+}
+
 export const mediaV4Api = {
   scan: (request: {
     source?: string
@@ -118,6 +129,8 @@ export const mediaV4Api = {
     scan_id: string
     entries: V4SourceEvidence[]
     scan_mode?: 'local' | 'tree_snapshot' | 'tree_baseline' | 'incremental' | 'full'
+    source_mode?: string
+    last_scan_mode?: string
     scan_stats?: { requested_directories?: number; rolling_verified?: number; changed_directories?: number }
   }>('/api/v4/sources/scan', request),
 
@@ -131,6 +144,7 @@ export const mediaV4Api = {
     source_locator?: string
     playback_locator?: string
     source_route_id?: string
+    source_mode?: string
   }) => api.post<V4Preview>('/api/v4/imports/preview', request),
 
   confirm: (revisionId: string) =>
@@ -143,6 +157,9 @@ export const mediaV4Api = {
     api.get<{ revision_id: string; status: string; jobs: V4Job[] }>(`/api/v4/imports/${encodeURIComponent(revisionId)}`),
 
   sourceLibraries: () => api.get<{ cards: V4SourceLibraryCard[] }>('/api/v4/sources/libraries'),
+
+  openlistStatus: (remoteRoot: string) =>
+    api.get<V4OpenlistBaselineStatus>(`/api/v4/sources/openlist/status?remote_root=${encodeURIComponent(remoteRoot)}`),
 
   enqueueScrape: (revisionId: string) =>
     api.post<{ revision_id: string; jobs: V4Job[] }>(`/api/v4/imports/${encodeURIComponent(revisionId)}/scrape`),

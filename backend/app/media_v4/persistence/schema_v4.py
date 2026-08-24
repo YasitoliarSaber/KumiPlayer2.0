@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 7
+V4_SCHEMA_VERSION = 8
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -53,6 +53,8 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             route_id TEXT NOT NULL DEFAULT '',
             display_name TEXT NOT NULL DEFAULT '',
             enabled INTEGER NOT NULL DEFAULT 1,
+            source_mode TEXT NOT NULL DEFAULT '',
+            last_scan_mode TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -692,6 +694,42 @@ def migrate_schema_v6_to_v7(conn: sqlite3.Connection) -> None:
 
     _add_column_if_missing(conn, "revision_work_candidates", "original_title", "TEXT NOT NULL DEFAULT ''")
     _add_column_if_missing(conn, "revision_work_candidates", "aliases_json", "TEXT NOT NULL DEFAULT '[]'")
+
+
+def create_v8_structures(conn: sqlite3.Connection) -> None:
+    """v8 增量结构：source_roots 增加来源根级模式字段。
+
+    source_mode 表达来源卡的建立/维护策略（local / tree_snapshot /
+    tree_openlist / openlist_full），last_scan_mode 只记录最近一次扫描方式；
+    两者都与文件级 SourceEvidence.ingest_method 分层，不再从排序后的
+    第一条证据反推来源卡模式。
+    """
+
+    _add_column_if_missing(conn, "source_roots", "source_mode", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "source_roots", "last_scan_mode", "TEXT NOT NULL DEFAULT ''")
+
+
+def migrate_schema_v7_to_v8(conn: sqlite3.Connection) -> None:
+    """v7 → v8 增量迁移：新增 source_mode / last_scan_mode 并做一次最小回填。
+
+    回填只依据既有 source_roots 行推导一次，后续必须由 scan/preview 合同显式
+    维护；不允许继续从文件证据反推模式。
+    """
+
+    create_v8_structures(conn)
+    conn.execute("UPDATE source_roots SET source_mode = 'local' WHERE source_mode = '' AND ingest_method = 'local_scan'")
+    conn.execute(
+        "UPDATE source_roots SET source_mode = 'tree_openlist' "
+        "WHERE source_mode = '' AND ingest_method = 'directory_tree' AND route_id != ''"
+    )
+    conn.execute(
+        "UPDATE source_roots SET source_mode = 'tree_snapshot' "
+        "WHERE source_mode = '' AND ingest_method = 'directory_tree'"
+    )
+    conn.execute(
+        "UPDATE source_roots SET source_mode = 'openlist_full' "
+        "WHERE source_mode = '' AND ingest_method = 'openlist_scan'"
+    )
 
 
 def migrate_schema_v4_to_v5(conn: sqlite3.Connection) -> None:

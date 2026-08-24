@@ -228,6 +228,7 @@ class V4RevisionService:
         source_provider: str = "local",
         ingest_method: str = "local_scan",
         source_metadata: dict[str, str] | None = None,
+        source_mode: str = "",
         _publish: bool = False,
         _override_payloads: dict[str, dict] | None = None,
         candidate_search: CandidateSearch | None = None,
@@ -241,6 +242,16 @@ class V4RevisionService:
             ingest_method = entries[0][0].ingest_method
         if not root_id or not scan_id:
             raise ValueError("空 revision 必须明确提供 root_id 和 scan_id")
+        # P-002 8.4：来源根级模式是独立权威字段，不再从排序后的第一条文件证据
+        # 反推。显式 source_mode 存在时，root 级 ingest_method 只保留为兼容遗留
+        # 列并按其稳定映射；文件级 SourceEvidence.ingest_method 仍表达观测方式。
+        if source_mode:
+            ingest_method = {
+                "local": "local_scan",
+                "tree_snapshot": "directory_tree",
+                "tree_openlist": "directory_tree",
+                "openlist_full": "openlist_scan",
+            }.get(source_mode, ingest_method)
 
         graph = self.resolver.resolve(entries)
         # P-001 7.7 R1：确认前候选解析。draft 时在线/测试搜索并合并同一
@@ -289,8 +300,8 @@ class V4RevisionService:
                 """
                 INSERT INTO source_roots(
                     root_id, provider, ingest_method, source_locator, playback_locator,
-                    route_id, display_name, root_container, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    route_id, display_name, root_container, source_mode, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(root_id) DO UPDATE SET
                     provider = excluded.provider,
                     ingest_method = excluded.ingest_method,
@@ -314,6 +325,10 @@ class V4RevisionService:
                         WHEN excluded.root_container != '' THEN excluded.root_container
                         ELSE source_roots.root_container
                     END,
+                    source_mode = CASE
+                        WHEN excluded.source_mode != '' THEN excluded.source_mode
+                        ELSE source_roots.source_mode
+                    END,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -325,6 +340,7 @@ class V4RevisionService:
                     str(source_metadata.get("route_id") or ""),
                     str(source_metadata.get("display_name") or ""),
                     str(source_metadata.get("root_container") or ""),
+                    source_mode,
                     created_at,
                     created_at,
                 ),

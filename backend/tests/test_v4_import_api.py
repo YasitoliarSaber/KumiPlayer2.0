@@ -553,7 +553,7 @@ def test_local_scan_receives_all_configured_cloud_mount_roots(monkeypatch):
     }
 
 
-def test_explicit_openlist_incremental_requires_a_confirmed_txt_baseline(monkeypatch):
+def test_explicit_openlist_incremental_without_baseline_returns_actionable_409(monkeypatch):
     from fastapi import HTTPException
 
     from app.api import media_v4
@@ -582,7 +582,10 @@ def test_explicit_openlist_incremental_requires_a_confirmed_txt_baseline(monkeyp
         ))
 
     assert exc_info.value.status_code == 409
-    assert "TXT 基线" in exc_info.value.detail
+    # 增量属于 OpenList 共同能力：错误必须指向“已确认基线”，而不是强制要求 TXT。
+    assert "已确认基线" in exc_info.value.detail
+    assert "首次完整扫描" in exc_info.value.detail
+    assert "必须先建立并确认 TXT 基线" not in exc_info.value.detail
 
 
 def test_openlist_auto_scan_rebuilds_missing_checkpoint_from_confirmed_revision(monkeypatch):
@@ -635,6 +638,213 @@ def test_openlist_auto_scan_rebuilds_missing_checkpoint_from_confirmed_revision(
     assert captured["scan_id"] == "scan-incremental"
     assert captured["state"]["remote_verified"] is False
     assert captured["state"]["root_id"] == root_id
+
+
+def test_plain_openlist_full_scan_confirm_enables_incremental_and_keeps_mode(tmp_path, monkeypatch):
+    """普通 OpenList 完整扫描确认后即可增量；来源卡模式保持 openlist_full。"""
+
+    from fastapi import HTTPException
+
+    from app.api import media_v4, openlist_v4
+    from app.integrations.openlist.providers import OpenListRouteConfig
+    from app.media_v4.sources.adapters import SourceEntry, to_source_evidence
+
+    config = SimpleNamespace(
+        openlist_server_url="https://openlist.example.test",
+        openlist_remote_root="/",
+        openlist_mount_root="X:\\OpenList",
+        openlist_routes=[OpenListRouteConfig(
+            route_id="route-anime",
+            remote_prefix="/Anime",
+            provider_id="pan115",
+        )],
+    )
+    client = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr(media_v4, "load_config", lambda: config)
+    monkeypatch.setattr(media_v4, "resolve_openlist_credentials", lambda: ("kumi", "secret", "available"))
+    monkeypatch.setattr(openlist_v4, "_client", lambda _config: object())
+    monkeypatch.setattr(media_v4, "stage_scan_state", lambda _scan_id, _state: None)
+    monkeypatch.setattr(media_v4, "activate_scan_state", lambda _scan_id: None)
+    monkeypatch.setattr(media_v4, "load_active_state", lambda _root_id: None)
+
+    def fake_full_scan(_client, **kwargs):
+        evidence = [
+            to_source_evidence(SourceEntry(
+                root_id=kwargs["root_id"],
+                scan_id="scan-full-openlist",
+                provider="pan115",
+                ingest_method="openlist_api",
+                relative_path="Show/Show.S01E01.mkv",
+                source_key="Show/Show.S01E01.mkv",
+                source_locator="Show/Show.S01E01.mkv",
+                playback_locator="X:\\OpenList\\Anime\\Show\\Show.S01E01.mkv",
+            ))
+        ]
+        return "scan-full-openlist", evidence
+
+    monkeypatch.setattr(media_v4, "scan_openlist_directory", fake_full_scan)
+
+    full = media_v4.scan_source(media_v4.SourceScanRequest(
+        source="openlist",
+        root_path="/Anime",
+        provider="pan115",
+        scan_mode="full",
+    ))
+    assert full["scan_mode"] == "full"
+    assert full["source_mode"] == "openlist_full"
+
+    # draft 未确认时显式 incremental 仍然拒绝，不悄悄退化为全量。
+    with pytest.raises(HTTPException) as exc_info:
+        media_v4.scan_source(media_v4.SourceScanRequest(
+            source="openlist",
+            root_path="/Anime",
+            provider="pan115",
+            scan_mode="incremental",
+        ))
+    assert exc_info.value.status_code == 409
+
+    preview = client.post("/api/v4/imports/preview", json={
+        "revision_id": "rev-openlist",
+        "root_id": full["root_id"],
+        "scan_id": full["scan_id"],
+        "entries": full["entries"],
+    })
+    assert preview.status_code == 200, preview.text
+    assert client.post("/api/v4/imports/rev-openlist/confirm").status_code == 200
+
+    captured: dict = {}
+
+    def fake_incremental(_client, **kwargs):
+        captured["baseline"] = kwargs["baseline"]
+        return "scan-incr", kwargs["baseline"], kwargs["state"], {"requested_directories": 1}
+
+    monkeypatch.setattr(media_v4, "scan_openlist_incremental", fake_incremental)
+
+    incr = media_v4.scan_source(media_v4.SourceScanRequest(
+        source="openlist",
+        root_path="/Anime",
+        provider="pan115",
+        scan_mode="incremental",
+    ))
+    assert incr["scan_mode"] == "incremental"
+    assert incr["source_mode"] == "openlist_full"
+    assert captured["baseline"][0].ingest_method == "openlist_api"
+
+    cards = client.get("/api/v4/sources/libraries").json()["cards"]
+    card = next(item for item in cards if item["root_id"] == full["root_id"])
+    assert card["source_mode"] == "openlist_full"
+    assert card["has_confirmed_baseline"] is True
+
+    status = client.get("/api/v4/sources/openlist/status", params={"remote_root": "/Anime"})
+    assert status.status_code == 200, status.text
+    assert status.json()["has_confirmed_baseline"] is True
+    assert status.json()["source_mode"] == "openlist_full"
+
+
+def test_source_card_source_mode_is_stable_across_mixed_evidence_order(tmp_path, monkeypatch):
+    """来源卡模式由来源根级 contract 决定，不随排序首条文件证据反推。"""
+
+    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "mode.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+
+    def make_entry(folder: str, ingest: str):
+        relative = f"{folder}/Show.S01E01.mkv"
+        evidence = SourceEvidence(
+            evidence_id=f"ev-{folder}",
+            scan_id="scan-mode",
+            root_id="root-mode",
+            source_key=relative,
+            relative_path=relative,
+            entry_kind="video",
+            provider="pan115",
+            source_locator=relative,
+            playback_locator=f"X:\\{relative}",
+            ingest_method=ingest,
+        )
+        facts = ParsedFacts(
+            parsed_fact_id=f"facts-{folder}",
+            evidence_id=evidence.evidence_id,
+            parser_version="fixture",
+            work_title="Show",
+            title_candidates=("Show",),
+            media_type="tv",
+            group_type="season",
+            season_candidate=1,
+            episode_candidate=1,
+            confidence="high",
+        )
+        return evidence, facts
+
+    def no_search(*_args, **_kwargs):
+        return []
+
+    # 场景 A：排序首条是 OpenList 已核对证据，但来源根模式由显式 contract 决定。
+    revisions.create_draft(
+        "rev-a",
+        [
+            make_entry("A", "openlist_api"),
+            make_entry("B", "directory_tree"),
+        ],
+        root_id="root-mode",
+        scan_id="scan-mode",
+        source_mode="tree_openlist",
+        candidate_search=no_search,
+    )
+    revisions.confirm("rev-a")
+    # 场景 B：排序首条换成目录树证据，模式不变，且同 root_id 不生成重复来源卡。
+    revisions.create_draft(
+        "rev-b",
+        [
+            make_entry("C", "directory_tree"),
+            make_entry("D", "openlist_api"),
+        ],
+        root_id="root-mode",
+        scan_id="scan-mode",
+        source_mode="tree_openlist",
+        candidate_search=no_search,
+    )
+    revisions.confirm("rev-b")
+    with database.connect() as conn:
+        rows = conn.execute(
+            "SELECT root_id, source_mode, ingest_method FROM source_roots WHERE root_id = 'root-mode'"
+        ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["source_mode"] == "tree_openlist"
+    assert rows[0]["ingest_method"] == "directory_tree"
+
+
+def test_openlist_status_endpoint_reports_no_baseline_for_unconfirmed_root(tmp_path, monkeypatch):
+    from app.api import media_v4
+    from app.integrations.openlist.providers import OpenListRouteConfig
+    from app.media_v4.sources.scanner import openlist_root_id
+
+    client = _client(tmp_path, monkeypatch)
+    config = SimpleNamespace(
+        openlist_server_url="https://openlist.example.test",
+        openlist_remote_root="/",
+        openlist_mount_root="X:\\OpenList",
+        openlist_routes=[OpenListRouteConfig(
+            route_id="route-anime",
+            remote_prefix="/Anime",
+            provider_id="pan115",
+        )],
+    )
+    monkeypatch.setattr(media_v4, "load_config", lambda: config)
+    monkeypatch.setattr(media_v4, "resolve_openlist_credentials", lambda: ("kumi", "secret", "available"))
+
+    response = client.get("/api/v4/sources/openlist/status", params={"remote_root": "/Anime"})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["root_id"] == openlist_root_id(config.openlist_server_url, "kumi", "/Anime")
+    assert body["remote_root"] == "/Anime"
+    assert body["has_confirmed_baseline"] is False
+    assert body["source_mode"] == ""
+    assert body["last_scan_mode"] == ""
 
 
 def test_openlist_scan_rejects_an_unmapped_remote_root_before_network(monkeypatch):

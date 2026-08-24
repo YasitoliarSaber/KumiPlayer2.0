@@ -214,7 +214,7 @@ def scan_openlist_incremental(
     """在 confirmed revision 文件全集上合并一轮受控 OpenList 核对。"""
 
     if not baseline:
-        raise ValueError("增量扫描缺少已确认的 TXT 基线")
+        raise ValueError("增量扫描缺少已确认的来源基线，请先完成并确认首次完整扫描，或使用 TXT 建立大库基线")
     root_id = str(state.get("root_id") or "")
     if not root_id or any(item.root_id != root_id for item in baseline):
         raise ValueError("增量检查点与已确认来源不一致")

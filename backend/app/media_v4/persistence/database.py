@@ -13,6 +13,7 @@ from app.media_v4.persistence.schema_v4 import (
     migrate_schema_v4_to_v5,
     migrate_schema_v5_to_v6,
     migrate_schema_v6_to_v7,
+    migrate_schema_v7_to_v8,
 )
 
 
@@ -129,11 +130,28 @@ class V4Database:
                 raise RuntimeError(
                     f"数据库版本 {version} 高于当前程序支持的 {self.CURRENT_SCHEMA_VERSION}，请升级 KumiPlayer"
                 )
+            if version == 7 and self._has_user_tables(conn):
+                # v7 → v8 增量迁移：来源根级 source_mode / last_scan_mode 并回填。
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    migrate_schema_v7_to_v8(conn)
+                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    conn.commit()
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    raise V4ResetRequiredError(
+                        "数据库声明为 V4 但物理结构不完整，需要一次性重置；" + str(exc)
+                    ) from exc
+                except Exception:
+                    conn.rollback()
+                    raise
+                version = self.CURRENT_SCHEMA_VERSION
             if version == 6 and self._has_user_tables(conn):
                 # v6 → v7 增量迁移：候选表增加 original_title / aliases_json。
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     migrate_schema_v6_to_v7(conn)
+                    migrate_schema_v7_to_v8(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -151,6 +169,7 @@ class V4Database:
                 try:
                     migrate_schema_v5_to_v6(conn)
                     migrate_schema_v6_to_v7(conn)
+                    migrate_schema_v7_to_v8(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -169,6 +188,7 @@ class V4Database:
                     migrate_schema_v4_to_v5(conn)
                     migrate_schema_v5_to_v6(conn)
                     migrate_schema_v6_to_v7(conn)
+                    migrate_schema_v7_to_v8(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:

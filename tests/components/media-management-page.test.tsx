@@ -9,6 +9,7 @@ const api = vi.hoisted(() => ({
   status: vi.fn(),
   overrideEvidence: vi.fn(),
   sourceLibraries: vi.fn(),
+  openlistStatus: vi.fn(),
 }))
 const config = vi.hoisted(() => ({ getConfig: vi.fn() }))
 const openlist = vi.hoisted(() => ({ browse: vi.fn(), getRoutes: vi.fn() }))
@@ -51,6 +52,13 @@ beforeEach(() => {
     issues: [],
   })
   api.sourceLibraries.mockResolvedValue({ cards: [] })
+  api.openlistStatus.mockResolvedValue({
+    root_id: 'root-115-anime',
+    remote_root: '/115/Anime',
+    source_mode: '',
+    last_scan_mode: '',
+    has_confirmed_baseline: false,
+  })
   api.status.mockResolvedValue({ revision_id: 'rev-existing', status: 'confirmed', jobs: [] })
   config.getConfig.mockResolvedValue({
     pan115_root: 'K:\\115网盘',
@@ -115,19 +123,53 @@ test('目录树使用真实网盘提供商、官网入口和设置中的播放�
   })))
 })
 
-test('OpenList 使用文件夹浏览并始终执行当前目录完整扫描', async () => {
+test('OpenList 首次完整扫描建立基线，确认前增量被禁用', async () => {
   render(<MediaManagementPage />)
   fireEvent.click(screen.getByRole('button', { name: 'OpenList' }))
 
   expect(await screen.findByRole('region', { name: 'OpenList 目录浏览器' })).toBeVisible()
-  expect(screen.queryByRole('switch', { name: '完整扫描' })).not.toBeInTheDocument()
-  expect(screen.queryByText('增量扫描')).not.toBeInTheDocument()
-  expect(screen.getByRole('button', { name: '扫描此文件夹并识别' })).toBeDisabled()
+  // 无已确认基线：主按钮建立基线，增量禁用，且不再提示改用“目录树 + OpenList”。
+  expect(screen.queryByText(/增量更新请使用/)).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '完整扫描并建立基线' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: '增量扫描' })).toBeDisabled()
   fireEvent.click(await screen.findByRole('button', { name: '打开文件夹 Anime' }))
   await waitFor(() => expect(openlist.browse).toHaveBeenCalledWith('/115/Anime', 1, false, 100))
   await screen.findByText(/当前目录：\/115\/Anime/)
-  fireEvent.click(screen.getByRole('button', { name: '扫描此文件夹并识别' }))
+  fireEvent.click(screen.getByRole('button', { name: '完整扫描并建立基线' }))
 
+  await waitFor(() => expect(api.scan).toHaveBeenCalledWith(expect.objectContaining({
+    source: 'openlist',
+    root_path: '/115/Anime',
+    provider: 'pan115',
+    scan_mode: 'full',
+  })))
+})
+
+test('已确认基线的 OpenList 默认增量扫描并保留完整校验', async () => {
+  api.openlistStatus.mockResolvedValue({
+    root_id: 'root-115-anime',
+    remote_root: '/115/Anime',
+    source_mode: 'openlist_full',
+    last_scan_mode: 'incremental',
+    has_confirmed_baseline: true,
+  })
+  render(<MediaManagementPage />)
+  fireEvent.click(screen.getByRole('button', { name: 'OpenList' }))
+  fireEvent.click(await screen.findByRole('button', { name: '打开文件夹 Anime' }))
+  await screen.findByText(/当前目录：\/115\/Anime/)
+
+  expect(screen.getByRole('button', { name: '增量扫描' })).toBeEnabled()
+  expect(screen.getByRole('button', { name: '完整校验' })).toBeEnabled()
+  fireEvent.click(screen.getByRole('button', { name: '增量扫描' }))
+  await waitFor(() => expect(api.scan).toHaveBeenCalledWith(expect.objectContaining({
+    source: 'openlist',
+    root_path: '/115/Anime',
+    provider: 'pan115',
+    scan_mode: 'incremental',
+  })))
+
+  api.scan.mockClear()
+  fireEvent.click(screen.getByRole('button', { name: '完整校验' }))
   await waitFor(() => expect(api.scan).toHaveBeenCalledWith(expect.objectContaining({
     source: 'openlist',
     root_path: '/115/Anime',
@@ -142,10 +184,10 @@ test('OpenList 未进入内容来源路由时不会猜测默认网盘提供商',
 
   expect(await screen.findByText('当前目录尚未匹配内容路由')).toBeVisible()
   expect(screen.getByText('请先进入一个已配置内容来源的目录，才能开始扫描。')).toBeVisible()
-  expect(screen.getByRole('button', { name: '扫描此文件夹并识别' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: '完整扫描并建立基线' })).toBeDisabled()
 })
 
-test('混合入口分别提供 TXT 基线与显式 OpenList 增量动作', async () => {
+test('混合入口首次要求 TXT 基线且未确认前禁用增量', async () => {
   render(<MediaManagementPage />)
   fireEvent.click(screen.getByRole('button', { name: '目录树 + OpenList 增量' }))
   expect(screen.queryByRole('group', { name: '内容来源' })).not.toBeInTheDocument()
@@ -154,6 +196,8 @@ test('混合入口分别提供 TXT 基线与显式 OpenList 增量动作', async
   })
   fireEvent.click(await screen.findByRole('button', { name: '打开文件夹 Anime' }))
   await screen.findByText(/当前目录：\/115\/Anime/)
+  // 尚无已确认基线：TXT 是主动作，增量被禁用并说明原因。
+  expect(screen.getByRole('button', { name: '增量扫描' })).toBeDisabled()
   fireEvent.click(screen.getByRole('button', { name: '建立 TXT 基线' }))
 
   await waitFor(() => expect(api.scan).toHaveBeenCalledWith(expect.objectContaining({
@@ -164,8 +208,21 @@ test('混合入口分别提供 TXT 基线与显式 OpenList 增量动作', async
     source_root: 'K:\\115网盘\\Anime',
     scan_mode: 'auto',
   })))
+})
 
-  api.scan.mockClear()
+test('混合入口基线确认后增量扫描发送显式 incremental', async () => {
+  api.openlistStatus.mockResolvedValue({
+    root_id: 'root-115-anime',
+    remote_root: '/115/Anime',
+    source_mode: 'tree_openlist',
+    last_scan_mode: 'tree_baseline',
+    has_confirmed_baseline: true,
+  })
+  render(<MediaManagementPage />)
+  fireEvent.click(screen.getByRole('button', { name: '目录树 + OpenList 增量' }))
+  fireEvent.click(await screen.findByRole('button', { name: '打开文件夹 Anime' }))
+  await screen.findByText(/当前目录：\/115\/Anime/)
+  await waitFor(() => expect(screen.getByRole('button', { name: '增量扫描' })).toBeEnabled())
   fireEvent.click(screen.getByRole('button', { name: '增量扫描' }))
   await waitFor(() => expect(api.scan).toHaveBeenCalledWith(expect.objectContaining({
     source: 'openlist',
@@ -215,12 +272,20 @@ test('来源卡可以回到同一 OpenList 来源执行更新', async () => {
   api.sourceLibraries.mockResolvedValue({
     cards: [{
       root_id: 'root-115-anime', provider: 'pan115', ingest_method: 'openlist_api',
+      source_mode: 'openlist_full', has_confirmed_baseline: true, last_scan_mode: 'incremental',
       source_locator: '/115/Anime', playback_locator: 'K:\\115网盘\\动画', route_id: 'route-115',
       display_name: '115 动画', revision_id: 'rev-existing', revision_status: 'confirmed',
       revision_created_at: '2026-08-24T00:00:00Z', confirmed_at: '2026-08-24T00:00:00Z',
       evidence_count: 120, work_count: 30, asset_count: 120, can_resume: false,
       job_summary: { total: 3, queued: 0, running: 0, succeeded: 3, failed: 0, cancelled: 0 },
     }],
+  })
+  api.openlistStatus.mockResolvedValue({
+    root_id: 'root-115-anime',
+    remote_root: '/115/Anime',
+    source_mode: 'openlist_full',
+    last_scan_mode: 'incremental',
+    has_confirmed_baseline: true,
   })
   render(<MediaManagementPage />)
 
@@ -233,6 +298,8 @@ test('来源卡可以回到同一 OpenList 来源执行更新', async () => {
   const sourcePicker = screen.getByRole('group', { name: '媒体来源类型' })
   expect(sourcePicker.querySelector('button[aria-label="OpenList"]')).toHaveAttribute('aria-pressed', 'true')
   await waitFor(() => expect(openlist.browse).toHaveBeenCalledWith('/115/Anime', 1, false, 100))
+  // 已确认基线：来源卡恢复后默认动作是增量扫描。
+  expect(await screen.findByRole('button', { name: '增量扫描' })).toBeEnabled()
 })
 
 test('任务进度使用面向用户的名称而不是内部 job type', async () => {

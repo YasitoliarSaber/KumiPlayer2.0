@@ -9,8 +9,76 @@ import pytest
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.persistence.schema_v4 import (
     V4_SCHEMA_VERSION,
+    _add_column_if_missing,
     create_schema_v4,
+    create_v6_structures,
 )
+
+
+def _build_v7_database(path) -> None:
+    """构造一个物理 v7 数据库（v8 结构去掉 source_mode 列 + user_version=7）。"""
+
+    conn = sqlite3.connect(path)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN IMMEDIATE")
+        create_schema_v4(conn)
+        create_v6_structures(conn)
+        _add_column_if_missing(conn, "revision_work_candidates", "original_title", "TEXT NOT NULL DEFAULT ''")
+        _add_column_if_missing(conn, "revision_work_candidates", "aliases_json", "TEXT NOT NULL DEFAULT '[]'")
+        conn.execute("PRAGMA user_version = 7")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _insert_v7_root(conn: sqlite3.Connection, *, root_id: str, provider: str, ingest_method: str, route_id: str = "") -> None:
+    conn.execute(
+        "INSERT INTO source_roots(root_id, provider, ingest_method, source_locator, playback_locator, route_id, display_name, root_container, created_at, updated_at) "
+        "VALUES (?, ?, ?, '', '', ?, '', '', 'now', 'now')",
+        (root_id, provider, ingest_method, route_id),
+    )
+
+
+def test_v7_database_is_migrated_to_v8_with_source_mode_backfill(tmp_path):
+    db_path = tmp_path / "legacy-v7.db"
+    _build_v7_database(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        _insert_v7_root(conn, root_id="root-local", provider="local", ingest_method="local_scan")
+        _insert_v7_root(
+            conn,
+            root_id="root-hybrid",
+            provider="pan115",
+            ingest_method="directory_tree",
+            route_id="route-anime",
+        )
+        _insert_v7_root(conn, root_id="root-tree", provider="baidu", ingest_method="directory_tree")
+        _insert_v7_root(
+            conn,
+            root_id="root-open",
+            provider="pan115",
+            ingest_method="openlist_scan",
+            route_id="route-anime",
+        )
+        conn.commit()
+
+    database = V4Database(db_path)
+    database.initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+        rows = {
+            str(row["root_id"]): str(row["source_mode"])
+            for row in conn.execute("SELECT root_id, source_mode FROM source_roots").fetchall()
+        }
+    assert rows == {
+        "root-local": "local",
+        "root-hybrid": "tree_openlist",
+        "root-tree": "tree_snapshot",
+        "root-open": "openlist_full",
+    }
 
 
 def _build_v4_database(path) -> None:
@@ -43,7 +111,7 @@ def test_v4_database_is_migrated_to_v5_without_data_loss(tmp_path):
 
     with sqlite3.connect(db_path) as conn:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 7
+        assert version == 8
         table = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tree_scan_validation'"
         ).fetchone()
@@ -61,7 +129,7 @@ def test_fresh_database_is_v5_and_has_validation_table(tmp_path):
 
     with sqlite3.connect(tmp_path / "fresh.db") as conn:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == V4_SCHEMA_VERSION == 7
+        assert version == V4_SCHEMA_VERSION == 8
         table = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tree_scan_validation'"
         ).fetchone()

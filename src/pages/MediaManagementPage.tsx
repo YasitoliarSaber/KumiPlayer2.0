@@ -12,7 +12,7 @@ import {
   FolderOpen24Regular,
   ScanObject24Regular,
 } from '@fluentui/react-icons'
-import { mediaV4Api, type V4Job, type V4Preview, type V4SourceEvidence, type V4SourceLibraryCard } from '../api/mediaV4'
+import { mediaV4Api, type V4Job, type V4OpenlistBaselineStatus, type V4Preview, type V4SourceEvidence, type V4SourceLibraryCard } from '../api/mediaV4'
 import { configApi, type PublicConfig } from '../api/config'
 import { openlistApi } from '../api/openlist'
 import { tasksApi } from '../api/tasks'
@@ -150,6 +150,7 @@ export default function MediaManagementPage() {
   const [routes, setRoutes] = useState<OpenListRoute[]>([])
   const [remoteBrowsing, setRemoteBrowsing] = useState(false)
   const [browserSession, setBrowserSession] = useState(0)
+  const [openlistBaseline, setOpenlistBaseline] = useState<V4OpenlistBaselineStatus | null>(null)
   const [sourceCards, setSourceCards] = useState<V4SourceLibraryCard[]>([])
   const [sourceCardsLoading, setSourceCardsLoading] = useState(true)
   const [revisionId, setRevisionId] = useState('')
@@ -158,6 +159,7 @@ export default function MediaManagementPage() {
     scan_id: string
     entries: V4SourceEvidence[]
     scan_mode?: 'local' | 'tree_snapshot' | 'tree_baseline' | 'incremental' | 'full'
+    source_mode?: string
     scan_stats?: { requested_directories?: number; rolling_verified?: number; changed_directories?: number }
     source_metadata: SourceCardMetadata
   } | null>(null)
@@ -201,6 +203,21 @@ export default function MediaManagementPage() {
       setSourceCardsLoading(false)
     }
   }, [])
+
+  const refreshOpenlistBaseline = useCallback(async (remote: string) => {
+    try {
+      const status = await mediaV4Api.openlistStatus(remote)
+      setOpenlistBaseline(status)
+    } catch {
+      // 凭据/连接未就绪时不阻塞浏览；扫描动作会给出可操作错误。
+      setOpenlistBaseline(null)
+    }
+  }, [])
+
+  useEffect(() => {
+    if ((kind !== 'openlist' && kind !== 'hybrid') || !remoteRoot.trim()) return
+    void refreshOpenlistBaseline(remoteRoot)
+  }, [kind, remoteRoot, refreshOpenlistBaseline])
 
   useEffect(() => {
     void refreshSourceCards()
@@ -362,17 +379,22 @@ export default function MediaManagementPage() {
     if (selected) setPath(selected)
   }
 
-  const scanSource = async (action: 'primary' | 'incremental' = 'primary') => {
-    if (kind !== 'openlist' && action !== 'incremental' && !path.trim()) {
+  const scanSource = async (action: 'primary' | 'incremental' | 'full' = 'primary') => {
+    const requiresOpenListConfig = kind === 'openlist' || kind === 'hybrid' || action === 'incremental' || action === 'full'
+    if (kind !== 'openlist' && action === 'primary' && !path.trim()) {
       setError(kind === 'local' ? '请先选择本地媒体目录' : '请先选择目录树 TXT')
       return
     }
-    if ((kind === 'openlist' || kind === 'hybrid' || action === 'incremental') && !config?.openlist_configured) {
+    if (requiresOpenListConfig && !config?.openlist_configured) {
       setError('请先在设置页完成 OpenList 连接配置')
       return
     }
-    if ((kind === 'openlist' || kind === 'hybrid' || action === 'incremental') && !routeForPath(routes, remoteRoot)) {
+    if (requiresOpenListConfig && !routeForPath(routes, remoteRoot)) {
       setError('请先在 OpenList 浏览器中进入一个已配置内容来源的目录')
+      return
+    }
+    if (action === 'incremental' && openlistBaseline?.has_confirmed_baseline !== true) {
+      setError('此 OpenList 目录尚无已确认基线，请先完成并确认首次完整扫描')
       return
     }
     setBusy('scan')
@@ -384,7 +406,7 @@ export default function MediaManagementPage() {
     setOverrideDrafts({})
     localStorage.removeItem(ACTIVE_REVISION_KEY)
     try {
-      const requestSource = action === 'incremental' ? 'openlist' : kind
+      const requestSource = action === 'incremental' || action === 'full' ? 'openlist' : kind
       const selectedProvider: ProviderId = requestSource === 'local'
         ? 'local'
         : requestSource === 'openlist' || kind === 'hybrid'
@@ -394,13 +416,17 @@ export default function MediaManagementPage() {
         ? providerRoot(selectedProvider, remoteRoot)
         : requestSource === 'local' ? path : routeForPath(routes, remoteRoot)?.local_path || ''
       const metadata = sourceCardMetadata(kind, selectedProvider, selectedSourceRoot)
+      let scanMode: 'auto' | 'full' | 'incremental' = 'auto'
+      if (action === 'incremental') scanMode = 'incremental'
+      else if (action === 'full') scanMode = 'full'
+      else if (requestSource === 'openlist') scanMode = openlistBaseline?.has_confirmed_baseline ? 'incremental' : 'full'
       const result = await mediaV4Api.scan({
         source: requestSource,
         root_path: requestSource === 'local' ? path : requestSource === 'openlist' || kind === 'hybrid' ? remoteRoot : providerRoot(provider) || 'tree',
         tree_file: requestSource === 'tree' || requestSource === 'hybrid' ? path : '',
         provider: selectedProvider,
         source_root: requestSource === 'tree' || requestSource === 'hybrid' ? selectedSourceRoot : '',
-        scan_mode: action === 'incremental' ? 'incremental' : requestSource === 'openlist' ? 'full' : 'auto',
+        scan_mode: scanMode,
       })
       const nextScan = { ...result, source_metadata: metadata }
       setScan(nextScan)
@@ -412,6 +438,7 @@ export default function MediaManagementPage() {
           scan_id: result.scan_id,
           entries: result.entries,
           allow_empty: false,
+          source_mode: result.source_mode || '',
           ...metadata,
         })
         setPreview(previewResult)
@@ -439,6 +466,7 @@ export default function MediaManagementPage() {
         scan_id: scan.scan_id,
         entries: scan.entries,
         allow_empty: allowEmpty,
+        source_mode: scan.source_mode || '',
         ...scan.source_metadata,
       })
       setRevisionId(nextRevisionId)
@@ -460,6 +488,7 @@ export default function MediaManagementPage() {
       localStorage.setItem(ACTIVE_REVISION_KEY, revisionId)
       setPreview({ ...preview, status: 'confirmed' })
       void refreshSourceCards()
+      if (kind === 'openlist' || kind === 'hybrid') void refreshOpenlistBaseline(remoteRoot)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '确认导入失败')
     } finally {
@@ -535,6 +564,15 @@ export default function MediaManagementPage() {
     }
   }
 
+  const sourceModeLabel = (card: V4SourceLibraryCard) => {
+    if (card.source_mode === 'local') return '本地来源'
+    if (card.source_mode === 'tree_snapshot') return '目录树基线'
+    if (card.source_mode === 'tree_openlist') return '目录树 + OpenList'
+    if (card.source_mode === 'openlist_full') return 'OpenList 来源'
+    // 兼容回填前的旧卡：按遗留 ingest_method 展示，不作为新判断依据。
+    return card.ingest_method === 'local_scan' ? '本地来源' : card.ingest_method === 'directory_tree' ? '目录树基线' : 'OpenList 来源'
+  }
+
   const prepareSourceUpdate = (card: V4SourceLibraryCard) => {
     clearResultState()
     setBrowserSession((current) => current + 1)
@@ -545,20 +583,21 @@ export default function MediaManagementPage() {
       setPath(card.source_locator || card.playback_locator)
       return
     }
-    if (card.ingest_method === 'openlist_api') {
-      setKind('openlist')
-      setPath('')
-      setRemoteRoot(card.source_locator || config?.openlist_remote_root || '/')
+    if (card.source_mode === 'tree_snapshot' || (card.source_mode === '' && !card.route_id)) {
+      setKind('tree')
+      setPath(card.source_locator)
       return
     }
-    if (card.route_id) {
+    if (card.source_mode === 'tree_openlist' || (card.source_mode === '' && card.route_id)) {
       setKind('hybrid')
       setPath('')
       setRemoteRoot(card.source_locator || config?.openlist_remote_root || '/')
       return
     }
-    setKind('tree')
-    setPath(card.source_locator)
+    // openlist_full（或旧卡的 openlist_api）：回到同一 OpenList 远端根。
+    setKind('openlist')
+    setPath('')
+    setRemoteRoot(card.source_locator || config?.openlist_remote_root || '/')
   }
 
   return (
@@ -586,7 +625,7 @@ export default function MediaManagementPage() {
               ? '正在处理'
               : card.job_summary.failed > 0 ? '有失败任务' : card.job_summary.cancelled > 0 ? '有已取消任务' : '上次导入已处理完毕'
             return <article className={`media-v4-library-source-card ${card.can_resume ? 'active' : 'settled'}`} key={card.root_id}>
-              <div className="media-v4-library-source-card-top"><span className="media-v4-provider-mark" aria-hidden="true">{card.provider === 'pan115' ? '115' : card.provider === 'baidu' ? '百' : card.provider === 'quark' ? '夸' : card.provider === 'local' ? '本' : '远'}</span><span>{card.ingest_method === 'local_scan' ? '本地来源' : card.ingest_method === 'directory_tree' ? '目录树基线' : 'OpenList 来源'}</span></div>
+              <div className="media-v4-library-source-card-top"><span className="media-v4-provider-mark" aria-hidden="true">{card.provider === 'pan115' ? '115' : card.provider === 'baidu' ? '百' : card.provider === 'quark' ? '夸' : card.provider === 'local' ? '本' : '远'}</span><span>{sourceModeLabel(card)}</span></div>
               <strong title={card.display_name}>{card.display_name}</strong>
               <span className="media-v4-source-card-locator" title={card.source_locator || card.playback_locator}>{card.source_locator || card.playback_locator || '已确认的媒体来源'}</span>
               <div className="media-v4-source-card-stats"><span>{card.work_count} 部作品</span><span>{card.asset_count} 个文件</span><span>{card.evidence_count} 条来源证据</span></div>
@@ -705,8 +744,23 @@ export default function MediaManagementPage() {
                 {!selectedRemoteRoute && <Button appearance="subtle" onClick={goSettings}>配置来源路由</Button>}
               </div>
               <div className="media-v4-command-row">
-                <div><strong>完整扫描当前文件夹</strong><span>本入口只扫描当前选择的 OpenList 目录；增量更新请使用“目录树 + OpenList 增量”。</span></div>
-                <Button aria-label="扫描此文件夹并识别" className="media-primary-command" appearance="primary" icon={<ScanObject24Regular />} disabled={busy !== '' || remoteBrowsing || !canScan} onClick={() => void scanSource()}>{busy === 'scan' ? <><Spinner size="tiny" />正在扫描</> : remoteBrowsing ? '正在切换目录' : '扫描此文件夹并识别'}</Button>
+                {openlistBaseline?.has_confirmed_baseline ? (
+                  <>
+                    <div><strong>已有已确认基线，默认增量更新</strong><span>增量只核对新增和变化目录；远端异常时可执行完整校验。</span></div>
+                    <div className="media-v4-command-buttons">
+                      <Button appearance="secondary" icon={<ScanObject24Regular />} disabled={busy !== '' || remoteBrowsing || !canScan} onClick={() => void scanSource('full')}>{busy === 'scan' ? <Spinner size="tiny" /> : remoteBrowsing ? '正在切换目录' : '完整校验'}</Button>
+                      <Button aria-label="增量扫描" className="media-primary-command" appearance="primary" icon={<ArrowSync24Regular />} disabled={busy !== '' || remoteBrowsing || !canScan} onClick={() => void scanSource('incremental')}>{busy === 'scan' ? <><Spinner size="tiny" />正在扫描</> : remoteBrowsing ? '正在切换目录' : '增量扫描'}</Button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div><strong>首次完整扫描建立基线</strong><span>确认本次导入后，此目录将解锁增量更新；当前还不能增量扫描。</span></div>
+                    <div className="media-v4-command-buttons">
+                      <Button appearance="secondary" icon={<ArrowSync24Regular />} disabled>增量扫描</Button>
+                      <Button aria-label="完整扫描并建立基线" className="media-primary-command" appearance="primary" icon={<ScanObject24Regular />} disabled={busy !== '' || remoteBrowsing || !canScan} onClick={() => void scanSource()}>{busy === 'scan' ? <><Spinner size="tiny" />正在扫描</> : remoteBrowsing ? '正在切换目录' : '完整扫描并建立基线'}</Button>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           )}
@@ -732,10 +786,10 @@ export default function MediaManagementPage() {
                 {!selectedRemoteRoute && <Button appearance="subtle" onClick={goSettings}>配置来源路由</Button>}
               </div>
               <div className="media-v4-command-row media-v4-hybrid-actions">
-                <div><strong>两个动作互不混淆</strong><span>第一次建立并确认基线；以后从同一来源卡进入时执行增量扫描。</span></div>
+                <div><strong>{openlistBaseline?.has_confirmed_baseline ? '基线已确认，日常使用增量扫描' : '两个动作互不混淆'}</strong><span>{openlistBaseline?.has_confirmed_baseline ? '增量只核对新增和变化目录；需要时可重新建立 TXT 基线或执行完整校验。' : '第一次建立并确认基线；以后从同一来源卡进入时执行增量扫描。'}</span></div>
                 <div className="media-v4-command-buttons">
-                  <Button aria-label="建立 TXT 基线" appearance="secondary" icon={<DocumentText24Regular />} disabled={busy !== '' || remoteBrowsing || !canScan} onClick={() => void scanSource()}>{busy === 'scan' ? <Spinner size="tiny" /> : remoteBrowsing ? '正在切换目录' : '建立 TXT 基线'}</Button>
-                  <Button aria-label="增量扫描" className="media-primary-command" appearance="primary" icon={<ArrowSync24Regular />} disabled={busy !== '' || remoteBrowsing || !config?.openlist_configured || !remoteRoot || !selectedRemoteRoute?.local_path} onClick={() => void scanSource('incremental')}>{busy === 'scan' ? <><Spinner size="tiny" />正在扫描</> : remoteBrowsing ? '正在切换目录' : '增量扫描'}</Button>
+                  <Button aria-label="建立 TXT 基线" appearance={openlistBaseline?.has_confirmed_baseline ? 'secondary' : 'primary'} icon={<DocumentText24Regular />} disabled={busy !== '' || remoteBrowsing || !canScan} onClick={() => void scanSource()}>{busy === 'scan' ? <Spinner size="tiny" /> : remoteBrowsing ? '正在切换目录' : '建立 TXT 基线'}</Button>
+                  <Button aria-label="增量扫描" className={openlistBaseline?.has_confirmed_baseline ? 'media-primary-command' : ''} appearance={openlistBaseline?.has_confirmed_baseline ? 'primary' : 'secondary'} icon={<ArrowSync24Regular />} disabled={busy !== '' || remoteBrowsing || !config?.openlist_configured || !remoteRoot || !selectedRemoteRoute?.local_path || openlistBaseline?.has_confirmed_baseline !== true} onClick={() => void scanSource('incremental')}>{busy === 'scan' ? <><Spinner size="tiny" />正在扫描</> : remoteBrowsing ? '正在切换目录' : '增量扫描'}</Button>
                 </div>
               </div>
             </div>
