@@ -17,6 +17,7 @@ from app.core.paths import get_data_dir
 from app.integrations.openlist.client import normalize_remote_path
 from app.integrations.openlist.models import OpenListError
 from app.integrations.openlist.providers import derive_local_path, provider_for_remote
+from app.media_v4.domain.models import SourceEvidence
 from app.media_v4.jobs.runner import V4JobRunner
 from app.media_v4.jobs.scrape import V4ScrapeService
 from app.media_v4.parsing.parser import V4Parser
@@ -853,6 +854,93 @@ def get_import(revision_id: str):
     }
 
 
+def _source_evidence_from_row(row) -> SourceEvidence:
+    return SourceEvidence(
+        evidence_id=str(row["evidence_id"]),
+        scan_id=str(row["scan_id"]),
+        root_id=str(row["root_id"]),
+        provider=str(row["provider"] or ""),
+        source_key=str(row["source_key"] or ""),
+        relative_path=str(row["relative_path"] or ""),
+        entry_kind=str(row["entry_kind"] or "video"),
+        size=row["size"],
+        mtime=row["mtime"],
+        fingerprint=str(row["fingerprint"] or ""),
+        raw_file_id=str(row["raw_file_id"] or ""),
+        ingest_method=str(row["ingest_method"] or ""),
+        source_route_id=str(row["source_route_id"] or ""),
+        source_locator=str(row["source_locator"] or ""),
+        playback_locator=str(row["playback_locator"] or ""),
+        tmdb_hint_id=str(row["tmdb_hint_id"] or ""),
+        tmdb_hint_type=str(row["tmdb_hint_type"] or ""),
+        import_family=str(row["import_family"] or "anime"),
+        target_filename=str(row["target_filename"] or ""),
+        observed_at=str(row["observed_at"] or ""),
+        presence_state=str(row["presence_state"] or "present"),
+    )
+
+
+@router.get("/sources/drafts")
+
+
+@router.get("/sources/drafts")
+def list_drafts():
+    """列出未确认 draft revision，供“待继续导入”恢复入口使用。
+
+    正式来源卡只代表 confirmed root；draft 是独立草稿，不冒充已建立媒体库。
+    """
+
+    with get_database().connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                ir.revision_id, ir.root_id, ir.scan_id, ir.created_at,
+                sr.provider, sr.source_mode,
+                sr.source_locator, sr.playback_locator,
+                (
+                    SELECT COUNT(*) FROM revision_evidence re
+                    WHERE re.revision_id = ir.revision_id
+                ) AS evidence_count,
+                (
+                    SELECT COUNT(*) FROM revision_issues ri
+                    WHERE ri.revision_id = ir.revision_id AND ri.resolved = 0
+                ) AS issue_count
+            FROM import_revisions ir
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            WHERE ir.status = 'draft'
+            ORDER BY ir.created_at DESC, ir.revision_id
+            """
+        ).fetchall()
+    return {"drafts": [dict(row) for row in rows]}
+
+
+@router.get("/imports/{revision_id}/evidence")
+def get_revision_evidence(revision_id: str):
+    """返回 draft revision 的完整证据快照，供前端重建识别预览。
+
+    只读 authoritative tables；不改变 ParsedFacts 或 revision 状态。
+    """
+
+    with get_database().connect() as conn:
+        row = conn.execute(
+            "SELECT status FROM import_revisions WHERE revision_id = ?",
+            (revision_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"revision 不存在: {revision_id}")
+        rows = conn.execute(
+            """
+            SELECT se.*
+            FROM revision_evidence re
+            JOIN source_evidence se ON se.evidence_id = re.evidence_id
+            WHERE re.revision_id = ?
+            ORDER BY se.relative_path COLLATE NOCASE, se.evidence_id
+            """,
+            (revision_id,),
+        ).fetchall()
+    return {"revision_id": revision_id, "status": row["status"], "entries": [asdict(_source_evidence_from_row(item)) for item in rows]}
+
+
 @router.get("/sources/libraries")
 def list_source_libraries():
     """列出已确认来源根及其最新 revision 的任务进度。
@@ -933,6 +1021,7 @@ def list_source_libraries():
         } if revision_ids else {}
 
     cards = []
+    progress_service = V4RevisionService(get_database())
     for row in rows:
         summary = summaries.get(row["revision_id"], {
             "total": 0,
@@ -942,12 +1031,38 @@ def list_source_libraries():
             "failed": 0,
             "cancelled": 0,
         })
+        progress: dict = {}
+        try:
+            progress = progress_service.get_execution_progress(str(row["revision_id"]))
+        except KeyError:
+            progress = {}
+        failed_jobs: list[str] = []
+        attention_units = 0
+        for stage_key in ("mirror", "metadata", "projection"):
+            stage = (progress.get("stage_summary") or {}).get(stage_key) or {}
+            if stage.get("status") in {"failed", "cancelled"}:
+                failed_jobs.append(stage_key)
+        for unit in progress.get("work_units") or []:
+            if unit.get("overall_status") in {"failed", "cancelled", "needs_attention"}:
+                attention_units += 1
+        first_error = ""
+        for unit in progress.get("work_units") or []:
+            for slot in ("mirror", "metadata"):
+                job = unit.get(slot) or {}
+                if job.get("last_error"):
+                    first_error = str(job["last_error"])
+                    break
+            if first_error:
+                break
         cards.append({
             **dict(row),
             "display_name": row["display_name"] or row["source_locator"] or f"{row['provider']} 媒体库",
             "source_mode": row["source_mode"] or "",
             "last_scan_mode": row["last_scan_mode"] or "",
             "has_confirmed_baseline": True,
+            "overall_status": progress.get("overall_status") or "completed",
+            "attention_count": attention_units,
+            "last_error": first_error,
             "evidence_count": int(row["evidence_count"]),
             "work_count": int(row["work_count"]),
             "asset_count": int(row["asset_count"]),
@@ -957,9 +1072,134 @@ def list_source_libraries():
                 or summary["running"] > 0
                 or summary["failed"] > 0
                 or summary["cancelled"] > 0
+                or attention_units > 0
             ),
         })
     return {"cards": cards}
+
+
+@router.post("/sources/scans")
+def start_durable_scan(request: SourceScanRequest):
+    """为 OpenList 完整/增量扫描创建 durable SourceScan 并立即返回任务身份。
+
+    大库扫描可离开、可查询、可取消；完成后 evidence 持久化到该 scan 下，
+    preview 只消费 completed scan。SourceScan 不进入 confirmed revision jobs。
+    """
+
+    from app.api.openlist_v4 import _client, _configured_routes, _remote_root
+    from app.media_v4.sources.durable_scan import create_durable_scan
+
+    config = load_config()
+    username, _password, credential_state = resolve_openlist_credentials()
+    if credential_state == "unavailable":
+        raise HTTPException(status_code=503, detail="本机凭据管理器暂时不可用，请稍后重试")
+    if not config.openlist_server_url or not username:
+        raise HTTPException(status_code=400, detail="请先在设置页完成 OpenList 连接配置")
+    if not config.openlist_mount_root:
+        raise HTTPException(status_code=409, detail="OpenList 导入需要先配置本地挂载根，才能建立可播放 Asset")
+    remote_root = normalize_remote_path(request.root_path.strip() or _remote_root(config))
+    routes = _configured_routes(config)
+    route_id, routed_provider = provider_for_remote(routes, remote_root)
+    if not route_id:
+        raise HTTPException(status_code=409, detail="当前 OpenList 目录未匹配已保存的内容来源路由")
+    root_id = openlist_root_id(config.openlist_server_url, username, remote_root)
+    database = get_database()
+    scan_mode = request.scan_mode or "full"
+    if scan_mode == "incremental":
+        baseline = _confirmed_source_evidence(root_id)
+        if not baseline:
+            raise HTTPException(
+                status_code=409,
+                detail="此 OpenList 目录尚无已确认基线，请先完成并确认首次完整扫描，或使用 TXT 建立大库基线",
+            )
+        state = load_active_state(root_id)
+        if not state or state.get("remote_root") != remote_root:
+            state = build_tree_baseline_state(root_id, remote_root, baseline)
+        _ensure_root_container(
+            database,
+            root_id=root_id,
+            provider=routed_provider,
+            ingest_method="openlist_scan",
+            locator=remote_root,
+            route_id=route_id,
+            root_container=_container_name(remote_root),
+            source_mode=_source_root_mode(root_id) or "openlist_full",
+            last_scan_mode="incremental",
+        )
+        scan_id = "scan_" + uuid.uuid4().hex
+        create_durable_scan(
+            database,
+            scan_id=scan_id,
+            root_id=root_id,
+            kind="incremental",
+            scan_fn=lambda: scan_openlist_incremental(
+                _client(config),
+                baseline=baseline,
+                state=state,
+                mapping_root=_remote_root(config),
+                mount_root=config.openlist_mount_root,
+                default_provider=routed_provider,
+                routes=routes,
+            ),
+            state_fn=lambda: state,
+        )
+        return {"scan_id": scan_id, "root_id": root_id, "scan_mode": "incremental", "status": "running"}
+    directory_observations: dict[str, float | None] = {}
+    _ensure_root_container(
+        database,
+        root_id=root_id,
+        provider=routed_provider,
+        ingest_method="openlist_scan",
+        locator=remote_root,
+        route_id=route_id,
+        root_container=_container_name(remote_root),
+        source_mode="openlist_full",
+        last_scan_mode="full",
+    )
+    scan_id = "scan_" + uuid.uuid4().hex
+    create_durable_scan(
+        database,
+        scan_id=scan_id,
+        root_id=root_id,
+        kind="full",
+        scan_fn=lambda: scan_openlist_directory(
+            _client(config),
+            remote_root=remote_root,
+            mapping_root=_remote_root(config),
+            mount_root=config.openlist_mount_root,
+            root_id=root_id,
+            default_provider=routed_provider,
+            routes=routes,
+            directory_observations=directory_observations,
+        ),
+        state_fn=lambda: build_full_scan_state(root_id, remote_root, directory_observations),
+    )
+    return {"scan_id": scan_id, "root_id": root_id, "scan_mode": "full", "status": "running"}
+
+
+@router.get("/sources/scans/{scan_id}")
+def get_durable_scan(scan_id: str):
+    from app.media_v4.sources.durable_scan import get_durable_scan
+
+    try:
+        result = get_durable_scan(get_database(), scan_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"扫描任务不存在: {scan_id}") from exc
+    return result
+
+
+@router.post("/sources/scans/{scan_id}/cancel")
+def cancel_durable_scan(scan_id: str):
+    from app.media_v4.sources.durable_scan import cancel_durable_scan, get_durable_scan
+
+    try:
+        current = get_durable_scan(get_database(), scan_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"扫描任务不存在: {scan_id}") from exc
+    if current["status"] not in {"running", "queued"}:
+        return {"scan_id": scan_id, "status": current["status"]}
+    cancel_durable_scan(scan_id)
+    return {"scan_id": scan_id, "status": "cancelling"}
 
 
 @router.get("/sources/openlist/status")

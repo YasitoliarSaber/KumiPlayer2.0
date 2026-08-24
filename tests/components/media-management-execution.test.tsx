@@ -12,6 +12,11 @@ const api = vi.hoisted(() => ({
   overrideEvidence: vi.fn(),
   sourceLibraries: vi.fn(),
   openlistStatus: vi.fn(),
+  drafts: vi.fn(),
+  revisionEvidence: vi.fn(),
+  startDurableScan: vi.fn(),
+  durableScan: vi.fn(),
+  cancelDurableScan: vi.fn(),
 }))
 const config = vi.hoisted(() => ({ getConfig: vi.fn() }))
 const openlist = vi.hoisted(() => ({ browse: vi.fn(), getRoutes: vi.fn() }))
@@ -85,6 +90,11 @@ beforeEach(() => {
     progress: makeProgress([]),
   })
   api.sourceLibraries.mockResolvedValue({ cards: [] })
+  api.drafts.mockResolvedValue({ drafts: [] })
+  api.revisionEvidence.mockResolvedValue({ revision_id: 'rev', status: 'draft', entries: [] })
+  api.startDurableScan.mockResolvedValue({ scan_id: 'scan-durable', root_id: 'root', scan_mode: 'full', status: 'running' })
+  api.durableScan.mockResolvedValue({ scan_id: 'scan-durable', root_id: 'root', status: 'completed', started_at: '', finished_at: '', error: '', entries: [] })
+  api.cancelDurableScan.mockResolvedValue({ scan_id: 'scan-durable', status: 'cancelling' })
   api.openlistStatus.mockResolvedValue({ root_id: 'r', remote_root: '/', source_mode: '', last_scan_mode: '', has_confirmed_baseline: false })
   config.getConfig.mockResolvedValue({
     pan115_root: 'K:\\115网盘',

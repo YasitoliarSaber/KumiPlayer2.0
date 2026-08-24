@@ -10,6 +10,11 @@ const api = vi.hoisted(() => ({
   overrideEvidence: vi.fn(),
   sourceLibraries: vi.fn(),
   openlistStatus: vi.fn(),
+  drafts: vi.fn(),
+  revisionEvidence: vi.fn(),
+  startDurableScan: vi.fn(),
+  durableScan: vi.fn(),
+  cancelDurableScan: vi.fn(),
 }))
 const config = vi.hoisted(() => ({ getConfig: vi.fn() }))
 const openlist = vi.hoisted(() => ({ browse: vi.fn(), getRoutes: vi.fn() }))
@@ -52,6 +57,11 @@ beforeEach(() => {
     issues: [],
   })
   api.sourceLibraries.mockResolvedValue({ cards: [] })
+  api.drafts.mockResolvedValue({ drafts: [] })
+  api.revisionEvidence.mockResolvedValue({ revision_id: 'rev', status: 'draft', entries: [] })
+  api.startDurableScan.mockResolvedValue({ scan_id: 'scan-durable', root_id: 'root', scan_mode: 'full', status: 'running' })
+  api.durableScan.mockResolvedValue({ scan_id: 'scan-durable', root_id: 'root', status: 'completed', started_at: '', finished_at: '', error: '', entries: [] })
+  api.cancelDurableScan.mockResolvedValue({ scan_id: 'scan-durable', status: 'cancelling' })
   api.openlistStatus.mockResolvedValue({
     root_id: 'root-115-anime',
     remote_root: '/115/Anime',
@@ -137,12 +147,13 @@ test('OpenList 首次完整扫描建立基线，确认前增量被禁用', async
   await screen.findByText(/当前目录：\/115\/Anime/)
   fireEvent.click(screen.getByRole('button', { name: '完整扫描并建立基线' }))
 
-  await waitFor(() => expect(api.scan).toHaveBeenCalledWith(expect.objectContaining({
+  await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({
     source: 'openlist',
     root_path: '/115/Anime',
     provider: 'pan115',
     scan_mode: 'full',
   })))
+  await waitFor(() => expect(api.durableScan).toHaveBeenCalledWith('scan-durable'))
 })
 
 test('已确认基线的 OpenList 默认增量扫描并保留完整校验', async () => {
@@ -161,16 +172,17 @@ test('已确认基线的 OpenList 默认增量扫描并保留完整校验', asyn
   expect(screen.getByRole('button', { name: '增量扫描' })).toBeEnabled()
   expect(screen.getByRole('button', { name: '完整校验' })).toBeEnabled()
   fireEvent.click(screen.getByRole('button', { name: '增量扫描' }))
-  await waitFor(() => expect(api.scan).toHaveBeenCalledWith(expect.objectContaining({
+  await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({
     source: 'openlist',
     root_path: '/115/Anime',
     provider: 'pan115',
     scan_mode: 'incremental',
   })))
+  await waitFor(() => expect(api.durableScan).toHaveBeenCalledWith('scan-durable'))
 
-  api.scan.mockClear()
+  api.startDurableScan.mockClear()
   fireEvent.click(screen.getByRole('button', { name: '完整校验' }))
-  await waitFor(() => expect(api.scan).toHaveBeenCalledWith(expect.objectContaining({
+  await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({
     source: 'openlist',
     root_path: '/115/Anime',
     provider: 'pan115',
@@ -224,7 +236,7 @@ test('混合入口基线确认后增量扫描发送显式 incremental', async ()
   await screen.findByText(/当前目录：\/115\/Anime/)
   await waitFor(() => expect(screen.getByRole('button', { name: '增量扫描' })).toBeEnabled())
   fireEvent.click(screen.getByRole('button', { name: '增量扫描' }))
-  await waitFor(() => expect(api.scan).toHaveBeenCalledWith(expect.objectContaining({
+  await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({
     source: 'openlist',
     root_path: '/115/Anime',
     provider: 'pan115',

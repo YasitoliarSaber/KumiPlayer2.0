@@ -43,20 +43,33 @@ export default function OpenListFolderBrowser({
   const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState('')
   const initialized = useRef(false)
+  // P-004：浏览请求 generation 竞态保护——只有最新请求可以提交状态；
+  // 快速进入慢目录再返回时，较慢的旧响应不能覆盖新目录。
+  const generationRef = useRef(0)
+
+  useEffect(() => {
+    return () => {
+      generationRef.current += 1
+    }
+  }, [])
 
   const browse = async (path: string, page = 1, refresh = false, append = false) => {
+    const generation = ++generationRef.current
     append ? setLoadingMore(true) : setLoading(true)
     onLoadingChange?.(true)
     setError('')
     try {
       const next = await openlistApi.browse(path, page, refresh, 100)
+      if (generation !== generationRef.current) return
       setResult((current) => append && current
         ? { ...next, entries: [...current.entries, ...next.entries] }
         : next)
       onPathChange(next.path)
     } catch (cause) {
+      if (generation !== generationRef.current) return
       setError(cause instanceof Error ? cause.message : '无法读取 OpenList 目录')
     } finally {
+      if (generation !== generationRef.current) return
       setLoading(false)
       setLoadingMore(false)
       onLoadingChange?.(false)
@@ -105,7 +118,10 @@ export default function OpenListFolderBrowser({
         </div>
       </div>
 
-      {error && <div className="media-flow-alert error" role="alert"><span>{error}</span><Button appearance="secondary" size="small" onClick={() => void browse(result?.path || initialPath || '/')}>重试</Button></div>}
+      {error && <div className="media-flow-alert error" role="alert"><span>{error}</span><Button appearance="secondary" size="small" onClick={() => void browse(result?.path || initialPath || '/', 1, true)}>重试</Button></div>}
+      {result?.cache.status === 'stale' && !loading && <div className="media-openlist-cache-hint" role="status"><ArrowSync24Regular aria-hidden="true" /><span>当前显示的是缓存的目录列表，远端可能已变化；可点击“刷新当前层”获取最新内容。</span></div>}
+      {result?.cache.refresh_failed && <div className="media-openlist-cache-hint refresh-failed" role="status"><span>缓存刷新失败，仍在显示上次成功读取的目录列表。</span></div>}
+      {result?.cache.refreshing && <div className="media-openlist-cache-hint" role="status"><Spinner size="tiny" /><span>正在刷新目录缓存…</span></div>}
       {loading && <div className="media-openlist-loading"><Spinner size="small" />正在读取目录…</div>}
       {!loading && result && (
         <>
@@ -128,7 +144,7 @@ export default function OpenListFolderBrowser({
           </div>
           {result.entries.length === 0 && <div className="media-v4-browser-empty">此目录没有可浏览的内容。</div>}
           <div className="media-openlist-foot">
-            <span title={result.path}>当前目录：{result.path} · 已加载 {result.entries.length}{result.total > 0 ? ` / ${result.total}` : ''} 项</span>
+            <span title={result.path}>当前目录：{result.path} · 已加载 {result.entries.length}{result.total > 0 ? ` / ${result.total}` : ''} 项{result.cache.status === 'fresh' && !result.cache.refreshing ? ' · 远端最新' : ''}</span>
             {result.has_more && <Button appearance="secondary" disabled={loadingMore} onClick={() => void browse(result.path, result.page + 1, false, true)}>{loadingMore ? '正在加载…' : '加载更多'}</Button>}
           </div>
         </>

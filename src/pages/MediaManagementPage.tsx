@@ -6,18 +6,20 @@ import {
   CheckmarkCircle24Filled,
   CheckmarkCircle24Regular,
   Cloud24Regular,
+  Dismiss24Regular,
   Database24Regular,
   DocumentText24Regular,
   Folder24Regular,
   FolderOpen24Regular,
   ScanObject24Regular,
 } from '@fluentui/react-icons'
-import { mediaV4Api, type V4Job, type V4OpenlistBaselineStatus, type V4Preview, type V4SourceEvidence, type V4SourceLibraryCard } from '../api/mediaV4'
+import { mediaV4Api, type V4DraftSummary, type V4Job, type V4OpenlistBaselineStatus, type V4Preview, type V4SourceEvidence, type V4SourceLibraryCard } from '../api/mediaV4'
 import type { V4ExecutionProgress } from '../api/mediaV4'
 import { configApi, type PublicConfig } from '../api/config'
 import { openlistApi } from '../api/openlist'
 import { tasksApi } from '../api/tasks'
 import type { OpenListRoute, ProviderId } from '../api/types'
+import { MediaProviderIcon, providerVisualFor } from '../components/media/MediaProviderIcon'
 import OpenListFolderBrowser from '../components/media/OpenListFolderBrowser'
 import { V4ExecutionProgress as V4ExecutionProgressView } from '../components/media/V4ExecutionProgress'
 import { V4RecognitionSummary, type OverrideDraft } from '../components/media/V4RecognitionSummary'
@@ -51,13 +53,12 @@ const SOURCE_OPTIONS: Array<{
 const PROVIDER_OPTIONS: Array<{
   value: Exclude<ProviderId, 'local' | 'other'>
   label: string
-  mark: string
   website: string
   websiteLabel: string
 }> = [
-  { value: 'pan115', label: '115 网盘', mark: '115', website: 'https://115.com/', websiteLabel: '前往 115 官网生成目录树' },
-  { value: 'baidu', label: '百度网盘', mark: '百', website: 'https://pan.baidu.com/', websiteLabel: '前往百度网盘官网' },
-  { value: 'quark', label: '夸克网盘', mark: '夸', website: 'https://pan.quark.cn/', websiteLabel: '前往夸克网盘官网' },
+  { value: 'pan115', label: '115 网盘', website: 'https://115.com/', websiteLabel: '前往 115 官网生成目录树' },
+  { value: 'baidu', label: '百度网盘', website: 'https://pan.baidu.com/', websiteLabel: '前往百度网盘官网' },
+  { value: 'quark', label: '夸克网盘', website: 'https://pan.quark.cn/', websiteLabel: '前往夸克网盘官网' },
 ]
 
 const JOB_LABELS: Record<string, string> = {
@@ -125,7 +126,7 @@ function ProviderPicker({ value, onChange }: {
           onClick={() => onChange(option.value)}
           key={option.value}
         >
-          <span className={`media-v4-provider-mark provider-${option.value}`} aria-hidden="true">{option.mark}</span>
+          <span className={`media-v4-provider-mark provider-${option.value}`} aria-hidden="true"><MediaProviderIcon provider={option.value} /></span>
           <span><strong>{option.label}</strong><small>目录树中的实际内容来源</small></span>
           {value === option.value && <CheckmarkCircle24Filled aria-hidden="true" />}
         </button>
@@ -155,6 +156,7 @@ export default function MediaManagementPage() {
   const [browserSession, setBrowserSession] = useState(0)
   const [openlistBaseline, setOpenlistBaseline] = useState<V4OpenlistBaselineStatus | null>(null)
   const [sourceCards, setSourceCards] = useState<V4SourceLibraryCard[]>([])
+  const [drafts, setDrafts] = useState<V4DraftSummary[]>([])
   const [sourceCardsLoading, setSourceCardsLoading] = useState(true)
   const [revisionId, setRevisionId] = useState('')
   const [workflowStage, setWorkflowStage] = useState<WorkflowStage>('source')
@@ -172,6 +174,7 @@ export default function MediaManagementPage() {
   const [jobs, setJobs] = useState<V4Job[]>([])
   const [busy, setBusy] = useState<'scan' | 'preview' | 'override' | 'confirm' | ''>('')
   const [retryingJobId, setRetryingJobId] = useState('')
+  const [scanTask, setScanTask] = useState<{ scan_id: string; status: string } | null>(null)
   const [error, setError] = useState('')
   const [allowEmpty, setAllowEmpty] = useState(false)
   const [overrideDrafts, setOverrideDrafts] = useState<Record<string, OverrideDraft>>({})
@@ -199,8 +202,12 @@ export default function MediaManagementPage() {
     sourceCardsRefreshInFlight.current = true
     setSourceCardsLoading(true)
     try {
-      const result = await mediaV4Api.sourceLibraries()
-      setSourceCards(result.cards)
+      const [cardsResult, draftsResult] = await Promise.all([
+        mediaV4Api.sourceLibraries(),
+        mediaV4Api.drafts().catch(() => ({ drafts: [] as V4DraftSummary[] })),
+      ])
+      setSourceCards(cardsResult.cards)
+      setDrafts(draftsResult.drafts)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法读取已导入媒体库')
     } finally {
@@ -448,14 +455,47 @@ export default function MediaManagementPage() {
       if (action === 'incremental') scanMode = 'incremental'
       else if (action === 'full') scanMode = 'full'
       else if (requestSource === 'openlist') scanMode = openlistBaseline?.has_confirmed_baseline ? 'incremental' : 'full'
-      const result = await mediaV4Api.scan({
-        source: requestSource,
-        root_path: requestSource === 'local' ? path : requestSource === 'openlist' || kind === 'hybrid' ? remoteRoot : providerRoot(provider) || 'tree',
-        tree_file: requestSource === 'tree' || requestSource === 'hybrid' ? path : '',
-        provider: selectedProvider,
-        source_root: requestSource === 'tree' || requestSource === 'hybrid' ? selectedSourceRoot : '',
-        scan_mode: scanMode,
-      })
+      // P-004：OpenList 大扫描走 durable SourceScan，可离开、可查询、可取消；
+      // 本地/目录树保持同步扫描。
+      let result: {
+        root_id: string
+        scan_id: string
+        entries: V4SourceEvidence[]
+        scan_mode?: 'local' | 'tree_snapshot' | 'tree_baseline' | 'incremental' | 'full'
+        source_mode?: string
+        scan_stats?: { requested_directories?: number; rolling_verified?: number; changed_directories?: number }
+      }
+      if (requestSource === 'openlist') {
+        const task = await mediaV4Api.startDurableScan({
+          source: 'openlist',
+          root_path: remoteRoot,
+          provider: selectedProvider,
+          scan_mode: scanMode === 'incremental' ? 'incremental' : 'full',
+        })
+        setScanTask({ scan_id: task.scan_id, status: 'running' })
+        while (true) {
+          await new Promise((resolve) => window.setTimeout(resolve, 900))
+          const state = await mediaV4Api.durableScan(task.scan_id)
+          setScanTask({ scan_id: task.scan_id, status: state.status })
+          if (state.status === 'completed') {
+            result = { root_id: task.root_id, scan_id: task.scan_id, entries: state.entries, scan_mode: task.scan_mode === 'incremental' ? 'incremental' : 'full', source_mode: task.scan_mode === 'incremental' ? openlistBaseline?.source_mode || 'openlist_full' : 'openlist_full' }
+            break
+          }
+          if (state.status === 'failed' || state.status === 'cancelled') {
+            throw new Error(state.error || (state.status === 'cancelled' ? '扫描已取消' : '来源扫描失败'))
+          }
+        }
+        setScanTask(null)
+      } else {
+        result = await mediaV4Api.scan({
+          source: requestSource,
+          root_path: requestSource === 'local' ? path : kind === 'hybrid' ? remoteRoot : providerRoot(provider) || 'tree',
+          tree_file: requestSource === 'tree' || kind === 'hybrid' ? path : '',
+          provider: selectedProvider,
+          source_root: requestSource === 'tree' || kind === 'hybrid' ? selectedSourceRoot : '',
+          scan_mode: scanMode,
+        })
+      }
       const nextScan = { ...result, source_metadata: metadata }
       setScan(nextScan)
       setAllowEmpty(false)
@@ -475,7 +515,17 @@ export default function MediaManagementPage() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '来源扫描失败')
     } finally {
+      setScanTask(null)
       setBusy('')
+    }
+  }
+
+  const cancelScanTask = async () => {
+    if (!scanTask) return
+    try {
+      await mediaV4Api.cancelDurableScan(scanTask.scan_id)
+    } catch {
+      // 取消请求失败不阻塞；轮询会看到终态。
     }
   }
 
@@ -567,6 +617,42 @@ export default function MediaManagementPage() {
     setProvider('pan115')
     setRemoteRoot(config?.openlist_remote_root || '/')
     clearResultState()
+  }
+
+  const resumeDraft = async (draft: V4DraftSummary) => {
+    setError('')
+    setBusy('preview')
+    try {
+      const evidence = await mediaV4Api.revisionEvidence(draft.revision_id)
+      const result = await mediaV4Api.preview({
+        revision_id: draft.revision_id,
+        root_id: draft.root_id,
+        scan_id: draft.scan_id,
+        entries: evidence.entries,
+        allow_empty: false,
+      })
+      setScan({
+        root_id: draft.root_id,
+        scan_id: draft.scan_id,
+        entries: evidence.entries,
+        source_metadata: {
+          source_display_name: '',
+          source_locator: draft.source_locator || '',
+          playback_locator: draft.playback_locator || '',
+          source_route_id: '',
+        },
+      })
+      setRevisionId(draft.revision_id)
+      setPreview(result)
+      setJobs([])
+      setExecuteProgress(null)
+      setOverrideDrafts({})
+      setWorkflowStage('review')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法恢复未完成的导入草稿')
+    } finally {
+      setBusy('')
+    }
   }
 
   const resumeSourceCard = async (card: V4SourceLibraryCard) => {
@@ -662,9 +748,11 @@ export default function MediaManagementPage() {
               ? '正在处理'
               : card.job_summary.failed > 0 ? '有失败任务' : card.job_summary.cancelled > 0 ? '有已取消任务' : '上次导入已处理完毕'
             return <article className={`media-v4-library-source-card ${card.can_resume ? 'active' : 'settled'}`} key={card.root_id}>
-              <div className="media-v4-library-source-card-top"><span className="media-v4-provider-mark" aria-hidden="true">{card.provider === 'pan115' ? '115' : card.provider === 'baidu' ? '百' : card.provider === 'quark' ? '夸' : card.provider === 'local' ? '本' : '远'}</span><span>{sourceModeLabel(card)}</span></div>
+              <div className="media-v4-library-source-card-top"><MediaProviderIcon provider={providerVisualFor(card.provider)} size={20} /><span>{sourceModeLabel(card)}</span><span className={`media-v4-source-card-state media-v4-source-card-state-${card.overall_status ?? 'completed'}`}>{card.overall_status === 'running' ? '进行中' : card.overall_status === 'needs_attention' ? '需要处理' : card.overall_status === 'queued' ? '等待中' : '已完成'}</span></div>
               <strong title={card.display_name}>{card.display_name}</strong>
               <span className="media-v4-source-card-locator" title={card.source_locator || card.playback_locator}>{card.source_locator || card.playback_locator || '已确认的媒体来源'}</span>
+              {card.last_error && <span className="media-v4-source-card-error" role="alert">{card.last_error}</span>}
+              {card.attention_count > 0 && <span className="media-v4-source-card-attention">有 {card.attention_count} 部作品需要处理</span>}
               <div className="media-v4-source-card-stats"><span>{card.work_count} 部作品</span><span>{card.asset_count} 个文件</span><span>{card.evidence_count} 条来源证据</span></div>
               <div className="media-v4-source-card-progress"><div><span>{card.can_resume ? `${progressLabel} · ${progress}%` : progressLabel}</span><span>{card.job_summary.total} 个任务</span></div><i aria-hidden="true"><b style={{ width: `${progress}%` }} /></i></div>
               <div className="media-v4-source-card-actions">
@@ -689,6 +777,24 @@ export default function MediaManagementPage() {
           })}
         </ol>
       </nav>
+
+      {drafts.length > 0 && <section className="media-v4-source-libraries media-v4-draft-libraries" aria-label="待继续导入">
+        <div className="media-v4-source-libraries-heading">
+          <div><span>尚未确认的导入草稿</span><h2>待继续导入</h2><p>这些来源还没有完成确认，不会进入媒体库来源卡；可以继续检查识别结果。</p></div>
+        </div>
+        <div className="media-v4-source-library-grid">
+          {drafts.map((draft) => (
+            <article className="media-v4-library-source-card media-v4-draft-card" key={draft.revision_id}>
+              <div className="media-v4-library-source-card-top"><MediaProviderIcon provider={providerVisualFor(draft.provider)} size={20} /><span>{draft.source_mode === 'tree_snapshot' || draft.source_mode === 'tree_openlist' ? '目录树草稿' : draft.source_mode === 'openlist_full' ? 'OpenList 草稿' : draft.provider === 'local' ? '本地草稿' : '导入草稿'}</span></div>
+              <strong title={draft.source_locator}>{draft.source_locator || '未命名草稿'}</strong>
+              <span className="media-v4-source-card-locator">{draft.evidence_count} 个媒体条目{draft.issue_count > 0 ? ` · ${draft.issue_count} 项需处理` : ''}</span>
+              <div className="media-v4-source-card-actions">
+                <Button appearance="primary" disabled={busy !== ''} onClick={() => void resumeDraft(draft)}>{busy === 'preview' ? <Spinner size="tiny" /> : '继续检查识别结果'}</Button>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>}
 
       {error && <MessageBar className="media-v4-message" intent="error"><MessageBarBody>{error}</MessageBarBody></MessageBar>}
 
@@ -787,6 +893,7 @@ export default function MediaManagementPage() {
                     <div className="media-v4-command-buttons">
                       <Button appearance="secondary" icon={<ScanObject24Regular />} disabled={busy !== '' || remoteBrowsing || !canScan} onClick={() => void scanSource('full')}>{busy === 'scan' ? <Spinner size="tiny" /> : remoteBrowsing ? '正在切换目录' : '完整校验'}</Button>
                       <Button aria-label="增量扫描" className="media-primary-command" appearance="primary" icon={<ArrowSync24Regular />} disabled={busy !== '' || remoteBrowsing || !canScan} onClick={() => void scanSource('incremental')}>{busy === 'scan' ? <><Spinner size="tiny" />正在扫描</> : remoteBrowsing ? '正在切换目录' : '增量扫描'}</Button>
+                      {busy === 'scan' && scanTask && <Button appearance="secondary" icon={<Dismiss24Regular />} onClick={() => void cancelScanTask()}>取消扫描</Button>}
                     </div>
                   </>
                 ) : (
@@ -795,6 +902,7 @@ export default function MediaManagementPage() {
                     <div className="media-v4-command-buttons">
                       <Button appearance="secondary" icon={<ArrowSync24Regular />} disabled>增量扫描</Button>
                       <Button aria-label="完整扫描并建立基线" className="media-primary-command" appearance="primary" icon={<ScanObject24Regular />} disabled={busy !== '' || remoteBrowsing || !canScan} onClick={() => void scanSource()}>{busy === 'scan' ? <><Spinner size="tiny" />正在扫描</> : remoteBrowsing ? '正在切换目录' : '完整扫描并建立基线'}</Button>
+                      {busy === 'scan' && scanTask && <Button appearance="secondary" icon={<Dismiss24Regular />} onClick={() => void cancelScanTask()}>取消扫描</Button>}
                     </div>
                   </>
                 )}
@@ -847,6 +955,7 @@ export default function MediaManagementPage() {
           <V4RecognitionSummary
             preview={preview}
             issues={preview.issues}
+            evidenceEntries={scan?.entries ?? []}
             overrideDrafts={overrideDrafts}
             busy={busy !== ''}
             onOverrideChange={(evidenceId, draft) => setOverrideDrafts((current) => ({ ...current, [evidenceId]: draft }))}
@@ -863,6 +972,7 @@ export default function MediaManagementPage() {
             <V4RecognitionSummary
               preview={preview}
               issues={preview.issues}
+              evidenceEntries={scan?.entries ?? []}
               overrideDrafts={overrideDrafts}
               busy={busy !== ''}
               onOverrideChange={(evidenceId, draft) => setOverrideDrafts((current) => ({ ...current, [evidenceId]: draft }))}

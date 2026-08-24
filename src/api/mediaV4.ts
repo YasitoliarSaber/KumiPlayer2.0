@@ -85,6 +85,9 @@ export interface V4SourceLibraryCard {
   source_mode: string
   last_scan_mode: string
   has_confirmed_baseline: boolean
+  overall_status: 'running' | 'needs_attention' | 'queued' | 'completed'
+  attention_count: number
+  last_error: string
   source_locator: string
   playback_locator: string
   route_id: string
@@ -106,6 +109,19 @@ export interface V4SourceLibraryCard {
     failed: number
     cancelled: number
   }
+}
+
+export interface V4DraftSummary {
+  revision_id: string
+  root_id: string
+  scan_id: string
+  created_at: string
+  provider: string
+  source_mode: string
+  source_locator: string
+  playback_locator: string
+  evidence_count: number
+  issue_count: number
 }
 
 export interface V4OpenlistBaselineStatus {
@@ -199,8 +215,26 @@ export const mediaV4Api = {
 
   sourceLibraries: () => api.get<{ cards: V4SourceLibraryCard[] }>('/api/v4/sources/libraries'),
 
+  drafts: () => api.get<{ drafts: V4DraftSummary[] }>('/api/v4/sources/drafts'),
+
+  revisionEvidence: (revisionId: string) =>
+    api.get<{ revision_id: string; status: string; entries: V4SourceEvidence[] }>(`/api/v4/imports/${encodeURIComponent(revisionId)}/evidence`),
+
   openlistStatus: (remoteRoot: string) =>
     api.get<V4OpenlistBaselineStatus>(`/api/v4/sources/openlist/status?remote_root=${encodeURIComponent(remoteRoot)}`),
+
+  startDurableScan: (request: {
+    source?: string
+    root_path?: string
+    provider?: string
+    scan_mode?: 'full' | 'incremental'
+  }) => api.post<{ scan_id: string; root_id: string; scan_mode: string; status: string }>('/api/v4/sources/scans', request),
+
+  durableScan: (scanId: string) =>
+    api.get<{ scan_id: string; root_id: string; status: string; started_at: string; finished_at: string; error: string; entries: V4SourceEvidence[] }>(`/api/v4/sources/scans/${encodeURIComponent(scanId)}`),
+
+  cancelDurableScan: (scanId: string) =>
+    api.post<{ scan_id: string; status: string }>(`/api/v4/sources/scans/${encodeURIComponent(scanId)}/cancel`),
 
   enqueueScrape: (revisionId: string) =>
     api.post<{ revision_id: string; jobs: V4Job[] }>(`/api/v4/imports/${encodeURIComponent(revisionId)}/scrape`),
