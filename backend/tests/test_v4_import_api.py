@@ -971,25 +971,52 @@ def test_metadata_manual_confirm_requeues_scrape_and_refreshes_projection(tmp_pa
     assert client.post("/api/v4/imports/rev-manual/confirm").status_code == 200
 
     def fake_provider(target):
-        assert target.get("provider_bindings"), "人工确认必须携带 provider binding"
+        assert any(
+            b.get("provider") == "tmdb" and str(b.get("provider_id")) == "12345"
+            for b in (target.get("provider_bindings") or [])
+        ), "人工确认后 scrape 必须消费已确认 binding，不得重新搜索"
         return {
             "provider": "tmdb",
             "provider_id": "12345",
             "media_type": "tv",
             "title": "Show",
             "metadata_state": "ready",
+            "poster_url": "https://image.tmdb.org/t/p/w780/p.jpg",
+            "fanart_url": "https://image.tmdb.org/t/p/original/f.jpg",
         }
 
     monkeypatch.setattr("app.media_v4.jobs.metadata.default_metadata_provider", fake_provider)
+    from app.media_v4.jobs import completeness as completeness_module
+    from app.media_v4.jobs import metadata_artifacts as artifacts_module
+
+    monkeypatch.setattr(artifacts_module, "load_config", lambda: SimpleNamespace(
+        artwork_storage_mode="remote", tmdb_timeout=5, proxy_url=None,
+    ))
+    monkeypatch.setattr(completeness_module, "load_config", lambda: SimpleNamespace(
+        artwork_storage_mode="remote", tmdb_timeout=5, proxy_url=None,
+    ))
 
     with media_v4._database.connect() as conn:
         work_id = conn.execute("SELECT work_id FROM works LIMIT 1").fetchone()["work_id"]
 
+    # 搜索端创建服务端候选，确认端只接受 candidate_id。
+    monkeypatch.setattr(
+        "app.media_v4.jobs.metadata.search_tmdb_candidates",
+        lambda *a, **k: [{
+            "provider": "tmdb",
+            "provider_id": "12345",
+            "media_type": "tv",
+            "title": "Show",
+            "year": 2024,
+        }],
+    )
+    searched = client.post("/api/v4/metadata/search", json={"work_id": work_id, "query": "Show"})
+    assert searched.status_code == 200, searched.text
+    candidate_id = searched.json()["candidates"][0]["candidate_id"]
+
     result = client.post("/api/v4/metadata/confirm", json={
         "work_id": work_id,
-        "provider": "tmdb",
-        "provider_id": "12345",
-        "media_type": "tv",
+        "candidate_id": candidate_id,
     })
     assert result.status_code == 200, result.text
 

@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+from app.media_v4.jobs.completeness import assess_metadata_completeness
 from app.media_v4.jobs.metadata_artifacts import publish_metadata_artifacts
 from app.media_v4.persistence.database import V4Database
 
@@ -142,6 +143,23 @@ class V4ScrapeService:
                     metadata=result,
                     mirror_root=mirror_root,
                 )
+                # P-001 7.7 R3：完整性是 ready 的硬门控。
+                complete, reasons = assess_metadata_completeness(
+                    self.database,
+                    revision_id=job["revision_id"],
+                    work_id=job["work_id"],
+                    target=target,
+                    metadata=result,
+                    mirror_root=mirror_root,
+                )
+                if not complete:
+                    result = {
+                        **result,
+                        "metadata_state": "failed",
+                        "reason": "；".join(reasons),
+                        "completeness": reasons,
+                    }
+                    ready = False
             now = _now()
             binding_status = "confirmed" if ready else (metadata_state or "waiting_metadata")
             binding_provider = provider_name if ready else "local"

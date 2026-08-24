@@ -14,6 +14,8 @@ from pathlib import PurePosixPath
 from app.media_v4.domain.models import ParsedFacts, ResolvedMediaGraph, SourceEvidence
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.persistence.repositories import V4Repository
+from app.media_v4.resolution import candidates as candidate_service
+from app.media_v4.resolution.candidates import CandidateSearch
 from app.media_v4.resolution.resolver import MediaResolver
 
 
@@ -27,134 +29,110 @@ def _normalize_title(value: str) -> str:
     return normalized.strip(" ._-·:：/\\()（）【】[]{}<>《》「」『』\"'")
 
 
-def _persist_work_candidates(
+def _merge_map_from_candidates(candidates_by_key: dict[str, list]) -> dict[str, str]:
+    """从已确认候选重建合并映射（同一 provider identity 的 draft Work 合并）。"""
+
+    identity_owner: dict[tuple[str, str, str], str] = {}
+    merge_map: dict[str, str] = {}
+    for work_key, items in candidates_by_key.items():
+        for item in items:
+            if item.status != "confirmed":
+                continue
+            identity = (item.provider, item.media_type, item.provider_id)
+            owner = identity_owner.setdefault(identity, work_key)
+            if owner != work_key:
+                merge_map[work_key] = owner
+    return merge_map
+
+
+def _persist_candidates(
     conn,
     revision_id: str,
     work_ids: dict[str, str],
-    graph: ResolvedMediaGraph,
-    entries: list[tuple[SourceEvidence, ParsedFacts]],
+    candidates_by_key: dict[str, list],
     created_at: str,
 ) -> None:
-    """P-001 7.4 阶段4：确认时按 revision 冻结 provider 候选身份。
-
-    候选输入包括显式 TMDB hint 与已存在的 provider binding；搜索结果只提出
-    provider identity，不修改本地季号/集号。同一 provider/media_type/provider_id
-    在 provider_bindings 唯一约束下天然对应唯一 Work。
-    """
+    """按 revision_id + draft_work_key 持久化候选（P-001 7.7 R1）。"""
 
     conn.execute(
         "DELETE FROM revision_work_candidates WHERE revision_id = ?", (revision_id,)
     )
     now = _now()
-    work_by_key = {work.work_key: work for work in graph.works}
+    for work_key, items in candidates_by_key.items():
+        work_id = work_ids.get(work_key, "")
+        for item in items:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO revision_work_candidates(
+                    candidate_id, revision_id, work_id, draft_work_key, provider,
+                    provider_id, media_type, title, year, evidence, confidence, status,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    revision_id,
+                    work_id,
+                    work_key,
+                    item.provider,
+                    item.provider_id,
+                    item.media_type,
+                    item.title,
+                    item.year,
+                    item.evidence,
+                    item.confidence,
+                    item.status,
+                    now,
+                    now,
+                ),
+            )
+
+
+def _freeze_candidate_bindings(
+    conn,
+    work_ids: dict[str, str],
+    candidates_by_key: dict[str, list],
+    created_at: str,
+) -> None:
+    """确认时把高置信唯一身份写入 provider_bindings，冻结身份供 scrape 消费。"""
+
     for work_key, work_id in work_ids.items():
-        work = work_by_key.get(work_key)
-        related_entries = [
-            (evidence, facts)
-            for evidence, facts in entries
-            if work is not None and evidence.evidence_id in work.source_evidence_ids
+        confirmed = [
+            item for item in candidates_by_key.get(work_key, [])
+            if item.status == "confirmed" and candidate_service.supported_provider(item.provider)
         ]
-        hints: list[tuple[str, str]] = []
-        for _evidence, facts in related_entries:
-            if facts.tmdb_hint_id and facts.tmdb_hint_type:
-                hint = (facts.tmdb_hint_type.casefold(), str(facts.tmdb_hint_id))
-                if hint not in hints:
-                    hints.append(hint)
-        existing = conn.execute(
-            "SELECT provider, media_type, provider_id FROM provider_bindings WHERE work_id = ?",
-            (work_id,),
-        ).fetchall()
-        for provider, media_type, provider_id in existing:
-            status = "confirmed"
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO revision_work_candidates(
-                    candidate_id, revision_id, work_id, draft_work_key, provider,
-                    provider_id, media_type, title, year, evidence, confidence, status,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'high', ?, ?, ?)
-                """,
-                (
-                    str(uuid.uuid4()),
-                    revision_id,
-                    work_id,
-                    work_key,
-                    provider,
-                    provider_id,
-                    media_type,
-                    work.preferred_title if work else "",
-                    work.year if work else None,
-                    "existing_provider_binding",
-                    status,
-                    now,
-                    now,
-                ),
-            )
-        for provider, provider_id in hints:
-            status = "confirmed" if any(
-                p == provider and str(pid) == provider_id
-                for p, _m, pid in existing
-            ) else "proposed"
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO revision_work_candidates(
-                    candidate_id, revision_id, work_id, draft_work_key, provider,
-                    provider_id, media_type, title, year, evidence, confidence, status,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'high', ?, ?, ?)
-                """,
-                (
-                    str(uuid.uuid4()),
-                    revision_id,
-                    work_id,
-                    work_key,
-                    "tmdb",
-                    provider_id,
-                    provider,
-                    work.preferred_title if work else "",
-                    work.year if work else None,
-                    "parsed_tmdb_hint",
-                    status,
-                    now,
-                    now,
-                ),
-            )
+        unique_identities = {(item.provider, item.media_type, item.provider_id) for item in confirmed}
+        if len(unique_identities) != 1:
+            continue
+        chosen = confirmed[0]
+        conn.execute(
+            """
+            INSERT INTO provider_bindings(work_id, provider, media_type, provider_id)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(work_id, provider, media_type) DO UPDATE SET provider_id = excluded.provider_id
+            """,
+            (work_id, chosen.provider, chosen.media_type, chosen.provider_id),
+        )
 
 
 def _structural_key(relative_path: str) -> str:
+    from app.media_v4.generic_container import is_generic_container_name
+
     parts = PurePosixPath(relative_path.replace("\\", "/")).parts
     directories = parts[:-1]
-    generic = {
-        "动画",
-        "新番",
-        "剧集",
-        "电影",
-        "动漫",
-        "番剧",
-        "影视",
-        "动画电影",
-        "已完结",
-        "完结",
-        "全部",
-        "网盘",
-        "115网盘",
-        "百度网盘",
-        "刮削好的动画",
-        "media",
-        "video",
-        "tv",
-        "anime",
-        "movies",
-        "series",
-        "shows",
-    }
-    season_dir = re.compile(r"(?i)^(?:season\s*\d+|s\d+|第\s*\d+\s*季|specials?|sps?|s00)$")
     for part in reversed(directories):
         normalized = _normalize_title(part)
-        if not normalized or normalized in generic or season_dir.fullmatch(normalized):
+        if not normalized or is_generic_container_name(normalized):
             continue
         return normalized
     return ""
+
+
+def _lookup_work_by_key(conn, work_key: str) -> str:
+    row = conn.execute(
+        "SELECT work_id FROM works WHERE identity_key = ?", (work_key,)
+    ).fetchone()
+    return str(row["work_id"]) if row else ""
 
 
 class RevisionBlockedError(RuntimeError):
@@ -190,6 +168,49 @@ class V4RevisionService:
         "is_auxiliary",
     })
 
+    def _load_draft_candidates(self, revision_id: str) -> dict[str, list]:
+        """确认时复用 draft 已冻结候选，避免再次联网搜索。"""
+
+        from app.media_v4.resolution.candidates import WorkCandidate
+
+        with self.database.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM revision_work_candidates WHERE revision_id = ?",
+                (revision_id,),
+            ).fetchall()
+        result: dict[str, list] = {}
+        for row in rows:
+            key = str(row["draft_work_key"])
+            result.setdefault(key, []).append(WorkCandidate(
+                work_key=key,
+                provider=str(row["provider"]),
+                provider_id=str(row["provider_id"]),
+                media_type=str(row["media_type"]),
+                title=str(row["title"]),
+                year=row["year"],
+                evidence=str(row["evidence"]),
+                confidence=str(row["confidence"]),
+                status=str(row["status"]),
+            ))
+        return result
+
+    def _existing_bindings_by_key(self, graph: ResolvedMediaGraph) -> dict[str, list[tuple[str, str, str]]]:
+        """按 identity_key 读取既有 provider binding，供跨 revision 候选复用。"""
+
+        bindings: dict[str, list[tuple[str, str, str]]] = {}
+        with self.database.connect() as conn:
+            for work in graph.works:
+                rows = conn.execute(
+                    """
+                    SELECT pb.provider, pb.media_type, pb.provider_id
+                    FROM works w JOIN provider_bindings pb ON pb.work_id = w.work_id
+                    WHERE w.identity_key = ?
+                    """,
+                    (work.work_key,),
+                ).fetchall()
+                bindings[work.work_key] = [(str(r[0]), str(r[1]), str(r[2])) for r in rows]
+        return bindings
+
     def create_draft(
         self,
         revision_id: str,
@@ -203,6 +224,7 @@ class V4RevisionService:
         source_metadata: dict[str, str] | None = None,
         _publish: bool = False,
         _override_payloads: dict[str, dict] | None = None,
+        candidate_search: CandidateSearch | None = None,
     ) -> ResolvedMediaGraph:
         if entries and any(evidence.root_id != entries[0][0].root_id for evidence, _ in entries):
             raise ValueError("同一 revision 不能混合多个来源根")
@@ -215,6 +237,27 @@ class V4RevisionService:
             raise ValueError("空 revision 必须明确提供 root_id 和 scan_id")
 
         graph = self.resolver.resolve(entries)
+        # P-001 7.7 R1：确认前候选解析。draft 时在线/测试搜索并合并同一
+        # provider identity；确认（publish）时复用已冻结候选，不再重新搜索。
+        candidates_by_key: dict[str, list] = {}
+        if _publish:
+            candidates_by_key = self._load_draft_candidates(revision_id)
+            graph = candidate_service.merge_graph(
+                graph,
+                _merge_map_from_candidates(candidates_by_key),
+            )
+        else:
+            search = candidate_search or candidate_service.default_candidate_search
+            existing_bindings = self._existing_bindings_by_key(graph)
+            candidates_by_key, merge_map, candidate_issues = candidate_service.plan_work_candidates(
+                graph,
+                entries,
+                search,
+                existing_bindings=existing_bindings,
+            )
+            graph = candidate_service.merge_graph(graph, merge_map)
+            if candidate_issues:
+                graph = replace(graph, issues=(*graph.issues, *candidate_issues))
         override_payloads = _override_payloads or {}
         source_metadata = source_metadata or {}
         created_at = _now()
@@ -367,6 +410,7 @@ class V4RevisionService:
                                 issue.message,
                             ),
                         )
+                    _persist_candidates(conn, revision_id, {}, candidates_by_key, created_at)
                     conn.commit()
                     return graph
 
@@ -441,12 +485,9 @@ class V4RevisionService:
                         candidate_titles = {
                             _normalize_title(value)
                             for _evidence, facts in related_entries
-                            for value in (
-                                facts.work_title,
-                                facts.series_group,
-                                *facts.title_candidates,
-                            )
+                            for value in (facts.work_title, *facts.title_candidates)
                             if _normalize_title(value)
+                            and _normalize_title(value) != _normalize_title(facts.series_group)
                         }
                         candidate_rows = conn.execute(
                             """
@@ -535,11 +576,27 @@ class V4RevisionService:
                                     (work_id, normalized_title),
                                 )
 
-                # P-001 7.4 阶段3.2：持久化作品关系（外传/独立关联作品 → 父系列）。
+                # P-001 7.7 R4：持久化作品关系；父 Work 可能只存在于已确认数据库。
                 for relation in graph.relations:
                     parent_work_id = work_ids.get(relation.parent_work_key)
+                    if not parent_work_id:
+                        parent_work_id = _lookup_work_by_key(conn, relation.parent_work_key)
                     child_work_id = work_ids.get(relation.child_work_key)
                     if not parent_work_id or not child_work_id:
+                        # 父 Work 不存在时保存明确待解析记录，不静默丢弃。
+                        conn.execute(
+                            """
+                            INSERT INTO revision_issues(
+                                revision_id, issue_id, code, evidence_id, message
+                            ) VALUES (?, ?, 'unresolved_parent_relation', ?, ?)
+                            """,
+                            (
+                                revision_id,
+                                f"relation-{uuid.uuid4().hex}",
+                                child_work_id or "",
+                                f"父系列 {relation.parent_work_key} 尚未导入，无法建立作品关系",
+                            ),
+                        )
                         continue
                     conn.execute(
                         """
@@ -555,8 +612,10 @@ class V4RevisionService:
                         ),
                     )
 
-                # P-001 7.4 阶段4.1：确认时冻结候选身份，供人工恢复与跨语言合卡。
-                _persist_work_candidates(conn, revision_id, work_ids, graph, entries, created_at)
+                # P-001 7.7 R1：确认时冻结候选身份（work_id 落库），并把高置信
+                # 唯一身份写入 provider_bindings，使确认后的 scrape 不再搜索。
+                _persist_candidates(conn, revision_id, work_ids, candidates_by_key, created_at)
+                _freeze_candidate_bindings(conn, work_ids, candidates_by_key, created_at)
 
                 # Provider identity is a mapping, never a replacement for the
                 # local Work identity.  Hints observed during parsing are
