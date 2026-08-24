@@ -11,7 +11,7 @@ def test_app_gates_normal_shell_behind_first_run_setup():
 
 def test_first_run_page_contains_required_zero_start_steps():
     page = (ROOT / "src" / "pages" / "FirstRunSetup.tsx").read_text(encoding="utf-8")
-    for text in ["内置播放器", "镜像目录", "媒体来源", "验证并完成", "SourceEvidence"]:
+    for text in ["内置播放器", "镜像目录", "媒体来源", "验证并完成", "不会移动或改名你的原始文件"]:
         assert text in page
     # 首次引导不再要求用户选择外部 MPV 路径，改为自动检测内置播放器
     assert "pickFolder" in page
