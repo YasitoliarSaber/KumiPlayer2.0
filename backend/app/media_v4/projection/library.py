@@ -81,11 +81,13 @@ class V4LibraryProjection:
                             SELECT COUNT(DISTINCT rb.episode_id)
                             FROM revision_bindings rb
                             JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                            JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = ''
                             WHERE rb.work_id = w.work_id AND rb.episode_id IS NOT NULL
                               AND ir.status = 'confirmed'
                         ) ELSE CASE WHEN EXISTS (
                             SELECT 1 FROM revision_bindings rb
                             JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                            JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = ''
                             WHERE rb.work_id = w.work_id AND rb.episode_id IS NULL
                               AND rb.asset_id IS NOT NULL AND ir.status = 'confirmed'
                         ) THEN 1 ELSE 0 END END AS episode_count,
@@ -93,18 +95,21 @@ class V4LibraryProjection:
                             SELECT COUNT(DISTINCT rb.asset_id)
                             FROM revision_bindings rb
                             JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                            JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = ''
                             WHERE rb.work_id = w.work_id AND rb.asset_id IS NOT NULL
                               AND ir.status = 'confirmed'
                         ) AS asset_count,
                         COALESCE((
                             SELECT sb.metadata_json FROM scrape_bindings sb
                             JOIN import_revisions sir ON sir.revision_id = sb.revision_id
+                            JOIN source_roots srs ON srs.root_id = sir.root_id AND srs.retired_at = ''
                             WHERE sb.work_id = w.work_id AND sir.status = 'confirmed'
                             ORDER BY sb.updated_at DESC, sb.binding_id DESC LIMIT 1
                         ), '{}') AS scraped_metadata_json,
                         COALESCE((
                             SELECT sb.status FROM scrape_bindings sb
                             JOIN import_revisions sir ON sir.revision_id = sb.revision_id
+                            JOIN source_roots srs ON srs.root_id = sir.root_id AND srs.retired_at = ''
                             WHERE sb.work_id = w.work_id AND sir.status = 'confirmed'
                             ORDER BY sb.updated_at DESC, sb.binding_id DESC LIMIT 1
                         ), '') AS scrape_binding_status,
@@ -113,6 +118,7 @@ class V4LibraryProjection:
                                 SELECT se.provider
                                 FROM revision_bindings rb
                                 JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                            JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = ''
                                 JOIN assets a ON a.asset_id = rb.asset_id
                                 JOIN source_evidence se ON se.evidence_id = a.evidence_id
                                 WHERE rb.work_id = w.work_id AND ir.status = 'confirmed'
@@ -124,6 +130,7 @@ class V4LibraryProjection:
                             JOIN episodes e ON e.season_id = s.season_id
                             JOIN revision_bindings rb ON rb.episode_id = e.episode_id
                             JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                            JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = ''
                             WHERE s.work_id = w.work_id AND ir.status = 'confirmed'
                               AND s.season_kind = 'regular'
                         ) AS regular_season_count,
@@ -133,6 +140,7 @@ class V4LibraryProjection:
                             JOIN episodes e ON e.season_id = s.season_id
                             JOIN revision_bindings rb ON rb.episode_id = e.episode_id
                             JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                            JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = ''
                             WHERE s.work_id = w.work_id AND ir.status = 'confirmed'
                               AND s.season_kind != 'regular'
                         ) AS special_season_count
@@ -140,6 +148,7 @@ class V4LibraryProjection:
                     WHERE EXISTS (
                         SELECT 1 FROM revision_bindings rb
                         JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                            JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = ''
                         WHERE rb.work_id = w.work_id AND ir.status = 'confirmed'
                     )
                     ORDER BY title COLLATE NOCASE, w.work_id

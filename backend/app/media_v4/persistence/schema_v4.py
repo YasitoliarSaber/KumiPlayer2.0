@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 8
+V4_SCHEMA_VERSION = 9
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -55,6 +55,8 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             enabled INTEGER NOT NULL DEFAULT 1,
             source_mode TEXT NOT NULL DEFAULT '',
             last_scan_mode TEXT NOT NULL DEFAULT '',
+            retired_at TEXT NOT NULL DEFAULT '',
+            retired_reason TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -587,6 +589,17 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         )
         """,
+        """
+        CREATE TABLE maintenance_operations (
+            operation_id TEXT PRIMARY KEY,
+            scope_provider TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            preview_json TEXT NOT NULL DEFAULT '{}',
+            result_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
         "ALTER TABLE source_roots ADD COLUMN root_container TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE works ADD COLUMN show_type TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE works ADD COLUMN card_type TEXT NOT NULL DEFAULT ''",
@@ -707,6 +720,37 @@ def create_v8_structures(conn: sqlite3.Connection) -> None:
 
     _add_column_if_missing(conn, "source_roots", "source_mode", "TEXT NOT NULL DEFAULT ''")
     _add_column_if_missing(conn, "source_roots", "last_scan_mode", "TEXT NOT NULL DEFAULT ''")
+
+
+def create_v9_structures(conn: sqlite3.Connection) -> None:
+    """v9 增量结构：来源退役字段与媒体库维护操作表。
+
+    source_roots.retired_at / retired_reason 表达“活动来源退役”；已确认的
+    revision / evidence / facts 作为审计事实保留，实时查询通过活动来源过滤排除。
+    maintenance_operations 记录按来源清理的预览/确认结果，支持幂等重入。
+    """
+
+    _add_column_if_missing(conn, "source_roots", "retired_at", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "source_roots", "retired_reason", "TEXT NOT NULL DEFAULT ''")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS maintenance_operations (
+            operation_id TEXT PRIMARY KEY,
+            scope_provider TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            preview_json TEXT NOT NULL DEFAULT '{}',
+            result_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def migrate_schema_v8_to_v9(conn: sqlite3.Connection) -> None:
+    """v8 → v9 增量迁移：来源退役字段与维护操作表。"""
+
+    create_v9_structures(conn)
 
 
 def migrate_schema_v7_to_v8(conn: sqlite3.Connection) -> None:

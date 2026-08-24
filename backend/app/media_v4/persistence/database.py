@@ -10,10 +10,14 @@ from pathlib import Path
 from app.media_v4.persistence.schema_v4 import (
     V4_SCHEMA_VERSION,
     create_schema_v4,
+    create_v6_structures,
+    create_v8_structures,
+    create_v9_structures,
     migrate_schema_v4_to_v5,
     migrate_schema_v5_to_v6,
     migrate_schema_v6_to_v7,
     migrate_schema_v7_to_v8,
+    migrate_schema_v8_to_v9,
 )
 
 
@@ -130,11 +134,28 @@ class V4Database:
                 raise RuntimeError(
                     f"数据库版本 {version} 高于当前程序支持的 {self.CURRENT_SCHEMA_VERSION}，请升级 KumiPlayer"
                 )
+            if version == 8 and self._has_user_tables(conn):
+                # v8 → v9 增量迁移：来源退役字段与维护操作表。
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    migrate_schema_v8_to_v9(conn)
+                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    conn.commit()
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    raise V4ResetRequiredError(
+                        "数据库声明为 V4 但物理结构不完整，需要一次性重置；" + str(exc)
+                    ) from exc
+                except Exception:
+                    conn.rollback()
+                    raise
+                version = self.CURRENT_SCHEMA_VERSION
             if version == 7 and self._has_user_tables(conn):
-                # v7 → v8 增量迁移：来源根级 source_mode / last_scan_mode 并回填。
+                # v7 → v8/v9 增量迁移：来源根级模式字段并回填，随后退役字段与维护表。
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     migrate_schema_v7_to_v8(conn)
+                    migrate_schema_v8_to_v9(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -152,6 +173,7 @@ class V4Database:
                 try:
                     migrate_schema_v6_to_v7(conn)
                     migrate_schema_v7_to_v8(conn)
+                    migrate_schema_v8_to_v9(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -189,6 +211,7 @@ class V4Database:
                     migrate_schema_v5_to_v6(conn)
                     migrate_schema_v6_to_v7(conn)
                     migrate_schema_v7_to_v8(conn)
+                    migrate_schema_v8_to_v9(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -241,8 +264,12 @@ class V4Database:
                 "数据库声明为 V4，但物理结构不完整，需要一次性重置；" + "；".join(details)
             )
         expected = sqlite3.connect(":memory:")
+        expected.row_factory = sqlite3.Row
         try:
             create_schema_v4(expected)
+            create_v6_structures(expected)
+            create_v8_structures(expected)
+            create_v9_structures(expected)
             expected_signature = self._schema_signature(expected)
         finally:
             expected.close()

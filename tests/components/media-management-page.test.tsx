@@ -96,8 +96,13 @@ beforeEach(() => {
   }))
 })
 
+async function enterImport() {
+  fireEvent.click(await screen.findByRole('button', { name: '导入媒体' }))
+}
+
 test('本地目录读取设置中的默认路径并只表达本机物理磁盘', async () => {
   render(<MediaManagementPage />)
+  await enterImport()
 
   expect(screen.getByRole('navigation', { name: '导入步骤' })).toBeVisible()
   expect(screen.getByRole('button', { name: '本地目录' })).toHaveAttribute('aria-pressed', 'true')
@@ -109,6 +114,7 @@ test('本地目录读取设置中的默认路径并只表达本机物理磁盘',
 
 test('目录树使用真实网盘提供商、官网入口和设置中的播放映射', async () => {
   render(<MediaManagementPage />)
+  await enterImport()
   fireEvent.click(screen.getByRole('button', { name: '目录树 TXT' }))
 
   expect(await screen.findByRole('button', { name: '115 网盘' })).toHaveAttribute('aria-pressed', 'true')
@@ -135,6 +141,7 @@ test('目录树使用真实网盘提供商、官网入口和设置中的播放�
 
 test('OpenList 首次完整扫描建立基线，确认前增量被禁用', async () => {
   render(<MediaManagementPage />)
+  await enterImport()
   fireEvent.click(screen.getByRole('button', { name: 'OpenList' }))
 
   expect(await screen.findByRole('region', { name: 'OpenList 目录浏览器' })).toBeVisible()
@@ -165,6 +172,7 @@ test('已确认基线的 OpenList 默认增量扫描并保留完整校验', asyn
     has_confirmed_baseline: true,
   })
   render(<MediaManagementPage />)
+  await enterImport()
   fireEvent.click(screen.getByRole('button', { name: 'OpenList' }))
   fireEvent.click(await screen.findByRole('button', { name: '打开文件夹 Anime' }))
   await screen.findByText(/当前目录：\/115\/Anime/)
@@ -192,6 +200,7 @@ test('已确认基线的 OpenList 默认增量扫描并保留完整校验', asyn
 
 test('OpenList 未进入内容来源路由时不会猜测默认网盘提供商', async () => {
   render(<MediaManagementPage />)
+  await enterImport()
   fireEvent.click(screen.getByRole('button', { name: 'OpenList' }))
 
   expect(await screen.findByText('当前目录尚未匹配内容路由')).toBeVisible()
@@ -201,6 +210,7 @@ test('OpenList 未进入内容来源路由时不会猜测默认网盘提供商',
 
 test('混合入口首次要求 TXT 基线且未确认前禁用增量', async () => {
   render(<MediaManagementPage />)
+  await enterImport()
   fireEvent.click(screen.getByRole('button', { name: '目录树 + OpenList 增量' }))
   expect(screen.queryByRole('group', { name: '内容来源' })).not.toBeInTheDocument()
   fireEvent.change(screen.getByRole('textbox', { name: '首次目录树 TXT 文件' }), {
@@ -231,6 +241,7 @@ test('混合入口基线确认后增量扫描发送显式 incremental', async ()
     has_confirmed_baseline: true,
   })
   render(<MediaManagementPage />)
+  await enterImport()
   fireEvent.click(screen.getByRole('button', { name: '目录树 + OpenList 增量' }))
   fireEvent.click(await screen.findByRole('button', { name: '打开文件夹 Anime' }))
   await screen.findByText(/当前目录：\/115\/Anime/)
@@ -246,6 +257,7 @@ test('混合入口基线确认后增量扫描发送显式 incremental', async ()
 
 test('本地来源路径有效后提交统一 V4 扫描请求', async () => {
   render(<MediaManagementPage />)
+  await enterImport()
   const input = await screen.findByRole('textbox', { name: '本机媒体文件夹' })
   fireEvent.change(input, { target: { value: 'D:\\Anime' } })
   fireEvent.click(screen.getByRole('button', { name: '扫描并识别' }))
@@ -300,10 +312,6 @@ test('来源卡可以回到同一 OpenList 来源执行更新', async () => {
     has_confirmed_baseline: true,
   })
   render(<MediaManagementPage />)
-
-  fireEvent.click(screen.getByRole('button', { name: 'OpenList' }))
-  await waitFor(() => expect(openlist.browse).toHaveBeenCalledWith('/', 1, false, 100))
-  openlist.browse.mockClear()
 
   fireEvent.click(await screen.findByRole('button', { name: '检查更新' }))
 

@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Checkbox, Input, MessageBar, MessageBarBody, Select, Spinner } from '@fluentui/react-components'
 import {
+  Add24Regular,
+  ArrowLeft24Regular,
   ArrowReset24Regular,
   ArrowSync24Regular,
   CheckmarkCircle24Filled,
   CheckmarkCircle24Regular,
   Cloud24Regular,
   Dismiss24Regular,
+  ShieldCheckmark24Regular,
   Database24Regular,
   DocumentText24Regular,
   Folder24Regular,
@@ -23,6 +26,7 @@ import { MediaProviderIcon, providerVisualFor } from '../components/media/MediaP
 import OpenListFolderBrowser from '../components/media/OpenListFolderBrowser'
 import { V4ExecutionProgress as V4ExecutionProgressView } from '../components/media/V4ExecutionProgress'
 import { V4RecognitionSummary, type OverrideDraft } from '../components/media/V4RecognitionSummary'
+import { LibraryMaintenancePanel } from '../components/media/LibraryMaintenancePanel'
 import { pickDirectoryTreeFile, pickFolder } from '../platform/folderPicker'
 import { useMediaWorkflowStore } from '../stores/mediaWorkflow'
 import { useUiStore } from '../stores/ui'
@@ -160,6 +164,7 @@ export default function MediaManagementPage() {
   const [sourceCardsLoading, setSourceCardsLoading] = useState(true)
   const [revisionId, setRevisionId] = useState('')
   const [workflowStage, setWorkflowStage] = useState<WorkflowStage>('source')
+  const [pageMode, setPageMode] = useState<'overview' | 'import' | 'maintenance'>('overview')
   const [executeProgress, setExecuteProgress] = useState<V4ExecutionProgress | null>(null)
   const [scan, setScan] = useState<{
     root_id: string
@@ -266,6 +271,7 @@ export default function MediaManagementPage() {
       setJobs(result.jobs)
       if (result.progress) setExecuteProgress(result.progress)
       setWorkflowStage('execute')
+      setPageMode('import')
     }).catch(() => {
       localStorage.removeItem(ACTIVE_REVISION_KEY)
     })
@@ -511,6 +517,7 @@ export default function MediaManagementPage() {
         })
         setPreview(previewResult)
         setWorkflowStage('review')
+        setPageMode('import')
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '来源扫描失败')
@@ -551,6 +558,7 @@ export default function MediaManagementPage() {
       setRevisionId(nextRevisionId)
       setPreview(result)
       setWorkflowStage('review')
+      setPageMode('import')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '识别预览失败')
     } finally {
@@ -571,6 +579,7 @@ export default function MediaManagementPage() {
       const status = await mediaV4Api.status(revisionId)
       if (status.progress) setExecuteProgress(status.progress)
       setWorkflowStage('execute')
+      setPageMode('import')
       void refreshSourceCards()
       if (kind === 'openlist' || kind === 'hybrid') void refreshOpenlistBaseline(remoteRoot)
     } catch (cause) {
@@ -612,6 +621,7 @@ export default function MediaManagementPage() {
   }
 
   const startNewImport = () => {
+    setPageMode('import')
     setKind('local')
     setPath(config?.local_root || '')
     setProvider('pan115')
@@ -648,6 +658,7 @@ export default function MediaManagementPage() {
       setExecuteProgress(null)
       setOverrideDrafts({})
       setWorkflowStage('review')
+      setPageMode('import')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法恢复未完成的导入草稿')
     } finally {
@@ -666,6 +677,7 @@ export default function MediaManagementPage() {
       setPreview(null)
       localStorage.setItem(ACTIVE_REVISION_KEY, card.revision_id)
       setWorkflowStage('execute')
+      setPageMode('import')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法读取该媒体库的导入进度')
     }
@@ -687,6 +699,24 @@ export default function MediaManagementPage() {
     }
   }
 
+  const providerLabel = (provider: string) => {
+    if (provider === 'local') return '本地'
+    if (provider === 'pan115') return '115 网盘'
+    if (provider === 'baidu') return '百度网盘'
+    if (provider === 'quark') return '夸克网盘'
+    return '其他来源'
+  }
+
+  const formatDate = (value: string) => {
+    if (!value) return '未知'
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) return '未知'
+    const year = date.getFullYear()
+    const month = String(date.getMonth() + 1).padStart(2, '0')
+    const day = String(date.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
+  }
+
   const sourceModeLabel = (card: V4SourceLibraryCard) => {
     if (card.source_mode === 'local') return '本地来源'
     if (card.source_mode === 'tree_snapshot') return '目录树基线'
@@ -698,6 +728,7 @@ export default function MediaManagementPage() {
 
   const prepareSourceUpdate = (card: V4SourceLibraryCard) => {
     clearResultState()
+    setPageMode('import')
     setBrowserSession((current) => current + 1)
     const nextProvider = card.provider === 'baidu' || card.provider === 'quark' ? card.provider : 'pan115'
     setProvider(nextProvider)
@@ -728,12 +759,27 @@ export default function MediaManagementPage() {
       <header className="media-flow-header">
         <div className="media-flow-title">
           <span>媒体管理</span>
-          <h1>导入媒体</h1>
-          <p>选择一个媒体来源，检查识别结果，然后建立可播放的媒体库。</p>
+          <h1>{pageMode === 'overview' ? '媒体库' : pageMode === 'maintenance' ? '媒体库维护' : '导入媒体'}</h1>
+          <p>{pageMode === 'overview'
+            ? '查看已导入的媒体来源、更新状态或添加新的媒体库。'
+            : pageMode === 'maintenance'
+              ? '按来源清理 KumiPlayer 媒体库数据与受控生成物。'
+              : '选择一个媒体来源，检查识别结果，然后建立可播放的媒体库。'}</p>
         </div>
-        {showReset && <Button className="media-v4-new-import" appearance="subtle" icon={<ArrowReset24Regular />} onClick={startNewImport}>重新开始</Button>}
+        <div className="media-v4-header-actions">
+          {pageMode === 'overview' ? (
+            <>
+              <Button appearance="subtle" icon={<ShieldCheckmark24Regular />} onClick={() => setPageMode('maintenance')}>媒体库维护</Button>
+              <Button className="media-primary-command" appearance="primary" icon={<Add24Regular />} onClick={() => setPageMode('import')}>导入媒体</Button>
+            </>
+          ) : (
+            <Button appearance="subtle" icon={<ArrowLeft24Regular />} onClick={() => setPageMode('overview')}>返回媒体管理</Button>
+          )}
+          {pageMode === 'import' && showReset && <Button className="media-v4-new-import" appearance="subtle" icon={<ArrowReset24Regular />} onClick={startNewImport}>重新开始</Button>}
+        </div>
       </header>
 
+      {pageMode === 'overview' && <>
       {(sourceCardsLoading || sourceCards.length > 0) && <section className="media-v4-source-libraries" aria-label="已导入媒体库">
         <div className="media-v4-source-libraries-heading">
           <div><span>已导入媒体库</span><h2>来源卡</h2><p>每张卡代表一个已确认的媒体来源，可随时回到该次导入的真实任务进度。</p></div>
@@ -748,13 +794,15 @@ export default function MediaManagementPage() {
               ? '正在处理'
               : card.job_summary.failed > 0 ? '有失败任务' : card.job_summary.cancelled > 0 ? '有已取消任务' : '上次导入已处理完毕'
             return <article className={`media-v4-library-source-card ${card.can_resume ? 'active' : 'settled'}`} key={card.root_id}>
-              <div className="media-v4-library-source-card-top"><MediaProviderIcon provider={providerVisualFor(card.provider)} size={20} /><span>{sourceModeLabel(card)}</span><span className={`media-v4-source-card-state media-v4-source-card-state-${card.overall_status ?? 'completed'}`}>{card.overall_status === 'running' ? '进行中' : card.overall_status === 'needs_attention' ? '需要处理' : card.overall_status === 'queued' ? '等待中' : '已完成'}</span></div>
+              <div className="media-v4-library-source-card-top"><MediaProviderIcon provider={providerVisualFor(card.provider)} size={20} /><span className="media-v4-source-card-provider-label">{providerLabel(card.provider)}</span><span className="media-v4-source-card-method-label">{sourceModeLabel(card)}</span><span className={`media-v4-source-card-state media-v4-source-card-state-${card.overall_status ?? 'completed'}`}>{card.overall_status === 'running' ? '进行中' : card.overall_status === 'needs_attention' ? '需要处理' : card.overall_status === 'queued' ? '等待中' : '已完成'}</span></div>
               <strong title={card.display_name}>{card.display_name}</strong>
+              <span className="media-v4-source-card-times">添加于 {formatDate(card.added_at)} · 更新于 {formatDate(card.updated_at)}</span>
               <span className="media-v4-source-card-locator" title={card.source_locator || card.playback_locator}>{card.source_locator || card.playback_locator || '已确认的媒体来源'}</span>
               {card.last_error && <span className="media-v4-source-card-error" role="alert">{card.last_error}</span>}
               {card.attention_count > 0 && <span className="media-v4-source-card-attention">有 {card.attention_count} 部作品需要处理</span>}
-              <div className="media-v4-source-card-stats"><span>{card.work_count} 部作品</span><span>{card.asset_count} 个文件</span><span>{card.evidence_count} 条来源证据</span></div>
-              <div className="media-v4-source-card-progress"><div><span>{card.can_resume ? `${progressLabel} · ${progress}%` : progressLabel}</span><span>{card.job_summary.total} 个任务</span></div><i aria-hidden="true"><b style={{ width: `${progress}%` }} /></i></div>
+              <div className="media-v4-source-card-stats"><span>{card.work_count} 部作品</span><span>{card.asset_count} 个文件</span></div>
+              {(card.work_previews ?? []).length > 0 && <div className="media-v4-source-card-previews" aria-label="作品预览">{(card.work_previews ?? []).slice(0, 6).map((work) => <span key={work.work_id} title={`${work.title} · ${work.asset_count_for_source} 个文件`}>{work.title}</span>)}{card.work_count > 6 ? <em>还有 {card.work_count - 6} 部</em> : null}</div>}
+              <div className="media-v4-source-card-progress"><div><span>{card.progress?.message || progressLabel}</span><span>{card.progress?.state === 'running' ? `${card.progress.completed_work_count}/${card.progress.total_work_count} 部` : ''}</span></div>{card.progress?.state === 'running' && card.progress.percent != null && <i aria-hidden="true"><b style={{ width: `${card.progress.percent}%` }} /></i>}</div>
               <div className="media-v4-source-card-actions">
                 <Button appearance={card.can_resume ? 'primary' : 'secondary'} onClick={() => void resumeSourceCard(card)}>{card.can_resume ? '查看进度' : '查看上次导入'}</Button>
                 <Button appearance={card.can_resume ? 'secondary' : 'primary'} icon={<ArrowSync24Regular />} disabled={active} onClick={() => prepareSourceUpdate(card)}>检查更新</Button>
@@ -764,19 +812,7 @@ export default function MediaManagementPage() {
         </div>}
       </section>}
 
-      <nav className="media-v4-steps" aria-label="导入步骤">
-        <ol>
-          {IMPORT_STEPS.map((step, index) => {
-            const StepIcon = step.icon
-            return (
-              <li className={index < activeStep ? 'complete' : index === activeStep ? 'active' : ''} key={step.label} aria-current={index === activeStep ? 'step' : undefined}>
-                <span className="media-v4-step-index" aria-hidden="true">{index < activeStep ? <CheckmarkCircle24Filled /> : <StepIcon />}</span>
-                <span>{step.label}</span>
-              </li>
-            )
-          })}
-        </ol>
-      </nav>
+
 
       {drafts.length > 0 && <section className="media-v4-source-libraries media-v4-draft-libraries" aria-label="待继续导入">
         <div className="media-v4-source-libraries-heading">
@@ -795,9 +831,40 @@ export default function MediaManagementPage() {
           ))}
         </div>
       </section>}
+      {!sourceCardsLoading && sourceCards.length === 0 && drafts.length === 0 && (
+        <section className="media-v4-source-empty" aria-label="空媒体库">
+          <div className="media-v4-empty"><strong>还没有导入任何媒体库</strong><span>点击“导入媒体”开始建立你的第一个来源。</span></div>
+          <Button className="media-primary-command" appearance="primary" icon={<Add24Regular />} onClick={() => setPageMode('import')}>导入媒体</Button>
+        </section>
+      )}
+      </>}
+
+      {pageMode === 'maintenance' && (
+        <section className="media-stage-shell media-v4-stage-panel media-v4-maintenance-panel">
+          <LibraryMaintenancePanel
+            busy={busy !== ''}
+            onPreview={(scope) => mediaV4Api.maintenancePreview(scope)}
+            onConfirm={(preview) => mediaV4Api.maintenanceConfirm({ preview_id: preview.preview_id, scope: preview.scope, digest: preview.digest })}
+          />
+        </section>
+      )}
 
       {error && <MessageBar className="media-v4-message" intent="error"><MessageBarBody>{error}</MessageBarBody></MessageBar>}
 
+      {pageMode === 'import' && <>
+      <nav className="media-v4-steps" aria-label="导入步骤">
+        <ol>
+          {IMPORT_STEPS.map((step, index) => {
+            const StepIcon = step.icon
+            return (
+              <li className={index < activeStep ? 'complete' : index === activeStep ? 'active' : ''} key={step.label} aria-current={index === activeStep ? 'step' : undefined}>
+                <span className="media-v4-step-index" aria-hidden="true">{index < activeStep ? <CheckmarkCircle24Filled /> : <StepIcon />}</span>
+                <span>{step.label}</span>
+              </li>
+            )
+          })}
+        </ol>
+      </nav>
       {workflowStage === 'source' && <section className="media-stage-shell media-v4-stage-panel media-v4-source-card">
         <div className="media-stage-header">
           <div className="media-stage-heading">
@@ -990,7 +1057,7 @@ export default function MediaManagementPage() {
           <div className="media-v4-empty">正在读取执行进度…</div>
         )}
       </section>}
-
+      </>}
     </div>
   )
 }

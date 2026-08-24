@@ -126,6 +126,26 @@ class SourceScanRequest(BaseModel):
     scan_mode: Literal["auto", "full", "incremental"] = "auto"
 
 
+
+class MaintenancePreviewRequest(BaseModel):
+    scope: Literal["local", "pan115", "baidu", "quark", "all"] = "all"
+
+
+class MaintenanceConfirmRequest(BaseModel):
+    preview_id: str = Field(min_length=1)
+    scope: Literal["local", "pan115", "baidu", "quark", "all"] = "all"
+    digest: str = Field(min_length=32)
+
+
+def _configured_mirror_root():
+    from app.core.paths import get_mirror_root
+
+    try:
+        return get_mirror_root()
+    except Exception:
+        return None
+
+
 class OverrideRequest(BaseModel):
     changes: dict
 
@@ -907,7 +927,7 @@ def list_drafts():
                 ) AS issue_count
             FROM import_revisions ir
             JOIN source_roots sr ON sr.root_id = ir.root_id
-            WHERE ir.status = 'draft'
+            WHERE ir.status = 'draft' AND sr.retired_at = ''
             ORDER BY ir.created_at DESC, ir.revision_id
             """
         ).fetchall()
@@ -943,139 +963,16 @@ def get_revision_evidence(revision_id: str):
 
 @router.get("/sources/libraries")
 def list_source_libraries():
-    """列出已确认来源根及其最新 revision 的任务进度。
+    """列出活动来源根及其最新 revision 的来源卡 read model。
 
-    来源卡只读地投影 V4 authoritative tables；它不是作品卡，也不会通过
-    刮削反向推导来源归属。
+    由 source_libraries read model 一次组装（时间、作品规模、作品预览、
+    P-003 作品级进度），来源卡不再由前端拼接数据库计数与 raw job 汇总；
+    退役来源统一排除。
     """
 
-    with get_database().connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT
-                sr.root_id,
-                sr.provider,
-                sr.ingest_method,
-                sr.source_mode,
-                sr.last_scan_mode,
-                sr.source_locator,
-                sr.playback_locator,
-                sr.route_id,
-                sr.display_name,
-                sr.enabled,
-                sr.created_at AS root_created_at,
-                sr.updated_at AS root_updated_at,
-                ir.revision_id,
-                ir.status AS revision_status,
-                ir.created_at AS revision_created_at,
-                ir.confirmed_at,
-                (
-                    SELECT COUNT(*) FROM revision_evidence re
-                    WHERE re.revision_id = ir.revision_id
-                ) AS evidence_count,
-                (
-                    SELECT COUNT(DISTINCT rb.work_id) FROM revision_bindings rb
-                    WHERE rb.revision_id = ir.revision_id AND rb.work_id != ''
-                ) AS work_count,
-                (
-                    SELECT COUNT(DISTINCT rb.asset_id) FROM revision_bindings rb
-                    WHERE rb.revision_id = ir.revision_id AND rb.asset_id IS NOT NULL
-                ) AS asset_count
-            FROM source_roots sr
-            JOIN import_revisions ir ON ir.revision_id = (
-                SELECT latest.revision_id
-                FROM import_revisions latest
-                WHERE latest.root_id = sr.root_id AND latest.status = 'confirmed'
-                ORDER BY latest.confirmed_at DESC, latest.created_at DESC, latest.revision_id DESC
-                LIMIT 1
-            )
-            ORDER BY ir.confirmed_at DESC, sr.updated_at DESC, sr.root_id
-            """
-        ).fetchall()
-        revision_ids = [row["revision_id"] for row in rows]
-        summaries = {
-            row["revision_id"]: {
-                "total": int(row["total"]),
-                "queued": int(row["queued"]),
-                "running": int(row["running"]),
-                "succeeded": int(row["succeeded"]),
-                "failed": int(row["failed"]),
-                "cancelled": int(row["cancelled"]),
-            }
-            for row in conn.execute(
-                """
-                SELECT
-                    revision_id,
-                    COUNT(*) AS total,
-                    SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued,
-                    SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
-                    SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) AS succeeded,
-                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
-                    SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled
-                FROM jobs
-                WHERE revision_id IN ({placeholders})
-                GROUP BY revision_id
-                """.format(placeholders=",".join("?" for _ in revision_ids)),
-                revision_ids,
-            ).fetchall()
-        } if revision_ids else {}
+    from app.media_v4.projection.source_libraries import list_source_cards
 
-    cards = []
-    progress_service = V4RevisionService(get_database())
-    for row in rows:
-        summary = summaries.get(row["revision_id"], {
-            "total": 0,
-            "queued": 0,
-            "running": 0,
-            "succeeded": 0,
-            "failed": 0,
-            "cancelled": 0,
-        })
-        progress: dict = {}
-        try:
-            progress = progress_service.get_execution_progress(str(row["revision_id"]))
-        except KeyError:
-            progress = {}
-        failed_jobs: list[str] = []
-        attention_units = 0
-        for stage_key in ("mirror", "metadata", "projection"):
-            stage = (progress.get("stage_summary") or {}).get(stage_key) or {}
-            if stage.get("status") in {"failed", "cancelled"}:
-                failed_jobs.append(stage_key)
-        for unit in progress.get("work_units") or []:
-            if unit.get("overall_status") in {"failed", "cancelled", "needs_attention"}:
-                attention_units += 1
-        first_error = ""
-        for unit in progress.get("work_units") or []:
-            for slot in ("mirror", "metadata"):
-                job = unit.get(slot) or {}
-                if job.get("last_error"):
-                    first_error = str(job["last_error"])
-                    break
-            if first_error:
-                break
-        cards.append({
-            **dict(row),
-            "display_name": row["display_name"] or row["source_locator"] or f"{row['provider']} 媒体库",
-            "source_mode": row["source_mode"] or "",
-            "last_scan_mode": row["last_scan_mode"] or "",
-            "has_confirmed_baseline": True,
-            "overall_status": progress.get("overall_status") or "completed",
-            "attention_count": attention_units,
-            "last_error": first_error,
-            "evidence_count": int(row["evidence_count"]),
-            "work_count": int(row["work_count"]),
-            "asset_count": int(row["asset_count"]),
-            "job_summary": summary,
-            "can_resume": (
-                summary["queued"] > 0
-                or summary["running"] > 0
-                or summary["failed"] > 0
-                or summary["cancelled"] > 0
-                or attention_units > 0
-            ),
-        })
-    return {"cards": cards}
+    return {"cards": list_source_cards(get_database())}
 
 
 @router.post("/sources/scans")
@@ -1279,6 +1176,42 @@ def enqueue_scrape(revision_id: str):
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"revision_id": revision_id, "jobs": jobs}
+
+
+@router.post("/library-maintenance/delete-preview")
+def library_delete_preview(request: MaintenancePreviewRequest):
+    """按来源清理预览（只读计算，不删除任何内容）。"""
+
+    from app.media_v4.maintenance.service import compute_delete_preview
+
+    try:
+        preview = compute_delete_preview(
+            get_database(),
+            provider=request.scope,
+            mirror_root=_configured_mirror_root(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return preview
+
+
+@router.post("/library-maintenance/delete-confirm")
+def library_delete_confirm(request: MaintenanceConfirmRequest):
+    """校验并执行按来源清理；digest 不一致或活动任务存在时返回 409。"""
+
+    from app.media_v4.maintenance.service import confirm_delete_preview
+
+    try:
+        result = confirm_delete_preview(
+            get_database(),
+            preview_id=request.preview_id,
+            scope=request.scope,
+            digest=request.digest,
+            mirror_root=_configured_mirror_root(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return result
 
 
 @router.get("/library")

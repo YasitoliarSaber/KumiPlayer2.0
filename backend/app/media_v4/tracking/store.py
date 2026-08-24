@@ -30,6 +30,7 @@ class V4TrackingStore:
                 """
                 SELECT 1 FROM revision_bindings rb
                 JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = ''
                 WHERE rb.work_id = ? AND ir.status = 'confirmed' LIMIT 1
                 """,
                 (work_id,),

@@ -79,6 +79,7 @@ beforeEach(() => {
 
 test('提供商选择使用专用矢量图标，不再渲染文字占位', async () => {
   render(<MediaManagementPage />)
+  fireEvent.click(await screen.findByRole('button', { name: '导入媒体' }))
   fireEvent.click(screen.getByRole('button', { name: '目录树 TXT' }))
   await screen.findByRole('button', { name: '115 网盘' })
 
@@ -173,6 +174,7 @@ test('OpenList 扫描进行中提供取消入口', async () => {
   api.startDurableScan.mockResolvedValue({ scan_id: 'scan-c', root_id: 'root-c', scan_mode: 'full', status: 'running' })
   api.durableScan.mockResolvedValue({ scan_id: 'scan-c', root_id: 'root-c', status: 'running', started_at: '', finished_at: '', error: '', entries: [] })
   render(<MediaManagementPage />)
+  fireEvent.click(await screen.findByRole('button', { name: '导入媒体' }))
   fireEvent.click(screen.getByRole('button', { name: 'OpenList' }))
   fireEvent.click(await screen.findByRole('button', { name: '打开文件夹 Anime' }))
   await screen.findByText(/当前目录：\/115\/Anime/)

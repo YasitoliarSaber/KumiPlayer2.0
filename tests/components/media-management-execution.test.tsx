@@ -111,6 +111,7 @@ beforeEach(() => {
 
 async function scanLocal(revisionId: string) {
   render(<MediaManagementPage />)
+  fireEvent.click(await screen.findByRole('button', { name: '导入媒体' }))
   const input = await screen.findByRole('textbox', { name: '本机媒体文件夹' })
   fireEvent.change(input, { target: { value: 'D:\\Anime' } })
   api.scan.mockResolvedValue({
@@ -148,6 +149,7 @@ test('确认成功后第二步卸载并切换到独立执行阶段', async () =>
 
 test('识别预览聚合作品摘要，不逐集平铺', async () => {
   render(<MediaManagementPage />)
+  fireEvent.click(await screen.findByRole('button', { name: '导入媒体' }))
   const input = await screen.findByRole('textbox', { name: '本机媒体文件夹' })
   fireEvent.change(input, { target: { value: 'D:\Anime' } })
   api.scan.mockResolvedValue({

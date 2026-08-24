@@ -78,6 +78,16 @@ export interface V4LibraryCard {
   asset_count: number
 }
 
+export interface V4WorkPreview {
+  work_id: string
+  title: string
+  year: number | null
+  media_type: 'tv' | 'movie'
+  poster_path: string
+  episode_count: number
+  asset_count_for_source: number
+}
+
 export interface V4SourceLibraryCard {
   root_id: string
   provider: string
@@ -93,13 +103,26 @@ export interface V4SourceLibraryCard {
   route_id: string
   display_name: string
   enabled: number
+  added_at: string
+  updated_at: string
   revision_id: string
-  revision_status: string
-  revision_created_at: string
-  confirmed_at: string
+  latest_revision_id: string
+  revision_state: string
   evidence_count: number
   work_count: number
   asset_count: number
+  work_previews: V4WorkPreview[]
+  progress: {
+    state: string
+    stage: string
+    current_work_id: string
+    current_work_title: string
+    completed_work_count: number
+    total_work_count: number
+    percent: number | null
+    message: string
+  }
+  available_actions: string[]
   can_resume: boolean
   job_summary: {
     total: number
@@ -109,6 +132,37 @@ export interface V4SourceLibraryCard {
     failed: number
     cancelled: number
   }
+}
+
+export interface V4MaintenancePreview {
+  preview_id: string
+  scope: string
+  expires_at: string
+  root_count: number
+  work_count: number
+  orphan_work_count: number
+  mixed_work_count: number
+  asset_count: number
+  artifact_count: number
+  artifact_paths: string[]
+  blocked: boolean
+  blocked_jobs: Array<{ job_id: string; job_type: string; status: string }>
+  warnings: string[]
+  roots: Array<{ root_id: string; provider: string; source_locator: string; revision_id: string; confirmed_at: string }>
+  orphan_works: string[]
+  mixed_works: string[]
+  digest: string
+}
+
+export interface V4MaintenanceResult {
+  preview_id: string
+  scope: string
+  status: string
+  retired_roots: string[]
+  orphan_works: string[]
+  mixed_works: string[]
+  artifact_results: Array<{ path: string; status: string; error?: string }>
+  projection_status: string
 }
 
 export interface V4DraftSummary {
@@ -216,6 +270,12 @@ export const mediaV4Api = {
   sourceLibraries: () => api.get<{ cards: V4SourceLibraryCard[] }>('/api/v4/sources/libraries'),
 
   drafts: () => api.get<{ drafts: V4DraftSummary[] }>('/api/v4/sources/drafts'),
+
+  maintenancePreview: (scope: string) =>
+    api.post<V4MaintenancePreview>('/api/v4/library-maintenance/delete-preview', { scope }),
+
+  maintenanceConfirm: (request: { preview_id: string; scope: string; digest: string }) =>
+    api.post<V4MaintenanceResult>('/api/v4/library-maintenance/delete-confirm', request),
 
   revisionEvidence: (revisionId: string) =>
     api.get<{ revision_id: string; status: string; entries: V4SourceEvidence[] }>(`/api/v4/imports/${encodeURIComponent(revisionId)}/evidence`),

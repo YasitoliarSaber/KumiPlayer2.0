@@ -129,6 +129,7 @@ class V4PlaybackManager:
                       AND EXISTS (
                           SELECT 1 FROM revision_bindings rb
                           JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                          JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = ''
                           WHERE rb.work_id = wa.work_id AND rb.asset_id = a.asset_id
                             AND rb.episode_id IS NULL AND ir.status = 'confirmed'
                       )
@@ -163,6 +164,7 @@ class V4PlaybackManager:
                   AND EXISTS (
                       SELECT 1 FROM revision_bindings rb
                       JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                          JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = ''
                       WHERE rb.work_id = e.work_id AND rb.episode_id = e.episode_id
                         AND rb.asset_id = a.asset_id AND ir.status = 'confirmed'
                   )
