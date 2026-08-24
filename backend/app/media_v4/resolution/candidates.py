@@ -112,58 +112,89 @@ def build_query_inputs(work: ResolvedWork, entries: list[tuple[SourceEvidence, P
     return queries[:8]
 
 
-def _nfo_related_titles(
-    work: ResolvedWork,
+def compute_nfo_ownership(
+    graph: ResolvedMediaGraph,
     entries: list[tuple[SourceEvidence, ParsedFacts]],
-) -> tuple[list[str], bool]:
-    """关联同目录/同 stem 的 sidecar NFO 标题，作为候选输入证据。"""
+) -> tuple[dict[str, set[str]], list[str]]:
+    """NFO→Work 确定性归属（R17）。
 
-    from app.media_v4.generic_container import is_generic_container_title
-    from app.media_v4.parsing.parser import _normalize_filename_stem
+    规则：文件 stem 与 Work 标题精确规范化等值可关联；目录级
+    tvshow.nfo / movie.nfo 仅在该目录恰好只有一个 Work 时可关联；
+    其他多 Work 情形返回歧义 evidence_id，不得注入任一 Work。
+    """
 
-    video_dirs: set[str] = set()
-    for evidence, _facts in entries:
-        if evidence.evidence_id in work.source_evidence_ids:
-            parts = PurePosixPath(evidence.relative_path).parts
-            video_dirs.add(PurePosixPath(*parts[:-1]).as_posix() if len(parts) > 1 else "")
-    titles: list[str] = []
-    found = False
+    work_dirs: dict[str, set[str]] = {}
+    dir_work_count: dict[str, set[str]] = {}
+    for work in graph.works:
+        dirs: set[str] = set()
+        for evidence, _facts in entries:
+            if evidence.evidence_id in work.source_evidence_ids:
+                parts = PurePosixPath(evidence.relative_path).parts
+                dirs.add(PurePosixPath(*parts[:-1]).as_posix() if len(parts) > 1 else "")
+        work_dirs[work.work_key] = dirs
+        for directory in dirs:
+            dir_work_count.setdefault(directory, set()).add(work.work_key)
+
+    ownership: dict[str, set[str]] = {}
+    ambiguous: list[str] = []
     for evidence, facts in entries:
         if evidence.entry_kind != "metadata" or facts.is_importable:
             continue
         parts = PurePosixPath(evidence.relative_path).parts
         parent = PurePosixPath(*parts[:-1]).as_posix() if len(parts) > 1 else ""
         stem = _normalize_filename_stem(PurePosixPath(evidence.relative_path).stem)
+        if stem.casefold() in {"tvshow", "movie"}:
+            owners = set(dir_work_count.get(parent, set()))
+        else:
+            stem_norm = _normalize_title(stem)
+            owners = {
+                work.work_key for work in graph.works
+                if stem_norm and stem_norm == _normalize_title(work.preferred_title)
+            }
+        if len(owners) > 1:
+            ambiguous.append(evidence.evidence_id)
+        elif len(owners) == 1:
+            ownership[evidence.evidence_id] = owners
+    return ownership, ambiguous
+
+
+def _nfo_related_titles(
+    work: ResolvedWork,
+    entries: list[tuple[SourceEvidence, ParsedFacts]],
+    ownership: dict[str, set[str]],
+) -> tuple[list[str], bool]:
+    """关联到该 Work 的 sidecar NFO 标题，作为候选查询证据。"""
+
+    from app.media_v4.generic_container import is_generic_container_title
+
+    titles: list[str] = []
+    found = False
+    for evidence, facts in entries:
+        if evidence.entry_kind != "metadata" or facts.is_importable:
+            continue
+        if ownership.get(evidence.evidence_id) != {work.work_key}:
+            continue
+        stem = _normalize_filename_stem(PurePosixPath(evidence.relative_path).stem)
         if not stem or is_generic_container_title(stem):
             continue
-        if parent in video_dirs or _normalize_title(stem) == _normalize_title(work.preferred_title):
-            if stem not in titles:
-                titles.append(stem)
-            found = True
+        if stem not in titles:
+            titles.append(stem)
+        found = True
     return titles, found
 
 
 def _nfo_evidence_facts(
     work: ResolvedWork,
     entries: list[tuple[SourceEvidence, ParsedFacts]],
+    ownership: dict[str, set[str]],
 ) -> list[tuple[SourceEvidence, ParsedFacts]]:
-    """关联同目录/同 stem 的 sidecar NFO 证据事实（含解析出的 provider ID）。"""
+    """关联到该 Work 的 sidecar NFO 证据事实（含解析出的 provider ID）。"""
 
-    video_dirs: set[str] = set()
-    for evidence, _facts in entries:
-        if evidence.evidence_id in work.source_evidence_ids:
-            parts = PurePosixPath(evidence.relative_path).parts
-            video_dirs.add(PurePosixPath(*parts[:-1]).as_posix() if len(parts) > 1 else "")
     result: list[tuple[SourceEvidence, ParsedFacts]] = []
     for evidence, facts in entries:
         if evidence.entry_kind != "metadata" or facts.is_importable:
             continue
-        parts = PurePosixPath(evidence.relative_path).parts
-        parent = PurePosixPath(*parts[:-1]).as_posix() if len(parts) > 1 else ""
-        stem = _normalize_filename_stem(PurePosixPath(evidence.relative_path).stem)
-        if parent in video_dirs or (
-            stem and _normalize_title(stem) == _normalize_title(work.preferred_title)
-        ):
+        if ownership.get(evidence.evidence_id) == {work.work_key}:
             result.append((evidence, facts))
     return result
 
@@ -181,6 +212,14 @@ def plan_work_candidates(
     candidates_by_key: dict[str, list[WorkCandidate]] = {}
     merge_map: dict[str, str] = {}
     issues: list[ResolutionIssue] = []
+    # R17：NFO→Work 确定性归属；多 Work 歧义写入 issue 并阻断注入。
+    nfo_ownership, ambiguous_nfo = compute_nfo_ownership(graph, entries)
+    for evidence_id in ambiguous_nfo:
+        issues.append(ResolutionIssue(
+            code="sidecar_nfo_ambiguous",
+            evidence_id=evidence_id,
+            message="目录级 NFO 同时对应多个作品，无法确定归属，需人工确认",
+        ))
 
     for work in graph.works:
         evidence_ids = set(work.source_evidence_ids)
@@ -216,7 +255,7 @@ def plan_work_candidates(
             confirmed[(provider, media_type, provider_id)] = candidate
         # 3) 在线/测试搜索候选（含 sidecar NFO 标题输入）。
         queries = build_query_inputs(work, entries)
-        nfo_titles, has_nfo = _nfo_related_titles(work, entries)
+        nfo_titles, has_nfo = _nfo_related_titles(work, entries, nfo_ownership)
         for title in nfo_titles:
             if title not in queries:
                 queries.append(title)
@@ -251,7 +290,7 @@ def plan_work_candidates(
                     status="proposed",
                 )
         # sidecar NFO 内容解析出的 provider ID 是强候选证据（同目录/同 stem 关联）。
-        for _evidence, facts in _nfo_evidence_facts(work, entries):
+        for _evidence, facts in _nfo_evidence_facts(work, entries, nfo_ownership):
             if not facts.tmdb_hint_id or not facts.tmdb_hint_type:
                 continue
             key = ("tmdb", facts.tmdb_hint_type.casefold(), str(facts.tmdb_hint_id))
@@ -361,32 +400,56 @@ def merge_graph(graph: ResolvedMediaGraph, merge_map: dict[str, str]) -> Resolve
     )
 
 
-def default_candidate_search(work_key: str, queries: list[str], year: int | None, media_type: str) -> list[WorkCandidate]:
-    """生产默认搜索：配置 Token 时用 TMDB；否则返回空（离线场景走 hint/既有绑定）。
+def default_candidate_search(
+    work_key: str,
+    queries: list[str],
+    year: int | None,
+    media_type: str,
+    *,
+    detail_cache: dict | None = None,
+    detail_budget: list[int] | None = None,
+) -> list[WorkCandidate]:
+    """生产默认搜索：配置 Token 时用 TMDB，并按需补全可信别名。
 
-    置信度由 plan_work_candidates 按标题/年份评分，这里只返回原始候选（medium）。
+    置信度由 plan_work_candidates 按标题/年份评分；别名来自详情接口
+    （alternative_titles/translations），有共享缓存与预算上限。
     """
 
     from app.core.config import load_config
-    from app.media_v4.jobs.metadata import search_tmdb_candidates
+    from app.media_v4.jobs.metadata import enrich_candidate_aliases, search_tmdb_candidates
 
     config = load_config()
     if not config.tmdb_bearer_token:
         return []
-    results: list[WorkCandidate] = []
+    raw: list[dict] = []
+    seen: set[tuple[str, str]] = set()
     for query in queries:
         for item in search_tmdb_candidates(query, media_type, year) or []:
-            results.append(WorkCandidate(
-                work_key=work_key,
-                provider="tmdb",
-                provider_id=str(item.get("provider_id") or ""),
-                media_type=item.get("media_type") or media_type,
-                title=item.get("title") or query,
-                original_title=item.get("original_title") or "",
-                aliases=tuple(str(alias) for alias in (item.get("aliases") or []) if alias),
-                year=item.get("year"),
-                evidence="online_search",
-                confidence="medium",
-                status="proposed",
-            ))
+            key = (str(item.get("media_type") or media_type), str(item.get("provider_id") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            raw.append(item)
+    enriched = enrich_candidate_aliases(
+        raw,
+        queries,
+        max_details=8,
+        detail_cache=detail_cache,
+        detail_budget=detail_budget,
+    )
+    results: list[WorkCandidate] = []
+    for item in enriched:
+        results.append(WorkCandidate(
+            work_key=work_key,
+            provider="tmdb",
+            provider_id=str(item.get("provider_id") or ""),
+            media_type=item.get("media_type") or media_type,
+            title=item.get("title") or item.get("name") or "",
+            original_title=item.get("original_title") or item.get("original_name") or "",
+            aliases=tuple(str(alias) for alias in (item.get("aliases") or []) if alias),
+            year=item.get("year"),
+            evidence="online_search",
+            confidence="medium",
+            status="proposed",
+        ))
     return results

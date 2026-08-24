@@ -253,7 +253,23 @@ class V4RevisionService:
                 _merge_map_from_candidates(candidates_by_key),
             )
         else:
-            search = candidate_search or candidate_service.default_candidate_search
+            if candidate_search is not None:
+                search = candidate_search
+            else:
+                # 同一 draft 内共享详情缓存与预算，避免逐查询放大 API。
+                detail_cache: dict = {}
+                detail_budget: list[int] = [0]
+
+                def search(work_key, queries, year, media_type):
+                    return candidate_service.default_candidate_search(
+                        work_key,
+                        queries,
+                        year,
+                        media_type,
+                        detail_cache=detail_cache,
+                        detail_budget=detail_budget,
+                    )
+
             existing_bindings = self._existing_bindings_by_key(graph)
             candidates_by_key, merge_map, candidate_issues = candidate_service.plan_work_candidates(
                 graph,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
@@ -1000,18 +1001,17 @@ def metadata_search(request: MetadataSearchRequest):
         ).fetchone()
     if work is None:
         raise HTTPException(status_code=404, detail="作品不存在")
-    from app.media_v4.jobs.metadata import search_tmdb_candidates
+    from app.media_v4.jobs.metadata import enrich_candidate_aliases, search_tmdb_candidates
 
     media_type = request.media_type or ("tv" if work["work_type"] == "series" else "movie")
-    candidates = search_tmdb_candidates(
-        request.query or work["preferred_title"],
-        media_type,
-        work["year"],
-    )
+    query = request.query or work["preferred_title"]
+    candidates = search_tmdb_candidates(query, media_type, work["year"])
     if candidates is None:
         raise HTTPException(status_code=409, detail="未配置 TMDB API Token，无法搜索在线候选")
     if not candidates:
         return {"work_id": request.work_id, "candidates": []}
+    # R16：人工搜索同样补全 provider 别名（预算内），并持久化 original/aliases。
+    candidates = enrich_candidate_aliases(candidates, [query], max_details=8)
 
     now = _now_iso()
     with database.connect() as conn:
@@ -1036,9 +1036,9 @@ def metadata_search(request: MetadataSearchRequest):
                 """
                 INSERT INTO revision_work_candidates(
                     candidate_id, revision_id, work_id, draft_work_key, provider,
-                    provider_id, media_type, title, year, evidence, confidence, status,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual_search', 'high', 'proposed', ?, ?)
+                    provider_id, media_type, title, original_title, aliases_json, year,
+                    evidence, confidence, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual_search', 'high', 'proposed', ?, ?)
                 """,
                 (
                     candidate_id,
@@ -1049,6 +1049,8 @@ def metadata_search(request: MetadataSearchRequest):
                     str(item.get("provider_id") or ""),
                     item.get("media_type") or media_type,
                     item.get("title") or "",
+                    item.get("original_title") or "",
+                    json.dumps([str(a) for a in (item.get("aliases") or [])], ensure_ascii=False),
                     item.get("year"),
                     now,
                     now,

@@ -87,6 +87,74 @@ def search_tmdb_candidates(query: str, media_type: str, year: int | None = None)
     return [_candidate_summary(item) for item in results[:8]]
 
 
+def _extract_aliases(detail: dict, media_type: str) -> list[str]:
+    """从详情 alternative_titles / translations 提取可信本地化标题别名。"""
+
+    aliases: list[str] = []
+    alternative = (detail.get("alternative_titles") or {}).get("results") or []
+    for item in alternative:
+        title = str(item.get("title") or "").strip()
+        if title:
+            aliases.append(title)
+    translations = (detail.get("translations") or {}).get("translations") or []
+    for item in translations:
+        data = item.get("data") or {}
+        for raw_title in (data.get("title"), data.get("name")):
+            value = str(raw_title or "").strip()
+            if value:
+                aliases.append(value)
+    seen: list[str] = []
+    for value in aliases:
+        if value not in seen:
+            seen.append(value)
+    return seen[:12]
+
+
+def enrich_candidate_aliases(
+    results: list[dict],
+    local_queries: list[str],
+    *,
+    max_details: int = 8,
+    detail_cache: dict | None = None,
+    detail_budget: list[int] | None = None,
+) -> list[dict]:
+    """为候选补全可信别名：primary/original 已精确匹配的候选不请求详情；
+    其余在预算内调用详情接口，失败/超预算保持无别名（不猜测 high）。"""
+
+    cache = detail_cache if detail_cache is not None else {}
+    budget = detail_budget if detail_budget is not None else [0]
+    local_norms = {_normalize_title(q) for q in local_queries}
+    local_norms.discard("")
+    config = load_config()
+    enriched: list[dict] = []
+    for item in results:
+        primary = _normalize_title(item.get("title") or item.get("name"))
+        original = _normalize_title(item.get("original_title") or item.get("original_name"))
+        if primary in local_norms or original in local_norms:
+            enriched.append({**item, "aliases": []})
+            continue
+        media_type = str(item.get("media_type") or "tv")
+        media_type = "tv" if media_type in {"tv", "series"} else "movie"
+        provider_id = str(item.get("provider_id") or "")
+        cache_key = (media_type, provider_id)
+        detail = cache.get(cache_key)
+        if detail is None and budget[0] < max_details:
+            budget[0] += 1
+            try:
+                with TMDBClient(bearer_token=config.tmdb_bearer_token) as client:
+                    detail = (
+                        client.get_tv_detail(int(provider_id))
+                        if media_type == "tv"
+                        else client.get_movie_detail(int(provider_id))
+                    )
+            except Exception:
+                detail = None
+            cache[cache_key] = detail
+        aliases = _extract_aliases(detail, media_type) if detail else []
+        enriched.append({**item, "aliases": aliases})
+    return enriched
+
+
 def default_metadata_provider(target: dict) -> dict:
     """返回带真实状态的元数据结果。
 
