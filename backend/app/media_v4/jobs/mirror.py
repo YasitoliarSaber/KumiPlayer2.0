@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.media_v4.jobs.paths import work_directory_name
+from app.media_v4.path_validation import validate_playback_locator
 from app.media_v4.persistence.database import V4Database
 
 
@@ -109,6 +110,13 @@ class V4MirrorMaterializer:
 
         paths: list[str] = []
         try:
+            # 写任何 .strm 前重新校验全部播放定位；任一不可达即整批失败，
+            # 不发布任何 Artifact，也不让 scrape/projection 继续。
+            for row in rows:
+                locator = str(row["playback_locator"] or row["source_locator"] or "")
+                ok, reason = validate_playback_locator(locator)
+                if not ok:
+                    raise RuntimeError(reason)
             for row in rows:
                 work_dir = work_directory_name(str(row["work_id"]))
                 asset_identity = row["fingerprint"] or row["asset_id"]

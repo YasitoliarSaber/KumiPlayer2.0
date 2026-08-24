@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import pytest
 
 
 def _entry(evidence_id: str, locator: str):
@@ -40,12 +40,18 @@ def test_mirror_consumes_confirmed_revision_and_keeps_multiple_assets(tmp_path, 
     from app.media_v4.persistence.database import V4Database
     from app.media_v4.revisions.service import V4RevisionService
 
+    def entry(evidence_id: str, name: str) -> tuple:
+        media = tmp_path / name
+        media.write_bytes(b"video")
+        evidence, facts = _entry(evidence_id, str(media))
+        return evidence, facts
+
     database = V4Database(tmp_path / "mirror.db")
     database.initialize()
     revision_service = V4RevisionService(database)
     revision_service.create_draft(
         "rev-mirror",
-        [_entry("1080p", "local://show/1080p"), _entry("2160p", "local://show/2160p")],
+        [entry("1080p", "show.1080p.mkv"), entry("2160p", "show.2160p.mkv")],
     )
     revision_service.confirm("rev-mirror")
     job = next(
@@ -63,8 +69,8 @@ def test_mirror_consumes_confirmed_revision_and_keeps_multiple_assets(tmp_path, 
     files = sorted((tmp_path / "mirror").rglob("*.strm"))
     assert len(files) == 2
     assert {file.read_text(encoding="utf-8") for file in files} == {
-        "local://show/1080p",
-        "local://show/2160p",
+        str(tmp_path / "show.1080p.mkv"),
+        str(tmp_path / "show.2160p.mkv"),
     }
 
 
@@ -73,10 +79,12 @@ def test_mirror_job_is_idempotent_after_success(tmp_path):
     from app.media_v4.persistence.database import V4Database
     from app.media_v4.revisions.service import V4RevisionService
 
+    media = tmp_path / "show.mkv"
+    media.write_bytes(b"video")
     database = V4Database(tmp_path / "mirror-idempotent.db")
     database.initialize()
     revision_service = V4RevisionService(database)
-    revision_service.create_draft("rev-mirror", [_entry("1080p", "local://show/1080p")])
+    revision_service.create_draft("rev-mirror", [_entry("1080p", str(media))])
     revision_service.confirm("rev-mirror")
     job = next(
         job for job in revision_service.list_jobs("rev-mirror") if job["job_type"] == "materialize_mirror"
@@ -139,7 +147,9 @@ def test_remote_assets_without_fingerprints_get_distinct_mirror_files(tmp_path):
     }
 
 
-def test_remote_tree_asset_directly_generates_strm_from_stable_locator(tmp_path):
+def test_remote_tree_asset_with_relative_locator_fails_before_publishing(tmp_path):
+    """无效/相对播放定位不能发布 STRM：mirror 必须失败且零 Artifact。"""
+
     from app.media_v4.domain.models import ParsedFacts, SourceEvidence
     from app.media_v4.jobs.mirror import V4MirrorMaterializer
     from app.media_v4.persistence.database import V4Database
@@ -176,8 +186,16 @@ def test_remote_tree_asset_directly_generates_strm_from_stable_locator(tmp_path)
         item for item in revisions.list_jobs("rev-inventory") if item["job_type"] == "materialize_mirror"
     )
 
-    result = V4MirrorMaterializer(database).process(job["job_id"], tmp_path / "mirror")
+    with pytest.raises(RuntimeError, match="不是本地绝对路径"):
+        V4MirrorMaterializer(database).process(job["job_id"], tmp_path / "mirror")
 
-    assert result.status == "succeeded"
-    assert len(result.artifact_paths) == 1
-    assert Path(result.artifact_paths[0]).read_text(encoding="utf-8") == "Show/Show.S01E01.mkv"
+    assert list((tmp_path / "mirror").rglob("*.strm")) == []
+    with database.connect() as conn:
+        status = conn.execute(
+            "SELECT status FROM jobs WHERE job_id = ?", (job["job_id"],)
+        ).fetchone()["status"]
+        published = conn.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE revision_id = 'rev-inventory' AND artifact_type = 'mirror'"
+        ).fetchone()[0]
+    assert status == "failed"
+    assert published == 0

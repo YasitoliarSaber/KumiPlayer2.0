@@ -12,10 +12,13 @@ from fastapi.testclient import TestClient
 def _client(tmp_path, monkeypatch):
     from app.api import media_v4
     from app.media_v4.persistence.database import V4Database
+    from app.media_v4.sources import tree_root
 
     database = V4Database(tmp_path / "api.db")
     database.initialize()
     monkeypatch.setattr(media_v4, "_database", database)
+    # 扫描元数据是树根解析的暂存文件，测试写入临时目录。
+    monkeypatch.setattr(tree_root, "get_data_dir", lambda: tmp_path)
     application = FastAPI()
     application.include_router(media_v4.router)
     return TestClient(application)
@@ -36,6 +39,254 @@ def _payload(revision_id: str = "rev-api"):
             }
         ],
     }
+
+
+def test_tree_scan_accepts_utf16_tree_through_both_entries(tmp_path, monkeypatch):
+    from app.api import media_v4
+    from app.integrations.openlist.providers import OpenListRouteConfig
+
+    mount = tmp_path / "百度网盘"
+    media_file = mount / "01动画" / "Show" / "Show.S01E01.mkv"
+    media_file.parent.mkdir(parents=True)
+    media_file.write_bytes(b"video")
+    tree = tmp_path / "01动画_文件目录.txt"
+    tree.write_text("Show/Show.S01E01.mkv\n", encoding="utf-16")
+    monkeypatch.setattr(media_v4, "load_config", lambda: SimpleNamespace(
+        pan115_root="",
+        baidu_root=str(mount),
+        openlist_server_url="https://openlist.example.test",
+        openlist_mount_root=str(mount),
+        openlist_remote_root="/",
+        openlist_routes=[OpenListRouteConfig(
+            route_id="route-anime",
+            remote_prefix="/01动画",
+            provider_id="baidu",
+        )],
+    ))
+    monkeypatch.setattr(
+        media_v4,
+        "resolve_openlist_credentials",
+        lambda: ("kumi", "secret", "available"),
+    )
+    monkeypatch.setattr(media_v4, "stage_scan_state", lambda _scan_id, _state: None)
+
+    tree_result = media_v4.scan_source(media_v4.SourceScanRequest(
+        source="tree",
+        tree_file=str(tree),
+        provider="baidu",
+    ))
+    hybrid_result = media_v4.scan_source(media_v4.SourceScanRequest(
+        source="hybrid",
+        root_path="/01动画",
+        tree_file=str(tree),
+        provider="baidu",
+    ))
+
+    assert tree_result["entries"][0]["playback_locator"] == str(media_file)
+    assert tree_result["path_validation"]["ok"] is True
+    assert hybrid_result["entries"][0]["playback_locator"] == str(media_file)
+    assert hybrid_result["path_validation"]["ok"] is True
+
+
+def test_unreachable_tree_scan_blocks_confirm_with_actionable_message(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    from app.api import media_v4
+
+    mount = tmp_path / "百度网盘"
+    (mount / "01动画").mkdir(parents=True)  # 子库目录存在但视频不存在
+    tree = tmp_path / "01动画_文件目录.txt"
+    tree.write_text("Show/Show.S01E01.mkv\n", encoding="utf-8")
+    monkeypatch.setattr(media_v4, "load_config", lambda: SimpleNamespace(
+        pan115_root="",
+        baidu_root=str(mount),
+        openlist_mount_root="",
+        openlist_remote_root="/",
+        openlist_routes=[],
+    ))
+
+    scan = media_v4.scan_source(media_v4.SourceScanRequest(
+        source="tree",
+        tree_file=str(tree),
+        provider="baidu",
+    ))
+    assert scan["path_validation"]["ok"] is False
+    assert scan["effective_playback_root"] == ""
+
+    preview = client.post("/api/v4/imports/preview", json={
+        "revision_id": "rev-unreachable",
+        "root_id": scan["root_id"],
+        "scan_id": scan["scan_id"],
+        "entries": [{
+            "provider": "baidu",
+            "ingest_method": "directory_tree",
+            "relative_path": "Show/Show.S01E01.mkv",
+            "source_locator": "C:\\fake\\Show\\Show.S01E01.mkv",
+            "playback_locator": "C:\\fake\\Show\\Show.S01E01.mkv",
+        }],
+        "source_locator": "C:\\fake",
+        "playback_locator": "C:\\fake",
+    })
+    assert preview.status_code == 200, preview.text
+
+    confirmed = client.post("/api/v4/imports/rev-unreachable/confirm")
+    assert confirmed.status_code == 409
+    assert "未验证通过" in confirmed.json()["detail"]
+
+
+def test_preview_uses_the_backend_effective_root_over_a_stale_frontend_copy(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    from app.api import media_v4
+
+    effective_root = tmp_path / "百度网盘" / "01动画"
+    effective_root.mkdir(parents=True)
+    media_file = effective_root / "Show" / "Show.S01E01.mkv"
+    media_file.parent.mkdir(parents=True)
+    media_file.write_bytes(b"video")
+    tree = tmp_path / "01动画_文件目录.txt"
+    tree.write_text("Show/Show.S01E01.mkv\n", encoding="utf-8")
+    monkeypatch.setattr(media_v4, "load_config", lambda: SimpleNamespace(
+        pan115_root="",
+        baidu_root=str(tmp_path / "百度网盘"),
+        openlist_mount_root="",
+        openlist_remote_root="/",
+        openlist_routes=[],
+    ))
+
+    scan = media_v4.scan_source(media_v4.SourceScanRequest(
+        source="tree",
+        tree_file=str(tree),
+        provider="baidu",
+    ))
+    assert scan["path_validation"]["ok"] is True
+
+    preview = client.post("/api/v4/imports/preview", json={
+        "revision_id": "rev-authoritative",
+        "root_id": scan["root_id"],
+        "scan_id": scan["scan_id"],
+        "entries": [{
+            "provider": "baidu",
+            "ingest_method": "directory_tree",
+            "relative_path": "Show/Show.S01E01.mkv",
+            "source_locator": "Z:\\stale\\Show\\Show.S01E01.mkv",
+            "playback_locator": "Z:\\stale\\Show\\Show.S01E01.mkv",
+        }],
+        "source_locator": "Z:\\stale",
+        "playback_locator": "Z:\\stale",
+    })
+    assert preview.status_code == 200, preview.text
+
+    with media_v4._database.connect() as conn:
+        row = conn.execute(
+            "SELECT source_locator, playback_locator FROM source_roots WHERE root_id = ?",
+            (scan["root_id"],),
+        ).fetchone()
+    assert row["playback_locator"] == str(effective_root)
+    assert row["source_locator"] == str(effective_root)
+
+
+def test_playback_refuses_unreachable_asset_without_launching_mpv(tmp_path, monkeypatch):
+    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.playback.session import V4PlaybackManager
+    from app.media_v4.revisions.service import V4RevisionService
+
+    missing = tmp_path / "missing.mkv"  # 不创建文件
+    evidence = SourceEvidence(
+        evidence_id="ev-unreachable",
+        scan_id="scan-unreachable",
+        root_id="root-unreachable",
+        source_key="Show/Show.S01E01.mkv",
+        relative_path="Show/Show.S01E01.mkv",
+        entry_kind="video",
+        provider="local",
+        source_locator=str(missing),
+        playback_locator=str(missing),
+    )
+    facts = ParsedFacts(
+        parsed_fact_id="facts-unreachable",
+        evidence_id="ev-unreachable",
+        parser_version="fixture",
+        work_title="Show",
+        title_candidates=("Show",),
+        media_type="tv",
+        group_type="season",
+        season_candidate=1,
+        episode_candidate=1,
+    )
+    database = V4Database(tmp_path / "unreachable.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-unreachable", [(evidence, facts)])
+    revisions.confirm("rev-unreachable")
+    with database.connect() as conn:
+        row = conn.execute(
+            "SELECT work_id, episode_id, asset_id FROM revision_bindings LIMIT 1"
+        ).fetchone()
+
+    monkeypatch.setattr(
+        "app.media_v4.playback.session.start_mpv",
+        lambda *_args, **_kwargs: pytest.fail("不可达 Asset 不得启动 MPV"),
+    )
+    manager = V4PlaybackManager(database, session_dir=tmp_path / "sessions")
+
+    with pytest.raises(ValueError) as exc_info:
+        manager.play(row["work_id"], row["episode_id"], row["asset_id"])
+
+    assert "挂载路径不可访问" in str(exc_info.value)
+
+
+def test_mirror_failure_keeps_scrape_and_projection_queued(tmp_path):
+    from app.media_v4.jobs.runner import V4JobRunner
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    media = tmp_path / "missing.mkv"  # 不创建文件
+    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+
+    evidence = SourceEvidence(
+        evidence_id="ev-gate",
+        scan_id="scan-gate",
+        root_id="root-gate",
+        source_key="Show/Show.S01E01.mkv",
+        relative_path="Show/Show.S01E01.mkv",
+        entry_kind="video",
+        provider="local",
+        source_locator=str(media),
+        playback_locator=str(media),
+    )
+    facts = ParsedFacts(
+        parsed_fact_id="facts-gate",
+        evidence_id="ev-gate",
+        parser_version="fixture",
+        work_title="Show",
+        title_candidates=("Show",),
+        media_type="tv",
+        group_type="season",
+        season_candidate=1,
+        episode_candidate=1,
+    )
+    database = V4Database(tmp_path / "gate.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-gate", [(evidence, facts)])
+    revisions.confirm("rev-gate")
+    jobs = revisions.list_jobs("rev-gate")
+    mirror_job = next(item for item in jobs if item["job_type"] == "materialize_mirror")
+
+    runner = V4JobRunner(database)
+    with pytest.raises(RuntimeError, match="挂载路径不可访问"):
+        runner.process_job(mirror_job["job_id"], mirror_root=tmp_path / "mirror")
+
+    with database.connect() as conn:
+        statuses = {
+            str(row["job_type"]): str(row["status"])
+            for row in conn.execute(
+                "SELECT job_type, status FROM jobs WHERE revision_id = 'rev-gate'"
+            ).fetchall()
+        }
+    assert statuses["materialize_mirror"] == "failed"
+    assert statuses["scrape_work"] == "queued"
+    assert statuses["refresh_projection"] == "queued"
 
 
 def test_preview_confirm_and_library_use_revision_work_and_job_identities(tmp_path, monkeypatch):
@@ -122,12 +373,16 @@ def test_hybrid_tree_scan_reuses_the_openlist_root_identity(tmp_path, monkeypatc
     from app.integrations.openlist.providers import OpenListRouteConfig
     from app.media_v4.sources.scanner import openlist_root_id
 
+    mount = tmp_path / "OpenList"
+    media_file = mount / "Anime" / "TV" / "Show" / "Show.S01E01.mkv"
+    media_file.parent.mkdir(parents=True)
+    media_file.write_bytes(b"video")
     tree = tmp_path / "anime-tree.txt"
     tree.write_text("Show/Show.S01E01.mkv\n", encoding="utf-8")
     config = SimpleNamespace(
         openlist_server_url="https://openlist.example.test",
         openlist_remote_root="/",
-        openlist_mount_root="X:\\OpenList",
+        openlist_mount_root=str(mount),
         openlist_routes=[OpenListRouteConfig(
             route_id="route-anime",
             label="115 动画",
@@ -160,19 +415,25 @@ def test_hybrid_tree_scan_reuses_the_openlist_root_identity(tmp_path, monkeypatc
     assert result["entries"][0]["provider"] == "pan115"
     assert result["entries"][0]["source_route_id"] == "route-anime"
     assert result["entries"][0]["relative_path"] == "Show/Show.S01E01.mkv"
-    assert result["entries"][0]["playback_locator"] == "X:\\OpenList\\Anime\\TV\\Show\\Show.S01E01.mkv"
+    assert result["entries"][0]["playback_locator"] == str(media_file)
+    assert result["effective_playback_root"] == str(mount / "Anime" / "TV")
+    assert result["path_validation"]["ok"] is True
 
 
 def test_tree_scan_preserves_quark_as_the_content_provider(tmp_path, monkeypatch):
     from app.api import media_v4
     from app.integrations.openlist.providers import OpenListRouteConfig
 
+    mount = tmp_path / "OpenList"
+    media_file = mount / "Quark" / "Show" / "Show.S01E01.mkv"
+    media_file.parent.mkdir(parents=True)
+    media_file.write_bytes(b"video")
     tree = tmp_path / "quark-tree.txt"
     tree.write_text("Show/Show.S01E01.mkv\n", encoding="utf-8")
     monkeypatch.setattr(media_v4, "load_config", lambda: SimpleNamespace(
         pan115_root="",
         baidu_root="",
-        openlist_mount_root="X:\\OpenList",
+        openlist_mount_root=str(mount),
         openlist_remote_root="/",
         openlist_routes=[OpenListRouteConfig(
             route_id="route-quark",
@@ -189,16 +450,23 @@ def test_tree_scan_preserves_quark_as_the_content_provider(tmp_path, monkeypatch
     ))
 
     assert result["entries"][0]["provider"] == "quark"
+    assert result["entries"][0]["playback_locator"] == str(media_file)
+    assert result["effective_playback_root"] == str(mount / "Quark")
 
 
-def test_tree_scan_uses_the_saved_mapping_instead_of_a_stale_frontend_copy(tmp_path, monkeypatch):
+def test_tree_scan_resolves_the_precise_sub_library_root_from_the_tree_location(tmp_path, monkeypatch):
     from app.api import media_v4
 
-    tree = tmp_path / "baidu-tree.txt"
+    baidu_root = tmp_path / "百度网盘"
+    library = baidu_root / "01动画"
+    media_file = library / "Show" / "Show.S01E01.mkv"
+    media_file.parent.mkdir(parents=True)
+    media_file.write_bytes(b"video")
+    tree = library / "01动画_文件目录.txt"
     tree.write_text("Show/Show.S01E01.mkv\n", encoding="utf-8")
     monkeypatch.setattr(media_v4, "load_config", lambda: SimpleNamespace(
         pan115_root="",
-        baidu_root="K:\\百度网盘",
+        baidu_root=str(baidu_root),
         openlist_mount_root="",
         openlist_remote_root="/",
         openlist_routes=[],
@@ -211,7 +479,11 @@ def test_tree_scan_uses_the_saved_mapping_instead_of_a_stale_frontend_copy(tmp_p
         source_root="Z:\\stale-frontend-copy",
     ))
 
-    assert result["entries"][0]["playback_locator"] == "K:\\百度网盘\\Show\\Show.S01E01.mkv"
+    # 总根 / Show 不存在；TXT 父目录（媒体子库）是唯一全部命中候选。
+    assert result["effective_playback_root"] == str(library)
+    assert result["entries"][0]["playback_locator"] == str(media_file)
+    assert result["path_validation"]["ok"] is True
+    assert result["path_validation"]["hits"] == result["path_validation"]["total"]
 
 
 def test_remote_tree_scan_requires_a_playback_mapping(tmp_path, monkeypatch):

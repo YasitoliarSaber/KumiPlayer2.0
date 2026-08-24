@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.core.paths import get_data_dir
+from app.media_v4.path_validation import validate_playback_locator
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.playback.store import V4PlaybackStore
 from app.playback.mpv import start_mpv
@@ -36,6 +37,9 @@ class V4PlaybackManager:
         locator = asset["playback_locator"] or asset["source_locator"]
         if not locator:
             raise ValueError("Asset 没有可播放定位符")
+        ok, reason = validate_playback_locator(locator)
+        if not ok:
+            raise ValueError(reason)
         strm_path = self.session_dir / f"{asset['asset_id']}.strm"
         self._write_strm(strm_path, locator)
         session_id = f"sess_{uuid.uuid4().hex[:16]}"

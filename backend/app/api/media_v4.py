@@ -31,11 +31,19 @@ from app.media_v4.sources.incremental import (
     stage_scan_state,
 )
 from app.media_v4.sources.scanner import (
+    DirectoryTreeReadError,
     openlist_root_id,
     parse_directory_tree_file,
     scan_local_directory,
     scan_openlist_directory,
     tree_root_id,
+)
+from app.media_v4.sources.tree_root import (
+    TreePlaybackRootResolver,
+    TreeRootResolution,
+    consume_scan_metadata,
+    load_scan_metadata,
+    stage_scan_metadata,
 )
 from app.media_v4.tracking.store import V4TrackingStore
 
@@ -198,6 +206,26 @@ def _configured_tree_roots(config, provider: str) -> list[str]:
     return list(unique.values())
 
 
+def _tree_validation_dict(resolution: TreeRootResolution) -> dict:
+    return {
+        "ok": resolution.ok,
+        "root": resolution.root,
+        "hits": resolution.hits,
+        "total": resolution.total,
+        "reason": resolution.reason,
+    }
+
+
+def _directory_tree_error_message(exc: DirectoryTreeReadError) -> str:
+    if exc.kind == "unreadable":
+        return "目录树文件无法打开，请确认文件未被占用或损坏后重新选择"
+    if exc.kind == "empty":
+        return "目录树文件为空，请重新导出 TXT"
+    if exc.kind == "too_large":
+        return "目录树文件过大，请拆分后重新导出"
+    return str(exc)
+
+
 @router.post("/sources/scan")
 def scan_source(request: SourceScanRequest):
     if request.source == "local" and not request.root_path.strip():
@@ -208,6 +236,7 @@ def scan_source(request: SourceScanRequest):
     try:
         effective_scan_mode: str = request.source
         scan_stats: dict[str, int] = {}
+        resolution: TreeRootResolution = TreeRootResolution("", True, "", 0, 0, ())
         content_provider = (
             request.provider
             if request.provider in {"local", "pan115", "baidu", "quark", "other"}
@@ -233,13 +262,18 @@ def scan_source(request: SourceScanRequest):
             if not config.openlist_mount_root:
                 raise HTTPException(status_code=409, detail="当前内容来源尚未配置本地挂载路径，请先在设置页完成来源映射")
             local_root = derive_local_path(config.openlist_mount_root, _remote_root(config), remote_root)
+            resolution = TreePlaybackRootResolver(
+                request.tree_file,
+                configured_roots=[local_root],
+            ).resolve()
             scan_id, evidence = parse_directory_tree_file(
                 request.tree_file,
                 root_id=root_id,
                 provider=content_provider,
-                source_root=local_root,
+                source_root=resolution.root,
                 source_route_id=route_id,
             )
+            stage_scan_metadata(scan_id, _tree_validation_dict(resolution))
             stage_scan_state(
                 scan_id,
                 build_tree_baseline_state(root_id, remote_root, evidence),
@@ -250,22 +284,20 @@ def scan_source(request: SourceScanRequest):
             configured_roots = _configured_tree_roots(config, content_provider)
             if not configured_roots:
                 raise HTTPException(status_code=409, detail="当前内容来源尚未配置本地挂载路径，请先在设置页完成来源映射")
-            requested_root = request.source_root.strip().rstrip("\\/").replace("/", "\\").casefold()
-            matched_root = next(
-                (root for root in configured_roots if root.replace("/", "\\").casefold() == requested_root),
-                "",
-            )
-            if not matched_root and len(configured_roots) == 1:
-                matched_root = configured_roots[0]
-            if not matched_root:
-                raise HTTPException(status_code=409, detail="前端提交的播放映射与当前设置不一致，请重新选择内容来源")
-            root_id = tree_root_id(content_provider, matched_root, request.tree_file)
+            resolution = TreePlaybackRootResolver(
+                request.tree_file,
+                configured_roots=configured_roots,
+            ).resolve()
+            effective_root = resolution.root
+            identity_root = effective_root or configured_roots[0]
+            root_id = tree_root_id(content_provider, identity_root, request.tree_file)
             scan_id, evidence = parse_directory_tree_file(
                 request.tree_file,
                 root_id=root_id,
                 provider=content_provider,
-                source_root=matched_root,
+                source_root=effective_root,
             )
+            stage_scan_metadata(scan_id, _tree_validation_dict(resolution))
         elif request.source == "openlist":
             from app.api.openlist_v4 import _client, _configured_routes, _remote_root
 
@@ -326,14 +358,25 @@ def scan_source(request: SourceScanRequest):
                 request.root_path,
                 excluded_roots=_configured_cloud_roots(config),
             )
+    except DirectoryTreeReadError as exc:
+        raise HTTPException(status_code=400, detail=_directory_tree_error_message(exc)) from exc
     except (FileNotFoundError, NotADirectoryError, OSError, OpenListError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"来源扫描失败: {exc}") from exc
+    validation = {
+        "ok": resolution.ok,
+        "root": resolution.root,
+        "hits": resolution.hits,
+        "total": resolution.total,
+        "reason": resolution.reason,
+    }
     return {
         "root_id": root_id,
         "scan_id": scan_id,
         "entries": [asdict(item) for item in evidence],
         "scan_mode": effective_scan_mode,
         "scan_stats": scan_stats,
+        "effective_playback_root": resolution.root,
+        "path_validation": validation,
     }
 
 
@@ -346,6 +389,17 @@ def preview(request: PreviewRequest):
     parser = V4Parser()
     parsed = [(item, parser.parse(item)) for item in evidence]
     service = V4RevisionService(database)
+    # 扫描元数据是后端权威：preview 不再采信前端拼装的总根副本。
+    scan_meta = load_scan_metadata(request.scan_id)
+    playback_locator = request.playback_locator
+    source_locator = request.source_locator
+    if scan_meta is not None:
+        if scan_meta.get("ok") and scan_meta.get("root"):
+            playback_locator = str(scan_meta["root"])
+            source_locator = str(scan_meta["root"])
+        else:
+            playback_locator = ""
+            source_locator = ""
     try:
         graph = service.create_draft(
             request.revision_id,
@@ -354,8 +408,8 @@ def preview(request: PreviewRequest):
             scan_id=request.scan_id,
             source_metadata={
                 "display_name": request.source_display_name,
-                "source_locator": request.source_locator,
-                "playback_locator": request.playback_locator,
+                "source_locator": source_locator,
+                "playback_locator": playback_locator,
                 "route_id": request.source_route_id,
             },
         )
@@ -372,23 +426,31 @@ def preview(request: PreviewRequest):
 def confirm(revision_id: str):
     database = get_database()
     service = V4RevisionService(database)
+    with database.connect() as conn:
+        row = conn.execute(
+            "SELECT scan_id FROM import_revisions WHERE revision_id = ?",
+            (revision_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"revision 不存在: {revision_id}")
+    scan_meta = load_scan_metadata(row["scan_id"])
+    if scan_meta is not None and not scan_meta.get("ok"):
+        raise HTTPException(
+            status_code=409,
+            detail="目录树媒体路径未验证通过，不能确认导入；请检查来源范围或挂载状态后重新扫描",
+        )
     try:
         service.confirm(revision_id)
     except (RevisionBlockedError, ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"revision 不存在: {revision_id}") from exc
-    with database.connect() as conn:
-        row = conn.execute(
-            "SELECT scan_id FROM import_revisions WHERE revision_id = ?",
-            (revision_id,),
-        ).fetchone()
-    if row is not None:
-        try:
-            activate_scan_state(row["scan_id"])
-        except OSError:
-            # 检查点是可重建的扫描加速数据，发布失败不能反转已确认 revision。
-            pass
+    consume_scan_metadata(row["scan_id"])
+    try:
+        activate_scan_state(row["scan_id"])
+    except OSError:
+        # 检查点是可重建的扫描加速数据，发布失败不能反转已确认 revision。
+        pass
     return {
         "revision_id": revision_id,
         "status": service.get_status(revision_id),
