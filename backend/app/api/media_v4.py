@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import asdict
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
@@ -50,6 +53,10 @@ from app.media_v4.sources.tree_root import TreePlaybackRootResolver, TreeRootRes
 from app.media_v4.tracking.store import V4TrackingStore
 
 router = APIRouter(prefix="/api/v4", tags=["media-v4"])
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 # Tests and the desktop bootstrap may inject an isolated handle.  The default
 # path is resolved lazily so importing the router never creates data files.
@@ -133,6 +140,7 @@ def _graph_to_dict(graph) -> dict:
         "works": [asdict(work) for work in graph.works],
         "episodes": [asdict(episode) for episode in graph.episodes],
         "work_assets": [asdict(asset) for asset in graph.work_assets],
+        "relations": [asdict(relation) for relation in graph.relations],
         "issues": [asdict(issue) for issue in graph.issues],
     }
 
@@ -208,6 +216,65 @@ def _configured_tree_roots(config, provider: str) -> list[str]:
     return list(unique.values())
 
 
+def _container_name(path: str) -> str:
+    """来源根目录的最后一个有效段名；通用容器段返回空（不当作作品身份）。"""
+
+    from app.media_v4.generic_container import is_generic_container_name
+
+    value = (path or "").strip().rstrip("/\\")
+    if not value:
+        return ""
+    name = value.replace("\\", "/").split("/")[-1]
+    return "" if is_generic_container_name(name) else name
+
+
+def _ensure_root_container(
+    database,
+    *,
+    root_id: str,
+    provider: str,
+    ingest_method: str,
+    locator: str,
+    route_id: str,
+    root_container: str,
+) -> None:
+    """为非目录树来源写入来源根上下文，preview 据此传入解析器。"""
+
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC).isoformat()
+    with database.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO source_roots(
+                root_id, provider, ingest_method, source_locator, playback_locator,
+                route_id, display_name, root_container, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?)
+            ON CONFLICT(root_id) DO UPDATE SET
+                provider = excluded.provider,
+                ingest_method = excluded.ingest_method,
+                source_locator = CASE
+                    WHEN excluded.source_locator != '' THEN excluded.source_locator
+                    ELSE source_roots.source_locator
+                END,
+                playback_locator = CASE
+                    WHEN excluded.playback_locator != '' THEN excluded.playback_locator
+                    ELSE source_roots.playback_locator
+                END,
+                route_id = CASE
+                    WHEN excluded.route_id != '' THEN excluded.route_id
+                    ELSE source_roots.route_id
+                END,
+                root_container = CASE
+                    WHEN excluded.root_container != '' THEN excluded.root_container
+                    ELSE source_roots.root_container
+                END,
+                updated_at = excluded.updated_at
+            """,
+            (root_id, provider, ingest_method, locator, locator, route_id, root_container, now, now),
+        )
+
+
 def _tree_validation_dict(resolution: TreeRootResolution) -> dict:
     return {
         "ok": resolution.ok,
@@ -226,6 +293,7 @@ def _persist_tree_scan(
     scan_id: str,
     route_id: str,
     effective_root: str,
+    root_container: str,
     evidence: list,
     resolution: TreeRootResolution,
 ) -> None:
@@ -243,8 +311,8 @@ def _persist_tree_scan(
             """
             INSERT INTO source_roots(
                 root_id, provider, ingest_method, source_locator, playback_locator,
-                route_id, display_name, created_at, updated_at
-            ) VALUES (?, ?, 'directory_tree', ?, ?, ?, '', ?, ?)
+                route_id, display_name, root_container, created_at, updated_at
+            ) VALUES (?, ?, 'directory_tree', ?, ?, ?, '', ?, ?, ?)
             ON CONFLICT(root_id) DO UPDATE SET
                 provider = excluded.provider,
                 ingest_method = excluded.ingest_method,
@@ -260,9 +328,13 @@ def _persist_tree_scan(
                     WHEN excluded.route_id != '' THEN excluded.route_id
                     ELSE source_roots.route_id
                 END,
+                root_container = CASE
+                    WHEN excluded.root_container != '' THEN excluded.root_container
+                    ELSE source_roots.root_container
+                END,
                 updated_at = excluded.updated_at
             """,
-            (root_id, provider, effective_root, effective_root, route_id, now, now),
+            (root_id, provider, effective_root, effective_root, route_id, root_container, now, now),
         )
         existing = conn.execute(
             "SELECT generation FROM source_scans WHERE scan_id = ?", (scan_id,)
@@ -375,6 +447,7 @@ def scan_source(request: SourceScanRequest):
                 scan_id=scan_id,
                 route_id=route_id,
                 effective_root=resolution.root,
+                root_container=_container_name(resolution.root or local_root),
                 evidence=evidence,
                 resolution=resolution,
             )
@@ -409,6 +482,7 @@ def scan_source(request: SourceScanRequest):
                 scan_id=scan_id,
                 route_id="",
                 effective_root=effective_root,
+                root_container=_container_name(effective_root),
                 evidence=evidence,
                 resolution=resolution,
             )
@@ -466,11 +540,29 @@ def scan_source(request: SourceScanRequest):
                     scan_id,
                     build_full_scan_state(root_id, remote_root, directory_observations),
                 )
+            _ensure_root_container(
+                get_database(),
+                root_id=root_id,
+                provider=content_provider,
+                ingest_method="openlist_scan",
+                locator=remote_root,
+                route_id=route_id,
+                root_container=_container_name(remote_root),
+            )
         else:
             config = load_config()
             root_id, scan_id, evidence = scan_local_directory(
                 request.root_path,
                 excluded_roots=_configured_cloud_roots(config),
+            )
+            _ensure_root_container(
+                get_database(),
+                root_id=root_id,
+                provider="local",
+                ingest_method="local_scan",
+                locator=str(Path(request.root_path).expanduser()),
+                route_id="",
+                root_container=_container_name(request.root_path),
             )
     except DirectoryTreeReadError as exc:
         raise HTTPException(status_code=400, detail=_directory_tree_error_message(exc)) from exc
@@ -491,6 +583,7 @@ def scan_source(request: SourceScanRequest):
         "scan_stats": scan_stats,
         "effective_playback_root": resolution.root,
         "path_validation": validation,
+        "root_container": _container_name(resolution.root or request.root_path),
     }
 
 
@@ -515,7 +608,17 @@ def preview(request: PreviewRequest):
         playback_locator = request.playback_locator
         source_route_id = request.source_route_id
     parser = V4Parser()
-    parsed = [(item, parser.parse(item)) for item in evidence]
+    # P-001 7.4 阶段2：来源根上下文是后端派生的权威；preview 从 source_roots
+    # 读取并传入解析器，避免「Season 1」等结构容器成为作品名。
+    root_container = ""
+    with database.connect() as conn:
+        root_row = conn.execute(
+            "SELECT root_container FROM source_roots WHERE root_id = ?",
+            (request.root_id,),
+        ).fetchone()
+        if root_row is not None:
+            root_container = str(root_row["root_container"] or "")
+    parsed = [(item, parser.parse(item, root_container=root_container)) for item in evidence]
     service = V4RevisionService(database)
     try:
         graph = service.create_draft(
@@ -528,6 +631,7 @@ def preview(request: PreviewRequest):
                 "source_locator": source_locator,
                 "playback_locator": playback_locator,
                 "route_id": source_route_id,
+                "root_container": root_container,
             },
         )
     except ValueError as exc:
@@ -872,3 +976,119 @@ def get_tracking_state(work_id: str, provider: str):
         return V4TrackingStore(get_database()).get_state(work_id, provider)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="追踪状态不存在") from exc
+
+
+class MetadataSearchRequest(BaseModel):
+    work_id: str = Field(min_length=1)
+    query: str = ""
+    media_type: str = ""
+
+
+class MetadataConfirmRequest(BaseModel):
+    work_id: str = Field(min_length=1)
+    provider: str = Field(min_length=1)
+    provider_id: str = Field(min_length=1)
+    media_type: str = ""
+
+
+@router.post("/metadata/search")
+def metadata_search(request: MetadataSearchRequest):
+    """V4 手动元数据恢复：按作品标题搜索在线候选，不修改本地媒体身份。"""
+
+    database = get_database()
+    with database.connect() as conn:
+        work = conn.execute(
+            "SELECT * FROM works WHERE work_id = ?", (request.work_id,)
+        ).fetchone()
+    if work is None:
+        raise HTTPException(status_code=404, detail="作品不存在")
+    from app.media_v4.jobs.metadata import search_tmdb_candidates
+
+    media_type = request.media_type or ("tv" if work["work_type"] == "series" else "movie")
+    candidates = search_tmdb_candidates(
+        request.query or work["preferred_title"],
+        media_type,
+        work["year"],
+    )
+    if candidates is None:
+        raise HTTPException(status_code=409, detail="未配置 TMDB API Token，无法搜索在线候选")
+    return {"work_id": request.work_id, "candidates": candidates}
+
+
+@router.post("/metadata/confirm")
+def metadata_confirm(request: MetadataConfirmRequest):
+    """确认候选 provider ID 后重新排队并执行刮削，再刷新投影。"""
+
+    database = get_database()
+    with database.connect() as conn:
+        work = conn.execute(
+            "SELECT * FROM works WHERE work_id = ?", (request.work_id,)
+        ).fetchone()
+        revision = conn.execute(
+            """
+            SELECT ir.revision_id FROM import_revisions ir
+            JOIN revision_bindings rb ON rb.revision_id = ir.revision_id
+            WHERE rb.work_id = ? AND ir.status = 'confirmed'
+            ORDER BY ir.confirmed_at DESC, ir.revision_id DESC LIMIT 1
+            """,
+            (request.work_id,),
+        ).fetchone()
+    if work is None:
+        raise HTTPException(status_code=404, detail="作品不存在")
+    if revision is None:
+        raise HTTPException(status_code=409, detail="该作品没有已确认的 revision，无法恢复刮削")
+    media_type = request.media_type or ("tv" if work["work_type"] == "series" else "movie")
+    with database.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO provider_bindings(work_id, provider, media_type, provider_id)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(work_id, provider, media_type) DO UPDATE SET provider_id = excluded.provider_id
+            """,
+            (request.work_id, request.provider, media_type, request.provider_id),
+        )
+        # 同步冻结候选身份，供 revision_work_candidates 恢复视图与跨语言合卡。
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO revision_work_candidates(
+                candidate_id, revision_id, work_id, draft_work_key, provider,
+                provider_id, media_type, title, year, evidence, confidence, status,
+                created_at, updated_at
+            )
+            SELECT ?, ir.revision_id, w.work_id, w.identity_key, ?, ?, ?,
+                   w.preferred_title, w.year, 'manual_confirmation', 'high', 'confirmed',
+                   ?, ?
+            FROM import_revisions ir
+            JOIN revision_bindings rb ON rb.revision_id = ir.revision_id
+            JOIN works w ON w.work_id = rb.work_id
+            WHERE rb.work_id = ? AND ir.status = 'confirmed'
+            LIMIT 1
+            """,
+            (
+                str(uuid.uuid4()),
+                request.provider,
+                request.provider_id,
+                media_type,
+                _now_iso(),
+                _now_iso(),
+                request.work_id,
+            ),
+        )
+    from app.media_v4.jobs.metadata import default_metadata_provider
+
+    scrape = V4ScrapeService(database)
+    jobs = scrape.enqueue_for_revision(revision["revision_id"])
+    job = next(
+        (item for item in jobs if item["work_id"] == request.work_id),
+        jobs[0] if jobs else None,
+    )
+    if job is None:
+        raise HTTPException(status_code=409, detail="无法为该作品创建刮削任务")
+    scrape.process(job["job_id"], default_metadata_provider)
+    V4LibraryProjection(database).rebuild()
+    return {
+        "work_id": request.work_id,
+        "provider": request.provider,
+        "provider_id": request.provider_id,
+        "status": "confirmed",
+    }

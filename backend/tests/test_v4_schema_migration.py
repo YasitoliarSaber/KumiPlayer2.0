@@ -43,7 +43,7 @@ def test_v4_database_is_migrated_to_v5_without_data_loss(tmp_path):
 
     with sqlite3.connect(db_path) as conn:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 5
+        assert version == 6
         table = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tree_scan_validation'"
         ).fetchone()
@@ -61,7 +61,7 @@ def test_fresh_database_is_v5_and_has_validation_table(tmp_path):
 
     with sqlite3.connect(tmp_path / "fresh.db") as conn:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == V4_SCHEMA_VERSION == 5
+        assert version == V4_SCHEMA_VERSION == 6
         table = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tree_scan_validation'"
         ).fetchone()

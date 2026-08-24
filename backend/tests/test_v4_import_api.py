@@ -892,3 +892,120 @@ def test_confirmed_tree_revision_confirm_is_idempotent_after_validation_cleanup(
     second = client.post("/api/v4/imports/rev-idempotent/confirm")
     assert second.status_code == 200, second.text
     assert second.json()["status"] == "confirmed"
+
+
+def test_tree_scan_wires_root_container_into_preview_identity(tmp_path, monkeypatch):
+    """扫描根即作品目录时，Season 1 首层不得再成为 Work（P-001 7.2.3）。"""
+
+    client = _client(tmp_path, monkeypatch)
+    from app.api import media_v4
+
+    mount = tmp_path / "百度网盘"
+    library = mount / "古诺希亚"
+    media_file = library / "Season 1" / "古诺希亚.S01E01.mkv"
+    media_file.parent.mkdir(parents=True)
+    media_file.write_bytes(b"video")
+    tree = library / "古诺希亚_文件目录.txt"
+    tree.write_text("Season 1/古诺希亚.S01E01.mkv\n", encoding="utf-8")
+    monkeypatch.setattr(media_v4, "load_config", lambda: SimpleNamespace(
+        pan115_root="",
+        baidu_root=str(mount),
+        openlist_mount_root="",
+        openlist_remote_root="/",
+        openlist_routes=[],
+    ))
+
+    scan = media_v4.scan_source(media_v4.SourceScanRequest(
+        source="tree",
+        tree_file=str(tree),
+        provider="baidu",
+    ))
+    assert scan["path_validation"]["ok"] is True
+    assert scan["root_container"] == "古诺希亚"
+
+    preview = client.post("/api/v4/imports/preview", json={
+        "revision_id": "rev-root-container",
+        "root_id": scan["root_id"],
+        "scan_id": scan["scan_id"],
+        "entries": [],
+    })
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    titles = {work["preferred_title"] for work in body["works"]}
+    assert titles == {"古诺希亚"}
+    assert not any(work["preferred_title"] == "Season 1" for work in body["works"])
+
+
+def test_metadata_manual_confirm_requeues_scrape_and_refreshes_projection(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    from app.api import media_v4
+    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+
+    media = tmp_path / "Show.S01E01.mkv"
+    media.write_bytes(b"video")
+    evidence = SourceEvidence(
+        evidence_id="ev-manual",
+        scan_id="scan-manual",
+        root_id="root-manual",
+        source_key="ev-manual",
+        relative_path="Show/Show.S01E01.mkv",
+        entry_kind="video",
+        provider="local",
+        source_locator=str(media),
+        playback_locator=str(media),
+    )
+    facts = ParsedFacts(
+        parsed_fact_id="facts-manual",
+        evidence_id="ev-manual",
+        parser_version="fixture",
+        work_title="Show",
+        title_candidates=("Show",),
+        media_type="tv",
+        group_type="season",
+        season_candidate=1,
+        episode_candidate=1,
+    )
+    from app.media_v4.revisions.service import V4RevisionService
+
+    V4RevisionService(media_v4._database).create_draft("rev-manual", [(evidence, facts)])
+    assert client.post("/api/v4/imports/rev-manual/confirm").status_code == 200
+
+    def fake_provider(target):
+        assert target.get("provider_bindings"), "人工确认必须携带 provider binding"
+        return {
+            "provider": "tmdb",
+            "provider_id": "12345",
+            "media_type": "tv",
+            "title": "Show",
+            "metadata_state": "ready",
+        }
+
+    monkeypatch.setattr("app.media_v4.jobs.metadata.default_metadata_provider", fake_provider)
+
+    with media_v4._database.connect() as conn:
+        work_id = conn.execute("SELECT work_id FROM works LIMIT 1").fetchone()["work_id"]
+
+    result = client.post("/api/v4/metadata/confirm", json={
+        "work_id": work_id,
+        "provider": "tmdb",
+        "provider_id": "12345",
+        "media_type": "tv",
+    })
+    assert result.status_code == 200, result.text
+
+    with media_v4._database.connect() as conn:
+        binding = conn.execute(
+            "SELECT provider, provider_id, status FROM scrape_bindings WHERE work_id = ?",
+            (work_id,),
+        ).fetchone()
+        candidates = conn.execute(
+            "SELECT provider, provider_id, status FROM revision_work_candidates WHERE work_id = ?",
+            (work_id,),
+        ).fetchall()
+    assert binding is not None
+    assert binding["status"] == "confirmed"
+    assert binding["provider_id"] == "12345"
+    assert any(
+        row["provider"] == "tmdb" and row["provider_id"] == "12345" and row["status"] == "confirmed"
+        for row in candidates
+    )

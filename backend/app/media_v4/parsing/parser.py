@@ -62,15 +62,25 @@ class V4Parser:
         # 避免把「Season 1」直接当成作品名（P-001 7.2.3/7.3.A）。
         parts = PurePosixPath(evidence.relative_path).parts
         parse_relative = evidence.relative_path
+        existing_title = existing_work_title
         if parts and is_generic_container_name(parts[0]):
             parse_relative = PurePosixPath(*parts[1:]).as_posix() if len(parts) > 1 else ""
+            if not existing_title:
+                # 首层是通用容器时，从文件名提取稳定系列名作为权威作品名。
+                from app.recognition.media import _extract_series_name_from_filename
+
+                filename_title = _extract_series_name_from_filename(
+                    PurePosixPath(parse_relative).name or PurePosixPath(evidence.relative_path).name
+                )
+                if filename_title and not is_generic_container_name(filename_title):
+                    existing_title = filename_title
         filename = PurePosixPath(parse_relative).name
         source = provider_to_source(evidence.provider)
         guess = recognize_media(
             filename,
             parse_relative,
             source=source,
-            existing_work_title=existing_work_title,
+            existing_work_title=existing_title,
             root_container=root_container,
         )
 

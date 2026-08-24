@@ -27,6 +27,100 @@ def _normalize_title(value: str) -> str:
     return normalized.strip(" ._-·:：/\\()（）【】[]{}<>《》「」『』\"'")
 
 
+def _persist_work_candidates(
+    conn,
+    revision_id: str,
+    work_ids: dict[str, str],
+    graph: ResolvedMediaGraph,
+    entries: list[tuple[SourceEvidence, ParsedFacts]],
+    created_at: str,
+) -> None:
+    """P-001 7.4 阶段4：确认时按 revision 冻结 provider 候选身份。
+
+    候选输入包括显式 TMDB hint 与已存在的 provider binding；搜索结果只提出
+    provider identity，不修改本地季号/集号。同一 provider/media_type/provider_id
+    在 provider_bindings 唯一约束下天然对应唯一 Work。
+    """
+
+    conn.execute(
+        "DELETE FROM revision_work_candidates WHERE revision_id = ?", (revision_id,)
+    )
+    now = _now()
+    work_by_key = {work.work_key: work for work in graph.works}
+    for work_key, work_id in work_ids.items():
+        work = work_by_key.get(work_key)
+        related_entries = [
+            (evidence, facts)
+            for evidence, facts in entries
+            if work is not None and evidence.evidence_id in work.source_evidence_ids
+        ]
+        hints: list[tuple[str, str]] = []
+        for _evidence, facts in related_entries:
+            if facts.tmdb_hint_id and facts.tmdb_hint_type:
+                hint = (facts.tmdb_hint_type.casefold(), str(facts.tmdb_hint_id))
+                if hint not in hints:
+                    hints.append(hint)
+        existing = conn.execute(
+            "SELECT provider, media_type, provider_id FROM provider_bindings WHERE work_id = ?",
+            (work_id,),
+        ).fetchall()
+        for provider, media_type, provider_id in existing:
+            status = "confirmed"
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO revision_work_candidates(
+                    candidate_id, revision_id, work_id, draft_work_key, provider,
+                    provider_id, media_type, title, year, evidence, confidence, status,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'high', ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    revision_id,
+                    work_id,
+                    work_key,
+                    provider,
+                    provider_id,
+                    media_type,
+                    work.preferred_title if work else "",
+                    work.year if work else None,
+                    "existing_provider_binding",
+                    status,
+                    now,
+                    now,
+                ),
+            )
+        for provider, provider_id in hints:
+            status = "confirmed" if any(
+                p == provider and str(pid) == provider_id
+                for p, _m, pid in existing
+            ) else "proposed"
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO revision_work_candidates(
+                    candidate_id, revision_id, work_id, draft_work_key, provider,
+                    provider_id, media_type, title, year, evidence, confidence, status,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'high', ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    revision_id,
+                    work_id,
+                    work_key,
+                    "tmdb",
+                    provider_id,
+                    provider,
+                    work.preferred_title if work else "",
+                    work.year if work else None,
+                    "parsed_tmdb_hint",
+                    status,
+                    now,
+                    now,
+                ),
+            )
+
+
 def _structural_key(relative_path: str) -> str:
     parts = PurePosixPath(relative_path.replace("\\", "/")).parts
     directories = parts[:-1]
@@ -130,8 +224,8 @@ class V4RevisionService:
                 """
                 INSERT INTO source_roots(
                     root_id, provider, ingest_method, source_locator, playback_locator,
-                    route_id, display_name, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    route_id, display_name, root_container, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(root_id) DO UPDATE SET
                     provider = excluded.provider,
                     ingest_method = excluded.ingest_method,
@@ -151,6 +245,10 @@ class V4RevisionService:
                         WHEN excluded.display_name != '' THEN excluded.display_name
                         ELSE source_roots.display_name
                     END,
+                    root_container = CASE
+                        WHEN excluded.root_container != '' THEN excluded.root_container
+                        ELSE source_roots.root_container
+                    END,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -161,6 +259,7 @@ class V4RevisionService:
                     str(source_metadata.get("playback_locator") or ""),
                     str(source_metadata.get("route_id") or ""),
                     str(source_metadata.get("display_name") or ""),
+                    str(source_metadata.get("root_container") or ""),
                     created_at,
                     created_at,
                 ),
@@ -380,8 +479,8 @@ class V4RevisionService:
                             """
                             INSERT INTO works(
                                 work_id, identity_key, work_type, preferred_title,
-                                year, created_at, updated_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                                year, show_type, card_type, created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 work_id,
@@ -389,6 +488,8 @@ class V4RevisionService:
                                 work_type,
                                 work.preferred_title,
                                 work.year,
+                                work.show_type,
+                                work.card_type,
                                 created_at,
                                 created_at,
                             ),
@@ -405,8 +506,9 @@ class V4RevisionService:
                                 (work_id, _normalize_title(existing_work["preferred_title"])),
                             )
                         conn.execute(
-                            "UPDATE works SET preferred_title = ?, year = ?, updated_at = ? WHERE work_id = ?",
-                            (work.preferred_title, work.year, created_at, work_id),
+                            "UPDATE works SET preferred_title = ?, year = ?, show_type = ?, "
+                            "card_type = ?, updated_at = ? WHERE work_id = ?",
+                            (work.preferred_title, work.year, work.show_type, work.card_type, created_at, work_id),
                         )
 
                     work_ids[work.work_key] = work_id
@@ -432,6 +534,29 @@ class V4RevisionService:
                                     """,
                                     (work_id, normalized_title),
                                 )
+
+                # P-001 7.4 阶段3.2：持久化作品关系（外传/独立关联作品 → 父系列）。
+                for relation in graph.relations:
+                    parent_work_id = work_ids.get(relation.parent_work_key)
+                    child_work_id = work_ids.get(relation.child_work_key)
+                    if not parent_work_id or not child_work_id:
+                        continue
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO work_relations(
+                            relation_id, parent_work_id, child_work_id, relation_type
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            str(uuid.uuid4()),
+                            parent_work_id,
+                            child_work_id,
+                            relation.relation_type,
+                        ),
+                    )
+
+                # P-001 7.4 阶段4.1：确认时冻结候选身份，供人工恢复与跨语言合卡。
+                _persist_work_candidates(conn, revision_id, work_ids, graph, entries, created_at)
 
                 # Provider identity is a mapping, never a replacement for the
                 # local Work identity.  Hints observed during parsing are

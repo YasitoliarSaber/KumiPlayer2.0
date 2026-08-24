@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 5
+V4_SCHEMA_VERSION = 6
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -556,6 +556,36 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             validated_at TEXT NOT NULL
         )
         """,
+        """
+        CREATE TABLE work_relations (
+            relation_id TEXT PRIMARY KEY,
+            parent_work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE CASCADE,
+            child_work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE CASCADE,
+            relation_type TEXT NOT NULL DEFAULT 'related',
+            UNIQUE(parent_work_id, child_work_id, relation_type)
+        )
+        """,
+        """
+        CREATE TABLE revision_work_candidates (
+            candidate_id TEXT PRIMARY KEY,
+            revision_id TEXT NOT NULL REFERENCES import_revisions(revision_id) ON DELETE CASCADE,
+            work_id TEXT NOT NULL,
+            draft_work_key TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            media_type TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            year INTEGER,
+            evidence TEXT NOT NULL DEFAULT '',
+            confidence TEXT NOT NULL DEFAULT 'medium',
+            status TEXT NOT NULL DEFAULT 'proposed',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        "ALTER TABLE source_roots ADD COLUMN root_container TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE works ADD COLUMN show_type TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE works ADD COLUMN card_type TEXT NOT NULL DEFAULT ''",
         "CREATE UNIQUE INDEX uq_v4_active_revision_per_root "
         "ON import_revisions(root_id) WHERE status = 'confirmed'",
         "CREATE INDEX idx_v4_facts_evidence ON parsed_facts(evidence_id)",
@@ -596,6 +626,61 @@ def create_tree_scan_validation(conn: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def create_v6_structures(conn: sqlite3.Connection) -> None:
+    """创建 v6 新增结构：work_relations、revision_work_candidates，以及
+    source_roots.root_container、works.show_type/card_type 列。"""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS work_relations (
+            relation_id TEXT PRIMARY KEY,
+            parent_work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE CASCADE,
+            child_work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE CASCADE,
+            relation_type TEXT NOT NULL DEFAULT 'related',
+            UNIQUE(parent_work_id, child_work_id, relation_type)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS revision_work_candidates (
+            candidate_id TEXT PRIMARY KEY,
+            revision_id TEXT NOT NULL REFERENCES import_revisions(revision_id) ON DELETE CASCADE,
+            work_id TEXT NOT NULL,
+            draft_work_key TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            media_type TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            year INTEGER,
+            evidence TEXT NOT NULL DEFAULT '',
+            confidence TEXT NOT NULL DEFAULT 'medium',
+            status TEXT NOT NULL DEFAULT 'proposed',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    _add_column_if_missing(conn, "source_roots", "root_container", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "works", "show_type", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "works", "card_type", "TEXT NOT NULL DEFAULT ''")
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {
+        str(row["name"])
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def migrate_schema_v5_to_v6(conn: sqlite3.Connection) -> None:
+    """v5 → v6 增量迁移：新增关系/候选表与作品卡片字段，不改动既有数据。"""
+
+    create_v6_structures(conn)
 
 
 def migrate_schema_v4_to_v5(conn: sqlite3.Connection) -> None:

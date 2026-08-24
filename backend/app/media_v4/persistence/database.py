@@ -11,6 +11,7 @@ from app.media_v4.persistence.schema_v4 import (
     V4_SCHEMA_VERSION,
     create_schema_v4,
     migrate_schema_v4_to_v5,
+    migrate_schema_v5_to_v6,
 )
 
 
@@ -56,6 +57,8 @@ class V4Database:
             "source_health",
             "openlist_telemetry",
             "tree_scan_validation",
+            "work_relations",
+            "revision_work_candidates",
         }
     )
     REQUIRED_TRIGGERS = frozenset(
@@ -125,13 +128,35 @@ class V4Database:
                 raise RuntimeError(
                     f"数据库版本 {version} 高于当前程序支持的 {self.CURRENT_SCHEMA_VERSION}，请升级 KumiPlayer"
                 )
+            if version == 5 and self._has_user_tables(conn):
+                # v5 → v6 增量迁移：新增关系/候选表与作品卡片字段。
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    migrate_schema_v5_to_v6(conn)
+                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    conn.commit()
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    raise V4ResetRequiredError(
+                        "数据库声明为 V4 但物理结构不完整，需要一次性重置；" + str(exc)
+                    ) from exc
+                except Exception:
+                    conn.rollback()
+                    raise
+                version = self.CURRENT_SCHEMA_VERSION
             if version == 4 and self._has_user_tables(conn):
                 # v4 → v5 增量迁移：只新增 tree_scan_validation，保留已确认媒体数据。
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     migrate_schema_v4_to_v5(conn)
+                    migrate_schema_v5_to_v6(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    raise V4ResetRequiredError(
+                        "数据库声明为 V4 但物理结构不完整，需要一次性重置；" + str(exc)
+                    ) from exc
                 except Exception:
                     conn.rollback()
                     raise
