@@ -119,8 +119,10 @@ class V4ScrapeService:
             result = provider(target)
             provider_name = str(result.get("provider") or "").strip()
             provider_id = str(result.get("provider_id") or "").strip()
-            if not provider_name or not provider_id:
-                raise ValueError("刮削结果缺少 provider/provider_id")
+            metadata_state = str(result.get("metadata_state") or "").strip()
+            if not metadata_state:
+                metadata_state = "ready" if provider_name != "local" else "waiting_metadata"
+            ready = metadata_state == "ready" and provider_name not in {"", "local"} and bool(provider_id)
             valid_episode_ids = {str(item["episode_id"]) for item in target["episodes"]}
             for mapping in result.get("episode_mappings") or []:
                 episode_id = str(mapping.get("episode_id") or "")
@@ -131,7 +133,7 @@ class V4ScrapeService:
                 season_id = str(mapping.get("season_id") or "")
                 if season_id not in valid_season_ids:
                     raise ValueError("刮削结果包含不属于当前 revision 的 Season 映射")
-            if mirror_root is not None and job["work_id"]:
+            if mirror_root is not None and job["work_id"] and ready:
                 publish_metadata_artifacts(
                     self.database,
                     revision_id=job["revision_id"],
@@ -141,39 +143,45 @@ class V4ScrapeService:
                     mirror_root=mirror_root,
                 )
             now = _now()
+            binding_status = "confirmed" if ready else (metadata_state or "waiting_metadata")
+            binding_provider = provider_name if ready else "local"
+            binding_provider_id = provider_id if ready else ""
             with self.database.connect() as conn:
                 conn.execute(
                     """
                     INSERT INTO scrape_bindings(
                         binding_id, revision_id, work_id, provider, provider_id,
-                        metadata_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        metadata_json, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(revision_id, work_id, provider) DO UPDATE SET
                         provider_id = excluded.provider_id,
                         metadata_json = excluded.metadata_json,
+                        status = excluded.status,
                         updated_at = excluded.updated_at
                     """,
                     (
                         str(uuid.uuid4()),
                         job["revision_id"],
                         job["work_id"],
-                        provider_name,
-                        provider_id,
+                        binding_provider,
+                        binding_provider_id,
                         json.dumps(result, ensure_ascii=False, sort_keys=True),
+                        binding_status,
                         now,
                         now,
                     ),
                 )
-                conn.execute(
-                    """
-                    INSERT INTO provider_bindings(work_id, provider, media_type, provider_id)
-                    SELECT ?, ?, CASE WHEN work_type = 'series' THEN 'tv' ELSE 'movie' END, ?
-                    FROM works WHERE work_id = ?
-                    ON CONFLICT(work_id, provider, media_type) DO UPDATE SET
-                        provider_id = excluded.provider_id
-                    """,
-                    (job["work_id"], provider_name, provider_id, job["work_id"]),
-                )
+                if ready:
+                    conn.execute(
+                        """
+                        INSERT INTO provider_bindings(work_id, provider, media_type, provider_id)
+                        SELECT ?, ?, CASE WHEN work_type = 'series' THEN 'tv' ELSE 'movie' END, ?
+                        FROM works WHERE work_id = ?
+                        ON CONFLICT(work_id, provider, media_type) DO UPDATE SET
+                            provider_id = excluded.provider_id
+                        """,
+                        (job["work_id"], provider_name, provider_id, job["work_id"]),
+                    )
                 for mapping in result.get("episode_mappings") or []:
                     episode_id = str(mapping.get("episode_id") or "")
                     conn.execute(

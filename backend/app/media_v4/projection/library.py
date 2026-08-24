@@ -95,6 +95,12 @@ class V4LibraryProjection:
                             ORDER BY sb.updated_at DESC, sb.binding_id DESC LIMIT 1
                         ), '{}') AS scraped_metadata_json,
                         COALESCE((
+                            SELECT sb.status FROM scrape_bindings sb
+                            JOIN import_revisions sir ON sir.revision_id = sb.revision_id
+                            WHERE sb.work_id = w.work_id AND sir.status = 'confirmed'
+                            ORDER BY sb.updated_at DESC, sb.binding_id DESC LIMIT 1
+                        ), '') AS scrape_binding_status,
+                        COALESCE((
                             SELECT GROUP_CONCAT(DISTINCT provider) FROM (
                                 SELECT se.provider
                                 FROM revision_bindings rb
@@ -103,7 +109,25 @@ class V4LibraryProjection:
                                 JOIN source_evidence se ON se.evidence_id = a.evidence_id
                                 WHERE rb.work_id = w.work_id AND ir.status = 'confirmed'
                             )
-                        ), '') AS source_providers
+                        ), '') AS source_providers,
+                        (
+                            SELECT COUNT(DISTINCT s.local_season_number)
+                            FROM seasons s
+                            JOIN episodes e ON e.season_id = s.season_id
+                            JOIN revision_bindings rb ON rb.episode_id = e.episode_id
+                            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                            WHERE s.work_id = w.work_id AND ir.status = 'confirmed'
+                              AND s.season_kind = 'regular'
+                        ) AS regular_season_count,
+                        (
+                            SELECT COUNT(DISTINCT s.local_season_number)
+                            FROM seasons s
+                            JOIN episodes e ON e.season_id = s.season_id
+                            JOIN revision_bindings rb ON rb.episode_id = e.episode_id
+                            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                            WHERE s.work_id = w.work_id AND ir.status = 'confirmed'
+                              AND s.season_kind != 'regular'
+                        ) AS special_season_count
                     FROM works w
                     WHERE EXISTS (
                         SELECT 1 FROM revision_bindings rb
@@ -122,6 +146,23 @@ class V4LibraryProjection:
                     metadata["sources"] = sorted(
                         filter(None, str(row["source_providers"] or "").split(","))
                     )
+                    regular_season_count = int(row["regular_season_count"] or 0)
+                    special_season_count = int(row["special_season_count"] or 0)
+                    metadata["regular_season_count"] = regular_season_count
+                    metadata["special_season_count"] = special_season_count
+                    # 元数据状态：只有 confirmed + ready 才是正式可发布；
+                    # 等待类状态保持非 ready，不得冒充成功（P-001 7.3.E）。
+                    binding_status = str(row["scrape_binding_status"] or "")
+                    meta_state = str(metadata.get("metadata_state") or "")
+                    if binding_status == "confirmed" and meta_state == "ready":
+                        state = "ready"
+                    elif binding_status in {"waiting_metadata", "waiting_review", "source_unavailable", "failed"}:
+                        state = binding_status
+                    elif binding_status == "confirmed":
+                        state = meta_state or "waiting_metadata"
+                    else:
+                        state = "waiting_metadata"
+                    metadata["metadata_state"] = state
                     cards_list.append({
                         "work_id": row["work_id"],
                         "title": metadata.get("title") or row["title"],
@@ -129,6 +170,8 @@ class V4LibraryProjection:
                         "media_type": row["media_type"],
                         "episode_count": row["episode_count"],
                         "asset_count": row["asset_count"],
+                        "regular_season_count": regular_season_count,
+                        "special_season_count": special_season_count,
                         "metadata": metadata,
                     })
                 cards = tuple(cards_list)

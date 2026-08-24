@@ -27,7 +27,13 @@ function PosterCard({
   const prewarmTimerRef = useRef<number | null>(null);
   const rawTitle = work.title || work.original_title || work.local_title || '';
   const displayTitle = cleanDisplayTitle(rawTitle) || '未命名作品';
-  const mainSeasonCount = (work.seasons || []).filter((season: any) => (season.group_type || 'season') === 'season').length || 1;
+  // P-001 阶段6：季度数由后端权威投影提供，不再用空数组 || 1 伪造一季。
+  const mainSeasonCount = Number(work.season_count || 0);
+  const seasonLabel = mainSeasonCount > 0
+    ? `共 ${mainSeasonCount} 季`
+    : work.show_type === 'anime_series' || work.show_type === 'live_series'
+      ? '季度待确认'
+      : '';
 
   const handleClick = () => {
     void openWorkDetail(work.work_id);
@@ -129,9 +135,9 @@ function PosterCard({
         <div className="poster-card-subtitle" style={{ color: 'var(--text-muted)' }}>
           {recentLabel
             ? recentLabel
-            : work.show_type === 'anime_series' || work.show_type === 'live_series' 
-            ? `共 ${mainSeasonCount} 季`
-            : work.year ? `${work.year}` : ''
+            : seasonLabel
+              ? seasonLabel
+              : work.year ? `${work.year}` : ''
           }
         </div>
       </div>

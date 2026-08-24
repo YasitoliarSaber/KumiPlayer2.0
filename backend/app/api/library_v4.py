@@ -43,6 +43,8 @@ def _card_payload(card: dict) -> dict:
         "seasons": [],
         "episode_count": card["episode_count"],
         "asset_count": card["asset_count"],
+        "season_count": int(metadata.get("regular_season_count") or card.get("regular_season_count") or 0),
+        "special_season_count": int(metadata.get("special_season_count") or card.get("special_season_count") or 0),
         "source_locations": {},
         "poster_path": metadata.get("poster_url") or "",
         "fanart_path": metadata.get("fanart_url") or "",
@@ -67,10 +69,13 @@ def _library_snapshot():
 
 
 @router.get("")
-def get_library(compact: bool = False, source: str | None = None):
+def get_library(compact: bool = False, source: str | None = None, include_all: bool = False):
     del compact
     snapshot = _library_snapshot()
     works = [_card_payload(card) for card in snapshot.cards]
+    if not include_all:
+        # 正式媒体墙只返回 ready 作品；waiting/review/failed 走异常区恢复。
+        works = [work for work in works if work.get("metadata_state") == "ready"]
     if source and source != "all":
         works = [work for work in works if source in work["sources"]]
     return {

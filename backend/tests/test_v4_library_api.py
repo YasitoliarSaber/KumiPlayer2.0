@@ -178,10 +178,14 @@ def test_library_sources_come_from_each_evidence_not_the_first_root_entry(tmp_pa
 
     assert client.post("/api/v4/imports/preview", json=payload).status_code == 200
     assert client.post("/api/v4/imports/rev-mixed-provider/confirm").status_code == 200
+    # 正式媒体墙只发布 ready 作品；未刮削的作品通过 include_all 进入维护视图。
     response = client.get("/api/library")
-
     assert response.status_code == 200
-    assert response.json()["works"][0]["sources"] == ["local", "pan115"]
+    assert response.json()["works"] == []
+    maintenance = client.get("/api/library?include_all=true")
+    assert maintenance.status_code == 200
+    assert maintenance.json()["works"][0]["sources"] == ["local", "pan115"]
+    assert maintenance.json()["works"][0]["metadata_state"] == "waiting_metadata"
 
 
 def test_empty_scan_can_confirm_source_removal_and_publish_empty_library(tmp_path, monkeypatch):

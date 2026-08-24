@@ -48,3 +48,16 @@ test('低频页面保持按需加载且不显示旧准备中遮罩', () => {
   assert.match(app, /<Suspense fallback=\{null\}>/);
   assert.doesNotMatch(app, /正在准备页面|正在载入界面组件/);
 });
+
+
+test('海报卡季度数来自后端 season_count，不再用空数组伪造一季', () => {
+  const poster = readFileSync(new URL('../src/components/library/PosterCard.tsx', import.meta.url), 'utf8');
+  const types = readFileSync(new URL('../src/api/types.ts', import.meta.url), 'utf8');
+
+  assert.match(poster, /season_count/);
+  assert.match(poster, /季度待确认/);
+  assert.doesNotMatch(poster, /\.length \|\| 1/);
+  assert.match(types, /season_count\?: number/);
+  assert.match(types, /special_season_count\?: number/);
+  assert.match(types, /metadata_state\?: 'ready' \| 'waiting_metadata' \| 'waiting_review' \| 'source_unavailable' \| 'failed'/);
+});

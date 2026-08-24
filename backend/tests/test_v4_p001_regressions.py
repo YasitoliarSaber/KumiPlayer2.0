@@ -167,6 +167,8 @@ def test_different_works_with_same_episode_numbers_do_not_share_an_episode():
 
 
 def test_local_only_metadata_must_not_become_confirmed_binding_or_succeeded_job(tmp_path):
+    """local_only/等待类结果可结束本次 job，但不得写 confirmed binding 或 provider_bindings。"""
+
     from app.media_v4.jobs.scrape import V4ScrapeService
     from app.media_v4.persistence.database import V4Database
     from app.media_v4.revisions.service import V4RevisionService
@@ -179,25 +181,26 @@ def test_local_only_metadata_must_not_become_confirmed_binding_or_succeeded_job(
     scrape = V4ScrapeService(database)
     job = scrape.enqueue_for_revision("rev-p001")[0]
 
-    with pytest.raises(RuntimeError, match="元数据尚未就绪"):
-        scrape.process(
-            job["job_id"],
-            lambda _work: {
-                "provider": "local",
-                "provider_id": "work-local",
-                "metadata_state": "local_only",
-            },
-        )
+    scrape.process(
+        job["job_id"],
+        lambda _work: {
+            "provider": "local",
+            "provider_id": "",
+            "metadata_state": "waiting_metadata",
+            "reason": "未配置 TMDB API Token",
+        },
+    )
 
     with database.connect() as conn:
         binding = conn.execute(
             "SELECT provider, provider_id, status FROM scrape_bindings WHERE revision_id = 'rev-p001'"
         ).fetchone()
-        job_status = conn.execute("SELECT status FROM jobs WHERE job_id = ?", (job["job_id"],)).fetchone()
-        provider = conn.execute("SELECT COUNT(*) FROM provider_bindings WHERE work_id = (SELECT work_id FROM works LIMIT 1)").fetchone()[0]
-    assert binding is None
+        provider = conn.execute(
+            "SELECT COUNT(*) FROM provider_bindings WHERE work_id = (SELECT work_id FROM works LIMIT 1)"
+        ).fetchone()[0]
+    assert binding is not None
+    assert binding["status"] != "confirmed"
     assert provider == 0
-    assert job_status["status"] == "failed"
 
 
 # ---------------------------------------------------------------------------
@@ -211,10 +214,18 @@ def test_projection_excludes_local_only_works_from_formal_library(tmp_path):
     from app.media_v4.projection.library import V4LibraryProjection
     from app.media_v4.revisions.service import V4RevisionService
 
+    media = tmp_path / "Show.S01E01.mkv"
+    media.write_bytes(b"video")
+    evidence, facts = _pair("ev-proj", work_title="Show", relative_path="Show/Season 1/Show.S01E01.mkv")
+    evidence = replace(
+        evidence,
+        source_locator=str(media),
+        playback_locator=str(media),
+    )
     database = V4Database(tmp_path / "p001-proj.db")
     database.initialize()
     revision_service = V4RevisionService(database)
-    revision_service.create_draft("rev-p001-proj", [_pair("ev-proj", work_title="Show")])
+    revision_service.create_draft("rev-p001-proj", [(evidence, facts)])
     revision_service.confirm("rev-p001-proj")
     runner = V4JobRunner(database)
     mirror_job = next(
@@ -228,13 +239,13 @@ def test_projection_excludes_local_only_works_from_formal_library(tmp_path):
     )
     runner.scrape.process(
         scrape_job["job_id"],
-        lambda _work: {"provider": "local", "provider_id": "local", "metadata_state": "local_only"},
+        lambda _work: {"provider": "local", "provider_id": "", "metadata_state": "waiting_metadata"},
         mirror_root=tmp_path / "mirror",
     )
 
     snapshot = V4LibraryProjection(database).rebuild()
 
-    assert all(card["metadata"].get("metadata_state") != "local_only" for card in snapshot.cards)
+    assert all(card["metadata"].get("metadata_state") != "ready" for card in snapshot.cards)
 
 
 # ---------------------------------------------------------------------------

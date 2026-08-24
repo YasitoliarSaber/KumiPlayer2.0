@@ -94,12 +94,15 @@ export interface WorkIndex {
   cast?: Array<{ name: string; role: string; profile_path: string }>
   tags: string[]
   last_played: string | null
-  metadata_state?: 'ready' | 'waiting_metadata' | 'waiting_review' | 'source_unavailable'
+  metadata_state?: 'ready' | 'waiting_metadata' | 'waiting_review' | 'source_unavailable' | 'failed'
   episode_count?: number
   asset_count?: number
   source_locations?: Record<string, string[]>
   main_episode_count?: number
   latest_episode_number?: number
+  /** P-001 阶段6：常规季数与特别篇数由后端权威投影提供。 */
+  season_count?: number
+  special_season_count?: number
   certification?: string
   certification_country?: string
   artwork_provenance?: Record<'poster' | 'fanart' | 'clearlogo', string>
