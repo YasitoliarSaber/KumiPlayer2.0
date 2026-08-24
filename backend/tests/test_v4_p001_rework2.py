@@ -166,6 +166,28 @@ def test_candidate_title_prefix_is_not_treated_as_exact_identity(tmp_path, monke
     assert row["status"] == "proposed"
 
 
+def test_spinoff_series_group_is_not_used_as_candidate_identity_query(tmp_path, monkeypatch):
+    """外传的父系列只用于关系，不能作为外传自身的候选身份查询。"""
+
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = _patch_database(tmp_path, monkeypatch)
+    evidence, facts = _entry("spinoff-query", work_title="Heya Camp")
+    facts = replace(facts, series_group="Yuru Camp", relation_type="spin_off")
+    seen_queries: list[str] = []
+
+    def search(_work_key, queries, _year, _media_type):
+        seen_queries.extend(queries)
+        return []
+
+    V4RevisionService(database).create_draft(
+        "rev-spinoff-query", [(evidence, facts)], candidate_search=search
+    )
+
+    assert "Heya Camp" in seen_queries
+    assert "Yuru Camp" not in seen_queries
+
+
 # ---------------------------------------------------------------------------
 # R7：完整性门控必经 —— 手动确认候选但无镜像产物不得发布。
 # ---------------------------------------------------------------------------

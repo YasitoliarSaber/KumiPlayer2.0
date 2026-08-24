@@ -89,7 +89,9 @@ def build_query_inputs(work: ResolvedWork, entries: list[tuple[SourceEvidence, P
         if facts.evidence_id in work.source_evidence_ids
     ]
     for facts in related:
-        for value in (facts.work_title, facts.original_title, facts.series_group, *facts.title_candidates):
+        # series_group 只表达父系列关系，不能作为独立外传/电影子作品的
+        # Provider 身份查询输入；否则 Heya Camp 会被 Yuru Camp 候选吸收。
+        for value in (facts.work_title, facts.original_title, *facts.title_candidates):
             value = (value or "").strip()
             if value and not is_generic_container_title(value) and value not in queries:
                 queries.append(value)
