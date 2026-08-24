@@ -26,5 +26,8 @@ export const tasksApi = {
   cancel: (taskId: string) =>
     api.post<TaskRecord>(`/api/tasks/${taskId}/cancel`),
 
+  retry: (taskId: string) =>
+    api.post<TaskRecord>(`/api/tasks/${taskId}/retry`),
+
   rescanLibrary: () => api.post<{ task_id: string; status: string }>('/api/library/rescan'),
 }

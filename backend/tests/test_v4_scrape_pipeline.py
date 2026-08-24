@@ -102,6 +102,40 @@ def test_scrape_metadata_does_not_overwrite_local_episode_number(tmp_path):
     assert season_mapping["provider_season_number"] == 9
 
 
+def test_invalid_scrape_mapping_is_rejected_before_metadata_files_are_published(tmp_path):
+    import pytest
+
+    from app.media_v4.jobs.scrape import V4ScrapeService
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "invalid-scrape.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-invalid-scrape", [_entry("a")])
+    revisions.confirm("rev-invalid-scrape")
+    job = next(item for item in revisions.list_jobs("rev-invalid-scrape") if item["job_type"] == "scrape_work")
+    mirror_root = tmp_path / "mirror"
+
+    with pytest.raises(ValueError, match="不属于当前 revision"):
+        V4ScrapeService(database).process(
+            job["job_id"],
+            lambda _target: {
+                "provider": "tmdb",
+                "provider_id": "42",
+                "title": "Show",
+                "episode_mappings": [{"episode_id": "foreign-episode"}],
+            },
+            mirror_root=mirror_root,
+        )
+
+    assert not list(mirror_root.rglob("*.nfo"))
+    with database.connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE revision_id = 'rev-invalid-scrape'"
+        ).fetchone()[0] == 0
+
+
 def test_scrape_target_contains_provider_hint_and_episode_mapping(tmp_path):
     from app.media_v4.jobs.scrape import V4ScrapeService
     from app.media_v4.persistence.database import V4Database

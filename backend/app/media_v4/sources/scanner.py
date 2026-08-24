@@ -7,6 +7,7 @@ import hashlib
 import os
 import re
 import uuid
+from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
 from app.integrations.openlist.client import normalize_remote_path
@@ -75,10 +76,31 @@ def _windows_volume_profile(path: str | Path) -> tuple[str, str]:
     return drive_type, filesystem_name.value if ok else ""
 
 
-def _ensure_physical_local_volume(path: str | Path) -> None:
+def _path_is_within(path: str | Path, root: str | Path) -> bool:
+    candidate = os.path.normcase(os.path.abspath(os.fspath(Path(path).expanduser())))
+    boundary = os.path.normcase(os.path.abspath(os.fspath(Path(root).expanduser())))
+    try:
+        return os.path.commonpath((candidate, boundary)) == boundary
+    except ValueError:
+        return False
+
+
+def _ensure_physical_local_volume(
+    path: str | Path,
+    *,
+    excluded_roots: Iterable[str | Path] = (),
+) -> None:
     drive_type, filesystem_name = _windows_volume_profile(path)
     normalized_filesystem = filesystem_name.casefold()
-    if drive_type == "remote" or any(marker in normalized_filesystem for marker in _VIRTUAL_FILESYSTEM_MARKERS):
+    configured_cloud_path = any(
+        str(root).strip() and _path_is_within(path, root)
+        for root in excluded_roots
+    )
+    if (
+        drive_type == "remote"
+        or configured_cloud_path
+        or any(marker in normalized_filesystem for marker in _VIRTUAL_FILESYSTEM_MARKERS)
+    ):
         raise ValueError(
             "本地目录只支持本机物理磁盘；检测到网盘挂载或虚拟文件系统，"
             "请改用目录树 TXT 或 OpenList 导入"
@@ -114,7 +136,9 @@ def tree_root_id(provider: str, source_root: str, tree_file: str | Path) -> str:
 
     stem = Path(tree_file).stem
     scope = re.sub(r"[_\s-]*(?:文件目录|目录树)(?:[_\s-]*\d{6,})?$", "", stem).strip()
-    identity = (source_root or scope or stem).replace("\\", "/").strip().casefold()
+    mapping_identity = source_root.replace("\\", "/").strip().casefold()
+    scope_identity = (scope or stem).replace("\\", "/").strip().casefold()
+    identity = "\x1f".join((mapping_identity, scope_identity))
     digest = hashlib.sha256(f"{provider.casefold()}\x1f{identity}".encode()).hexdigest()[:24]
     return "root_" + digest
 
@@ -124,10 +148,16 @@ def openlist_root_id(server_url: str, username: str, remote_root: str) -> str:
     return "root_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
 
 
-def scan_local_directory(root_path: str | Path) -> tuple[str, str, list]:
+def scan_local_directory(
+    root_path: str | Path,
+    *,
+    excluded_roots: Iterable[str | Path] = (),
+) -> tuple[str, str, list]:
     candidate = Path(root_path).expanduser()
-    _ensure_physical_local_volume(candidate)
+    excluded = tuple(excluded_roots)
+    _ensure_physical_local_volume(candidate, excluded_roots=excluded)
     root = candidate.resolve()
+    _ensure_physical_local_volume(root, excluded_roots=excluded)
     if not root.is_dir():
         raise NotADirectoryError(str(root))
     root_id = _root_id(root)
@@ -165,6 +195,7 @@ def parse_directory_tree_file(
     root_id: str,
     provider: str,
     source_root: str = "",
+    source_route_id: str = "",
 ) -> tuple[str, list]:
     # 目录树可能位于 WebDAV/CloudDrive 等虚拟盘。此类盘符可以正常打开文件，
     # 但不一定实现 Windows 最终路径解析；导入合同只要求 TXT 可读，不要求
@@ -221,6 +252,7 @@ def parse_directory_tree_file(
                     source_key=relative,
                     source_locator=locator,
                     playback_locator=locator,
+                    source_route_id=source_route_id,
                 )
             )
         )

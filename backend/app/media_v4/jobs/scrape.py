@@ -121,6 +121,16 @@ class V4ScrapeService:
             provider_id = str(result.get("provider_id") or "").strip()
             if not provider_name or not provider_id:
                 raise ValueError("刮削结果缺少 provider/provider_id")
+            valid_episode_ids = {str(item["episode_id"]) for item in target["episodes"]}
+            for mapping in result.get("episode_mappings") or []:
+                episode_id = str(mapping.get("episode_id") or "")
+                if episode_id not in valid_episode_ids:
+                    raise ValueError("刮削结果包含不属于当前 revision 的 Episode 映射")
+            valid_season_ids = {str(item["season_id"]) for item in target["episodes"]}
+            for mapping in result.get("season_mappings") or []:
+                season_id = str(mapping.get("season_id") or "")
+                if season_id not in valid_season_ids:
+                    raise ValueError("刮削结果包含不属于当前 revision 的 Season 映射")
             if mirror_root is not None and job["work_id"]:
                 publish_metadata_artifacts(
                     self.database,
@@ -164,11 +174,8 @@ class V4ScrapeService:
                     """,
                     (job["work_id"], provider_name, provider_id, job["work_id"]),
                 )
-                valid_episode_ids = {str(item["episode_id"]) for item in target["episodes"]}
                 for mapping in result.get("episode_mappings") or []:
                     episode_id = str(mapping.get("episode_id") or "")
-                    if episode_id not in valid_episode_ids:
-                        raise ValueError("刮削结果包含不属于当前 revision 的 Episode 映射")
                     conn.execute(
                         """
                         INSERT INTO episode_provider_mappings(
@@ -188,11 +195,8 @@ class V4ScrapeService:
                             str(mapping.get("provider_episode_id") or ""),
                         ),
                     )
-                valid_season_ids = {str(item["season_id"]) for item in target["episodes"]}
                 for mapping in result.get("season_mappings") or []:
                     season_id = str(mapping.get("season_id") or "")
-                    if season_id not in valid_season_ids:
-                        raise ValueError("刮削结果包含不属于当前 revision 的 Season 映射")
                     conn.execute(
                         """
                         INSERT INTO season_provider_mappings(

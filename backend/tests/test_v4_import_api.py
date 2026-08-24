@@ -119,6 +119,7 @@ def test_preview_with_unknown_title_returns_review_issue_and_confirm_conflict(tm
 
 def test_hybrid_tree_scan_reuses_the_openlist_root_identity(tmp_path, monkeypatch):
     from app.api import media_v4
+    from app.integrations.openlist.providers import OpenListRouteConfig
     from app.media_v4.sources.scanner import openlist_root_id
 
     tree = tmp_path / "anime-tree.txt"
@@ -126,7 +127,13 @@ def test_hybrid_tree_scan_reuses_the_openlist_root_identity(tmp_path, monkeypatc
     config = SimpleNamespace(
         openlist_server_url="https://openlist.example.test",
         openlist_remote_root="/",
-        openlist_mount_root="",
+        openlist_mount_root="X:\\OpenList",
+        openlist_routes=[OpenListRouteConfig(
+            route_id="route-anime",
+            label="115 动画",
+            remote_prefix="/Anime",
+            provider_id="pan115",
+        )],
     )
     monkeypatch.setattr(media_v4, "load_config", lambda: config)
     monkeypatch.setattr(
@@ -138,45 +145,147 @@ def test_hybrid_tree_scan_reuses_the_openlist_root_identity(tmp_path, monkeypatc
 
     result = media_v4.scan_source(media_v4.SourceScanRequest(
         source="hybrid",
-        root_path="/Anime",
+        root_path="/Anime/TV",
         tree_file=str(tree),
-        provider="pan115",
+        provider="baidu",
+        source_root="Z:\\stale-frontend-path",
     ))
 
     assert result["root_id"] == openlist_root_id(
         config.openlist_server_url,
         "kumi",
-        "/Anime",
+        "/Anime/TV",
     )
     assert result["entries"][0]["ingest_method"] == "directory_tree"
+    assert result["entries"][0]["provider"] == "pan115"
+    assert result["entries"][0]["source_route_id"] == "route-anime"
     assert result["entries"][0]["relative_path"] == "Show/Show.S01E01.mkv"
+    assert result["entries"][0]["playback_locator"] == "X:\\OpenList\\Anime\\TV\\Show\\Show.S01E01.mkv"
 
 
-def test_tree_scan_preserves_quark_as_the_content_provider(tmp_path):
+def test_tree_scan_preserves_quark_as_the_content_provider(tmp_path, monkeypatch):
     from app.api import media_v4
+    from app.integrations.openlist.providers import OpenListRouteConfig
 
     tree = tmp_path / "quark-tree.txt"
     tree.write_text("Show/Show.S01E01.mkv\n", encoding="utf-8")
+    monkeypatch.setattr(media_v4, "load_config", lambda: SimpleNamespace(
+        pan115_root="",
+        baidu_root="",
+        openlist_mount_root="X:\\OpenList",
+        openlist_remote_root="/",
+        openlist_routes=[OpenListRouteConfig(
+            route_id="route-quark",
+            remote_prefix="/Quark",
+            provider_id="quark",
+        )],
+    ))
 
     result = media_v4.scan_source(media_v4.SourceScanRequest(
         source="tree",
         tree_file=str(tree),
         provider="quark",
+        source_root=str(tmp_path / "quark-mount"),
     ))
 
     assert result["entries"][0]["provider"] == "quark"
+
+
+def test_tree_scan_uses_the_saved_mapping_instead_of_a_stale_frontend_copy(tmp_path, monkeypatch):
+    from app.api import media_v4
+
+    tree = tmp_path / "baidu-tree.txt"
+    tree.write_text("Show/Show.S01E01.mkv\n", encoding="utf-8")
+    monkeypatch.setattr(media_v4, "load_config", lambda: SimpleNamespace(
+        pan115_root="",
+        baidu_root="K:\\百度网盘",
+        openlist_mount_root="",
+        openlist_remote_root="/",
+        openlist_routes=[],
+    ))
+
+    result = media_v4.scan_source(media_v4.SourceScanRequest(
+        source="tree",
+        tree_file=str(tree),
+        provider="baidu",
+        source_root="Z:\\stale-frontend-copy",
+    ))
+
+    assert result["entries"][0]["playback_locator"] == "K:\\百度网盘\\Show\\Show.S01E01.mkv"
+
+
+def test_remote_tree_scan_requires_a_playback_mapping(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+
+    from app.api import media_v4
+
+    tree = tmp_path / "tree.txt"
+    tree.write_text("Show/Show.S01E01.mkv\n", encoding="utf-8")
+    monkeypatch.setattr(media_v4, "load_config", lambda: SimpleNamespace(
+        pan115_root="",
+        baidu_root="",
+        openlist_mount_root="",
+        openlist_remote_root="/",
+        openlist_routes=[],
+    ))
+
+    with pytest.raises(HTTPException) as exc_info:
+        media_v4.scan_source(media_v4.SourceScanRequest(
+            source="tree",
+            tree_file=str(tree),
+            provider="baidu",
+        ))
+
+    assert exc_info.value.status_code == 409
+    assert "挂载路径" in exc_info.value.detail
+
+
+def test_local_scan_receives_all_configured_cloud_mount_roots(monkeypatch):
+    from app.api import media_v4
+
+    captured = {}
+    config = SimpleNamespace(
+        pan115_root="K:\\115网盘",
+        baidu_root="K:\\百度网盘",
+        openlist_mount_root="K:\\",
+        openlist_routes=[{"local_path": "L:\\夸克网盘"}],
+    )
+    monkeypatch.setattr(media_v4, "load_config", lambda: config)
+
+    def fake_scan(root_path, *, excluded_roots):
+        captured["root_path"] = root_path
+        captured["excluded_roots"] = excluded_roots
+        return "root-local", "scan-local", []
+
+    monkeypatch.setattr(media_v4, "scan_local_directory", fake_scan)
+
+    result = media_v4.scan_source(media_v4.SourceScanRequest(
+        source="local",
+        root_path="D:\\Media",
+    ))
+
+    assert result["root_id"] == "root-local"
+    assert captured == {
+        "root_path": "D:\\Media",
+        "excluded_roots": ["K:\\115网盘", "K:\\百度网盘", "K:\\", "L:\\夸克网盘"],
+    }
 
 
 def test_explicit_openlist_incremental_requires_a_confirmed_txt_baseline(monkeypatch):
     from fastapi import HTTPException
 
     from app.api import media_v4
+    from app.integrations.openlist.providers import OpenListRouteConfig
 
     config = SimpleNamespace(
         openlist_server_url="https://openlist.example.test",
         openlist_remote_root="/",
         openlist_mount_root="X:\\OpenList",
-        openlist_routes=[],
+        openlist_routes=[OpenListRouteConfig(
+            route_id="route-anime",
+            remote_prefix="/Anime",
+            provider_id="pan115",
+        )],
     )
     monkeypatch.setattr(media_v4, "load_config", lambda: config)
     monkeypatch.setattr(media_v4, "resolve_openlist_credentials", lambda: ("kumi", "secret", "available"))
@@ -196,6 +305,7 @@ def test_explicit_openlist_incremental_requires_a_confirmed_txt_baseline(monkeyp
 
 def test_openlist_auto_scan_rebuilds_missing_checkpoint_from_confirmed_revision(monkeypatch):
     from app.api import media_v4, openlist_v4
+    from app.integrations.openlist.providers import OpenListRouteConfig
     from app.media_v4.sources.adapters import SourceEntry, to_source_evidence
     from app.media_v4.sources.scanner import openlist_root_id
 
@@ -203,7 +313,11 @@ def test_openlist_auto_scan_rebuilds_missing_checkpoint_from_confirmed_revision(
         openlist_server_url="https://openlist.example.test",
         openlist_remote_root="/",
         openlist_mount_root="X:\\OpenList",
-        openlist_routes=[],
+        openlist_routes=[OpenListRouteConfig(
+            route_id="route-anime",
+            remote_prefix="/Anime",
+            provider_id="pan115",
+        )],
     )
     root_id = openlist_root_id(config.openlist_server_url, "kumi", "/Anime")
     baseline = [to_source_evidence(SourceEntry(
@@ -239,6 +353,33 @@ def test_openlist_auto_scan_rebuilds_missing_checkpoint_from_confirmed_revision(
     assert captured["scan_id"] == "scan-incremental"
     assert captured["state"]["remote_verified"] is False
     assert captured["state"]["root_id"] == root_id
+
+
+def test_openlist_scan_rejects_an_unmapped_remote_root_before_network(monkeypatch):
+    from fastapi import HTTPException
+
+    from app.api import media_v4, openlist_v4
+
+    config = SimpleNamespace(
+        openlist_server_url="https://openlist.example.test",
+        openlist_remote_root="/",
+        openlist_mount_root="X:\\OpenList",
+        openlist_routes=[],
+    )
+    monkeypatch.setattr(media_v4, "load_config", lambda: config)
+    monkeypatch.setattr(media_v4, "resolve_openlist_credentials", lambda: ("kumi", "secret", "available"))
+    monkeypatch.setattr(openlist_v4, "_client", lambda _config: pytest.fail("未映射目录不应发起网络请求"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        media_v4.scan_source(media_v4.SourceScanRequest(
+            source="openlist",
+            root_path="/Unmapped",
+            provider="pan115",
+            scan_mode="full",
+        ))
+
+    assert exc_info.value.status_code == 409
+    assert "内容来源路由" in exc_info.value.detail
 
 
 def test_playback_and_tracking_are_user_state_endpoints(tmp_path, monkeypatch):

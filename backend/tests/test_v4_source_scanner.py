@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 
 def test_local_scan_emits_only_source_evidence(tmp_path):
     from app.media_v4.sources.scanner import scan_local_directory
@@ -17,6 +19,26 @@ def test_local_scan_emits_only_source_evidence(tmp_path):
     assert len(evidence) == 1
     assert evidence[0].relative_path == "Show/Show.S01E01.mkv"
     assert evidence[0].source_locator.endswith("Show\\Show.S01E01.mkv")
+
+
+def test_local_scan_rejects_a_configured_cloud_mount_even_when_it_reports_ntfs(tmp_path, monkeypatch):
+    from app.media_v4.sources import scanner
+
+    monkeypatch.setattr(scanner, "_windows_volume_profile", lambda _path: ("fixed", "NTFS"))
+
+    with pytest.raises(ValueError, match="网盘挂载"):
+        scanner.scan_local_directory(tmp_path, excluded_roots=[tmp_path])
+
+
+def test_tree_root_identity_separates_libraries_but_ignores_export_timestamps():
+    from app.media_v4.sources.scanner import tree_root_id
+
+    first = tree_root_id("baidu", "K:\\百度网盘", "动画_文件目录_20260810194440.txt")
+    refreshed = tree_root_id("baidu", "K:\\百度网盘", "动画_文件目录_20260824120000.txt")
+    movies = tree_root_id("baidu", "K:\\百度网盘", "电影_文件目录_20260824120000.txt")
+
+    assert first == refreshed
+    assert first != movies
 
 
 def test_directory_tree_adapter_preserves_remote_path_without_parsing_identity(tmp_path):

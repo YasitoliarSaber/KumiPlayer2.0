@@ -14156,7 +14156,8 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-source-card-progress > div { display: flex; justify-content: space-between; gap: 8px; color: var(--text-secondary); font-size: 11px; }
 .media-v4-source-card-progress i { display: block; height: 3px; overflow: hidden; border-radius: 99px; background: color-mix(in srgb, var(--border) 76%, transparent); }
 .media-v4-source-card-progress b { display: block; height: 100%; border-radius: inherit; background: var(--accent-strong); transition: width 180ms ease; }
-.media-v4-library-source-card .fui-Button { justify-self: start; min-height: 30px; margin-top: 1px; }
+.media-v4-source-card-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 1px; }
+.media-v4-library-source-card .media-v4-source-card-actions .fui-Button { min-width: 108px; min-height: 30px; }
 
 .media-v4-steps {
   padding: 12px 16px;
@@ -14350,7 +14351,8 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-job-succeeded .media-v4-job-state { color: var(--success, #107c10); }
 .media-v4-job-failed .media-v4-job-state { color: var(--danger, #c42b1c); }
 .media-v4-job-error { color: var(--danger, #c42b1c) !important; overflow-wrap: anywhere; }
-.media-v4-job code { overflow: hidden; color: var(--text-tertiary); font-size: 10px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.media-v4-job-tail { display: flex !important; align-items: center; justify-content: flex-end; gap: 8px; }
+.media-v4-job code { min-width: 0; overflow: hidden; color: var(--text-tertiary); font-size: 10px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 @keyframes media-v4-job-pulse { 50% { opacity: .35; transform: scale(.82); } }
 
 @container media-flow (max-width: 900px) {
@@ -14382,7 +14384,8 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
   .media-v4-override-row { grid-template-columns: 1fr; }
   .media-v4-override-row .fui-Button { grid-column: auto; justify-self: stretch; }
   .media-v4-job { grid-template-columns: 24px minmax(0, 1fr); }
-  .media-v4-job code { grid-column: 2; text-align: left; }
+  .media-v4-job-tail { grid-column: 2; justify-content: space-between; }
+  .media-v4-job code { text-align: left; }
 }
 @media (prefers-reduced-motion: reduce) {
   .media-v4-source-options > button { transition: none; }

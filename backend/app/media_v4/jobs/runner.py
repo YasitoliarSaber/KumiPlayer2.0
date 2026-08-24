@@ -60,6 +60,8 @@ class V4JobRunner:
             ).fetchone()
         if revision is None or revision["status"] != "confirmed":
             raise ValueError("只有 confirmed revision 的排队任务可以执行")
+        if not self._prerequisites_succeeded(dict(job)):
+            raise ValueError("任务的前置步骤尚未全部成功")
 
         if job["job_type"] == "materialize_mirror":
             materialized = self.materializer.process(job_id, mirror_root or get_mirror_root())
@@ -109,8 +111,36 @@ class V4JobRunner:
             ).fetchall()
         results: list[JobRunResult] = []
         for row in rows:
+            with self.database.connect() as conn:
+                job = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (row["job_id"],)).fetchone()
+            if job is None or not self._prerequisites_succeeded(dict(job)):
+                continue
             results.append(self.process_job(row["job_id"], mirror_root=mirror_root))
         return results
+
+    def _prerequisites_succeeded(self, job: dict) -> bool:
+        job_type = str(job["job_type"])
+        if job_type == "materialize_mirror":
+            return True
+        params: tuple[object, ...]
+        if job_type == "scrape_work":
+            predicate = "job_type = 'materialize_mirror' AND work_id = ?"
+            params = (job["revision_id"], job.get("work_id"))
+        elif job_type == "refresh_projection":
+            predicate = "job_type IN ('materialize_mirror', 'scrape_work')"
+            params = (job["revision_id"],)
+        elif job_type == "cleanup_superseded_artifacts":
+            predicate = "job_type IN ('materialize_mirror', 'scrape_work', 'refresh_projection')"
+            params = (job["revision_id"],)
+        else:
+            return False
+        with self.database.connect() as conn:
+            blocked = conn.execute(
+                f"SELECT 1 FROM jobs WHERE revision_id = ? AND {predicate} "
+                "AND status != 'succeeded' LIMIT 1",
+                params,
+            ).fetchone()
+        return blocked is None
 
     def _mark_running(self, job_id: str) -> bool:
         with self.database.connect() as conn:

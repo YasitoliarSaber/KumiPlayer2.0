@@ -76,6 +76,41 @@ def test_runner_materializes_scrapes_and_publishes_projection(tmp_path):
     assert card["metadata"]["plot"] == "metadata reached the projection"
 
 
+def test_failed_scrape_blocks_projection_until_the_failed_job_is_retried(tmp_path):
+    import pytest
+
+    from app.media_v4.jobs.runner import V4JobRunner
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "blocked-projection.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-blocked", [_entry()])
+    revisions.confirm("rev-blocked")
+    runner = V4JobRunner(
+        database,
+        metadata_provider=lambda _target: (_ for _ in ()).throw(RuntimeError("provider unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        runner.process_available(mirror_root=tmp_path / "mirror")
+
+    assert runner.process_available(mirror_root=tmp_path / "mirror") == []
+    with database.connect() as conn:
+        statuses = {
+            row["job_type"]: row["status"]
+            for row in conn.execute(
+                "SELECT job_type, status FROM jobs WHERE revision_id = 'rev-blocked'"
+            )
+        }
+    assert statuses == {
+        "materialize_mirror": "succeeded",
+        "scrape_work": "failed",
+        "refresh_projection": "queued",
+    }
+
+
 def test_special_episode_nfo_keeps_zero_season_number():
     from app.media_v4.jobs.metadata_artifacts import _episode_nfo
 

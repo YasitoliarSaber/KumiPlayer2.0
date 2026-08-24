@@ -135,8 +135,8 @@ def retry_task(task_id: str):
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
-        if row["status"] != "failed":
-            raise HTTPException(status_code=409, detail="只有失败任务可以重试")
+        if row["status"] not in {"failed", "cancelled"}:
+            raise HTTPException(status_code=409, detail="只有失败或已取消任务可以重试")
         if conn.execute(
             "SELECT status FROM import_revisions WHERE revision_id = ?",
             (row["revision_id"],),

@@ -12,11 +12,13 @@ const api = vi.hoisted(() => ({
 }))
 const config = vi.hoisted(() => ({ getConfig: vi.fn() }))
 const openlist = vi.hoisted(() => ({ browse: vi.fn(), getRoutes: vi.fn() }))
+const tasks = vi.hoisted(() => ({ retry: vi.fn() }))
 const goSettings = vi.hoisted(() => vi.fn())
 
 vi.mock('../../src/api/mediaV4', () => ({ mediaV4Api: api }))
 vi.mock('../../src/api/config', () => ({ configApi: config }))
 vi.mock('../../src/api/openlist', () => ({ openlistApi: openlist }))
+vi.mock('../../src/api/tasks', () => ({ tasksApi: tasks }))
 vi.mock('../../src/platform/folderPicker', () => ({
   pickDirectoryTreeFile: vi.fn(),
   pickFolder: vi.fn(),
@@ -32,7 +34,7 @@ vi.mock('../../src/stores/ui', () => ({
 }))
 
 const routes = [
-  { route_id: 'route-115', label: '115 动画', remote_prefix: '/115/Anime', provider_id: 'pan115', enabled: true, local_path: 'K:\\115网盘\\动画', local_available: true },
+  { route_id: 'route-115', label: '115 网盘', remote_prefix: '/115', provider_id: 'pan115', enabled: true, local_path: 'K:\\115网盘', local_available: true },
   { route_id: 'route-quark', label: '夸克动画', remote_prefix: '/Quark/Anime', provider_id: 'quark', enabled: true, local_path: 'K:\\夸克网盘\\动画', local_available: true },
 ]
 
@@ -60,6 +62,7 @@ beforeEach(() => {
     openlist_routes: routes,
   })
   openlist.getRoutes.mockResolvedValue({ routes })
+  tasks.retry.mockResolvedValue({ status: 'pending' })
   openlist.browse.mockImplementation(async (path = '') => ({
     path: path || '/',
     parent_path: path && path !== '/' ? '/' : null,
@@ -145,6 +148,7 @@ test('OpenList 未进入内容来源路由时不会猜测默认网盘提供商',
 test('混合入口分别提供 TXT 基线与显式 OpenList 增量动作', async () => {
   render(<MediaManagementPage />)
   fireEvent.click(screen.getByRole('button', { name: '目录树 + OpenList 增量' }))
+  expect(screen.queryByRole('group', { name: '内容来源' })).not.toBeInTheDocument()
   fireEvent.change(screen.getByRole('textbox', { name: '首次目录树 TXT 文件' }), {
     target: { value: 'K:\\115网盘\\动画\\目录树.txt' },
   })
@@ -157,6 +161,7 @@ test('混合入口分别提供 TXT 基线与显式 OpenList 增量动作', async
     root_path: '/115/Anime',
     tree_file: 'K:\\115网盘\\动画\\目录树.txt',
     provider: 'pan115',
+    source_root: 'K:\\115网盘\\Anime',
     scan_mode: 'auto',
   })))
 
@@ -204,4 +209,90 @@ test('来源卡展示持久化进度并可恢复查看任务', async () => {
   expect(screen.getByText('30 部作品')).toBeVisible()
   fireEvent.click(screen.getByRole('button', { name: '查看进度' }))
   await waitFor(() => expect(api.status).toHaveBeenCalledWith('rev-existing'))
+})
+
+test('来源卡可以回到同一 OpenList 来源执行更新', async () => {
+  api.sourceLibraries.mockResolvedValue({
+    cards: [{
+      root_id: 'root-115-anime', provider: 'pan115', ingest_method: 'openlist_api',
+      source_locator: '/115/Anime', playback_locator: 'K:\\115网盘\\动画', route_id: 'route-115',
+      display_name: '115 动画', revision_id: 'rev-existing', revision_status: 'confirmed',
+      revision_created_at: '2026-08-24T00:00:00Z', confirmed_at: '2026-08-24T00:00:00Z',
+      evidence_count: 120, work_count: 30, asset_count: 120, can_resume: false,
+      job_summary: { total: 3, queued: 0, running: 0, succeeded: 3, failed: 0, cancelled: 0 },
+    }],
+  })
+  render(<MediaManagementPage />)
+
+  fireEvent.click(screen.getByRole('button', { name: 'OpenList' }))
+  await waitFor(() => expect(openlist.browse).toHaveBeenCalledWith('/', 1, false, 100))
+  openlist.browse.mockClear()
+
+  fireEvent.click(await screen.findByRole('button', { name: '检查更新' }))
+
+  const sourcePicker = screen.getByRole('group', { name: '媒体来源类型' })
+  expect(sourcePicker.querySelector('button[aria-label="OpenList"]')).toHaveAttribute('aria-pressed', 'true')
+  await waitFor(() => expect(openlist.browse).toHaveBeenCalledWith('/115/Anime', 1, false, 100))
+})
+
+test('任务进度使用面向用户的名称而不是内部 job type', async () => {
+  localStorage.setItem('kumiplayer.media-v4.active-revision', 'rev-existing')
+  api.status.mockResolvedValue({
+    revision_id: 'rev-existing',
+    status: 'confirmed',
+    jobs: [{
+      job_id: 'job-1',
+      job_type: 'materialize_mirror',
+      revision_id: 'rev-existing',
+      work_id: 'work-1',
+      status: 'succeeded',
+      idempotency_key: 'materialize_mirror:rev-existing:work-1',
+    }],
+  })
+
+  render(<MediaManagementPage />)
+
+  expect(await screen.findByText('生成镜像文件')).toBeVisible()
+  expect(screen.queryByText('materialize_mirror')).not.toBeInTheDocument()
+})
+
+test('失败任务可以直接从导入进度页重试', async () => {
+  localStorage.setItem('kumiplayer.media-v4.active-revision', 'rev-existing')
+  api.status.mockResolvedValue({
+    revision_id: 'rev-existing',
+    status: 'confirmed',
+    jobs: [{
+      job_id: 'job-failed',
+      job_type: 'scrape_work',
+      revision_id: 'rev-existing',
+      work_id: 'work-1',
+      status: 'failed',
+      idempotency_key: 'scrape_work:rev-existing:work-1',
+      last_error: '网络暂时不可用',
+    }],
+  })
+  render(<MediaManagementPage />)
+
+  fireEvent.click(await screen.findByRole('button', { name: '重试 获取媒体信息' }))
+
+  await waitFor(() => expect(tasks.retry).toHaveBeenCalledWith('job-failed'))
+})
+
+test('只有排队或运行中的来源卡才启动实时轮询', async () => {
+  const timeoutSpy = vi.spyOn(window, 'setTimeout')
+  api.sourceLibraries.mockResolvedValue({
+    cards: [{
+      root_id: 'root-failed', provider: 'baidu', ingest_method: 'directory_tree',
+      source_locator: 'K:\\tree.txt', playback_locator: 'K:\\百度网盘', route_id: '',
+      display_name: '失败的导入', revision_id: 'rev-failed', revision_status: 'confirmed',
+      revision_created_at: '2026-08-24T00:00:00Z', confirmed_at: '2026-08-24T00:00:00Z',
+      evidence_count: 1, work_count: 1, asset_count: 1, can_resume: true,
+      job_summary: { total: 3, queued: 0, running: 0, succeeded: 2, failed: 1, cancelled: 0 },
+    }],
+  })
+
+  render(<MediaManagementPage />)
+  expect(await screen.findByText('失败的导入')).toBeVisible()
+  expect(timeoutSpy.mock.calls.some((call) => call[1] === 1500)).toBe(false)
+  timeoutSpy.mockRestore()
 })

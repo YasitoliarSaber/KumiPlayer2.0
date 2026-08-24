@@ -12,6 +12,7 @@ from app.core.config import load_config, resolve_openlist_credentials
 from app.core.paths import get_data_dir
 from app.integrations.openlist.client import normalize_remote_path
 from app.integrations.openlist.models import OpenListError
+from app.integrations.openlist.providers import derive_local_path, provider_for_remote
 from app.media_v4.jobs.runner import V4JobRunner
 from app.media_v4.jobs.scrape import V4ScrapeService
 from app.media_v4.parsing.parser import V4Parser
@@ -162,6 +163,41 @@ def _confirmed_source_evidence(root_id: str):
     return V4Repository(database).list_confirmed_source_evidence(root_id)
 
 
+def _configured_cloud_roots(config) -> list[str]:
+    roots = [
+        str(getattr(config, "pan115_root", "") or ""),
+        str(getattr(config, "baidu_root", "") or ""),
+        str(getattr(config, "openlist_mount_root", "") or ""),
+    ]
+    for route in getattr(config, "openlist_routes", ()) or ():
+        local_path = route.get("local_path", "") if isinstance(route, dict) else getattr(route, "local_path", "")
+        roots.append(str(local_path or ""))
+    return [root for root in roots if root.strip()]
+
+
+def _configured_tree_roots(config, provider: str) -> list[str]:
+    roots: list[str] = []
+    if provider == "pan115":
+        roots.append(str(getattr(config, "pan115_root", "") or ""))
+    elif provider == "baidu":
+        roots.append(str(getattr(config, "baidu_root", "") or ""))
+    mount_root = str(getattr(config, "openlist_mount_root", "") or "").strip()
+    remote_root = normalize_remote_path(str(getattr(config, "openlist_remote_root", "") or "/"))
+    if mount_root:
+        for route in getattr(config, "openlist_routes", ()) or ():
+            route_provider = route.get("provider_id", "") if isinstance(route, dict) else getattr(route, "provider_id", "")
+            enabled = route.get("enabled", True) if isinstance(route, dict) else getattr(route, "enabled", True)
+            prefix = route.get("remote_prefix", "") if isinstance(route, dict) else getattr(route, "remote_prefix", "")
+            if enabled and route_provider == provider and prefix:
+                roots.append(derive_local_path(mount_root, remote_root, str(prefix)))
+    unique: dict[str, str] = {}
+    for root in roots:
+        value = root.strip().rstrip("\\/")
+        if value:
+            unique.setdefault(value.replace("/", "\\").casefold(), value)
+    return list(unique.values())
+
+
 @router.post("/sources/scan")
 def scan_source(request: SourceScanRequest):
     if request.source == "local" and not request.root_path.strip():
@@ -179,8 +215,7 @@ def scan_source(request: SourceScanRequest):
         )
         if request.source == "hybrid":
             effective_scan_mode = "tree_baseline"
-            from app.api.openlist_v4 import _remote_root
-            from app.integrations.openlist.providers import derive_local_path
+            from app.api.openlist_v4 import _configured_routes, _remote_root
 
             config = load_config()
             username, _password, credential_state = resolve_openlist_credentials()
@@ -189,15 +224,21 @@ def scan_source(request: SourceScanRequest):
             if not config.openlist_server_url or not username:
                 raise HTTPException(status_code=400, detail="请先在设置页完成 OpenList 连接配置")
             remote_root = normalize_remote_path(request.root_path.strip() or _remote_root(config))
+            routes = _configured_routes(config)
+            route_id, routed_provider = provider_for_remote(routes, remote_root)
+            if not route_id:
+                raise HTTPException(status_code=409, detail="当前 OpenList 目录未匹配已保存的内容来源路由")
+            content_provider = routed_provider
             root_id = openlist_root_id(config.openlist_server_url, username, remote_root)
-            local_root = request.source_root.strip()
-            if not local_root and config.openlist_mount_root:
-                local_root = derive_local_path(config.openlist_mount_root, _remote_root(config), remote_root)
+            if not config.openlist_mount_root:
+                raise HTTPException(status_code=409, detail="当前内容来源尚未配置本地挂载路径，请先在设置页完成来源映射")
+            local_root = derive_local_path(config.openlist_mount_root, _remote_root(config), remote_root)
             scan_id, evidence = parse_directory_tree_file(
                 request.tree_file,
                 root_id=root_id,
                 provider=content_provider,
                 source_root=local_root,
+                source_route_id=route_id,
             )
             stage_scan_state(
                 scan_id,
@@ -205,12 +246,25 @@ def scan_source(request: SourceScanRequest):
             )
         elif request.source == "tree":
             effective_scan_mode = "tree_snapshot"
-            root_id = tree_root_id(request.provider, request.source_root, request.tree_file)
+            config = load_config()
+            configured_roots = _configured_tree_roots(config, content_provider)
+            if not configured_roots:
+                raise HTTPException(status_code=409, detail="当前内容来源尚未配置本地挂载路径，请先在设置页完成来源映射")
+            requested_root = request.source_root.strip().rstrip("\\/").replace("/", "\\").casefold()
+            matched_root = next(
+                (root for root in configured_roots if root.replace("/", "\\").casefold() == requested_root),
+                "",
+            )
+            if not matched_root and len(configured_roots) == 1:
+                matched_root = configured_roots[0]
+            if not matched_root:
+                raise HTTPException(status_code=409, detail="前端提交的播放映射与当前设置不一致，请重新选择内容来源")
+            root_id = tree_root_id(content_provider, matched_root, request.tree_file)
             scan_id, evidence = parse_directory_tree_file(
                 request.tree_file,
                 root_id=root_id,
                 provider=content_provider,
-                source_root=request.source_root,
+                source_root=matched_root,
             )
         elif request.source == "openlist":
             from app.api.openlist_v4 import _client, _configured_routes, _remote_root
@@ -222,6 +276,11 @@ def scan_source(request: SourceScanRequest):
             if not config.openlist_mount_root:
                 raise HTTPException(status_code=409, detail="OpenList 导入需要先配置本地挂载根，才能建立可播放 Asset")
             remote_root = normalize_remote_path(request.root_path.strip() or _remote_root(config))
+            routes = _configured_routes(config)
+            route_id, routed_provider = provider_for_remote(routes, remote_root)
+            if not route_id:
+                raise HTTPException(status_code=409, detail="当前 OpenList 目录未匹配已保存的内容来源路由")
+            content_provider = routed_provider
             root_id = openlist_root_id(config.openlist_server_url, username, remote_root)
             baseline = _confirmed_source_evidence(root_id)
             state = load_active_state(root_id)
@@ -241,7 +300,7 @@ def scan_source(request: SourceScanRequest):
                     mapping_root=_remote_root(config),
                     mount_root=config.openlist_mount_root,
                     default_provider=content_provider,
-                    routes=_configured_routes(config),
+                    routes=routes,
                 )
                 stage_scan_state(scan_id, next_state)
             else:
@@ -254,7 +313,7 @@ def scan_source(request: SourceScanRequest):
                     mount_root=config.openlist_mount_root,
                     root_id=root_id,
                     default_provider=content_provider,
-                    routes=_configured_routes(config),
+                    routes=routes,
                     directory_observations=directory_observations,
                 )
                 stage_scan_state(
@@ -262,7 +321,11 @@ def scan_source(request: SourceScanRequest):
                     build_full_scan_state(root_id, remote_root, directory_observations),
                 )
         else:
-            root_id, scan_id, evidence = scan_local_directory(request.root_path)
+            config = load_config()
+            root_id, scan_id, evidence = scan_local_directory(
+                request.root_path,
+                excluded_roots=_configured_cloud_roots(config),
+            )
     except (FileNotFoundError, NotADirectoryError, OSError, OpenListError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"来源扫描失败: {exc}") from exc
     return {
@@ -433,7 +496,7 @@ def list_source_libraries():
                 """.format(placeholders=",".join("?" for _ in revision_ids)),
                 revision_ids,
             ).fetchall()
-        } if revision_ids else []
+        } if revision_ids else {}
 
     cards = []
     for row in rows:
@@ -452,7 +515,12 @@ def list_source_libraries():
             "work_count": int(row["work_count"]),
             "asset_count": int(row["asset_count"]),
             "job_summary": summary,
-            "can_resume": summary["queued"] > 0 or summary["running"] > 0 or summary["failed"] > 0,
+            "can_resume": (
+                summary["queued"] > 0
+                or summary["running"] > 0
+                or summary["failed"] > 0
+                or summary["cancelled"] > 0
+            ),
         })
     return {"cards": cards}
 

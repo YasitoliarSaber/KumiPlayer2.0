@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Checkbox, Input, MessageBar, MessageBarBody, Select, Spinner } from '@fluentui/react-components'
 import {
   ArrowReset24Regular,
@@ -15,6 +15,7 @@ import {
 import { mediaV4Api, type V4Job, type V4Preview, type V4SourceEvidence, type V4SourceLibraryCard } from '../api/mediaV4'
 import { configApi, type PublicConfig } from '../api/config'
 import { openlistApi } from '../api/openlist'
+import { tasksApi } from '../api/tasks'
 import type { OpenListRoute, ProviderId } from '../api/types'
 import OpenListFolderBrowser from '../components/media/OpenListFolderBrowser'
 import { pickDirectoryTreeFile, pickFolder } from '../platform/folderPicker'
@@ -57,10 +58,10 @@ const PROVIDER_OPTIONS: Array<{
 ]
 
 const JOB_LABELS: Record<string, string> = {
-  materialize: '生成镜像文件',
-  scrape: '获取媒体信息',
-  projection: '更新媒体库',
-  cleanup: '清理旧产物',
+  materialize_mirror: '生成镜像文件',
+  scrape_work: '获取媒体信息',
+  refresh_projection: '更新媒体库',
+  cleanup_superseded_artifacts: '清理旧版本',
 }
 
 const JOB_STATUS_LABELS: Record<string, string> = {
@@ -87,6 +88,18 @@ function routeForPath(routes: OpenListRoute[], remotePath: string) {
   return routes
     .filter((route) => route.enabled && (normalized === route.remote_prefix || normalized.startsWith(`${route.remote_prefix}/`)))
     .sort((left, right) => right.remote_prefix.length - left.remote_prefix.length)[0]
+}
+
+function playbackRootForRoute(route: OpenListRoute | undefined, remotePath: string) {
+  if (!route?.local_path) return ''
+  const normalizedPath = (remotePath || '/').replace(/\\/g, '/').replace(/\/+$/, '') || '/'
+  const normalizedPrefix = (route.remote_prefix || '/').replace(/\\/g, '/').replace(/\/+$/, '') || '/'
+  const relative = normalizedPath === normalizedPrefix
+    ? ''
+    : normalizedPath.slice(normalizedPrefix.length).replace(/^\/+/, '')
+  if (!relative) return route.local_path
+  const separator = route.local_path.includes('\\') ? '\\' : '/'
+  return `${route.local_path.replace(/[\\/]+$/, '')}${separator}${relative.replace(/\//g, separator)}`
 }
 
 function finalPathSegment(path: string) {
@@ -136,6 +149,7 @@ export default function MediaManagementPage() {
   const [config, setConfig] = useState<PublicConfig | null>(null)
   const [routes, setRoutes] = useState<OpenListRoute[]>([])
   const [remoteBrowsing, setRemoteBrowsing] = useState(false)
+  const [browserSession, setBrowserSession] = useState(0)
   const [sourceCards, setSourceCards] = useState<V4SourceLibraryCard[]>([])
   const [sourceCardsLoading, setSourceCardsLoading] = useState(true)
   const [revisionId, setRevisionId] = useState('')
@@ -150,9 +164,11 @@ export default function MediaManagementPage() {
   const [preview, setPreview] = useState<V4Preview | null>(null)
   const [jobs, setJobs] = useState<V4Job[]>([])
   const [busy, setBusy] = useState<'scan' | 'preview' | 'override' | 'confirm' | ''>('')
+  const [retryingJobId, setRetryingJobId] = useState('')
   const [error, setError] = useState('')
   const [allowEmpty, setAllowEmpty] = useState(false)
   const [overrideDrafts, setOverrideDrafts] = useState<Record<string, OverrideDraft>>({})
+  const sourceCardsRefreshInFlight = useRef(false)
 
   useEffect(() => {
     let alive = true
@@ -171,7 +187,9 @@ export default function MediaManagementPage() {
     return () => { alive = false }
   }, [])
 
-  const refreshSourceCards = async () => {
+  const refreshSourceCards = useCallback(async () => {
+    if (sourceCardsRefreshInFlight.current) return
+    sourceCardsRefreshInFlight.current = true
     setSourceCardsLoading(true)
     try {
       const result = await mediaV4Api.sourceLibraries()
@@ -179,19 +197,30 @@ export default function MediaManagementPage() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法读取已导入媒体库')
     } finally {
+      sourceCardsRefreshInFlight.current = false
       setSourceCardsLoading(false)
     }
-  }
-
-  useEffect(() => {
-    void refreshSourceCards()
   }, [])
 
   useEffect(() => {
-    if (!sourceCards.some((card) => card.can_resume)) return
-    const timer = window.setInterval(() => { void refreshSourceCards() }, 1500)
-    return () => window.clearInterval(timer)
-  }, [sourceCards])
+    void refreshSourceCards()
+  }, [refreshSourceCards])
+
+  const hasActiveSourceJobs = sourceCards.some((card) => card.job_summary.queued > 0 || card.job_summary.running > 0)
+  useEffect(() => {
+    if (!hasActiveSourceJobs) return
+    let cancelled = false
+    let timer = 0
+    const poll = async () => {
+      await refreshSourceCards()
+      if (!cancelled) timer = window.setTimeout(() => { void poll() }, 1500)
+    }
+    timer = window.setTimeout(() => { void poll() }, 1500)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [hasActiveSourceJobs, refreshSourceCards])
 
   useEffect(() => {
     if (!pendingDroppedTreePath) return
@@ -211,15 +240,27 @@ export default function MediaManagementPage() {
     })
   }, [])
 
+  const hasActiveJobs = jobs.some((job) => !['succeeded', 'failed', 'cancelled'].includes(job.status))
   useEffect(() => {
-    if (!revisionId || jobs.length === 0 || jobs.every((job) => ['succeeded', 'failed', 'cancelled'].includes(job.status))) return
-    const timer = window.setInterval(() => {
-      void mediaV4Api.status(revisionId).then((result) => setJobs(result.jobs)).catch((cause) => {
-        setError(cause instanceof Error ? cause.message : '后台任务状态读取失败')
-      })
-    }, 1000)
-    return () => window.clearInterval(timer)
-  }, [jobs, revisionId])
+    if (!revisionId || !hasActiveJobs) return
+    let cancelled = false
+    let timer = 0
+    const poll = async () => {
+      try {
+        const result = await mediaV4Api.status(revisionId)
+        if (!cancelled) setJobs(result.jobs)
+      } catch (cause) {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : '后台任务状态读取失败')
+      } finally {
+        if (!cancelled) timer = window.setTimeout(() => { void poll() }, 1000)
+      }
+    }
+    timer = window.setTimeout(() => { void poll() }, 1000)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [hasActiveJobs, revisionId])
 
   const groupedWorks = useMemo(() => {
     if (!preview) return []
@@ -233,15 +274,17 @@ export default function MediaManagementPage() {
   const activeStep = jobs.length > 0 ? 2 : scan ? 1 : 0
   const selectedRemoteRoute = routeForPath(routes, remoteRoot)
   const canScan = kind === 'openlist'
-    ? Boolean(config?.openlist_configured && remoteRoot && selectedRemoteRoute)
+    ? Boolean(config?.openlist_configured && remoteRoot && selectedRemoteRoute?.local_path)
     : kind === 'hybrid'
-      ? Boolean(path.trim() && config?.openlist_configured && remoteRoot && selectedRemoteRoute)
-      : Boolean(path.trim())
+      ? Boolean(path.trim() && config?.openlist_configured && remoteRoot && selectedRemoteRoute?.local_path)
+      : kind === 'tree'
+        ? Boolean(path.trim() && providerRoot(provider))
+        : Boolean(path.trim())
   const showReset = kind !== 'local' || Boolean(scan || preview || jobs.length || error)
 
-  const providerRoot = (providerId: ProviderId, remotePath = '') => {
+  function providerRoot(providerId: ProviderId, remotePath = '') {
     const matchedRoute = routeForPath(routes, remotePath)
-    if (matchedRoute?.provider_id === providerId && matchedRoute.local_path) return matchedRoute.local_path
+    if (matchedRoute?.provider_id === providerId) return playbackRootForRoute(matchedRoute, remotePath)
     if (providerId === 'pan115') return config?.pan115_root || ''
     if (providerId === 'baidu') return config?.baidu_root || ''
     return routes.find((route) => route.enabled && route.provider_id === providerId && route.local_path)?.local_path || ''
@@ -477,6 +520,47 @@ export default function MediaManagementPage() {
     }
   }
 
+  const retryJob = async (job: V4Job) => {
+    setRetryingJobId(job.job_id)
+    setError('')
+    try {
+      await tasksApi.retry(job.job_id)
+      const result = await mediaV4Api.status(job.revision_id)
+      setJobs(result.jobs)
+      void refreshSourceCards()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '任务重试失败')
+    } finally {
+      setRetryingJobId('')
+    }
+  }
+
+  const prepareSourceUpdate = (card: V4SourceLibraryCard) => {
+    clearResultState()
+    setBrowserSession((current) => current + 1)
+    const nextProvider = card.provider === 'baidu' || card.provider === 'quark' ? card.provider : 'pan115'
+    setProvider(nextProvider)
+    if (card.provider === 'local') {
+      setKind('local')
+      setPath(card.source_locator || card.playback_locator)
+      return
+    }
+    if (card.ingest_method === 'openlist_api') {
+      setKind('openlist')
+      setPath('')
+      setRemoteRoot(card.source_locator || config?.openlist_remote_root || '/')
+      return
+    }
+    if (card.route_id) {
+      setKind('hybrid')
+      setPath('')
+      setRemoteRoot(card.source_locator || config?.openlist_remote_root || '/')
+      return
+    }
+    setKind('tree')
+    setPath(card.source_locator)
+  }
+
   return (
     <div className="media-flow-page media-v4-page">
       <header className="media-flow-header">
@@ -496,14 +580,21 @@ export default function MediaManagementPage() {
         {sourceCardsLoading && sourceCards.length === 0 ? <div className="media-v4-source-card-loading"><Spinner size="small" />正在读取媒体库…</div> : <div className="media-v4-source-library-grid">
           {sourceCards.map((card) => {
             const pending = card.job_summary.queued + card.job_summary.running
+            const active = pending > 0
             const progress = card.job_summary.total === 0 ? 100 : Math.round(((card.job_summary.succeeded + card.job_summary.failed + card.job_summary.cancelled) / card.job_summary.total) * 100)
+            const progressLabel = pending > 0
+              ? '正在处理'
+              : card.job_summary.failed > 0 ? '有失败任务' : card.job_summary.cancelled > 0 ? '有已取消任务' : '上次导入已处理完毕'
             return <article className={`media-v4-library-source-card ${card.can_resume ? 'active' : 'settled'}`} key={card.root_id}>
               <div className="media-v4-library-source-card-top"><span className="media-v4-provider-mark" aria-hidden="true">{card.provider === 'pan115' ? '115' : card.provider === 'baidu' ? '百' : card.provider === 'quark' ? '夸' : card.provider === 'local' ? '本' : '远'}</span><span>{card.ingest_method === 'local_scan' ? '本地来源' : card.ingest_method === 'directory_tree' ? '目录树基线' : 'OpenList 来源'}</span></div>
               <strong title={card.display_name}>{card.display_name}</strong>
               <span className="media-v4-source-card-locator" title={card.source_locator || card.playback_locator}>{card.source_locator || card.playback_locator || '已确认的媒体来源'}</span>
               <div className="media-v4-source-card-stats"><span>{card.work_count} 部作品</span><span>{card.asset_count} 个文件</span><span>{card.evidence_count} 条来源证据</span></div>
-              <div className="media-v4-source-card-progress"><div><span>{card.can_resume ? `${pending ? '正在处理' : '有失败任务'} · ${progress}%` : '上次导入已处理完毕'}</span><span>{card.job_summary.total} 个任务</span></div><i aria-hidden="true"><b style={{ width: `${progress}%` }} /></i></div>
-              <Button appearance={card.can_resume ? 'primary' : 'secondary'} onClick={() => void resumeSourceCard(card)}>{card.can_resume ? '查看进度' : '查看上次导入'}</Button>
+              <div className="media-v4-source-card-progress"><div><span>{card.can_resume ? `${progressLabel} · ${progress}%` : progressLabel}</span><span>{card.job_summary.total} 个任务</span></div><i aria-hidden="true"><b style={{ width: `${progress}%` }} /></i></div>
+              <div className="media-v4-source-card-actions">
+                <Button appearance={card.can_resume ? 'primary' : 'secondary'} onClick={() => void resumeSourceCard(card)}>{card.can_resume ? '查看进度' : '查看上次导入'}</Button>
+                <Button appearance={card.can_resume ? 'secondary' : 'primary'} icon={<ArrowSync24Regular />} disabled={active} onClick={() => prepareSourceUpdate(card)}>检查更新</Button>
+              </div>
             </article>
           })}
         </div>}
@@ -607,7 +698,7 @@ export default function MediaManagementPage() {
 
           {kind === 'openlist' && (
             <div className="media-v4-workspace-body">
-              <OpenListFolderBrowser configured={Boolean(config?.openlist_configured)} initialPath={config?.openlist_remote_root || '/'} onLoadingChange={setRemoteBrowsing} onPathChange={handleRemotePathChange} onGoSettings={goSettings} />
+              <OpenListFolderBrowser key={`openlist-${browserSession}`} configured={Boolean(config?.openlist_configured)} initialPath={remoteRoot || config?.openlist_remote_root || '/'} onLoadingChange={setRemoteBrowsing} onPathChange={handleRemotePathChange} onGoSettings={goSettings} />
               <div className="media-v4-mapping-note">
                 <Cloud24Regular aria-hidden="true" />
                 <div><strong>{selectedRemoteRoute ? selectedRemoteRoute.label : '当前目录尚未匹配内容路由'}</strong><span>{selectedRemoteRoute ? `内容来源：${PROVIDER_OPTIONS.find((item) => item.value === selectedRemoteRoute.provider_id)?.label || '其他远程来源'}；播放位置由已保存路由推导。` : '请先进入一个已配置内容来源的目录，才能开始扫描。'}</span></div>
@@ -625,7 +716,6 @@ export default function MediaManagementPage() {
               <div className="media-v4-hybrid-grid">
                 <div className="media-v4-field-block">
                   <div className="media-v4-field-copy"><span className="media-v4-action-index">首次</span><strong>选择 TXT 基线</strong><span>目录树负责快速建立大库的完整基线。</span></div>
-                  <ProviderPicker value={provider} onChange={setProvider} />
                   <div className="media-v4-path-row media-v4-path-row-wide">
                     <Input aria-label="首次目录树 TXT 文件" name="hybrid_tree_file" autoComplete="off" spellCheck={false} value={path} onChange={(_, data) => setPath(data.value)} placeholder="例如 K:\\媒体清单\\动画目录树.txt" />
                     <Button appearance="secondary" icon={<DocumentText24Regular />} onClick={() => void choosePath()}>选择文件</Button>
@@ -633,14 +723,19 @@ export default function MediaManagementPage() {
                 </div>
                 <div className="media-v4-field-block">
                   <div className="media-v4-field-copy"><span className="media-v4-action-index">后续</span><strong>选择同一 OpenList 目录</strong><span>确认 TXT 基线后，增量只核对新增和变化目录。</span></div>
-                  <OpenListFolderBrowser configured={Boolean(config?.openlist_configured)} initialPath={config?.openlist_remote_root || '/'} onLoadingChange={setRemoteBrowsing} onPathChange={handleRemotePathChange} onGoSettings={goSettings} />
+                  <OpenListFolderBrowser key={`hybrid-${browserSession}`} configured={Boolean(config?.openlist_configured)} initialPath={remoteRoot || config?.openlist_remote_root || '/'} onLoadingChange={setRemoteBrowsing} onPathChange={handleRemotePathChange} onGoSettings={goSettings} />
                 </div>
+              </div>
+              <div className="media-v4-mapping-note">
+                <Cloud24Regular aria-hidden="true" />
+                <div><strong>{selectedRemoteRoute ? selectedRemoteRoute.label : '当前目录尚未匹配内容路由'}</strong><span>{selectedRemoteRoute ? 'TXT 的内容来源与播放位置将使用这条已保存路由，不需要重复选择。' : '请先进入一个已配置内容来源的目录。'}</span></div>
+                {!selectedRemoteRoute && <Button appearance="subtle" onClick={goSettings}>配置来源路由</Button>}
               </div>
               <div className="media-v4-command-row media-v4-hybrid-actions">
                 <div><strong>两个动作互不混淆</strong><span>第一次建立并确认基线；以后从同一来源卡进入时执行增量扫描。</span></div>
                 <div className="media-v4-command-buttons">
                   <Button aria-label="建立 TXT 基线" appearance="secondary" icon={<DocumentText24Regular />} disabled={busy !== '' || remoteBrowsing || !canScan} onClick={() => void scanSource()}>{busy === 'scan' ? <Spinner size="tiny" /> : remoteBrowsing ? '正在切换目录' : '建立 TXT 基线'}</Button>
-                  <Button aria-label="增量扫描" className="media-primary-command" appearance="primary" icon={<ArrowSync24Regular />} disabled={busy !== '' || remoteBrowsing || !config?.openlist_configured || !remoteRoot} onClick={() => void scanSource('incremental')}>{busy === 'scan' ? <><Spinner size="tiny" />正在扫描</> : remoteBrowsing ? '正在切换目录' : '增量扫描'}</Button>
+                  <Button aria-label="增量扫描" className="media-primary-command" appearance="primary" icon={<ArrowSync24Regular />} disabled={busy !== '' || remoteBrowsing || !config?.openlist_configured || !remoteRoot || !selectedRemoteRoute?.local_path} onClick={() => void scanSource('incremental')}>{busy === 'scan' ? <><Spinner size="tiny" />正在扫描</> : remoteBrowsing ? '正在切换目录' : '增量扫描'}</Button>
                 </div>
               </div>
             </div>
@@ -664,7 +759,7 @@ export default function MediaManagementPage() {
         </>}
       </section>}
 
-      {jobs.length > 0 && <section className="media-stage-shell media-v4-stage-panel media-v4-jobs-card"><div className="media-stage-header"><div className="media-stage-heading"><span className="media-stage-icon" aria-hidden="true"><Database24Regular /></span><div><span className="media-stage-eyebrow">第 3 步</span><h2>建立媒体库</h2><p>可以离开此页面；返回后会继续显示当前导入进度。</p></div></div></div><div className="media-v4-job-list">{jobs.map((job) => <article className={`media-v4-job media-v4-job-${job.status}`} key={job.job_id}><span className="media-v4-job-state" aria-hidden="true">{job.status === 'succeeded' ? <CheckmarkCircle24Filled /> : <span />}</span><div><strong>{JOB_LABELS[job.job_type] || job.job_type}</strong><span>{JOB_STATUS_LABELS[job.status] || job.status}{job.attempts ? ` · 第 ${job.attempts} 次尝试` : ''}</span>{job.last_error && <span className="media-v4-job-error" role="alert">{job.last_error}</span>}</div><code title={job.job_id}>{job.job_id}</code></article>)}</div></section>}
+      {jobs.length > 0 && <section className="media-stage-shell media-v4-stage-panel media-v4-jobs-card"><div className="media-stage-header"><div className="media-stage-heading"><span className="media-stage-icon" aria-hidden="true"><Database24Regular /></span><div><span className="media-stage-eyebrow">第 3 步</span><h2>建立媒体库</h2><p>可以离开此页面；返回后会继续显示当前导入进度。</p></div></div></div><div className="media-v4-job-list">{jobs.map((job) => { const label = JOB_LABELS[job.job_type] || job.job_type; const retryable = job.status === 'failed' || job.status === 'cancelled'; return <article className={`media-v4-job media-v4-job-${job.status}`} key={job.job_id}><span className="media-v4-job-state" aria-hidden="true">{job.status === 'succeeded' ? <CheckmarkCircle24Filled /> : <span />}</span><div><strong>{label}</strong><span>{JOB_STATUS_LABELS[job.status] || job.status}{job.attempts ? ` · 第 ${job.attempts} 次尝试` : ''}</span>{job.last_error && <span className="media-v4-job-error" role="alert">{job.last_error}</span>}</div><div className="media-v4-job-tail"><code title={job.job_id}>{job.job_id}</code>{retryable && <Button size="small" appearance="secondary" aria-label={`重试 ${label}`} disabled={retryingJobId !== ''} onClick={() => void retryJob(job)}>{retryingJobId === job.job_id ? <Spinner size="tiny" /> : '重试'}</Button>}</div></article> })}</div></section>}
     </div>
   )
 }
