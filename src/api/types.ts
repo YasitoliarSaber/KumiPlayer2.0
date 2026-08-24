@@ -96,6 +96,8 @@ export interface WorkIndex {
   last_played: string | null
   metadata_state?: 'ready' | 'waiting_metadata' | 'waiting_review' | 'source_unavailable'
   episode_count?: number
+  asset_count?: number
+  source_locations?: Record<string, string[]>
   main_episode_count?: number
   latest_episode_number?: number
   certification?: string
@@ -134,6 +136,13 @@ export interface EpisodeIndex {
   group_type: string
   kind: string
   playback_locator?: string
+  asset_id?: string
+  assets?: Array<{
+    asset_id: string
+    playback_locator?: string
+    availability?: 'available' | 'missing' | 'source_unavailable'
+    source?: 'pan115' | 'baidu' | 'local' | 'openlist'
+  }>
   thumb_path?: string
   availability?: 'available' | 'missing' | 'source_unavailable'
 }

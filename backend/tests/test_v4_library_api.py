@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -58,6 +60,66 @@ def test_detail_deduplicates_episode_rows_but_exposes_all_assets(tmp_path, monke
     assert len(body["episodes"]) == 1
     assert len(body["episodes"][0]["assets"]) == 2
     assert body["seasons"][0]["episode_count"] == 1
+
+
+def test_detail_projects_saved_scrape_metadata_without_rewriting_local_identity(tmp_path, monkeypatch):
+    client, database = _client(tmp_path, monkeypatch)
+    assert client.post("/api/v4/imports/preview", json=_entry("rev-detail-metadata")).status_code == 200
+    assert client.post("/api/v4/imports/rev-detail-metadata/confirm").status_code == 200
+    with database.connect() as conn:
+        work_id = conn.execute("SELECT work_id FROM works LIMIT 1").fetchone()["work_id"]
+        episode_id = conn.execute("SELECT episode_id FROM episodes LIMIT 1").fetchone()["episode_id"]
+        metadata = {
+            "provider": "tmdb",
+            "provider_id": "42",
+            "title": "在线标题",
+            "plot": "完整简介",
+            "genres": ["动画", "冒险"],
+            "studios": ["Kumi Studio"],
+            "cast": [{"name": "角色甲", "role": "声优", "profile_path": "/person.jpg"}],
+            "certification": "PG-13",
+            "certification_country": "US",
+            "clearlogo_url": "/logo.png",
+            "tags": ["热血"],
+            "episode_mappings": [{
+                "episode_id": episode_id,
+                "title": "刮削后的单集标题",
+                "plot": "单集简介",
+                "still_url": "/still.jpg",
+                "runtime": 24,
+            }],
+        }
+        conn.execute(
+            """
+            INSERT INTO scrape_bindings(
+                binding_id, revision_id, work_id, provider, provider_id,
+                metadata_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "binding-detail-metadata",
+                "rev-detail-metadata",
+                work_id,
+                "tmdb",
+                "42",
+                json.dumps(metadata, ensure_ascii=False),
+                "2026-08-24T00:00:00+00:00",
+                "2026-08-24T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+
+    body = client.get(f"/api/library/works/{work_id}").json()
+    assert body["title"] == "在线标题"
+    assert body["cast"][0]["name"] == "角色甲"
+    assert body["certification"] == "PG-13"
+    assert body["certification_country"] == "US"
+    assert body["clearlogo_path"] == "/logo.png"
+    assert body["tags"] == ["热血"]
+    assert body["episodes"][0]["episode_id"] == episode_id
+    assert body["episodes"][0]["episode_number"] == 1
+    assert body["episodes"][0]["title"] == "刮削后的单集标题"
+    assert body["episodes"][0]["thumb_path"] == "/still.jpg"
 
 
 def test_watch_status_patch_preserves_omitted_fields_and_rescan_is_v4_projection(tmp_path, monkeypatch):

@@ -48,10 +48,13 @@ def _card_payload(card: dict) -> dict:
         "fanart_path": metadata.get("fanart_url") or "",
         "local_poster_path": metadata.get("local_poster_path") or "",
         "local_fanart_path": metadata.get("local_fanart_path") or "",
-        "clearlogo_path": "",
+        "clearlogo_path": metadata.get("clearlogo_url") or metadata.get("clearlogo_path") or "",
         "dir_path": "",
-        "related_works": [],
-        "tags": [],
+        "related_works": metadata.get("related_works") or [],
+        "cast": metadata.get("cast") or [],
+        "tags": metadata.get("tags") or [],
+        "certification": metadata.get("certification") or "",
+        "certification_country": metadata.get("certification_country") or "",
         "last_played": None,
         "metadata_state": metadata.get("metadata_state") or ("ready" if metadata else "pending"),
     }
@@ -169,9 +172,20 @@ def get_work_detail(work_id: str):
             (work_id,),
         ).fetchone()
 
+    try:
+        metadata = json.loads(scrape_row["metadata_json"] or "{}") if scrape_row else {}
+    except (TypeError, ValueError):
+        metadata = {}
+    episode_metadata = {
+        str(item.get("episode_id")): item
+        for item in metadata.get("episode_mappings") or []
+        if item.get("episode_id")
+    }
+
     episode_map: dict[str, dict] = {}
     source_locations: dict[str, list[str]] = {}
     for row in episodes:
+        scraped_episode = episode_metadata.get(str(row["episode_id"]), {})
         episode = episode_map.setdefault(
             row["episode_id"],
             {
@@ -181,7 +195,10 @@ def get_work_detail(work_id: str):
                 "episode_number": row["local_episode_number"],
                 "absolute_episode_number": row["absolute_episode_number"],
                 "special_number": row["special_number"],
-                "title": row["display_title"] or "",
+                "title": scraped_episode.get("title") or row["display_title"] or "",
+                "plot": scraped_episode.get("plot") or "",
+                "runtime": scraped_episode.get("runtime"),
+                "thumb_path": scraped_episode.get("still_url") or scraped_episode.get("thumb_path") or "",
                 "group_type": "season" if row["season_kind"] == "regular" else row["season_kind"],
                 "kind": row["episode_kind"],
                 "playback_locator": "",
@@ -256,10 +273,6 @@ def get_work_detail(work_id: str):
     media_type = "tv" if work["work_type"] == "series" else "movie"
     show_type = "anime_series" if media_type == "tv" else "anime_movie"
     watch_status = _watch_payload(dict(watch_row)) if watch_row else None
-    try:
-        metadata = json.loads(scrape_row["metadata_json"] or "{}") if scrape_row else {}
-    except (TypeError, ValueError):
-        metadata = {}
     sources = sorted({item["source"] for item in episode_payload}) or ["local"]
     payload = {
         "work_id": work["work_id"],
@@ -285,10 +298,13 @@ def get_work_detail(work_id: str):
         "fanart_path": metadata.get("fanart_url") or "",
         "local_poster_path": metadata.get("local_poster_path") or "",
         "local_fanart_path": metadata.get("local_fanart_path") or "",
-        "clearlogo_path": "",
+        "clearlogo_path": metadata.get("clearlogo_url") or metadata.get("clearlogo_path") or "",
         "dir_path": "",
-        "related_works": [],
-        "tags": [],
+        "related_works": metadata.get("related_works") or [],
+        "cast": metadata.get("cast") or [],
+        "tags": metadata.get("tags") or [],
+        "certification": metadata.get("certification") or "",
+        "certification_country": metadata.get("certification_country") or "",
         "last_played": None,
         "metadata_state": metadata.get("metadata_state") or ("ready" if metadata else "pending"),
         "watch_status": watch_status,
