@@ -13787,3 +13787,7 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .category-scan-button:disabled { opacity: 0.6; cursor: default; }
 .category-scan-cancel { padding: 5px 10px; border-radius: 7px; border: 1px solid color-mix(in srgb, var(--warning, #c45b52) 40%, transparent); background: transparent; color: var(--warning, #c45b52); font-size: 12px; cursor: pointer; }
 .category-scan-message { padding: 9px 12px; border-radius: 8px; font-size: 13px; color: var(--text-secondary); background: color-mix(in srgb, var(--surface-raised) 88%, transparent); border: 1px solid color-mix(in srgb, var(--border) 70%, transparent); margin-bottom: 12px; }
+.media-v4-source-card-indeterminate { display: block; height: 4px; border-radius: 999px; overflow: hidden; background: color-mix(in srgb, var(--border) 70%, transparent); position: relative; }
+.media-v4-source-card-indeterminate::after { content: ''; position: absolute; inset-block: 0; width: 40%; border-radius: inherit; background: var(--accent-strong); animation: media-v4-indeterminate 1.4s ease-in-out infinite; }
+@keyframes media-v4-indeterminate { 0% { left: -40%; } 100% { left: 100%; } }
+@media (prefers-reduced-motion: reduce) { .media-v4-source-card-indeterminate::after { animation: none; } }

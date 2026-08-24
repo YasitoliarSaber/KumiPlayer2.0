@@ -916,6 +916,8 @@ export default function WorkDetailPage() {
     timeoutMs = 10 * 60 * 1000,
   ) => {
     const reportProgress = onProgress || setNotice;
+    // V4 同步命令（metadata/confirm、tracking scan）返回空 task_id，无需轮询。
+    if (!taskId) return { status: 'succeeded' as const, result: {} };
     const deadline = Date.now() + timeoutMs;
     let consecutivePollErrors = 0;
     while (Date.now() < deadline) {

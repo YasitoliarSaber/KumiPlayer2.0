@@ -255,3 +255,50 @@ def test_tracking_scan_all_enqueues_incremental_for_openlist_roots(tmp_path, mon
     assert tasks, response.text
     assert tasks[0]["status"] == "running"
     assert tasks[0]["remote_root"] == "/Anime"
+
+
+def test_work_delete_preview_and_confirm_hides_work(tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api import library_v4, media_v4
+
+    database = _fresh_database(tmp_path)
+    monkeypatch.setattr(media_v4, "_database", database)
+    monkeypatch.setattr(media_v4, "_configured_mirror_root", lambda: None)
+    monkeypatch.setattr(library_v4, "get_database", lambda: database)
+    _seed_work(database, work_id="w1", title="将被删除")
+    _seed_work(database, work_id="w2", title="保留作品")
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO playback_progress(episode_id, asset_id, work_id, position, duration, updated_at) VALUES ('ep-x', 'as-x', 'w1', 1, 10, 'now')"
+        )
+
+    application = FastAPI()
+    application.include_router(media_v4.router)
+    application.include_router(library_v4.router)
+    client = TestClient(application)
+
+    preview = client.post("/api/v4/works/w1/delete-preview", json={})
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["playback_count"] == 1
+
+    confirm = client.post("/api/v4/works/w1/delete-confirm", json={"preview_id": body["preview_id"], "digest": body["digest"]})
+    assert confirm.status_code == 200, confirm.text
+    assert confirm.json()["status"] == "completed"
+
+    # 作品从列表退出，但不可变快照保留
+    works = client.get("/api/library?include_all=true").json()["works"]
+    assert all(work["work_id"] != "w1" for work in works)
+    assert any(work["work_id"] == "w2" for work in works)
+    with database.connect() as conn:
+        hidden = conn.execute("SELECT override_json FROM work_overrides WHERE work_id = 'w1'").fetchone()
+        import json as _json
+        assert _json.loads(hidden["override_json"]).get("hidden") is True
+        playback = conn.execute("SELECT 1 FROM playback_progress WHERE work_id = 'w1'").fetchone()
+    assert playback is None
+
+    # digest 不一致拒绝
+    stale = client.post("/api/v4/works/w1/delete-confirm", json={"preview_id": "x", "digest": "0" * 64})
+    assert stale.status_code == 409

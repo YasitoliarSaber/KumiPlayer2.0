@@ -5,14 +5,16 @@ import { mediaV4Api } from './mediaV4';
 export const workDetailV4Capabilities = {
   manualScrape: true,
   bangumiBinding: false,
-  seasonalManagement: false,
+  seasonalManagement: true,
   appendEpisodes: false,
   artworkMutation: true,
   titleMutation: true,
-  workDeletion: false,
+  workDeletion: true,
   sourceSpecificFolders: true,
   mirrorFolder: true,
 } as const;
+
+const candidateIdByTmdb = new Map<string, string>();
 
 const unavailable = <T>(feature: string): Promise<T> =>
   Promise.reject(new Error(`${feature}尚未接入 V4 数据流`));
@@ -27,6 +29,7 @@ export interface ScrapeTarget {
   scrape_type: string;
   scrape_year: number | null;
   local_year: number | null;
+  season_number?: number | null;
 }
 
 export interface ScrapeCandidate {
@@ -83,16 +86,45 @@ export interface DeletePreviewResponse {
 export const workDetailV4Compatibility = {
   scrape: {
     getTargetByWork: (
-      _workId: string,
-      _source?: string,
-      _seasonNumber?: number | null,
-      _groupType?: string,
-    ) => unavailable<ScrapeTarget | null>('手动刮削'),
-    searchCandidates: (_targetId: string, _query?: string, _year?: number) =>
-      unavailable<{ candidates: ScrapeCandidate[]; search_queries: string[] }>('手动刮削'),
-    selectCandidate: (
-      _targetId: string,
-      _tmdbId: number,
+      workId: string,
+      source?: string,
+      seasonNumber?: number | null,
+      groupType?: string,
+    ) => Promise.resolve<ScrapeTarget | null>({
+      scrape_target_id: workId,
+      source: source || '',
+      scrape_title: '',
+      scrape_type: groupType === 'movie' ? 'movie' : 'tv',
+      scrape_year: null,
+      local_year: null,
+      season_number: seasonNumber ?? null,
+    }),
+    searchCandidates: async (targetId: string, query?: string, year?: number) => {
+      const result = await mediaV4Api.metadataSearch({
+        work_id: targetId,
+        query: query || '',
+        year: year ?? null,
+      });
+      const candidates = (result.candidates || []).map((item) => {
+        const tmdbId = Number(item.provider_id);
+        candidateIdByTmdb.set(`${targetId}:${tmdbId}`, item.candidate_id);
+        return {
+          scrape_target_id: targetId,
+          tmdb_id: tmdbId,
+          tmdb_type: item.media_type || 'tv',
+          title: item.title,
+          original_title: item.original_title || '',
+          year: item.year,
+          poster_path: '',
+          vote_average: 0,
+          score: 0,
+        };
+      });
+      return { candidates, search_queries: [query || ''] };
+    },
+    selectCandidate: async (
+      targetId: string,
+      tmdbId: number,
       _tmdbType: string,
       _selectedBy?: string,
       _searchQuery?: string,
@@ -100,7 +132,13 @@ export const workDetailV4Compatibility = {
       _includeEpisode?: boolean,
       _workId?: string,
       _scope?: 'work' | 'season',
-    ) => unavailable<{ task_id: string }>('手动刮削'),
+    ) => {
+      const candidateId = candidateIdByTmdb.get(`${targetId}:${tmdbId}`);
+      if (!candidateId) throw new Error('候选已失效，请重新搜索');
+      await mediaV4Api.metadataConfirm({ work_id: targetId, candidate_id: candidateId });
+      // metadata/confirm 同步完成刮削并刷新投影；空 task_id 表示无需轮询。
+      return { task_id: '', status: 'succeeded' };
+    },
     rerunWorkScrape: async (workId: string) => {
       const result = await mediaV4Api.enqueueWorkScrape(workId);
       return { task_id: result.job_id, status: result.status };
@@ -131,7 +169,10 @@ export const workDetailV4Compatibility = {
     setCollection: (_workId: string, _type: number, _seasonNumber?: number) => unavailable<Record<string, unknown>>('Bangumi 收藏同步'),
   },
   tracking: {
-    scan: (_workId: string, _includeScrape?: boolean) => unavailable<{ task_id: string; status: string }>('作品追更扫描'),
+    scan: async (workId: string, _includeScrape?: boolean) => {
+      const result = await mediaV4Api.trackingScanWork(workId);
+      return { task_id: '', status: result.status };
+    },
     uploadArtwork: (_workId: string, _kind: 'poster' | 'fanart' | 'clearlogo', _file: File) =>
       unavailable<{ path: string }>('手动图片管理'),
     restoreArtwork: (_workId: string, _kind: 'poster' | 'fanart' | 'clearlogo') =>
@@ -152,11 +193,26 @@ export const workDetailV4Compatibility = {
       await mediaV4Api.restoreWorkTitle(workId);
       return { work_id: workId, restored: true };
     },
-    deleteWorkPreview: (_workId: string) => unavailableReason<DeletePreviewResponse>('单个作品删除', '请先通过媒体库维护按来源清理，或等待单作品删除命令接入'),
-    deleteWorkConfirm: (_workId: string, _previewId: string) => unavailableReason<{
-      status: 'succeeded' | 'partial_failed' | 'failed';
-      failed: Array<{ path: string; reason: string }>;
-    }>('单个作品删除', '请先通过媒体库维护按来源清理，或等待单作品删除命令接入'),
+    deleteWorkPreview: async (workId: string) => {
+      const preview = await mediaV4Api.deleteWorkPreview(workId);
+      return {
+        preview_id: preview.preview_id,
+        files: preview.artifact_paths.map((path) => ({ path, kind: 'artifact', exists: true, allowed: true, reason: '' })),
+        warnings: ['源视频与挂载盘媒体始终保留；确认后作品从媒体库退出并清理受控镜像/NFO/图片。'],
+        blocked: false,
+        history_count: preview.playback_count,
+        progress_count: preview.playback_count,
+        related_reference_count: preview.tracking_count,
+      } satisfies DeletePreviewResponse;
+    },
+    deleteWorkConfirm: async (workId: string, previewId: string) => {
+      const preview = await mediaV4Api.deleteWorkPreview(workId);
+      const result = await mediaV4Api.deleteWorkConfirm(workId, previewId, preview.digest);
+      return {
+        status: (result.status === 'completed' ? 'succeeded' : 'failed') as 'succeeded' | 'partial_failed' | 'failed',
+        failed: result.artifact_results.filter((item) => item.status === 'failed').map((item) => ({ path: item.path, reason: '删除失败' })),
+      };
+    },
   },
   artwork: {
     upload: (workId: string, kind: 'poster' | 'fanart' | 'clearlogo', file: File) => {

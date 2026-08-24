@@ -19,8 +19,9 @@ class WatchStatusRequest(BaseModel):
     favorite: bool | None = None
 
 
-def _card_payload(card: dict) -> dict:
+def _card_payload(card: dict, override: dict | None = None) -> dict:
     metadata = card.get("metadata") or {}
+    override = override or {}
     media_type = card["media_type"] if card["media_type"] in {"tv", "movie"} else "tv"
     # P-001 7.7 R4：show_type/card_type 以后端持久化权威为准，不再硬编码。
     show_type = str(card.get("show_type") or metadata.get("show_type") or "")
@@ -33,9 +34,14 @@ def _card_payload(card: dict) -> dict:
     watch_status = metadata.get("watch_status")
     if watch_status is None:
         watch_status = {"work_id": card["work_id"], "status": "", "note": "", "favorite": False, "updated_at": ""}
+    # P-006：用户覆盖层（标题/图片）优先于刮削事实；不覆盖原始抓取数据。
+    display_title = str(override.get("title") or "") or metadata.get("title") or card["title"]
+    local_poster = str(override.get("local_poster_path") or "") or metadata.get("local_poster_path") or ""
+    local_fanart = str(override.get("local_fanart_path") or "") or metadata.get("local_fanart_path") or ""
+    local_clearlogo = str(override.get("local_clearlogo_path") or "") or metadata.get("local_clearlogo_path") or ""
     return {
         "work_id": card["work_id"],
-        "title": card["title"],
+        "title": display_title,
         "original_title": metadata.get("original_title") or card["title"],
         "year": card["year"],
         "title_provenance": "online" if metadata.get("provider") not in {None, "", "local"} else "local",
@@ -58,9 +64,9 @@ def _card_payload(card: dict) -> dict:
         "source_locations": {},
         "poster_path": metadata.get("poster_url") or "",
         "fanart_path": metadata.get("fanart_url") or "",
-        "local_poster_path": metadata.get("local_poster_path") or "",
-        "local_fanart_path": metadata.get("local_fanart_path") or "",
-        "clearlogo_path": metadata.get("clearlogo_url") or metadata.get("clearlogo_path") or "",
+        "local_poster_path": local_poster,
+        "local_fanart_path": local_fanart,
+        "clearlogo_path": metadata.get("clearlogo_url") or metadata.get("clearlogo_path") or local_clearlogo,
         "dir_path": "",
         "related_works": metadata.get("related_works") or [],
         "cast": metadata.get("cast") or [],
@@ -79,14 +85,42 @@ def _library_snapshot():
     return projection.current() or projection.rebuild()
 
 
+def _work_overrides_map(work_ids: list[str]) -> dict[str, dict]:
+    """批量读取作品用户覆盖层（标题/图片/隐藏标记）。"""
+
+    if not work_ids:
+        return {}
+    import json as _json
+
+    with get_database().connect() as conn:
+        placeholders = ",".join("?" for _ in work_ids)
+        rows = conn.execute(
+            "SELECT work_id, override_json FROM work_overrides WHERE work_id IN (" + placeholders + ")",
+            work_ids,
+        ).fetchall()
+    result: dict[str, dict] = {}
+    for row in rows:
+        try:
+            result[str(row["work_id"])] = _json.loads(row["override_json"] or "{}")
+        except (TypeError, ValueError):
+            result[str(row["work_id"])] = {}
+    return result
+
+
 @router.get("")
 def get_library(compact: bool = False, source: str | None = None, include_all: bool = False):
     del compact
     snapshot = _library_snapshot()
-    watch_map = _watch_status_map([card["work_id"] for card in snapshot.cards])
+    work_ids = [card["work_id"] for card in snapshot.cards]
+    watch_map = _watch_status_map(work_ids)
+    override_map = _work_overrides_map(work_ids)
     works = []
     for card in snapshot.cards:
-        payload = _card_payload(card)
+        override = override_map.get(card["work_id"], {})
+        if override.get("hidden"):
+            # 单作品删除：从活动媒体库排除（不可变快照保留审计事实）。
+            continue
+        payload = _card_payload(card, override)
         payload["watch_status"] = watch_map.get(card["work_id"], {
             "work_id": card["work_id"], "status": "", "note": "", "favorite": False, "updated_at": "",
         })
@@ -297,9 +331,14 @@ def get_work_detail(work_id: str):
     show_type = "anime_series" if media_type == "tv" else "anime_movie"
     watch_status = _watch_payload(dict(watch_row)) if watch_row else None
     sources = sorted({item["source"] for item in episode_payload}) or ["local"]
+    override = _work_overrides_map([work_id]).get(work_id, {})
+    display_title = str(override.get("title") or "") or metadata.get("title") or work["preferred_title"]
+    local_poster = str(override.get("local_poster_path") or "") or metadata.get("local_poster_path") or ""
+    local_fanart = str(override.get("local_fanart_path") or "") or metadata.get("local_fanart_path") or ""
+    local_clearlogo = str(override.get("local_clearlogo_path") or "") or metadata.get("local_clearlogo_path") or ""
     payload = {
         "work_id": work["work_id"],
-        "title": metadata.get("title") or work["preferred_title"],
+        "title": display_title,
         "original_title": metadata.get("original_title") or work["original_title"] or work["preferred_title"],
         "year": metadata.get("year") or work["year"],
         "title_provenance": "online" if metadata.get("provider") not in {None, "", "local"} else "local",
@@ -319,9 +358,9 @@ def get_work_detail(work_id: str):
         "source_locations": {key: sorted(set(values)) for key, values in source_locations.items()},
         "poster_path": metadata.get("poster_url") or "",
         "fanart_path": metadata.get("fanart_url") or "",
-        "local_poster_path": metadata.get("local_poster_path") or "",
-        "local_fanart_path": metadata.get("local_fanart_path") or "",
-        "clearlogo_path": metadata.get("clearlogo_url") or metadata.get("clearlogo_path") or "",
+        "local_poster_path": local_poster,
+        "local_fanart_path": local_fanart,
+        "clearlogo_path": metadata.get("clearlogo_url") or metadata.get("clearlogo_path") or local_clearlogo,
         "dir_path": "",
         "related_works": metadata.get("related_works") or [],
         "cast": metadata.get("cast") or [],

@@ -318,3 +318,113 @@ def confirm_delete_preview(database: V4Database, *, preview_id: str, scope: str,
 
 def _scope_from_digest_preview(preview: dict) -> str:
     return str(preview.get("scope") or "all")
+def compute_work_delete_preview(database: V4Database, *, work_id: str, mirror_root: Path | None = None) -> dict:
+    """单作品删除预览：列出该作品在活动来源中的受控生成物与个人状态影响。"""
+
+    with database.connect() as conn:
+        revision = conn.execute(
+            """
+            SELECT ir.revision_id FROM import_revisions ir
+            JOIN revision_bindings rb ON rb.revision_id = ir.revision_id
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            WHERE rb.work_id = ? AND ir.status = 'confirmed' AND sr.retired_at = ''
+            ORDER BY ir.confirmed_at DESC LIMIT 1
+            """,
+            (work_id,),
+        ).fetchone()
+        if revision is None:
+            raise ValueError("该作品不在任何活动媒体库中")
+        artifact_rows = conn.execute(
+            "SELECT artifact_id, target_path FROM artifacts WHERE revision_id = ? AND work_id = ? ORDER BY target_path",
+            (revision["revision_id"], work_id),
+        ).fetchall()
+        playback_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM playback_progress WHERE work_id = ?", (work_id,)
+        ).fetchone()["c"]
+        tracking_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM tracking_states WHERE work_id = ?", (work_id,)
+        ).fetchone()["c"]
+    artifact_paths: list[str] = []
+    for artifact in artifact_rows:
+        path = Path(artifact["target_path"])
+        if mirror_root is not None:
+            try:
+                resolved = path.resolve(strict=False)
+                root_resolved = mirror_root.resolve(strict=False)
+                if resolved == root_resolved or root_resolved not in resolved.parents:
+                    continue
+            except OSError:
+                continue
+        artifact_paths.append(str(path))
+    preview = {
+        "preview_id": "prev_work_" + uuid.uuid4().hex,
+        "work_id": work_id,
+        "artifact_count": len(artifact_paths),
+        "artifact_paths": artifact_paths,
+        "playback_count": int(playback_count or 0),
+        "tracking_count": int(tracking_count or 0),
+        "digest": _digest("work:" + work_id, [{"root_id": "", "revision_id": str(revision["revision_id"])}], [{"work_id": work_id}], artifact_paths),
+    }
+    return preview
+
+
+def confirm_work_delete(database: V4Database, *, work_id: str, preview_id: str, digest: str, mirror_root: Path | None = None) -> dict:
+    """校验并执行单作品删除：标记隐藏 + 清理受控生成物 + 播放/追更状态 + 投影重建。"""
+
+    current = compute_work_delete_preview(database, work_id=work_id, mirror_root=mirror_root)
+    if current["digest"] != digest:
+        raise ValueError("作品状态已变化，请重新生成删除预览")
+    with database.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = conn.execute(
+                "SELECT override_json FROM work_overrides WHERE work_id = ?", (work_id,)
+            ).fetchone()
+            payload = json.loads(existing["override_json"]) if existing else {}
+            payload["hidden"] = True
+            conn.execute(
+                """
+                INSERT INTO work_overrides(work_id, override_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(work_id) DO UPDATE SET override_json = excluded.override_json, updated_at = excluded.updated_at
+                """,
+                (work_id, json.dumps(payload, ensure_ascii=False), _now(), _now()),
+            )
+            conn.execute("DELETE FROM playback_progress WHERE work_id = ?", (work_id,))
+            conn.execute("DELETE FROM tracking_states WHERE work_id = ?", (work_id,))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    cleanup_results: list[dict] = []
+    for path_text in current["artifact_paths"]:
+        path = Path(path_text)
+        try:
+            if mirror_root is not None:
+                resolved = path.resolve(strict=False)
+                root_resolved = mirror_root.resolve(strict=False)
+                if resolved == root_resolved or root_resolved not in resolved.parents:
+                    cleanup_results.append({"path": path_text, "status": "blocked"})
+                    continue
+            if path.is_dir() and not path.is_symlink():
+                cleanup_results.append({"path": path_text, "status": "blocked"})
+                continue
+            if path.exists() or path.is_symlink():
+                path.unlink()
+                cleanup_results.append({"path": path_text, "status": "removed"})
+            else:
+                cleanup_results.append({"path": path_text, "status": "missing"})
+        except OSError as exc:
+            cleanup_results.append({"path": path_text, "status": "failed", "error": str(exc)})
+    try:
+        V4LibraryProjection(database).rebuild()
+        projection_status = "ok"
+    except Exception as exc:  # noqa: BLE001
+        projection_status = f"failed: {exc}"
+    return {
+        "preview_id": preview_id,
+        "work_id": work_id,
+        "status": "completed",
+        "artifact_results": cleanup_results,
+        "projection_status": projection_status,
+    }

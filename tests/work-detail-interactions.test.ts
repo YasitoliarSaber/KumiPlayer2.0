@@ -13,7 +13,7 @@ test('作品详情只消费 V4 作品、季度和 Asset 身份', () => {
   assert.doesNotMatch(compatibility, /\/api\/(scrape|tracking)|import_plan_id/);
   assert.match(compatibility, /manualScrape: true/);
   assert.match(compatibility, /titleMutation: true/);
-  assert.match(compatibility, /workDeletion: false/);
+  assert.match(compatibility, /workDeletion: true/);
 });
 
 test('作品详情恢复旧版沉浸式结构而不是简化信息列表', () => {

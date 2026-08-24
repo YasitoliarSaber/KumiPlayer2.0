@@ -132,6 +132,11 @@ class WorkTitleRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
 
 
+class WorkDeleteConfirmRequest(BaseModel):
+    preview_id: str = Field(min_length=1)
+    digest: str = Field(min_length=32)
+
+
 class ArtworkUploadRequest(BaseModel):
     kind: Literal["poster", "fanart", "clearlogo"]
     data_base64: str = Field(min_length=1)
@@ -1267,6 +1272,36 @@ def enqueue_work_scrape(work_id: str):
             (job_id, revision["revision_id"], work_id, f"scrape_work:{revision['revision_id']}:{work_id}", now, now),
         )
     return {"work_id": work_id, "job_id": job_id, "status": "queued"}
+
+
+@router.post("/works/{work_id}/delete-preview")
+def work_delete_preview(work_id: str):
+    """单作品删除预览（只读计算，不删除任何内容）。"""
+
+    from app.media_v4.maintenance.service import compute_work_delete_preview
+
+    try:
+        return compute_work_delete_preview(get_database(), work_id=work_id, mirror_root=_configured_mirror_root())
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/works/{work_id}/delete-confirm")
+def work_delete_confirm(work_id: str, request: WorkDeleteConfirmRequest):
+    """校验并执行单作品删除；digest 不一致返回 409。"""
+
+    from app.media_v4.maintenance.service import confirm_work_delete
+
+    try:
+        return confirm_work_delete(
+            get_database(),
+            work_id=work_id,
+            preview_id=request.preview_id,
+            digest=request.digest,
+            mirror_root=_configured_mirror_root(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/sources/openlist/status")

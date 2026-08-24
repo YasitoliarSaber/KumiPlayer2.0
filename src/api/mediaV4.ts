@@ -325,6 +325,18 @@ export const mediaV4Api = {
   trackingCancelScan: (scanId: string) =>
     api.post<{ scan_id: string; status: string }>(`/api/v4/tracking/scans/${encodeURIComponent(scanId)}/cancel`),
 
+  metadataSearch: (request: { work_id: string; query?: string; media_type?: string; year?: number | null }) =>
+    api.post<{ work_id: string; candidates: Array<{ candidate_id: string; provider_id: string; media_type: string; title: string; original_title: string; year: number | null; aliases: string[] }> }>('/api/v4/metadata/search', request),
+
+  metadataConfirm: (request: { work_id: string; candidate_id: string }) =>
+    api.post<{ work_id: string; candidate_id: string; provider: string; provider_id: string; status: string }>('/api/v4/metadata/confirm', request),
+
+  deleteWorkPreview: (workId: string) =>
+    api.post<{ preview_id: string; work_id: string; artifact_count: number; artifact_paths: string[]; playback_count: number; tracking_count: number; digest: string }>(`/api/v4/works/${encodeURIComponent(workId)}/delete-preview`, {}),
+
+  deleteWorkConfirm: (workId: string, previewId: string, digest: string) =>
+    api.post<{ preview_id: string; work_id: string; status: string; artifact_results: Array<{ path: string; status: string }> }>(`/api/v4/works/${encodeURIComponent(workId)}/delete-confirm`, { preview_id: previewId, digest }),
+
   revisionEvidence: (revisionId: string) =>
     api.get<{ revision_id: string; status: string; entries: V4SourceEvidence[] }>(`/api/v4/imports/${encodeURIComponent(revisionId)}/evidence`),
 
