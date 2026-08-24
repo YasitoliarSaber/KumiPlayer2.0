@@ -67,10 +67,14 @@ def create_durable_scan(
                 (now, scan_id),
             )
         else:
+            generation = conn.execute(
+                "SELECT COALESCE(MAX(generation), 0) + 1 FROM source_scans WHERE root_id = ?",
+                (root_id,),
+            ).fetchone()[0]
             conn.execute(
                 "INSERT INTO source_scans(scan_id, root_id, generation, status, started_at) "
-                "VALUES (?, ?, 1, 'running', ?)",
-                (scan_id, root_id, now),
+                "VALUES (?, ?, ?, 'running', ?)",
+                (scan_id, root_id, generation, now),
             )
     _cancel_flags[scan_id] = threading.Event()
 

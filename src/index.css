@@ -13779,3 +13779,11 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 }
 .media-v4-completed-block { display: grid; gap: 8px; }
 .media-v4-completed-toggle { display: inline-flex; gap: 6px; align-items: center; border: 0; background: none; color: var(--text-secondary); font-size: 13px; cursor: pointer; padding: 4px 0; }
+/* P-006 追更标签与新番扫描入口（分类页 + 卡片） */
+.poster-card-seasonal { display: inline-flex; gap: 5px; align-items: center; margin-top: 3px; font-size: 12px; color: var(--accent-strong); }
+.poster-card-seasonal .seasonal-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-strong); }
+.category-seasonal-actions { display: inline-flex; gap: 8px; align-items: center; }
+.category-scan-button { padding: 5px 10px; border-radius: 7px; border: 1px solid color-mix(in srgb, var(--border) 76%, transparent); background: color-mix(in srgb, var(--accent-strong) 9%, transparent); color: var(--text); font-size: 12px; cursor: pointer; }
+.category-scan-button:disabled { opacity: 0.6; cursor: default; }
+.category-scan-cancel { padding: 5px 10px; border-radius: 7px; border: 1px solid color-mix(in srgb, var(--warning, #c45b52) 40%, transparent); background: transparent; color: var(--warning, #c45b52); font-size: 12px; cursor: pointer; }
+.category-scan-message { padding: 9px 12px; border-radius: 8px; font-size: 13px; color: var(--text-secondary); background: color-mix(in srgb, var(--surface-raised) 88%, transparent); border: 1px solid color-mix(in srgb, var(--border) 70%, transparent); margin-bottom: 12px; }

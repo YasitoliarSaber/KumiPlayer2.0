@@ -227,6 +227,26 @@ export interface V4ExecutionProgress {
   work_units: V4WorkProgressUnit[]
 }
 
+export interface V4TrackingWork {
+  work_id: string
+  title: string
+  show_type: string
+  media_type: 'tv' | 'movie'
+  status: 'watching' | 'on_hold'
+  favorite: boolean
+  last_watched_episode: number | null
+  latest_episode_number: number | null
+  updated_at: string
+}
+
+export interface V4TrackingScanTask {
+  task_id: string
+  root_id: string
+  remote_root: string
+  status: string
+  reason?: string
+}
+
 export const mediaV4Api = {
   scan: (request: {
     source?: string
@@ -294,6 +314,16 @@ export const mediaV4Api = {
 
   enqueueWorkScrape: (workId: string) =>
     api.post<{ work_id: string; job_id: string; status: string }>(`/api/v4/works/${encodeURIComponent(workId)}/scrape`),
+
+  trackingWorks: () => api.get<{ works: V4TrackingWork[] }>('/api/v4/tracking/works'),
+
+  trackingScanAll: () => api.post<{ tasks: V4TrackingScanTask[] }>('/api/v4/tracking/scan-all', {}),
+
+  trackingScanWork: (workId: string) =>
+    api.post<{ task_id: string; root_id: string; remote_root: string; status: string }>(`/api/v4/tracking/${encodeURIComponent(workId)}/scan`, {}),
+
+  trackingCancelScan: (scanId: string) =>
+    api.post<{ scan_id: string; status: string }>(`/api/v4/tracking/scans/${encodeURIComponent(scanId)}/cancel`),
 
   revisionEvidence: (revisionId: string) =>
     api.get<{ revision_id: string; status: string; entries: V4SourceEvidence[] }>(`/api/v4/imports/${encodeURIComponent(revisionId)}/evidence`),

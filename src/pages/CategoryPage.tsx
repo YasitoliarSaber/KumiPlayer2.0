@@ -5,6 +5,8 @@ import { useUiStore, type LibraryView, type SortId } from '../stores/ui';
 import { matchesSourceFilter } from '../utils/sourceFilter';
 import { getSortDimension, getSortOption, sortDimensions, toggleSort } from '../utils/categorySort';
 import { useDismissiblePopover } from '../hooks/useDismissiblePopover';
+import { useCallback } from 'react';
+import { mediaV4Api, type V4TrackingScanTask } from '../api/mediaV4';
 import VirtualizedPosterGrid from '../components/library/VirtualizedPosterGrid';
 import LibraryViewControls, { normalizeColumns } from '../components/library/LibraryViewControls';
 import LoadingState from '../components/ui/loading-state';
@@ -30,6 +32,42 @@ export default function CategoryPage() {
   const posterSize = useUiStore((state) => state.posterSize);
   const [sortOpen, setSortOpen] = useState(false);
   const [columnCapacity, setColumnCapacity] = useState<number>();
+  const [scanTasks, setScanTasks] = useState<V4TrackingScanTask[]>([]);
+  const [scanning, setScanning] = useState(false);
+  const [scanMessage, setScanMessage] = useState('');
+  const seasonalWorks = useMemo(() => works.filter((work) => work.watch_status?.status === 'watching' || work.watch_status?.status === 'on_hold'), [works]);
+
+  const startSeasonalScan = useCallback(async () => {
+    setScanning(true);
+    setScanMessage('');
+    try {
+      const result = await mediaV4Api.trackingScanAll();
+      setScanTasks(result.tasks);
+      const running = result.tasks.filter((task) => task.status === 'running');
+      const blocked = result.tasks.filter((task) => task.status === 'blocked');
+      if (running.length > 0) {
+        setScanMessage(`已开始 ${running.length} 个新番增量扫描，完成后请在媒体管理中确认识别结果。`);
+      } else if (blocked.length > 0) {
+        setScanMessage('暂无可增量扫描的新番来源：' + blocked.map((task) => task.reason || '来源未就绪').join('；'));
+      } else {
+        setScanMessage('没有需要扫描的新番来源。');
+      }
+    } catch (cause) {
+      setScanMessage(cause instanceof Error ? cause.message : '发起新番扫描失败');
+    } finally {
+      setScanning(false);
+    }
+  }, []);
+
+  const cancelSeasonalScan = useCallback(async (scanId: string) => {
+    try {
+      await mediaV4Api.trackingCancelScan(scanId);
+      setScanTasks((current) => current.filter((task) => task.task_id !== scanId));
+      setScanMessage('已请求取消扫描。');
+    } catch (cause) {
+      setScanMessage(cause instanceof Error ? cause.message : '取消扫描失败');
+    }
+  }, []);
 
   useLayoutEffect(() => {
     if (!activeCategory) return;
@@ -93,11 +131,19 @@ export default function CategoryPage() {
       <div className="category-head">
         <div className="category-title-block"><h1>{categoryLabels[activeCategory]}</h1><span>共 {categoryWorks.length} 部</span></div>
         <div className="category-toolbar" role="toolbar" aria-label="分类视图工具">
-          {activeCategory === 'seasonal' && <span className="category-v4-note">导入和扫描统一在媒体管理中进行</span>}
+          {activeCategory === 'seasonal' && (
+            <div className="category-seasonal-actions">
+              <button type="button" className="category-scan-button" disabled={scanning} onClick={() => void startSeasonalScan()}>
+                {scanning ? '正在发起…' : `扫描新番${seasonalWorks.length > 0 ? `（${seasonalWorks.length} 部）` : ''}`}
+              </button>
+              {scanTasks.length > 0 && <button type="button" className="category-scan-cancel" onClick={() => scanTasks.forEach((task) => void cancelSeasonalScan(task.task_id))}>取消扫描</button>}
+            </div>
+          )}
           <SortMenu value={sort} open={sortOpen} onOpenChange={setSortOpen} onChange={setSort} />
           <LibraryViewControls maxColumns={columnCapacity} />
         </div>
       </div>
+      {scanMessage && <div className="category-scan-message" role="status">{scanMessage}</div>}
       {categoryWorks.length === 0 ? <CenteredMessage>这个筛选下还没有作品</CenteredMessage> : (
         <div className="category-grid-wrap">
           <VirtualizedPosterGrid works={categoryWorks} columns={normalizeColumns(posterSize)} onColumnCapacityChange={setColumnCapacity} localArtworkOnly />

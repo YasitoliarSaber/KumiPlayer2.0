@@ -140,6 +140,13 @@ function PosterCard({
               : work.year ? `${work.year}` : ''
           }
         </div>
+        {(work.watch_status?.status === 'watching' || work.watch_status?.status === 'on_hold') && (
+          <div className="poster-card-seasonal">
+            <span className="seasonal-dot" aria-hidden="true" />
+            {work.watch_status.status === 'watching' ? '追更中' : '搁置中'}
+            {work.latest_episode_number != null && ` · 更新至 ${work.latest_episode_number} 集`}
+          </div>
+        )}
       </div>
     </button>
   );

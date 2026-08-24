@@ -123,3 +123,21 @@ describe('isSeasonalWork', () => {
     expect(isSeasonalWork(base)).toBe(false)
   })
 })
+
+
+test('S00 特别篇不作为普通季度', () => {
+  const preview: V4Preview = {
+    revision_id: 'rev-s00', status: 'draft',
+    works: [{ work_key: 'w1', preferred_title: '正片', year: 2024, media_type: 'tv', source_evidence_ids: [] }],
+    episodes: [
+      makeEpisode('w1', 1, { local_season_number: 1, season_kind: 'regular' }),
+      makeEpisode('w1', 1, { local_season_number: 0, season_kind: 'special', special_number: 1 }),
+    ] as never,
+    work_assets: [],
+    issues: [],
+  }
+  const summary = buildWorkSummaries(preview)
+  const kinds = summary.works[0].groups.map((group) => group.kind)
+  expect(kinds).toEqual(['season', 'special'])
+  expect(summary.works[0].groups.find((group) => group.kind === 'special')?.seasonNumber).toBeNull()
+})
