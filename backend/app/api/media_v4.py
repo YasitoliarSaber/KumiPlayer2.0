@@ -127,6 +127,14 @@ class SourceScanRequest(BaseModel):
 
 
 
+
+class WorkTitleRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+
+
+class ArtworkUploadRequest(BaseModel):
+    kind: Literal["poster", "fanart", "clearlogo"]
+    data_base64: str = Field(min_length=1)
 class MaintenancePreviewRequest(BaseModel):
     scope: Literal["local", "pan115", "baidu", "quark", "all"] = "all"
 
@@ -1097,6 +1105,168 @@ def cancel_durable_scan(scan_id: str):
         return {"scan_id": scan_id, "status": current["status"]}
     cancel_durable_scan(scan_id)
     return {"scan_id": scan_id, "status": "cancelling"}
+
+
+@router.patch("/works/{work_id}/title")
+def set_work_title(work_id: str, request: WorkTitleRequest):
+    """作品标题用户覆盖层：写入 work_overrides，不覆盖抓取事实。"""
+
+    import json as _json
+
+    now = _now_iso()
+    with get_database().connect() as conn:
+        existing = conn.execute(
+            "SELECT override_json FROM work_overrides WHERE work_id = ?",
+            (work_id,),
+        ).fetchone()
+        payload = _json.loads(existing["override_json"]) if existing else {}
+        payload["title"] = request.title.strip()
+        conn.execute(
+            """
+            INSERT INTO work_overrides(work_id, override_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(work_id) DO UPDATE SET override_json = excluded.override_json, updated_at = excluded.updated_at
+            """,
+            (work_id, _json.dumps(payload, ensure_ascii=False), now, now),
+        )
+    return {"work_id": work_id, "title": request.title.strip()}
+
+
+@router.delete("/works/{work_id}/title")
+def restore_work_title(work_id: str):
+    """恢复默认标题：清除用户覆盖。"""
+
+    with get_database().connect() as conn:
+        conn.execute("DELETE FROM work_overrides WHERE work_id = ?", (work_id,))
+    return {"work_id": work_id, "restored": True}
+
+
+@router.post("/works/{work_id}/artwork")
+async def upload_work_artwork(work_id: str, request: ArtworkUploadRequest):
+    """上传作品图片覆盖层；写入受管镜像根内 work 专属目录，返回本地路径。"""
+
+    import base64 as _base64
+    from pathlib import Path as _Path
+
+    mirror_root = _configured_mirror_root()
+    if mirror_root is None:
+        raise HTTPException(status_code=409, detail="尚未配置镜像根目录，无法保存图片")
+    if request.kind not in {"poster", "fanart", "clearlogo"}:
+        raise HTTPException(status_code=400, detail="不支持的图片类型")
+    try:
+        raw = _base64.b64decode(request.data_base64, validate=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="图片数据不是有效 Base64") from exc
+    if len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="图片不能超过 5MB")
+    directory = _Path(mirror_root) / "artwork" / work_id
+    directory.mkdir(parents=True, exist_ok=True)
+    suffix = ".png" if request.kind == "poster" else ".jpg"
+    target = directory / f"{request.kind}{suffix}"
+    target.write_bytes(raw)
+    now = _now_iso()
+    with get_database().connect() as conn:
+        existing = conn.execute(
+            "SELECT override_json FROM work_overrides WHERE work_id = ?",
+            (work_id,),
+        ).fetchone()
+        payload = json.loads(existing["override_json"]) if existing else {}
+        payload[f"local_{request.kind}_path"] = str(target)
+        conn.execute(
+            """
+            INSERT INTO work_overrides(work_id, override_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(work_id) DO UPDATE SET override_json = excluded.override_json, updated_at = excluded.updated_at
+            """,
+            (work_id, json.dumps(payload, ensure_ascii=False), now, now),
+        )
+    return {"path": str(target)}
+
+
+@router.delete("/works/{work_id}/artwork/{kind}")
+def restore_work_artwork(work_id: str, kind: str):
+    """恢复默认图片：清除用户覆盖并删除受控文件。"""
+
+    from pathlib import Path as _Path
+
+    mirror_root = _configured_mirror_root()
+    if kind not in {"poster", "fanart", "clearlogo"}:
+        raise HTTPException(status_code=400, detail="不支持的图片类型")
+    with get_database().connect() as conn:
+        existing = conn.execute(
+            "SELECT override_json FROM work_overrides WHERE work_id = ?",
+            (work_id,),
+        ).fetchone()
+        if existing is not None:
+            payload = json.loads(existing["override_json"])
+            old_path = payload.pop(f"local_{kind}_path", "")
+            conn.execute(
+                "UPDATE work_overrides SET override_json = ?, updated_at = ? WHERE work_id = ?",
+                (json.dumps(payload, ensure_ascii=False), _now_iso(), work_id),
+            )
+            if mirror_root is not None and old_path:
+                try:
+                    path = _Path(old_path).resolve(strict=False)
+                    root = _Path(mirror_root).resolve(strict=False)
+                    if root in path.parents and path.exists() and not path.is_dir():
+                        path.unlink()
+                except OSError:
+                    pass
+    return {"work_id": work_id, "restored": True}
+
+
+@router.get("/works/{work_id}/folder")
+def work_folder(work_id: str):
+    """返回该作品在已确认 Asset 中的安全播放目录；不可用时说明原因。"""
+
+    with get_database().connect() as conn:
+        row = conn.execute(
+            """
+            SELECT a.playback_locator
+            FROM revision_bindings rb
+            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            JOIN assets a ON a.asset_id = rb.asset_id
+            WHERE rb.work_id = ? AND ir.status = 'confirmed' AND sr.retired_at = ''
+              AND a.playback_locator != ''
+            ORDER BY a.playback_locator LIMIT 1
+            """,
+            (work_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="该作品没有可打开的已确认媒体文件")
+    folder = str(Path(row["playback_locator"]).parent)
+    return {"folder": folder, "exists": Path(folder).is_dir()}
+
+
+@router.post("/works/{work_id}/scrape")
+def enqueue_work_scrape(work_id: str):
+    """为指定作品创建/重跑刮削任务（进入同一 V4 job 链）。"""
+
+    with get_database().connect() as conn:
+        revision = conn.execute(
+            """
+            SELECT ir.revision_id FROM import_revisions ir
+            JOIN revision_bindings rb ON rb.revision_id = ir.revision_id
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            WHERE rb.work_id = ? AND ir.status = 'confirmed' AND sr.retired_at = ''
+            ORDER BY ir.confirmed_at DESC LIMIT 1
+            """,
+            (work_id,),
+        ).fetchone()
+    if revision is None:
+        raise HTTPException(status_code=404, detail="该作品不在任何活动媒体库中")
+    job_id = "job_" + uuid.uuid4().hex
+    now = _now_iso()
+    with get_database().connect() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO jobs(job_id, job_type, revision_id, work_id, idempotency_key, status, attempts, last_error, created_at, updated_at)
+            VALUES (?, 'scrape_work', ?, ?, ?, 'queued', 0, '', ?, ?)
+            """,
+            (job_id, revision["revision_id"], work_id, f"scrape_work:{revision['revision_id']}:{work_id}", now, now),
+        )
+    return {"work_id": work_id, "job_id": job_id, "status": "queued"}
 
 
 @router.get("/sources/openlist/status")

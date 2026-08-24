@@ -140,5 +140,17 @@ def list_progress(work_id: str | None = None):
 
 @router.get("/history")
 def history(limit: int = 50, work_id: str | None = None):
-    del limit
-    return list_progress(work_id)
+    """P-006：播放历史是独立事件，按播放时间降序并严格尊重 limit。"""
+
+    bounded = max(1, min(int(limit), 200))
+    params: list = []
+    where = ""
+    if work_id:
+        where = "WHERE work_id = ?"
+        params.append(work_id)
+    with get_database().connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM playback_history " + where + " ORDER BY played_at DESC, event_id LIMIT ?",
+            (*params, bounded),
+        ).fetchall()
+    return {"items": [dict(row) for row in rows], "limit": bounded}

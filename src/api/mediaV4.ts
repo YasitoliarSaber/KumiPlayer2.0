@@ -277,6 +277,24 @@ export const mediaV4Api = {
   maintenanceConfirm: (request: { preview_id: string; scope: string; digest: string }) =>
     api.post<V4MaintenanceResult>('/api/v4/library-maintenance/delete-confirm', request),
 
+  setWorkTitle: (workId: string, title: string) =>
+    api.patch<{ work_id: string; title: string }>(`/api/v4/works/${encodeURIComponent(workId)}/title`, { title }),
+
+  restoreWorkTitle: (workId: string) =>
+    api.delete<{ work_id: string; restored: boolean }>(`/api/v4/works/${encodeURIComponent(workId)}/title`),
+
+  uploadWorkArtwork: (workId: string, kind: string, dataBase64: string) =>
+    api.post<{ path: string }>(`/api/v4/works/${encodeURIComponent(workId)}/artwork`, { kind, data_base64: dataBase64 }),
+
+  restoreWorkArtwork: (workId: string, kind: string) =>
+    api.delete<{ work_id: string; restored: boolean }>(`/api/v4/works/${encodeURIComponent(workId)}/artwork/${kind}`),
+
+  workFolder: (workId: string) =>
+    api.get<{ folder: string; exists: boolean }>(`/api/v4/works/${encodeURIComponent(workId)}/folder`),
+
+  enqueueWorkScrape: (workId: string) =>
+    api.post<{ work_id: string; job_id: string; status: string }>(`/api/v4/works/${encodeURIComponent(workId)}/scrape`),
+
   revisionEvidence: (revisionId: string) =>
     api.get<{ revision_id: string; status: string; entries: V4SourceEvidence[] }>(`/api/v4/imports/${encodeURIComponent(revisionId)}/evidence`),
 

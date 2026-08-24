@@ -1438,12 +1438,12 @@ export default function WorkDetailPage() {
               {workDetailV4Capabilities.seasonalManagement && work.import_scope === 'seasonal' && <button role="menuitem" onClick={scanCurrentWork} disabled={managementBusy}><ScanLine size={16} />扫描当前作品</button>}
               {workDetailV4Capabilities.appendEpisodes && <button role="menuitem" onClick={() => { setAppendOpen(true); setMoreMenuOpen(false); }}><Upload size={16} />追加剧集</button>}
               {workDetailV4Capabilities.artworkMutation && <button role="menuitem" onClick={() => { setArtworkKind('fanart'); setMoreMenuOpen(false); }}><Image size={16} />更换背景图</button>}
-              {workDetailV4Capabilities.sourceSpecificFolders && hasMultipleSources ? sourceFolderEpisodes.map(({ source, episodeId }) => (
+              {workDetailV4Capabilities.sourceSpecificFolders && (hasMultipleSources && sourceFolderEpisodes.length > 0 ? sourceFolderEpisodes.map(({ source, episodeId }) => (
                 <button key={`video-${source}`} role="menuitem" onClick={() => { setMoreMenuOpen(false); void handleOpenFolder(episodeId, source); }}><FolderOpen size={16} />打开{workSourceLabel(source)}文件夹</button>
               )) : (
                 <button role="menuitem" onClick={() => { setMoreMenuOpen(false); void handleOpenFolder(); }}><FolderOpen size={16} />打开视频文件夹</button>
-              )}
-              {workDetailV4Capabilities.mirrorFolder && (hasMultipleSources ? sourceFolderEpisodes.map(({ source, episodeId }) => (
+              ))}
+              {workDetailV4Capabilities.mirrorFolder && (hasMultipleSources && sourceFolderEpisodes.length > 0 ? sourceFolderEpisodes.map(({ source, episodeId }) => (
                 <button key={`mirror-${source}`} role="menuitem" onClick={() => { setMoreMenuOpen(false); void handleOpenMirrorFolder(episodeId, source); }}><FolderSymlink size={16} />打开{workSourceLabel(source)}镜像文件夹</button>
               )) : (
                 <button role="menuitem" onClick={() => { setMoreMenuOpen(false); void handleOpenMirrorFolder(); }}><FolderSymlink size={16} />打开镜像文件夹</button>

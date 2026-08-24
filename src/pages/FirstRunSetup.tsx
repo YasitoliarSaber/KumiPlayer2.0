@@ -136,7 +136,7 @@ export default function FirstRunSetup({ initialConfig, onComplete, mode = 'first
                 <span className="first-run-hero-icon"><Sparkles size={28} /></span>
                 <p className="first-run-eyebrow">{isReconfigure ? '重新检查 KumiPlayer 配置' : '欢迎使用 KumiPlayer'}</p>
                 <h1>{isReconfigure ? '重新配置基础环境' : '先完成几项基础设置'}</h1>
-                <p>真实视频始终保留在你的网盘或本地目录中。KumiPlayer 会先记录扫描到的 SourceEvidence，再建立可确认的媒体图谱、镜像、元数据和播放记录。</p>
+                <p>真实视频始终保留在你的网盘或本地目录中。KumiPlayer 只负责整理媒体、建立可播放的媒体库，不会移动或改名你的原始文件。</p>
                 <div className="first-run-principles">
                   <article><ShieldCheck size={20} /><div><strong>不移动真实媒体</strong><span>路径检查只读取文件和目录信息。</span></div></article>
                   <article><Database size={20} /><div><strong>来源先记录，再整理</strong><span>本地目录、挂载网盘和目录树会进入同一条媒体整理链路，后续仍可在媒体管理中确认与修正。</span></div></article>

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 9
+V4_SCHEMA_VERSION = 10
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -145,6 +145,14 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             original_title TEXT NOT NULL DEFAULT '',
             year INTEGER,
             status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE work_overrides (
+            work_id TEXT PRIMARY KEY,
+            override_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -405,6 +413,19 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             completed INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL,
             PRIMARY KEY(episode_id, asset_id)
+        )
+        """,
+        """
+        CREATE TABLE playback_history (
+            event_id TEXT PRIMARY KEY,
+            work_id TEXT NOT NULL,
+            episode_id TEXT NOT NULL DEFAULT '',
+            asset_id TEXT NOT NULL DEFAULT '',
+            played_at TEXT NOT NULL,
+            title_snapshot TEXT NOT NULL DEFAULT '',
+            season_snapshot TEXT NOT NULL DEFAULT '',
+            episode_snapshot TEXT NOT NULL DEFAULT '',
+            source_provider TEXT NOT NULL DEFAULT ''
         )
         """,
         """
@@ -745,6 +766,42 @@ def create_v9_structures(conn: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def create_v10_structures(conn: sqlite3.Connection) -> None:
+    """v10 增量结构：独立播放历史事件表与作品用户覆盖层。"""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS work_overrides (
+            work_id TEXT PRIMARY KEY,
+            override_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS playback_history (
+            event_id TEXT PRIMARY KEY,
+            work_id TEXT NOT NULL,
+            episode_id TEXT NOT NULL DEFAULT '',
+            asset_id TEXT NOT NULL DEFAULT '',
+            played_at TEXT NOT NULL,
+            title_snapshot TEXT NOT NULL DEFAULT '',
+            season_snapshot TEXT NOT NULL DEFAULT '',
+            episode_snapshot TEXT NOT NULL DEFAULT '',
+            source_provider TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+
+
+def migrate_schema_v9_to_v10(conn: sqlite3.Connection) -> None:
+    """v9 → v10 增量迁移：独立播放历史事件表。"""
+
+    create_v10_structures(conn)
 
 
 def migrate_schema_v8_to_v9(conn: sqlite3.Connection) -> None:

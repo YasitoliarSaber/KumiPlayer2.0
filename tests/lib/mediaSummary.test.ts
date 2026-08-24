@@ -111,3 +111,15 @@ describe('sortWorkUnits', () => {
     expect(sorted).toEqual(['running_mirror', 'failed', 'waiting_metadata', 'completed'])
   })
 })
+
+import { isSeasonalWork } from '../../src/utils/libraryCategories'
+import type { WorkIndex } from '../../src/api/types'
+
+describe('isSeasonalWork', () => {
+  test('基于后端 watch_status，不再常量 false', () => {
+    const base = { work_id: 'w', title: 'x', original_title: '', year: null, rating: 0, plot: '', genres: [], studios: [], show_type: 'anime_series' as const, media_type: 'tv' as const, source: 'pan115' as const, card_type: 'main_series' as const, poster_path: '', fanart_path: '', clearlogo_path: '', dir_path: '' } as WorkIndex
+    expect(isSeasonalWork({ ...base, watch_status: { work_id: 'w', status: 'watching', note: '', favorite: false, updated_at: '' } })).toBe(true)
+    expect(isSeasonalWork({ ...base, watch_status: { work_id: 'w', status: '', note: '', favorite: true, updated_at: '' } })).toBe(false)
+    expect(isSeasonalWork(base)).toBe(false)
+  })
+})

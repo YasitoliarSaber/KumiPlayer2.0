@@ -40,7 +40,7 @@ def _insert_v7_root(conn: sqlite3.Connection, *, root_id: str, provider: str, in
     )
 
 
-def test_v7_database_is_migrated_to_v9_with_source_mode_backfill(tmp_path):
+def test_v7_database_is_migrated_to_v10_with_source_mode_backfill(tmp_path):
     db_path = tmp_path / "legacy-v7.db"
     _build_v7_database(db_path)
     with sqlite3.connect(db_path) as conn:
@@ -68,7 +68,7 @@ def test_v7_database_is_migrated_to_v9_with_source_mode_backfill(tmp_path):
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
         rows = {
             str(row["root_id"]): str(row["source_mode"])
             for row in conn.execute("SELECT root_id, source_mode FROM source_roots").fetchall()
@@ -111,7 +111,7 @@ def test_v4_database_is_migrated_to_v5_without_data_loss(tmp_path):
 
     with sqlite3.connect(db_path) as conn:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 9
+        assert version == 10
         table = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tree_scan_validation'"
         ).fetchone()
@@ -129,7 +129,7 @@ def test_fresh_database_is_v5_and_has_validation_table(tmp_path):
 
     with sqlite3.connect(tmp_path / "fresh.db") as conn:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == V4_SCHEMA_VERSION == 9
+        assert version == V4_SCHEMA_VERSION == 10
         table = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tree_scan_validation'"
         ).fetchone()

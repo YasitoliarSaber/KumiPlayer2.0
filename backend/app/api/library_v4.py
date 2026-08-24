@@ -30,6 +30,9 @@ def _card_payload(card: dict) -> dict:
     if not card_type:
         card_type = "main_series" if media_type == "tv" else "standalone"
     sources = metadata.get("sources") or ["local"]
+    watch_status = metadata.get("watch_status")
+    if watch_status is None:
+        watch_status = {"work_id": card["work_id"], "status": "", "note": "", "favorite": False, "updated_at": ""}
     return {
         "work_id": card["work_id"],
         "title": card["title"],
@@ -51,6 +54,7 @@ def _card_payload(card: dict) -> dict:
         "asset_count": card["asset_count"],
         "season_count": int(metadata.get("regular_season_count") or card.get("regular_season_count") or 0),
         "special_season_count": int(metadata.get("special_season_count") or card.get("special_season_count") or 0),
+        "latest_episode_number": card.get("latest_episode_number"),
         "source_locations": {},
         "poster_path": metadata.get("poster_url") or "",
         "fanart_path": metadata.get("fanart_url") or "",
@@ -64,6 +68,7 @@ def _card_payload(card: dict) -> dict:
         "certification": metadata.get("certification") or "",
         "certification_country": metadata.get("certification_country") or "",
         "last_played": None,
+        "watch_status": watch_status,
         "metadata_state": metadata.get("metadata_state") or ("ready" if metadata else "pending"),
     }
 
@@ -78,7 +83,14 @@ def _library_snapshot():
 def get_library(compact: bool = False, source: str | None = None, include_all: bool = False):
     del compact
     snapshot = _library_snapshot()
-    works = [_card_payload(card) for card in snapshot.cards]
+    watch_map = _watch_status_map([card["work_id"] for card in snapshot.cards])
+    works = []
+    for card in snapshot.cards:
+        payload = _card_payload(card)
+        payload["watch_status"] = watch_map.get(card["work_id"], {
+            "work_id": card["work_id"], "status": "", "note": "", "favorite": False, "updated_at": "",
+        })
+        works.append(payload)
     if not include_all:
         # 正式媒体墙只返回 ready 作品；waiting/review/failed 走异常区恢复。
         works = [work for work in works if work.get("metadata_state") == "ready"]
@@ -335,6 +347,23 @@ def _watch_payload(row: dict) -> dict:
         "favorite": bool(metadata.get("favorite", False)),
         "updated_at": row.get("updated_at", ""),
     }
+
+
+def _watch_status_map(work_ids: list[str]) -> dict[str, dict]:
+    """批量读取 tracking_states，供列表卡片补 watch_status（收藏/追更）。"""
+
+    if not work_ids:
+        return {}
+    with get_database().connect() as conn:
+        placeholders = ",".join("?" for _ in work_ids)
+        rows = conn.execute(
+            "SELECT work_id, metadata_json, updated_at FROM tracking_states WHERE work_id IN (" + placeholders + ")",
+            work_ids,
+        ).fetchall()
+    result: dict[str, dict] = {}
+    for row in rows:
+        result[str(row["work_id"])] = _watch_payload(dict(row))
+    return result
 
 
 @router.get("/diagnostics")

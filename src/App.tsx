@@ -13,6 +13,7 @@ import CategoryPage from './pages/CategoryPage';
 import SearchPage from './pages/SearchPage';
 import LoadingState from './components/ui/loading-state';
 import { configApi, type PublicConfig } from './api/config';
+import { mediaV4Api } from './api/mediaV4';
 import { FluentProvider } from '@fluentui/react-components';
 import { getKumiFluentTheme } from './design/fluentTheme';
 import { listenForTreeFileDrop } from './platform/fileDrop';
@@ -74,6 +75,35 @@ export default function App() {
       unlisten?.();
     };
   }, [appConfig?.setup_completed, goManage, page, queueDroppedTreePath, setupOverride]);
+
+  useEffect(() => {
+    if (!appConfig?.setup_completed) return undefined;
+    let disposed = false;
+    let timer = 0;
+    let lastDigest = '';
+    // P-006：全局刷新桥梁——轮询 V4 Projection generation/digest，新投影发布时
+    // 自动刷新媒体库；应用不可见时降低频率；同一 digest 不重复刷新；失败不清空旧库。
+    const check = async () => {
+      try {
+        const snapshot = await mediaV4Api.library();
+        if (!disposed && snapshot.digest && snapshot.digest !== lastDigest) {
+          if (lastDigest !== '') loadLibrary();
+          lastDigest = snapshot.digest;
+        }
+      } catch {
+        // 网络失败保留现有媒体库快照。
+      }
+      if (!disposed) {
+        const delay = document.visibilityState === 'visible' ? 5000 : 30000;
+        timer = window.setTimeout(() => { void check() }, delay);
+      }
+    };
+    timer = window.setTimeout(() => { void check() }, 5000);
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [appConfig?.setup_completed, loadLibrary]);
 
   useEffect(() => {
     if (!appConfig?.setup_completed) return;

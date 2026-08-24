@@ -18,6 +18,7 @@ from app.media_v4.persistence.schema_v4 import (
     migrate_schema_v6_to_v7,
     migrate_schema_v7_to_v8,
     migrate_schema_v8_to_v9,
+    migrate_schema_v9_to_v10,
 )
 
 
@@ -139,6 +140,7 @@ class V4Database:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     migrate_schema_v8_to_v9(conn)
+                    migrate_schema_v9_to_v10(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -156,6 +158,7 @@ class V4Database:
                 try:
                     migrate_schema_v7_to_v8(conn)
                     migrate_schema_v8_to_v9(conn)
+                    migrate_schema_v9_to_v10(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -174,6 +177,7 @@ class V4Database:
                     migrate_schema_v6_to_v7(conn)
                     migrate_schema_v7_to_v8(conn)
                     migrate_schema_v8_to_v9(conn)
+                    migrate_schema_v9_to_v10(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -212,6 +216,7 @@ class V4Database:
                     migrate_schema_v6_to_v7(conn)
                     migrate_schema_v7_to_v8(conn)
                     migrate_schema_v8_to_v9(conn)
+                    migrate_schema_v9_to_v10(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:

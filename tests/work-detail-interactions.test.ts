@@ -11,7 +11,8 @@ test('作品详情只消费 V4 作品、季度和 Asset 身份', () => {
   assert.match(detail, /playbackApi\.play/);
   assert.match(detail, /workDetailV4Capabilities/);
   assert.doesNotMatch(compatibility, /\/api\/(scrape|tracking)|import_plan_id/);
-  assert.match(compatibility, /manualScrape: false/);
+  assert.match(compatibility, /manualScrape: true/);
+  assert.match(compatibility, /titleMutation: true/);
   assert.match(compatibility, /workDeletion: false/);
 });
 

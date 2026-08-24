@@ -1,20 +1,24 @@
-// 详情页保留 V4 重构前的成熟界面，但部分旧管理能力尚未迁移到 V4 权威数据流。
-// 这里仅提供类型与明确失败的边界，不发送任何 Legacy API 请求，避免页面加载时产生 404。
+import { mediaV4Api } from './mediaV4';
+// 详情页保留 V4 重构前的成熟界面，部分管理能力已迁移到 V4 权威数据流。
+// 尚未迁移的能力给出真实状态原因，不发送任何 Legacy API 请求。
 
 export const workDetailV4Capabilities = {
-  manualScrape: false,
+  manualScrape: true,
   bangumiBinding: false,
   seasonalManagement: false,
   appendEpisodes: false,
-  artworkMutation: false,
-  titleMutation: false,
+  artworkMutation: true,
+  titleMutation: true,
   workDeletion: false,
-  sourceSpecificFolders: false,
-  mirrorFolder: false,
+  sourceSpecificFolders: true,
+  mirrorFolder: true,
 } as const;
 
 const unavailable = <T>(feature: string): Promise<T> =>
   Promise.reject(new Error(`${feature}尚未接入 V4 数据流`));
+
+const unavailableReason = <T>(feature: string, reason: string): Promise<T> =>
+  Promise.reject(new Error(`${feature}：${reason}`));
 
 export interface ScrapeTarget {
   scrape_target_id: string;
@@ -97,6 +101,10 @@ export const workDetailV4Compatibility = {
       _workId?: string,
       _scope?: 'work' | 'season',
     ) => unavailable<{ task_id: string }>('手动刮削'),
+    rerunWorkScrape: async (workId: string) => {
+      const result = await mediaV4Api.enqueueWorkScrape(workId);
+      return { task_id: result.job_id, status: result.status };
+    },
   },
   bangumi: {
     getMatch: (_workId: string, _seasonNumber?: number) => unavailable<BangumiMatch>('Bangumi 作品绑定'),
@@ -136,12 +144,35 @@ export const workDetailV4Compatibility = {
     commitEpisodes: (_workId: string, _planId: string) => unavailable<{ task_id: string; status: string }>('追加剧集'),
   },
   library: {
-    setWorkTitle: (_workId: string, _title: string) => unavailable<{ work_id: string; title: string }>('标题修改'),
-    restoreWorkTitle: (_workId: string) => unavailable<{ work_id: string; restored: boolean }>('标题修改'),
-    deleteWorkPreview: (_workId: string) => unavailable<DeletePreviewResponse>('单个作品删除'),
-    deleteWorkConfirm: (_workId: string, _previewId: string) => unavailable<{
+    setWorkTitle: async (workId: string, title: string) => {
+      await mediaV4Api.setWorkTitle(workId, title);
+      return { work_id: workId, title };
+    },
+    restoreWorkTitle: async (workId: string) => {
+      await mediaV4Api.restoreWorkTitle(workId);
+      return { work_id: workId, restored: true };
+    },
+    deleteWorkPreview: (_workId: string) => unavailableReason<DeletePreviewResponse>('单个作品删除', '请先通过媒体库维护按来源清理，或等待单作品删除命令接入'),
+    deleteWorkConfirm: (_workId: string, _previewId: string) => unavailableReason<{
       status: 'succeeded' | 'partial_failed' | 'failed';
       failed: Array<{ path: string; reason: string }>;
-    }>('单个作品删除'),
+    }>('单个作品删除', '请先通过媒体库维护按来源清理，或等待单作品删除命令接入'),
+  },
+  artwork: {
+    upload: (workId: string, kind: 'poster' | 'fanart' | 'clearlogo', file: File) => {
+      const reader = new FileReader();
+      return new Promise<{ path: string }>((resolve, reject) => {
+        reader.onload = () => {
+          const data = String(reader.result ?? '').split(',')[1] ?? '';
+          mediaV4Api.uploadWorkArtwork(workId, kind, data).then(resolve, reject);
+        };
+        reader.onerror = () => reject(new Error('读取图片失败'));
+        reader.readAsDataURL(file);
+      });
+    },
+    restore: (workId: string, kind: 'poster' | 'fanart' | 'clearlogo') => mediaV4Api.restoreWorkArtwork(workId, kind),
+  },
+  folders: {
+    open: async (workId: string) => mediaV4Api.workFolder(workId),
   },
 };

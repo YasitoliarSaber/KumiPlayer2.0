@@ -63,6 +63,13 @@ class V4PlaybackStore:
                 """,
                 (episode_id, asset_id, work_id, position, duration, int(completed), _now()),
             )
+            # P-006：播放历史是独立事件（进度可 upsert，历史必须记录事件）。
+            _append_history_event(
+                conn,
+                work_id=work_id,
+                episode_id=episode_id,
+                asset_id=asset_id,
+            )
 
     def get_progress(self, episode_id: str, asset_id: str) -> dict:
         with self.database.connect() as conn:
@@ -73,3 +80,54 @@ class V4PlaybackStore:
         if row is None:
             raise KeyError((episode_id, asset_id))
         return dict(row)
+
+
+def _append_history_event(conn, *, work_id: str, episode_id: str, asset_id: str) -> None:
+    """写入一条播放历史事件，附当时标题/季集快照与来源。"""
+
+    import uuid
+
+    title_snapshot = ""
+    season_snapshot = ""
+    episode_snapshot = ""
+    source_provider = ""
+    row = conn.execute(
+        """
+        SELECT w.preferred_title AS title, w.year,
+               s.local_season_number, e.local_episode_number,
+               se.provider
+        FROM works w
+        LEFT JOIN episodes e ON e.episode_id = ? AND e.work_id = w.work_id
+        LEFT JOIN seasons s ON s.season_id = e.season_id
+        LEFT JOIN assets a ON a.asset_id = ?
+        LEFT JOIN source_evidence se ON se.evidence_id = a.evidence_id
+        WHERE w.work_id = ?
+        """,
+        (episode_id, asset_id, work_id),
+    ).fetchone()
+    if row is not None:
+        title_snapshot = str(row["title"] or "")
+        if row["local_season_number"] is not None:
+            season_snapshot = f"第 {row['local_season_number']} 季"
+        if row["local_episode_number"] is not None:
+            episode_snapshot = f"第 {row['local_episode_number']} 集"
+        source_provider = str(row["provider"] or "")
+    conn.execute(
+        """
+        INSERT INTO playback_history(
+            event_id, work_id, episode_id, asset_id, played_at,
+            title_snapshot, season_snapshot, episode_snapshot, source_provider
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "hist_" + uuid.uuid4().hex,
+            work_id,
+            episode_id,
+            asset_id,
+            _now(),
+            title_snapshot,
+            season_snapshot,
+            episode_snapshot,
+            source_provider,
+        ),
+    )

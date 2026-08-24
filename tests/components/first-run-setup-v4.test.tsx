@@ -33,7 +33,7 @@ describe('FirstRunSetup V4 引导', () => {
   test('说明统一来源链路，并把 OpenList 明确为完成后的接入配置', async () => {
     render(<FirstRunSetup initialConfig={config as never} onComplete={vi.fn()} />);
 
-    expect(screen.getByText(/SourceEvidence/)).toBeVisible();
+    expect(screen.getByText(/不会移动或改名你的原始文件/)).toBeVisible();
     expect(screen.getByText(/来源先记录，再整理/)).toBeVisible();
 
     fireEvent.click(screen.getByRole('button', { name: '继续' }));

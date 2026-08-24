@@ -143,7 +143,16 @@ class V4LibraryProjection:
                             JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = ''
                             WHERE s.work_id = w.work_id AND ir.status = 'confirmed'
                               AND s.season_kind != 'regular'
-                        ) AS special_season_count
+                        ) AS special_season_count,
+                        (
+                            SELECT MAX(e.local_episode_number)
+                            FROM episodes e
+                            JOIN revision_bindings rb ON rb.episode_id = e.episode_id
+                            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                            JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = ''
+                            WHERE e.work_id = w.work_id AND ir.status = 'confirmed'
+                              AND e.episode_kind = 'regular'
+                        ) AS latest_episode_number
                     FROM works w
                     WHERE EXISTS (
                         SELECT 1 FROM revision_bindings rb
@@ -206,6 +215,7 @@ class V4LibraryProjection:
                         "asset_count": row["asset_count"],
                         "regular_season_count": regular_season_count,
                         "special_season_count": special_season_count,
+                        "latest_episode_number": row["latest_episode_number"],
                         "metadata": metadata,
                     })
                 cards = tuple(cards_list)
