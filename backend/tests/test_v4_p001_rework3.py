@@ -230,3 +230,36 @@ def test_unreachable_sidecar_nfo_does_not_fabricate_provider_id(tmp_path, monkey
             "SELECT provider, provider_id FROM revision_work_candidates WHERE revision_id = 'rev-nfo3'"
         ).fetchall()
     assert all(row["provider_id"] != "42" for row in rows)
+
+
+def test_sidecar_nfo_requires_absolute_locator_and_preserves_movie_type(tmp_path):
+    """NFO 不能从当前工作目录误读，电影 NFO 也不能被写成 TV 身份。"""
+
+    relative = SourceEvidence(
+        evidence_id="nfo-relative",
+        scan_id="scan-rw3",
+        root_id="root-rw3",
+        source_key="nfo-relative",
+        relative_path="Movie/movie.nfo",
+        entry_kind="metadata",
+        provider="local",
+        source_locator="Movie/movie.nfo",
+    )
+    assert V4Parser().parse(relative).tmdb_hint_id is None
+
+    movie_file = tmp_path / "Movie" / "movie.nfo"
+    movie_file.parent.mkdir(parents=True)
+    movie_file.write_text("<movie><tmdbid>314</tmdbid></movie>", encoding="utf-8")
+    movie = SourceEvidence(
+        evidence_id="nfo-movie",
+        scan_id="scan-rw3",
+        root_id="root-rw3",
+        source_key="nfo-movie",
+        relative_path="Movie/movie.nfo",
+        entry_kind="metadata",
+        provider="local",
+        source_locator=str(movie_file),
+    )
+    facts = V4Parser().parse(movie)
+    assert facts.tmdb_hint_id == 314
+    assert facts.tmdb_hint_type == "movie"

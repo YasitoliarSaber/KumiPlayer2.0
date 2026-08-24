@@ -55,7 +55,7 @@ def _normalize_filename_stem(stem: str) -> str:
 _NFO_MAX_BYTES = 256 * 1024
 
 
-def _parse_sidecar_nfo(evidence: SourceEvidence) -> tuple[int | None, str, str] | None:
+def _parse_sidecar_nfo(evidence: SourceEvidence) -> tuple[int | None, str, str, str] | None:
     """有界、严格编码、只读解析可达 sidecar NFO，提取 tmdb uniqueid 与标题。
 
     文件不可达、超限、解码失败或 XML 解析失败时返回 None（仅标题证据降级）。
@@ -68,6 +68,10 @@ def _parse_sidecar_nfo(evidence: SourceEvidence) -> tuple[int | None, str, str] 
         return None
     try:
         path = Path(locator)
+        # SourceEvidence 的相对路径只能用于目录结构事实，绝不能相对当前
+        # 工作目录读取任意文件；sidecar 内容只允许来自明确的绝对本地定位符。
+        if not path.is_absolute():
+            return None
         if not path.is_file():
             return None
         with open(path, "rb") as handle:
@@ -89,9 +93,11 @@ def _parse_sidecar_nfo(evidence: SourceEvidence) -> tuple[int | None, str, str] 
     for unique in root.findall(".//uniqueid"):
         if (unique.get("type") or "").casefold() == "tmdb":
             try:
-                tmdb_id = int((unique.text or "").strip())
+                value = int((unique.text or "").strip())
             except ValueError:
                 tmdb_id = None
+            else:
+                tmdb_id = value if value > 0 else None
             if tmdb_id is not None:
                 break
     if tmdb_id is None:
@@ -99,7 +105,8 @@ def _parse_sidecar_nfo(evidence: SourceEvidence) -> tuple[int | None, str, str] 
         if tmdb_node is not None:
             tmdb_text = tmdb_node.text or ""
             if tmdb_text.strip().isdigit():
-                tmdb_id = int(tmdb_text.strip())
+                value = int(tmdb_text.strip())
+                tmdb_id = value if value > 0 else None
 
     def _text(tag: str) -> str:
         node = root.find(f".//{tag}")
@@ -109,7 +116,9 @@ def _parse_sidecar_nfo(evidence: SourceEvidence) -> tuple[int | None, str, str] 
 
     title = _text("title")
     original = _text("originaltitle")
-    return tmdb_id, title, original
+    root_tag = str(root.tag).rsplit("}", 1)[-1].casefold()
+    media_type = "movie" if root_tag == "movie" else "tv" if root_tag == "tvshow" else ""
+    return tmdb_id, title, original, media_type
 
 
 class V4Parser:
@@ -140,7 +149,7 @@ class V4Parser:
                     is_importable=False,
                     is_auxiliary=True,
                 )
-            tmdb_id, title, original_title = parsed
+            tmdb_id, title, original_title, tmdb_media_type = parsed
             return ParsedFacts(
                 parsed_fact_id="facts_" + evidence.evidence_id,
                 evidence_id=evidence.evidence_id,
@@ -151,8 +160,8 @@ class V4Parser:
                 title_candidates=tuple(
                     dict.fromkeys(filter(None, (title or stem, original_title)))
                 ) or (stem,),
-                tmdb_hint_id=tmdb_id,
-                tmdb_hint_type="tv" if tmdb_id else "",
+                tmdb_hint_id=tmdb_id if tmdb_media_type else None,
+                tmdb_hint_type=tmdb_media_type if tmdb_id else "",
                 is_importable=False,
                 is_auxiliary=True,
             )
