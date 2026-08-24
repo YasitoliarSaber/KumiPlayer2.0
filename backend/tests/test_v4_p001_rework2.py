@@ -427,3 +427,56 @@ def test_manual_confirm_rejects_candidate_from_superseded_revision(tmp_path, mon
         json={"work_id": work_id, "candidate_id": candidate_id},
     )
     assert response.status_code == 409
+
+
+def test_manual_confirm_reports_conflict_when_provider_identity_belongs_to_other_work(tmp_path, monkeypatch):
+    """Provider 全局唯一冲突必须返回可恢复的 409，而非暴露 SQLite 异常。"""
+
+    import uuid
+    from datetime import UTC, datetime
+
+    client = _client(tmp_path, monkeypatch)
+    database = _patch_database(tmp_path, monkeypatch)
+    from app.media_v4.revisions.service import V4RevisionService
+
+    service = V4RevisionService(database)
+    owner_evidence, owner_facts = _entry("owner", work_title="Owner Show")
+    service.create_draft("rev-owner", [(owner_evidence, owner_facts)], candidate_search=lambda *a, **k: [])
+    service.confirm("rev-owner")
+
+    target_evidence, target_facts = _entry("target", work_title="Target Show")
+    target_evidence = replace(target_evidence, root_id="root-target", scan_id="scan-target")
+    service.create_draft("rev-target", [(target_evidence, target_facts)], candidate_search=lambda *a, **k: [])
+    service.confirm("rev-target")
+
+    now = datetime.now(UTC).isoformat()
+    candidate_id = str(uuid.uuid4())
+    with database.connect() as conn:
+        owner_id = conn.execute(
+            "SELECT work_id FROM works WHERE preferred_title = 'Owner Show'"
+        ).fetchone()["work_id"]
+        target_id = conn.execute(
+            "SELECT work_id FROM works WHERE preferred_title = 'Target Show'"
+        ).fetchone()["work_id"]
+        conn.execute(
+            "INSERT INTO provider_bindings(work_id, provider, media_type, provider_id) "
+            "VALUES (?, 'tmdb', 'tv', '42')",
+            (owner_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO revision_work_candidates(
+                candidate_id, revision_id, work_id, draft_work_key, provider,
+                provider_id, media_type, title, evidence, confidence, status,
+                created_at, updated_at
+            ) VALUES (?, 'rev-target', ?, 'target-key', 'tmdb', '42', 'tv',
+                      'Target Show', 'manual_search', 'high', 'proposed', ?, ?)
+            """,
+            (candidate_id, target_id, now, now),
+        )
+
+    response = client.post(
+        "/api/v4/metadata/confirm",
+        json={"work_id": target_id, "candidate_id": candidate_id},
+    )
+    assert response.status_code == 409

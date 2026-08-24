@@ -1119,6 +1119,15 @@ def metadata_confirm(request: MetadataConfirmRequest):
         raise HTTPException(status_code=409, detail="候选已过期，请重新搜索")
 
     with database.connect() as conn:
+        identity_owner = conn.execute(
+            """
+            SELECT work_id FROM provider_bindings
+            WHERE provider = ? AND media_type = ? AND provider_id = ?
+            """,
+            (provider, media_type, provider_id),
+        ).fetchone()
+        if identity_owner is not None and str(identity_owner["work_id"]) != request.work_id:
+            raise HTTPException(status_code=409, detail="该 Provider 身份已经属于另一个作品")
         conn.execute(
             """
             INSERT INTO provider_bindings(work_id, provider, media_type, provider_id)
