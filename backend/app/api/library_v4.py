@@ -22,7 +22,13 @@ class WatchStatusRequest(BaseModel):
 def _card_payload(card: dict) -> dict:
     metadata = card.get("metadata") or {}
     media_type = card["media_type"] if card["media_type"] in {"tv", "movie"} else "tv"
-    show_type = "anime_series" if media_type == "tv" else "anime_movie"
+    # P-001 7.7 R4：show_type/card_type 以后端持久化权威为准，不再硬编码。
+    show_type = str(card.get("show_type") or metadata.get("show_type") or "")
+    if not show_type:
+        show_type = "anime_series" if media_type == "tv" else "anime_movie"
+    card_type = str(card.get("card_type") or metadata.get("card_type") or "")
+    if not card_type:
+        card_type = "main_series" if media_type == "tv" else "standalone"
     sources = metadata.get("sources") or ["local"]
     return {
         "work_id": card["work_id"],
@@ -36,9 +42,9 @@ def _card_payload(card: dict) -> dict:
         "studios": metadata.get("studios") or [],
         "media_type": media_type,
         "show_type": show_type,
+        "card_type": card_type,
         "source": sources[0],
         "sources": sources,
-        "card_type": "main_series" if media_type == "tv" else "standalone",
         "episodes": [],
         "seasons": [],
         "episode_count": card["episode_count"],

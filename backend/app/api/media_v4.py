@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -986,14 +986,12 @@ class MetadataSearchRequest(BaseModel):
 
 class MetadataConfirmRequest(BaseModel):
     work_id: str = Field(min_length=1)
-    provider: str = Field(min_length=1)
-    provider_id: str = Field(min_length=1)
-    media_type: str = ""
+    candidate_id: str = Field(min_length=1)
 
 
 @router.post("/metadata/search")
 def metadata_search(request: MetadataSearchRequest):
-    """V4 手动元数据恢复：按作品标题搜索在线候选，不修改本地媒体身份。"""
+    """V4 手动元数据恢复：搜索端先创建服务端候选记录，供 confirm 选择。"""
 
     database = get_database()
     with database.connect() as conn:
@@ -1012,17 +1010,55 @@ def metadata_search(request: MetadataSearchRequest):
     )
     if candidates is None:
         raise HTTPException(status_code=409, detail="未配置 TMDB API Token，无法搜索在线候选")
-    return {"work_id": request.work_id, "candidates": candidates}
+    if not candidates:
+        return {"work_id": request.work_id, "candidates": []}
+
+    now = _now_iso()
+    with database.connect() as conn:
+        conn.execute(
+            "DELETE FROM revision_work_candidates WHERE work_id = ? AND evidence = 'manual_search'",
+            (request.work_id,),
+        )
+        stored = []
+        for item in candidates:
+            candidate_id = str(uuid.uuid4())
+            conn.execute(
+                """
+                INSERT INTO revision_work_candidates(
+                    candidate_id, revision_id, work_id, draft_work_key, provider,
+                    provider_id, media_type, title, year, evidence, confidence, status,
+                    created_at, updated_at
+                ) VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, 'manual_search', 'high', 'proposed', ?, ?)
+                """,
+                (
+                    candidate_id,
+                    request.work_id,
+                    str(work["identity_key"]),
+                    "tmdb",
+                    str(item.get("provider_id") or ""),
+                    item.get("media_type") or media_type,
+                    item.get("title") or "",
+                    item.get("year"),
+                    now,
+                    now,
+                ),
+            )
+            stored.append({**item, "candidate_id": candidate_id})
+    return {"work_id": request.work_id, "candidates": stored}
 
 
 @router.post("/metadata/confirm")
 def metadata_confirm(request: MetadataConfirmRequest):
-    """确认候选 provider ID 后重新排队并执行刮削，再刷新投影。"""
+    """只接受服务端候选 candidate_id；确认后重排刮削（job 不再搜索）并刷新投影。"""
 
     database = get_database()
     with database.connect() as conn:
         work = conn.execute(
             "SELECT * FROM works WHERE work_id = ?", (request.work_id,)
+        ).fetchone()
+        candidate = conn.execute(
+            "SELECT * FROM revision_work_candidates WHERE candidate_id = ?",
+            (request.candidate_id,),
         ).fetchone()
         revision = conn.execute(
             """
@@ -1037,7 +1073,38 @@ def metadata_confirm(request: MetadataConfirmRequest):
         raise HTTPException(status_code=404, detail="作品不存在")
     if revision is None:
         raise HTTPException(status_code=409, detail="该作品没有已确认的 revision，无法恢复刮削")
-    media_type = request.media_type or ("tv" if work["work_type"] == "series" else "movie")
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="候选不存在，请先搜索生成候选")
+    if str(candidate["work_id"]) != request.work_id:
+        raise HTTPException(status_code=409, detail="候选不属于该作品，无法确认")
+    if candidate["status"] == "confirmed":
+        with database.connect() as conn:
+            binding = conn.execute(
+                "SELECT provider, provider_id, status FROM scrape_bindings WHERE work_id = ?",
+                (request.work_id,),
+            ).fetchone()
+        return {
+            "work_id": request.work_id,
+            "candidate_id": request.candidate_id,
+            "status": "already_confirmed",
+            "binding": dict(binding) if binding else None,
+        }
+    if candidate["status"] != "proposed":
+        raise HTTPException(status_code=409, detail="候选状态不允许确认")
+    from app.media_v4.resolution.candidates import supported_provider
+
+    provider = str(candidate["provider"])
+    if not supported_provider(provider) or provider == "local":
+        raise HTTPException(status_code=409, detail="候选 Provider 不受支持")
+    provider_id = str(candidate["provider_id"])
+    media_type = str(candidate["media_type"]) or ("tv" if work["work_type"] == "series" else "movie")
+    try:
+        updated_at = datetime.fromisoformat(str(candidate["updated_at"]))
+    except (ValueError, TypeError):
+        updated_at = None
+    if updated_at is None or datetime.now(UTC) - updated_at > timedelta(hours=24):
+        raise HTTPException(status_code=409, detail="候选已过期，请重新搜索")
+
     with database.connect() as conn:
         conn.execute(
             """
@@ -1045,34 +1112,18 @@ def metadata_confirm(request: MetadataConfirmRequest):
             VALUES (?, ?, ?, ?)
             ON CONFLICT(work_id, provider, media_type) DO UPDATE SET provider_id = excluded.provider_id
             """,
-            (request.work_id, request.provider, media_type, request.provider_id),
+            (request.work_id, provider, media_type, provider_id),
         )
-        # 同步冻结候选身份，供 revision_work_candidates 恢复视图与跨语言合卡。
+        conn.execute(
+            "UPDATE revision_work_candidates SET status = 'confirmed', updated_at = ? WHERE candidate_id = ?",
+            (_now_iso(), request.candidate_id),
+        )
         conn.execute(
             """
-            INSERT OR IGNORE INTO revision_work_candidates(
-                candidate_id, revision_id, work_id, draft_work_key, provider,
-                provider_id, media_type, title, year, evidence, confidence, status,
-                created_at, updated_at
-            )
-            SELECT ?, ir.revision_id, w.work_id, w.identity_key, ?, ?, ?,
-                   w.preferred_title, w.year, 'manual_confirmation', 'high', 'confirmed',
-                   ?, ?
-            FROM import_revisions ir
-            JOIN revision_bindings rb ON rb.revision_id = ir.revision_id
-            JOIN works w ON w.work_id = rb.work_id
-            WHERE rb.work_id = ? AND ir.status = 'confirmed'
-            LIMIT 1
+            UPDATE revision_work_candidates SET status = 'rejected', updated_at = ?
+            WHERE work_id = ? AND status = 'proposed' AND candidate_id != ?
             """,
-            (
-                str(uuid.uuid4()),
-                request.provider,
-                request.provider_id,
-                media_type,
-                _now_iso(),
-                _now_iso(),
-                request.work_id,
-            ),
+            (_now_iso(), request.work_id, request.candidate_id),
         )
     from app.media_v4.jobs.metadata import default_metadata_provider
 
@@ -1088,7 +1139,8 @@ def metadata_confirm(request: MetadataConfirmRequest):
     V4LibraryProjection(database).rebuild()
     return {
         "work_id": request.work_id,
-        "provider": request.provider,
-        "provider_id": request.provider_id,
+        "candidate_id": request.candidate_id,
+        "provider": provider,
+        "provider_id": provider_id,
         "status": "confirmed",
     }

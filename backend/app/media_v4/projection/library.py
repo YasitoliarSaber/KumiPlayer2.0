@@ -68,6 +68,8 @@ class V4LibraryProjection:
                         w.work_id,
                         w.preferred_title AS title,
                         w.year,
+                        w.show_type,
+                        w.card_type,
                         CASE WHEN w.work_type = 'series' THEN 'tv' ELSE 'movie' END AS media_type,
                         CASE WHEN w.work_type = 'series' THEN (
                             SELECT COUNT(DISTINCT rb.episode_id)
@@ -163,11 +165,17 @@ class V4LibraryProjection:
                     else:
                         state = "waiting_metadata"
                     metadata["metadata_state"] = state
+                    show_type = str(row["show_type"] or "")
+                    card_type = str(row["card_type"] or "")
+                    metadata["show_type"] = show_type
+                    metadata["card_type"] = card_type
                     cards_list.append({
                         "work_id": row["work_id"],
                         "title": metadata.get("title") or row["title"],
                         "year": metadata.get("year") or row["year"],
                         "media_type": row["media_type"],
+                        "show_type": show_type,
+                        "card_type": card_type,
                         "episode_count": row["episode_count"],
                         "asset_count": row["asset_count"],
                         "regular_season_count": regular_season_count,

@@ -128,6 +128,9 @@ VIDEO_SUFFIXES = frozenset({
     ".wmv",
 })
 
+# 目录树可能携带 sidecar NFO；保留为只读 metadata 证据，不覆盖本地编号。
+METADATA_SUFFIXES = frozenset({".nfo"})
+
 # 目录树文件上限，与旧版 media_presets 64 MB 边界一致。
 MAX_TREE_FILE_BYTES = 64 * 1024 * 1024
 
@@ -248,7 +251,13 @@ def read_directory_tree_text(file_path: str | Path) -> str:
 def tree_media_relative_paths(text: str) -> list[str]:
     """从解码后的目录树文本提取媒体相对路径；不写数据库、不做身份判断。"""
 
-    relative_paths: list[str] = []
+    return [path for path, _kind in _tree_relative_paths(text) if _kind == "video"]
+
+
+def _tree_relative_paths(text: str) -> list[tuple[str, str]]:
+    """提取视频与 NFO metadata 相对路径；NFO 仅作只读身份证据。"""
+
+    results: list[tuple[str, str]] = []
     stack: list[str] = []
     skip_tree_root = False
     for line in text.splitlines():
@@ -264,20 +273,26 @@ def tree_media_relative_paths(text: str) -> list[str]:
                 stack.append(name)
             else:
                 stack[depth] = name
-            if Path(name).suffix.casefold() not in VIDEO_SUFFIXES:
+            suffix = Path(name).suffix.casefold()
+            if suffix not in VIDEO_SUFFIXES and suffix not in METADATA_SUFFIXES:
                 continue
             parts = [part for part in stack[: depth + 1] if part]
             if skip_tree_root and parts:
                 parts = parts[1:]
             relative = "/".join(parts)
+            kind = "video" if suffix in VIDEO_SUFFIXES else "metadata"
         else:
             value = line.strip().replace("\\", "/")
-            if not value or value.startswith("#") or Path(value).suffix.casefold() not in VIDEO_SUFFIXES:
+            suffix = Path(value).suffix.casefold()
+            if not value or value.startswith("#") or (
+                suffix not in VIDEO_SUFFIXES and suffix not in METADATA_SUFFIXES
+            ):
                 continue
             relative = value.lstrip("/")
+            kind = "video" if suffix in VIDEO_SUFFIXES else "metadata"
         if relative:
-            relative_paths.append(relative)
-    return relative_paths
+            results.append((relative, kind))
+    return results
 
 
 def build_directory_tree_evidence(
@@ -293,7 +308,7 @@ def build_directory_tree_evidence(
 
     actual_scan_id = scan_id or ("scan_" + uuid.uuid4().hex)
     evidence = []
-    for relative in tree_media_relative_paths(text):
+    for relative, kind in _tree_relative_paths(text):
         locator = relative
         if source_root:
             locator_path = Path(source_root).expanduser()
@@ -312,6 +327,7 @@ def build_directory_tree_evidence(
                     source_locator=locator,
                     playback_locator=locator,
                     source_route_id=source_route_id,
+                    entry_kind=kind,
                 )
             )
         )

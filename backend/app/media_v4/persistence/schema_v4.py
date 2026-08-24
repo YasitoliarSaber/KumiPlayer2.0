@@ -568,7 +568,7 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE revision_work_candidates (
             candidate_id TEXT PRIMARY KEY,
-            revision_id TEXT NOT NULL REFERENCES import_revisions(revision_id) ON DELETE CASCADE,
+            revision_id TEXT NOT NULL,
             work_id TEXT NOT NULL,
             draft_work_key TEXT NOT NULL,
             provider TEXT NOT NULL,
@@ -647,7 +647,7 @@ def create_v6_structures(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS revision_work_candidates (
             candidate_id TEXT PRIMARY KEY,
-            revision_id TEXT NOT NULL REFERENCES import_revisions(revision_id) ON DELETE CASCADE,
+            revision_id TEXT NOT NULL,
             work_id TEXT NOT NULL,
             draft_work_key TEXT NOT NULL,
             provider TEXT NOT NULL,

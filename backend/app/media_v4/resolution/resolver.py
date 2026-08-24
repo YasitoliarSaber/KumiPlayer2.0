@@ -250,8 +250,9 @@ class MediaResolver:
         relations: list[ResolvedWorkRelation] = []
         for key, row in work_rows.items():
             parent_key = _relation_work_key_from_row(row)
-            if not parent_key or parent_key == key or parent_key not in work_rows:
+            if not parent_key or parent_key == key:
                 continue
+            # 父 Work 可能只存在于已确认数据库；关系始终保留，由持久化层解析。
             relation_type = row["relation_type"] or "related"
             relations.append(
                 ResolvedWorkRelation(

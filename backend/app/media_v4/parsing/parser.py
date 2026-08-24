@@ -57,6 +57,19 @@ class V4Parser:
         existing_work_title: str = "",
         root_container: str = "",
     ) -> ParsedFacts:
+        # 目录树 NFO 等 metadata 证据：只保留为只读候选身份证据，不参与
+        # Work/Season/Episode 解析，不覆盖本地编号。
+        if evidence.entry_kind == "metadata" or PurePosixPath(evidence.relative_path).suffix.casefold() == ".nfo":
+            stem = PurePosixPath(evidence.relative_path).stem
+            return ParsedFacts(
+                parsed_fact_id="facts_" + evidence.evidence_id,
+                evidence_id=evidence.evidence_id,
+                parser_version=self.VERSION,
+                resource_type="metadata",
+                title_candidates=(stem,) if stem else (),
+                is_importable=False,
+                is_auxiliary=True,
+            )
         # 相对路径首层若是通用结构容器（Season 1 / S01 / Specials / 分类目录），
         # 它不是作品身份：解析时先剥离该段，让识别器回退到文件名系列名，
         # 避免把「Season 1」直接当成作品名（P-001 7.2.3/7.3.A）。
