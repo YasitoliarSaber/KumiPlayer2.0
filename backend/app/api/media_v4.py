@@ -505,12 +505,15 @@ def preview(request: PreviewRequest):
             raise HTTPException(status_code=409, detail="扫描证据与当前请求不一致，请重新扫描")
         source_locator = validation["effective_root"]
         playback_locator = validation["effective_root"]
+        # route 已随权威树扫描写入 source_roots，不能再由 preview 请求覆盖。
+        source_route_id = ""
     else:
         if not request.entries and not request.allow_empty:
             raise HTTPException(status_code=409, detail="空来源必须由用户明确确认后才能替代当前 revision")
         evidence = _make_entries(request)
         source_locator = request.source_locator
         playback_locator = request.playback_locator
+        source_route_id = request.source_route_id
     parser = V4Parser()
     parsed = [(item, parser.parse(item)) for item in evidence]
     service = V4RevisionService(database)
@@ -524,7 +527,7 @@ def preview(request: PreviewRequest):
                 "display_name": request.source_display_name,
                 "source_locator": source_locator,
                 "playback_locator": playback_locator,
-                "route_id": request.source_route_id,
+                "route_id": source_route_id,
             },
         )
     except ValueError as exc:

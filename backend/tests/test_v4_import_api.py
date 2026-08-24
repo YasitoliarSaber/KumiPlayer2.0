@@ -799,6 +799,7 @@ def test_preview_ignores_tampered_entry_locators_for_tree_scan(tmp_path, monkeyp
         }],
         "source_locator": r"C:\tampered",
         "playback_locator": r"C:\tampered",
+        "source_route_id": "route-tampered",
     })
     assert preview.status_code == 200, preview.text
 
@@ -814,6 +815,12 @@ def test_preview_ignores_tampered_entry_locators_for_tree_scan(tmp_path, monkeyp
     expected = str(mount / "01动画" / "Show" / "Show.S01E01.mkv")
     assert evidence_rows[0]["playback_locator"] == expected
     assert evidence_rows[0]["playback_locator"] != tampered
+    with media_v4._database.connect() as conn:
+        source_root = conn.execute(
+            "SELECT route_id FROM source_roots WHERE root_id = ?",
+            (scan["root_id"],),
+        ).fetchone()
+    assert source_root["route_id"] == ""
 
     # 确认后 Asset 也必须来自权威证据，而不是前端改写值。
     confirmed = client.post("/api/v4/imports/rev-tamper/confirm")
