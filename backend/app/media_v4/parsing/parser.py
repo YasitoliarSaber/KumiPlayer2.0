@@ -10,6 +10,7 @@ import re
 from pathlib import PurePosixPath
 
 from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+from app.media_v4.generic_container import is_generic_container_name
 from app.media_v4.sources.adapters import provider_to_source
 from app.recognition.media import recognize_media
 
@@ -56,11 +57,18 @@ class V4Parser:
         existing_work_title: str = "",
         root_container: str = "",
     ) -> ParsedFacts:
-        filename = PurePosixPath(evidence.relative_path).name
+        # 相对路径首层若是通用结构容器（Season 1 / S01 / Specials / 分类目录），
+        # 它不是作品身份：解析时先剥离该段，让识别器回退到文件名系列名，
+        # 避免把「Season 1」直接当成作品名（P-001 7.2.3/7.3.A）。
+        parts = PurePosixPath(evidence.relative_path).parts
+        parse_relative = evidence.relative_path
+        if parts and is_generic_container_name(parts[0]):
+            parse_relative = PurePosixPath(*parts[1:]).as_posix() if len(parts) > 1 else ""
+        filename = PurePosixPath(parse_relative).name
         source = provider_to_source(evidence.provider)
         guess = recognize_media(
             filename,
-            evidence.relative_path,
+            parse_relative,
             source=source,
             existing_work_title=existing_work_title,
             root_container=root_container,

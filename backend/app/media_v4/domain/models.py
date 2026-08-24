@@ -80,6 +80,20 @@ class ResolvedWork:
     year: int | None
     media_type: str
     source_evidence_ids: tuple[str, ...] = field(default_factory=tuple)
+    card_type: str = ""
+    show_type: str = ""
+    series_group: str = ""
+    relation_type: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedWorkRelation:
+    """同一媒体图内的作品关系（父系列/独立关联作品/电影/重制版等）。"""
+
+    parent_work_key: str
+    child_work_key: str
+    relation_type: str
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,4 +135,5 @@ class ResolvedMediaGraph:
     works: tuple[ResolvedWork, ...] = field(default_factory=tuple)
     episodes: tuple[ResolvedEpisode, ...] = field(default_factory=tuple)
     work_assets: tuple[ResolvedWorkAsset, ...] = field(default_factory=tuple)
+    relations: tuple[ResolvedWorkRelation, ...] = field(default_factory=tuple)
     issues: tuple[ResolutionIssue, ...] = field(default_factory=tuple)

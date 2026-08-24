@@ -13,8 +13,10 @@ from app.media_v4.domain.models import (
     ResolvedMediaGraph,
     ResolvedWork,
     ResolvedWorkAsset,
+    ResolvedWorkRelation,
     SourceEvidence,
 )
+from app.media_v4.generic_container import is_generic_container_title
 
 
 def _normalize_title(value: str) -> str:
@@ -24,26 +26,47 @@ def _normalize_title(value: str) -> str:
 
 
 def _is_placeholder_title(value: str) -> bool:
-    return _normalize_title(value) in {
-        "",
-        "unknown",
-        "untitled",
-        "n/a",
-        "na",
-        "none",
-        "null",
-    }
+    return is_generic_container_title(value)
 
 
 def _work_key(facts: ParsedFacts) -> str:
     if facts.tmdb_hint_id and facts.tmdb_hint_type:
         return f"provider:{facts.tmdb_hint_type.casefold()}:{facts.tmdb_hint_id}"
-    title = _normalize_title(facts.series_group or facts.work_title or (facts.title_candidates or ("",))[0])
+    # 当前作品身份优先：独立/外传/电影子作品用 work_title；只有 work_title
+    # 是通用容器/占位时才用稳定的 series_group 聚合（P-001 7.3.C）。
+    identity_title = facts.work_title or (facts.title_candidates or ("",))[0]
+    if is_generic_container_title(identity_title):
+        for candidate in (facts.series_group, *facts.title_candidates):
+            if candidate and not is_generic_container_title(candidate):
+                identity_title = candidate
+                break
+    title = _normalize_title(identity_title)
     if _is_placeholder_title(title):
         return ""
     media_type = (facts.media_type or facts.group_type or "unknown").casefold()
     year = str(facts.year_candidate or "")
     return f"title:{title}:{year}:{media_type}"
+
+
+def _relation_work_key(facts: ParsedFacts) -> str:
+    """由 series_group 推导父系列 Work key；与 _work_key 的 title 规则一致。"""
+
+    if not facts.series_group or is_generic_container_title(facts.series_group):
+        return ""
+    media_type = (facts.media_type or facts.group_type or "unknown").casefold()
+    year = str(facts.year_candidate or "")
+    return f"title:{_normalize_title(facts.series_group)}:{year}:{media_type}"
+
+
+def _relation_work_key_from_row(row: dict) -> str:
+    """由 work 行数据推导父系列 Work key，供 relations 构建使用。"""
+
+    series_group = str(row.get("series_group") or "")
+    if not series_group or is_generic_container_title(series_group):
+        return ""
+    media_type = str(row.get("media_type") or "unknown").casefold()
+    year = str(row.get("year") or "")
+    return f"title:{_normalize_title(series_group)}:{year}:{media_type}"
 
 
 def _edition_key(facts: ParsedFacts) -> str:
@@ -71,13 +94,20 @@ class MediaResolver:
                         message="解析结果标记为需要人工复核，确认前必须处理",
                     )
                 )
+            identity_title = facts.work_title or (facts.title_candidates or ("",))[0]
             key = _work_key(facts)
             if not key:
+                generic = bool(identity_title.strip()) and is_generic_container_title(identity_title)
                 issues.append(
                     ResolutionIssue(
-                        code="work_identity_missing",
+                        code="generic_container_title" if generic else "work_identity_missing",
                         evidence_id=evidence.evidence_id,
-                        message="缺少足够的作品标题或 Provider 身份，需人工确认",
+                        message=(
+                            "目录/文件只能提供通用容器标题（Season/S01/Specials/分类/纯数字），"
+                            "无法确定作品身份，需人工确认"
+                            if generic
+                            else "缺少足够的作品标题或 Provider 身份，需人工确认"
+                        ),
                     )
                 )
                 continue
@@ -85,9 +115,13 @@ class MediaResolver:
             work = work_rows.setdefault(
                 key,
                 {
-                    "title": facts.work_title or (facts.title_candidates or ("",))[0],
+                    "title": identity_title,
                     "year": facts.year_candidate,
                     "media_type": facts.media_type or "unknown",
+                    "card_type": facts.card_type,
+                    "show_type": facts.show_type,
+                    "series_group": facts.series_group,
+                    "relation_type": facts.relation_type,
                     "evidence_ids": [],
                 },
             )
@@ -173,8 +207,29 @@ class MediaResolver:
                         "special_number": special_number,
                         "edition_key": edition_key,
                         "asset_ids": [],
+                        "title_norms": {_normalize_title(identity_title)},
+                        "has_provider_identity": bool(facts.tmdb_hint_id and facts.tmdb_hint_type),
                     },
                 )
+                # Episode → Asset 合并的 Work 身份防线：同一 Episode 若出现
+                # 不同非通用作品标题且没有可信 provider 身份串接，必须形成
+                # resolution issue，绝不能静默当成多版本（P-001 7.3.C）。
+                title_norm = _normalize_title(identity_title)
+                if (
+                    title_norm
+                    and title_norm not in episode["title_norms"]
+                    and not (episode["has_provider_identity"] and bool(facts.tmdb_hint_id and facts.tmdb_hint_type))
+                ):
+                    episode["title_norms"].add(title_norm)
+                    issues.append(
+                        ResolutionIssue(
+                            code="ambiguous_work_identity",
+                            evidence_id=evidence.evidence_id,
+                            message="同一集出现指向不同独立作品的 Asset，不能自动合并为多版本",
+                        )
+                    )
+                elif title_norm:
+                    episode["title_norms"].add(title_norm)
                 if evidence.evidence_id not in episode["asset_ids"]:
                     episode["asset_ids"].append(evidence.evidence_id)
 
@@ -185,9 +240,26 @@ class MediaResolver:
                 year=row["year"],
                 media_type=row["media_type"],
                 source_evidence_ids=tuple(row["evidence_ids"]),
+                card_type=row["card_type"],
+                show_type=row["show_type"],
+                series_group=row["series_group"],
+                relation_type=row["relation_type"],
             )
             for key, row in work_rows.items()
         )
+        relations: list[ResolvedWorkRelation] = []
+        for key, row in work_rows.items():
+            parent_key = _relation_work_key_from_row(row)
+            if not parent_key or parent_key == key or parent_key not in work_rows:
+                continue
+            relation_type = row["relation_type"] or "related"
+            relations.append(
+                ResolvedWorkRelation(
+                    parent_work_key=parent_key,
+                    child_work_key=key,
+                    relation_type=relation_type,
+                )
+            )
         episodes = tuple(
             ResolvedEpisode(
                 episode_key=row["episode_key"],
@@ -215,5 +287,6 @@ class MediaResolver:
             works=works,
             episodes=episodes,
             work_assets=work_assets,
+            relations=tuple(relations),
             issues=tuple(issues),
         )
