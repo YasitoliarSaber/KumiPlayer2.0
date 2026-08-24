@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, expect, test, vi } from 'vitest'
 import MediaManagementPage from '../../src/pages/MediaManagementPage'
 
@@ -302,7 +302,7 @@ test('来源卡可以回到同一 OpenList 来源执行更新', async () => {
   expect(await screen.findByRole('button', { name: '增量扫描' })).toBeEnabled()
 })
 
-test('任务进度使用面向用户的名称而不是内部 job type', async () => {
+test('任务进度使用用户阶段标签而不是内部 job type', async () => {
   localStorage.setItem('kumiplayer.media-v4.active-revision', 'rev-existing')
   api.status.mockResolvedValue({
     revision_id: 'rev-existing',
@@ -315,15 +315,37 @@ test('任务进度使用面向用户的名称而不是内部 job type', async ()
       status: 'succeeded',
       idempotency_key: 'materialize_mirror:rev-existing:work-1',
     }],
+    progress: {
+      revision_id: 'rev-existing',
+      revision_status: 'confirmed',
+      overall_status: 'completed',
+      stage_summary: {
+        mirror: { status: 'succeeded', total: 1, queued: 0, running: 0, succeeded: 1, failed: 0, cancelled: 0 },
+        metadata: { status: 'succeeded', total: 1, queued: 0, running: 0, succeeded: 1, failed: 0, cancelled: 0 },
+        projection: { status: 'succeeded', total: 1, queued: 0, running: 0, succeeded: 1, failed: 0, cancelled: 0 },
+      },
+      work_units: [{
+        work_id: 'work-1',
+        title: '测试作品',
+        media_type: 'tv',
+        episode_count: 1,
+        asset_count: 1,
+        overall_status: 'completed',
+        mirror: { job_id: 'job-1', status: 'succeeded', attempts: 1, last_error: '' },
+        metadata: { job_id: 'job-2', status: 'succeeded', attempts: 1, last_error: '' },
+      }],
+    },
   })
 
   render(<MediaManagementPage />)
 
+  // 用户阶段只出现一次，不按后端 job 数量重复。
   expect(await screen.findByText('生成镜像文件')).toBeVisible()
+  expect(screen.getAllByText('生成镜像文件')).toHaveLength(1)
   expect(screen.queryByText('materialize_mirror')).not.toBeInTheDocument()
 })
 
-test('失败任务可以直接从导入进度页重试', async () => {
+test('失败作品可以从导入进度页精确重试', async () => {
   localStorage.setItem('kumiplayer.media-v4.active-revision', 'rev-existing')
   api.status.mockResolvedValue({
     revision_id: 'rev-existing',
@@ -337,10 +359,32 @@ test('失败任务可以直接从导入进度页重试', async () => {
       idempotency_key: 'scrape_work:rev-existing:work-1',
       last_error: '网络暂时不可用',
     }],
+    progress: {
+      revision_id: 'rev-existing',
+      revision_status: 'confirmed',
+      overall_status: 'needs_attention',
+      stage_summary: {
+        mirror: { status: 'succeeded', total: 1, queued: 0, running: 0, succeeded: 1, failed: 0, cancelled: 0 },
+        metadata: { status: 'failed', total: 1, queued: 0, running: 0, succeeded: 0, failed: 1, cancelled: 0 },
+        projection: { status: 'queued', total: 1, queued: 1, running: 0, succeeded: 0, failed: 0, cancelled: 0 },
+      },
+      work_units: [{
+        work_id: 'work-1',
+        title: '失败作品',
+        media_type: 'tv',
+        episode_count: 1,
+        asset_count: 1,
+        overall_status: 'failed',
+        mirror: { job_id: 'job-ok', status: 'succeeded', attempts: 1, last_error: '' },
+        metadata: { job_id: 'job-failed', status: 'failed', attempts: 1, last_error: '网络暂时不可用' },
+      }],
+    },
   })
   render(<MediaManagementPage />)
 
-  fireEvent.click(await screen.findByRole('button', { name: '重试 获取媒体信息' }))
+  const card = (await screen.findByText('失败作品')).closest('article')!
+  fireEvent.click(within(card).getByRole('button', { name: /失败作品/ }))
+  fireEvent.click(await within(card).findByRole('button', { name: /重试/ }))
 
   await waitFor(() => expect(tasks.retry).toHaveBeenCalledWith('job-failed'))
 })

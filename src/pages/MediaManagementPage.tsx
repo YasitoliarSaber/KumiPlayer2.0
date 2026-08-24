@@ -13,17 +13,20 @@ import {
   ScanObject24Regular,
 } from '@fluentui/react-icons'
 import { mediaV4Api, type V4Job, type V4OpenlistBaselineStatus, type V4Preview, type V4SourceEvidence, type V4SourceLibraryCard } from '../api/mediaV4'
+import type { V4ExecutionProgress } from '../api/mediaV4'
 import { configApi, type PublicConfig } from '../api/config'
 import { openlistApi } from '../api/openlist'
 import { tasksApi } from '../api/tasks'
 import type { OpenListRoute, ProviderId } from '../api/types'
 import OpenListFolderBrowser from '../components/media/OpenListFolderBrowser'
+import { V4ExecutionProgress as V4ExecutionProgressView } from '../components/media/V4ExecutionProgress'
+import { V4RecognitionSummary, type OverrideDraft } from '../components/media/V4RecognitionSummary'
 import { pickDirectoryTreeFile, pickFolder } from '../platform/folderPicker'
 import { useMediaWorkflowStore } from '../stores/mediaWorkflow'
 import { useUiStore } from '../stores/ui'
 
 type ImportKind = 'local' | 'tree' | 'openlist' | 'hybrid'
-type OverrideDraft = { title: string; mediaType: 'tv' | 'movie'; season: string; episode: string }
+type WorkflowStage = 'source' | 'review' | 'execute'
 type SourceCardMetadata = {
   source_display_name: string
   source_locator: string
@@ -154,6 +157,8 @@ export default function MediaManagementPage() {
   const [sourceCards, setSourceCards] = useState<V4SourceLibraryCard[]>([])
   const [sourceCardsLoading, setSourceCardsLoading] = useState(true)
   const [revisionId, setRevisionId] = useState('')
+  const [workflowStage, setWorkflowStage] = useState<WorkflowStage>('source')
+  const [executeProgress, setExecuteProgress] = useState<V4ExecutionProgress | null>(null)
   const [scan, setScan] = useState<{
     root_id: string
     scan_id: string
@@ -252,12 +257,15 @@ export default function MediaManagementPage() {
     setRevisionId(savedRevision)
     void mediaV4Api.status(savedRevision).then((result) => {
       setJobs(result.jobs)
+      if (result.progress) setExecuteProgress(result.progress)
+      setWorkflowStage('execute')
     }).catch(() => {
       localStorage.removeItem(ACTIVE_REVISION_KEY)
     })
   }, [])
 
   const hasActiveJobs = jobs.some((job) => !['succeeded', 'failed', 'cancelled'].includes(job.status))
+  const executionActive = executeProgress?.overall_status === 'running' || executeProgress?.overall_status === 'queued'
   useEffect(() => {
     if (!revisionId || !hasActiveJobs) return
     let cancelled = false
@@ -265,7 +273,10 @@ export default function MediaManagementPage() {
     const poll = async () => {
       try {
         const result = await mediaV4Api.status(revisionId)
-        if (!cancelled) setJobs(result.jobs)
+        if (!cancelled) {
+          setJobs(result.jobs)
+          if (result.progress) setExecuteProgress(result.progress)
+        }
       } catch (cause) {
         if (!cancelled) setError(cause instanceof Error ? cause.message : '后台任务状态读取失败')
       } finally {
@@ -279,16 +290,31 @@ export default function MediaManagementPage() {
     }
   }, [hasActiveJobs, revisionId])
 
-  const groupedWorks = useMemo(() => {
-    if (!preview) return []
-    return preview.works.map((work) => ({
-      ...work,
-      episodes: preview.episodes.filter((episode) => episode.work_key === work.work_key),
-      movieAssets: preview.work_assets.filter((asset) => asset.work_key === work.work_key),
-    }))
-  }, [preview])
+  useEffect(() => {
+    if (!revisionId || !executionActive) return
+    let cancelled = false
+    let timer = 0
+    const poll = async () => {
+      try {
+        const result = await mediaV4Api.status(revisionId)
+        if (!cancelled) {
+          setJobs(result.jobs)
+          if (result.progress) setExecuteProgress(result.progress)
+        }
+      } catch (cause) {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : '后台任务状态读取失败')
+      } finally {
+        if (!cancelled) timer = window.setTimeout(() => { void poll() }, 1200)
+      }
+    }
+    timer = window.setTimeout(() => { void poll() }, 1200)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [executionActive, revisionId])
 
-  const activeStep = jobs.length > 0 ? 2 : scan ? 1 : 0
+  const activeStep = workflowStage === 'source' ? 0 : workflowStage === 'review' ? 1 : 2
   const selectedRemoteRoute = routeForPath(routes, remoteRoot)
   const canScan = kind === 'openlist'
     ? Boolean(config?.openlist_configured && remoteRoot && selectedRemoteRoute?.local_path)
@@ -297,7 +323,7 @@ export default function MediaManagementPage() {
       : kind === 'tree'
         ? Boolean(path.trim() && providerRoot(provider))
         : Boolean(path.trim())
-  const showReset = kind !== 'local' || Boolean(scan || preview || jobs.length || error)
+  const showReset = workflowStage !== 'source' || kind !== 'local' || Boolean(error)
 
   function providerRoot(providerId: ProviderId, remotePath = '') {
     const matchedRoute = routeForPath(routes, remotePath)
@@ -359,6 +385,8 @@ export default function MediaManagementPage() {
     setError('')
     setAllowEmpty(false)
     setOverrideDrafts({})
+    setExecuteProgress(null)
+    setWorkflowStage('source')
     localStorage.removeItem(ACTIVE_REVISION_KEY)
   }
 
@@ -442,6 +470,7 @@ export default function MediaManagementPage() {
           ...metadata,
         })
         setPreview(previewResult)
+        setWorkflowStage('review')
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '来源扫描失败')
@@ -471,6 +500,7 @@ export default function MediaManagementPage() {
       })
       setRevisionId(nextRevisionId)
       setPreview(result)
+      setWorkflowStage('review')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '识别预览失败')
     } finally {
@@ -487,6 +517,10 @@ export default function MediaManagementPage() {
       setJobs(result.jobs)
       localStorage.setItem(ACTIVE_REVISION_KEY, revisionId)
       setPreview({ ...preview, status: 'confirmed' })
+      // P-003：确认成功后立即切换到独立执行阶段，第二步正文退出。
+      const status = await mediaV4Api.status(revisionId)
+      if (status.progress) setExecuteProgress(status.progress)
+      setWorkflowStage('execute')
       void refreshSourceCards()
       if (kind === 'openlist' || kind === 'hybrid') void refreshOpenlistBaseline(remoteRoot)
     } catch (cause) {
@@ -541,9 +575,11 @@ export default function MediaManagementPage() {
       const result = await mediaV4Api.status(card.revision_id)
       setRevisionId(card.revision_id)
       setJobs(result.jobs)
+      if (result.progress) setExecuteProgress(result.progress)
       setScan(null)
       setPreview(null)
       localStorage.setItem(ACTIVE_REVISION_KEY, card.revision_id)
+      setWorkflowStage('execute')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法读取该媒体库的导入进度')
     }
@@ -556,6 +592,7 @@ export default function MediaManagementPage() {
       await tasksApi.retry(job.job_id)
       const result = await mediaV4Api.status(job.revision_id)
       setJobs(result.jobs)
+      if (result.progress) setExecuteProgress(result.progress)
       void refreshSourceCards()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '任务重试失败')
@@ -655,7 +692,7 @@ export default function MediaManagementPage() {
 
       {error && <MessageBar className="media-v4-message" intent="error"><MessageBarBody>{error}</MessageBarBody></MessageBar>}
 
-      <section className="media-stage-shell media-v4-stage-panel media-v4-source-card">
+      {workflowStage === 'source' && <section className="media-stage-shell media-v4-stage-panel media-v4-source-card">
         <div className="media-stage-header">
           <div className="media-stage-heading">
             <span className="media-stage-icon" aria-hidden="true"><FolderOpen24Regular /></span>
@@ -795,11 +832,11 @@ export default function MediaManagementPage() {
             </div>
           )}
         </div>
-      </section>
+      </section>}
 
-      {scan && <section className="media-stage-shell media-v4-stage-panel media-v4-review-card">
+      {workflowStage === 'review' && scan && <section className="media-stage-shell media-v4-stage-panel media-v4-review-card">
         <div className="media-stage-header">
-          <div className="media-stage-heading"><span className="media-stage-icon" aria-hidden="true"><CheckmarkCircle24Regular /></span><div><span className="media-stage-eyebrow">第 2 步</span><h2>检查识别结果</h2><p>已扫描 {scan.entries.length} 个媒体条目。确认前可以检查作品、季度、剧集和文件版本。</p></div></div>
+          <div className="media-stage-heading"><span className="media-stage-icon" aria-hidden="true"><CheckmarkCircle24Regular /></span><div><span className="media-stage-eyebrow">第 2 步</span><h2>检查识别结果</h2><p>已扫描 {scan.entries.length} 个媒体条目。默认按作品摘要检查，需要处理的条目会置顶。</p></div></div>
           {!preview && <Button appearance="secondary" disabled={busy !== '' || (scan.entries.length === 0 && !allowEmpty)} onClick={() => void buildPreview()}>{busy === 'preview' ? <Spinner size="tiny" /> : '生成识别预览'}</Button>}
         </div>
         {scan.scan_mode === 'incremental' && <MessageBar intent="info"><MessageBarBody>本次使用 OpenList 增量核对：请求 {scan.scan_stats?.requested_directories || 0} 个目录，其中滚动抽查 {scan.scan_stats?.rolling_verified || 0} 个、变化优先核对 {scan.scan_stats?.changed_directories || 0} 个。</MessageBarBody></MessageBar>}
@@ -807,13 +844,43 @@ export default function MediaManagementPage() {
         {!preview && <div className="media-v4-empty">{scan.entries.length === 0 ? <Checkbox checked={allowEmpty} onChange={(_, data) => setAllowEmpty(Boolean(data.checked))} label="我确认该来源当前确实为空，并允许移除它先前导入的媒体" /> : '正在生成识别结果…'}</div>}
         {preview && <>
           {preview.issues.length > 0 && <MessageBar intent="warning"><MessageBarBody>发现 {preview.issues.length} 个需要人工处理的问题；未解决前不能确认。</MessageBarBody></MessageBar>}
-          {groupedWorks.length > 0 ? <div className="media-v4-work-grid">{groupedWorks.map((work) => <article className="media-v4-work-card" key={work.work_key}><div><strong>{work.preferred_title || '未命名作品'}</strong><span>{work.year || '年份未知'} · {work.media_type === 'movie' ? '电影' : '剧集'}</span></div><div className="media-v4-episode-list">{work.episodes.map((episode) => <span key={`${episode.episode_key}-${episode.edition_key}`}>{episodeLabel(episode)} · {episode.asset_evidence_ids.length} 个文件</span>)}{work.movieAssets.map((asset) => <span key={`${work.work_key}-${asset.edition_key}`}>电影{asset.edition_key === 'default' ? '' : ` · ${asset.edition_key}`} · {asset.asset_evidence_ids.length} 个文件</span>)}</div></article>)}</div> : <div className="media-v4-empty">这个来源没有可建立媒体库的作品。</div>}
-          {preview.issues.length > 0 && <div className="media-v4-issues">{preview.issues.map((issue) => { const draft = overrideDrafts[issue.evidence_id] || { title: '', mediaType: 'tv' as const, season: '1', episode: '1' }; return <div key={`${issue.code}-${issue.evidence_id}`}><strong>{issue.code}</strong><span>{issue.message}</span><div className="media-v4-override-row"><Input aria-label="修正作品标题" value={draft.title} placeholder="作品标题" onChange={(_, data) => setOverrideDrafts((current) => ({ ...current, [issue.evidence_id]: { ...draft, title: data.value } }))} /><Select aria-label="修正媒体类型" value={draft.mediaType} onChange={(event) => setOverrideDrafts((current) => ({ ...current, [issue.evidence_id]: { ...draft, mediaType: event.currentTarget.value as 'tv' | 'movie' } }))}><option value="tv">剧集</option><option value="movie">电影</option></Select>{draft.mediaType === 'tv' && <><Input aria-label="修正季度" value={draft.season} placeholder="季度" onChange={(_, data) => setOverrideDrafts((current) => ({ ...current, [issue.evidence_id]: { ...draft, season: data.value } }))} /><Input aria-label="修正集号" value={draft.episode} placeholder="集号" onChange={(_, data) => setOverrideDrafts((current) => ({ ...current, [issue.evidence_id]: { ...draft, episode: data.value } }))} /></>}<Button appearance="secondary" disabled={busy !== ''} onClick={() => void applyOverride(issue.evidence_id)}>应用修正</Button></div></div> })}</div>}
+          <V4RecognitionSummary
+            preview={preview}
+            issues={preview.issues}
+            overrideDrafts={overrideDrafts}
+            busy={busy !== ''}
+            onOverrideChange={(evidenceId, draft) => setOverrideDrafts((current) => ({ ...current, [evidenceId]: draft }))}
+            onApplyOverride={(evidenceId) => void applyOverride(evidenceId)}
+          />
           <div className="media-v4-command-row media-v4-confirm-row"><div><strong>{preview.issues.length > 0 ? '需要先处理识别问题' : '识别结果可以建立媒体库'}</strong><span>确认后将生成镜像、获取媒体信息并更新媒体库。</span></div><Button className="media-primary-command" appearance="primary" icon={<Database24Regular />} disabled={busy !== '' || preview.issues.length > 0 || preview.status === 'confirmed'} onClick={() => void confirmRevision()}>{busy === 'confirm' ? <><Spinner size="tiny" />正在建立</> : preview.status === 'confirmed' ? '已建立媒体库' : '确认并建立媒体库'}</Button></div>
         </>}
       </section>}
 
-      {jobs.length > 0 && <section className="media-stage-shell media-v4-stage-panel media-v4-jobs-card"><div className="media-stage-header"><div className="media-stage-heading"><span className="media-stage-icon" aria-hidden="true"><Database24Regular /></span><div><span className="media-stage-eyebrow">第 3 步</span><h2>建立媒体库</h2><p>可以离开此页面；返回后会继续显示当前导入进度。</p></div></div></div><div className="media-v4-job-list">{jobs.map((job) => { const label = JOB_LABELS[job.job_type] || job.job_type; const retryable = job.status === 'failed' || job.status === 'cancelled'; return <article className={`media-v4-job media-v4-job-${job.status}`} key={job.job_id}><span className="media-v4-job-state" aria-hidden="true">{job.status === 'succeeded' ? <CheckmarkCircle24Filled /> : <span />}</span><div><strong>{label}</strong><span>{JOB_STATUS_LABELS[job.status] || job.status}{job.attempts ? ` · 第 ${job.attempts} 次尝试` : ''}</span>{job.last_error && <span className="media-v4-job-error" role="alert">{job.last_error}</span>}</div><div className="media-v4-job-tail"><code title={job.job_id}>{job.job_id}</code>{retryable && <Button size="small" appearance="secondary" aria-label={`重试 ${label}`} disabled={retryingJobId !== ''} onClick={() => void retryJob(job)}>{retryingJobId === job.job_id ? <Spinner size="tiny" /> : '重试'}</Button>}</div></article> })}</div></section>}
+      {workflowStage === 'execute' && <section className="media-stage-shell media-v4-stage-panel media-v4-jobs-card">
+        <div className="media-stage-header">
+          <div className="media-stage-heading"><span className="media-stage-icon" aria-hidden="true"><Database24Regular /></span><div><span className="media-stage-eyebrow">第 3 步</span><h2>建立媒体库</h2><p>可以离开此页面；返回后会继续显示当前导入进度。</p></div></div>
+          {preview && <details className="media-v4-review-details"><summary>查看本次识别摘要</summary><div className="media-v4-review-details-body">
+            <V4RecognitionSummary
+              preview={preview}
+              issues={preview.issues}
+              overrideDrafts={overrideDrafts}
+              busy={busy !== ''}
+              onOverrideChange={(evidenceId, draft) => setOverrideDrafts((current) => ({ ...current, [evidenceId]: draft }))}
+              onApplyOverride={(evidenceId) => void applyOverride(evidenceId)}
+            />
+          </div></details>}
+        </div>
+        {executeProgress ? (
+          <V4ExecutionProgressView
+            progress={executeProgress}
+            busyRetryId={retryingJobId}
+            onRetry={(jobId: string) => { const job = jobs.find((item) => item.job_id === jobId); if (job) void retryJob(job) }}
+          />
+        ) : (
+          <div className="media-v4-empty">正在读取执行进度…</div>
+        )}
+      </section>}
+
     </div>
   )
 }

@@ -116,6 +116,47 @@ export interface V4OpenlistBaselineStatus {
   has_confirmed_baseline: boolean
 }
 
+export interface V4WorkProgressUnit {
+  work_id: string
+  title: string
+  media_type: 'tv' | 'movie'
+  episode_count: number
+  asset_count: number
+  overall_status:
+    | 'waiting_mirror'
+    | 'running_mirror'
+    | 'waiting_metadata'
+    | 'running_metadata'
+    | 'needs_attention'
+    | 'failed'
+    | 'cancelled'
+    | 'completed'
+  mirror: { job_id: string; status: string; attempts: number; last_error: string }
+  metadata: { job_id: string; status: string; attempts: number; last_error: string }
+}
+
+export interface V4StageSummary {
+  status: 'idle' | 'running' | 'failed' | 'cancelled' | 'queued' | 'succeeded'
+  total: number
+  queued: number
+  running: number
+  succeeded: number
+  failed: number
+  cancelled: number
+}
+
+export interface V4ExecutionProgress {
+  revision_id: string
+  revision_status: string
+  overall_status: 'running' | 'needs_attention' | 'queued' | 'completed'
+  stage_summary: {
+    mirror: V4StageSummary
+    metadata: V4StageSummary
+    projection: V4StageSummary
+  }
+  work_units: V4WorkProgressUnit[]
+}
+
 export const mediaV4Api = {
   scan: (request: {
     source?: string
@@ -154,7 +195,7 @@ export const mediaV4Api = {
     api.patch<V4Preview>(`/api/v4/imports/${encodeURIComponent(revisionId)}/evidence/${encodeURIComponent(evidenceId)}`, { changes }),
 
   status: (revisionId: string) =>
-    api.get<{ revision_id: string; status: string; jobs: V4Job[] }>(`/api/v4/imports/${encodeURIComponent(revisionId)}`),
+    api.get<{ revision_id: string; status: string; jobs: V4Job[]; progress: V4ExecutionProgress }>(`/api/v4/imports/${encodeURIComponent(revisionId)}`),
 
   sourceLibraries: () => api.get<{ cards: V4SourceLibraryCard[] }>('/api/v4/sources/libraries'),
 

@@ -842,9 +842,15 @@ def get_import(revision_id: str):
     service = V4RevisionService(get_database())
     try:
         status = service.get_status(revision_id)
+        progress = service.get_execution_progress(revision_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"revision 不存在: {revision_id}") from exc
-    return {"revision_id": revision_id, "status": status, "jobs": service.list_jobs(revision_id)}
+    return {
+        "revision_id": revision_id,
+        "status": status,
+        "jobs": service.list_jobs(revision_id),
+        "progress": progress,
+    }
 
 
 @router.get("/sources/libraries")

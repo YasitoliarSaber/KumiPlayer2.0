@@ -23,6 +23,128 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _job_summary(job: dict | None) -> dict:
+    """把单个 job 折叠成作品单元可用的最小投影；无 job 时返回等待态。"""
+
+    if job is None:
+        return {"job_id": "", "status": "queued", "attempts": 0, "last_error": ""}
+    return {
+        "job_id": str(job["job_id"] or ""),
+        "status": str(job["status"] or "queued"),
+        "attempts": int(job["attempts"] or 0),
+        "last_error": str(job["last_error"] or ""),
+    }
+
+
+def _derive_work_status(mirror: dict | None, metadata: dict | None, scrape_status: str) -> str:
+    """由 mirror + metadata jobs 推导作品单元的用户可见状态。
+
+    优先级与文档一致：运行中 > 需要处理/失败/取消 > 等待 > 完成；
+    失败/取消不能被后续 queued job 掩盖。scrape 元数据状态（waiting_review /
+    source_unavailable / failed / waiting_metadata）不能显示为已完成。
+    """
+
+    def first(*jobs: dict | None) -> dict | None:
+        return next((job for job in jobs if job is not None), None)
+
+    mirror_job = first(mirror)
+    metadata_job = first(metadata)
+    if mirror_job is not None:
+        if mirror_job["status"] == "running":
+            return "running_mirror"
+        if mirror_job["status"] == "failed":
+            return "failed"
+        if mirror_job["status"] == "cancelled":
+            return "cancelled"
+        if mirror_job["status"] == "queued":
+            return "waiting_mirror"
+        # mirror succeeded
+        if metadata_job is not None:
+            if metadata_job["status"] == "running":
+                return "running_metadata"
+            if metadata_job["status"] == "failed":
+                return "failed"
+            if metadata_job["status"] == "cancelled":
+                return "cancelled"
+            if metadata_job["status"] == "queued":
+                return "waiting_metadata"
+            # metadata succeeded
+            if scrape_status and scrape_status != "confirmed":
+                return "needs_attention"
+            return "completed"
+        return "waiting_metadata"
+    # 理论上每个 work 都有 mirror job；异常情况按 metadata 状态展示。
+    if metadata_job is not None:
+        if metadata_job["status"] == "running":
+            return "running_metadata"
+        if metadata_job["status"] == "failed":
+            return "failed"
+        if metadata_job["status"] == "cancelled":
+            return "cancelled"
+        if metadata_job["status"] == "queued":
+            return "waiting_metadata"
+        if scrape_status and scrape_status != "confirmed":
+            return "needs_attention"
+        return "completed"
+    return "waiting_mirror"
+
+
+def _stage_status(jobs: list[dict]) -> str:
+    """阶段级状态：running > failed/cancelled > queued > succeeded；空为 idle。"""
+
+    if not jobs:
+        return "idle"
+    statuses = [str(job["status"]) for job in jobs]
+    if "running" in statuses:
+        return "running"
+    if "failed" in statuses:
+        return "failed"
+    if "cancelled" in statuses:
+        return "cancelled"
+    if "queued" in statuses:
+        return "queued"
+    return "succeeded"
+
+
+def _stage_summary(jobs: list[dict]) -> dict:
+    return {
+        "status": _stage_status(jobs),
+        "total": len(jobs),
+        "queued": sum(1 for job in jobs if job["status"] == "queued"),
+        "running": sum(1 for job in jobs if job["status"] == "running"),
+        "succeeded": sum(1 for job in jobs if job["status"] == "succeeded"),
+        "failed": sum(1 for job in jobs if job["status"] == "failed"),
+        "cancelled": sum(1 for job in jobs if job["status"] == "cancelled"),
+    }
+
+
+def _revision_overall_status(work_units: list[dict], stage: dict[str, list[dict]]) -> str:
+    """revision 级整体状态：running > needs_attention > queued > completed。"""
+
+    if any(unit["overall_status"] in {"running_mirror", "running_metadata"} for unit in work_units):
+        return "running"
+    if any(stage["projection"] and str(job["status"]) == "running" for job in stage["projection"]):
+        return "running"
+    if any(unit["overall_status"] in {"failed", "cancelled", "needs_attention"} for unit in work_units):
+        return "needs_attention"
+    if any(
+        str(job["status"]) in {"failed", "cancelled"}
+        for stage_jobs in stage.values()
+        for job in stage_jobs
+    ):
+        return "needs_attention"
+    if any(
+        str(job["status"]) in {"queued"}
+        for stage_jobs in stage.values()
+        for job in stage_jobs
+    ):
+        return "queued"
+    if any(unit["overall_status"] == "waiting_mirror" or unit["overall_status"] == "waiting_metadata" for unit in work_units):
+        return "queued"
+    return "completed"
+
+
+
 def _normalize_title(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value or "").casefold()
     normalized = re.sub(r"\s+", " ", normalized).strip()
@@ -1256,3 +1378,108 @@ class V4RevisionService:
                 (revision_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_execution_progress(self, revision_id: str) -> dict:
+        """P-003：V4 只读执行进度投影。
+
+        从 authoritative tables（import_revisions / jobs / works /
+        revision_bindings / scrape_bindings）读取，禁止从前端 preview、日志
+        文本或 Library Projection 反推运行状态。返回作品单元 + 用户阶段摘要，
+        原始 job_id 只作为重试命令参数。
+        """
+
+        with self.database.connect() as conn:
+            revision = conn.execute(
+                "SELECT revision_id, status, confirmed_at FROM import_revisions WHERE revision_id = ?",
+                (revision_id,),
+            ).fetchone()
+            if revision is None:
+                raise KeyError(revision_id)
+            job_rows = conn.execute(
+                "SELECT job_id, job_type, work_id, status, attempts, last_error "
+                "FROM jobs WHERE revision_id = ? ORDER BY job_type, job_id",
+                (revision_id,),
+            ).fetchall()
+            binding_rows = conn.execute(
+                "SELECT work_id, COUNT(DISTINCT episode_id) AS episode_count, "
+                "COUNT(DISTINCT asset_id) AS asset_count "
+                "FROM revision_bindings WHERE revision_id = ? AND work_id != '' "
+                "GROUP BY work_id",
+                (revision_id,),
+            ).fetchall()
+            work_ids = sorted(
+                {str(row["work_id"]) for row in job_rows if str(row["work_id"])}
+                | {str(row["work_id"]) for row in binding_rows}
+            )
+            works: dict[str, dict] = {}
+            if work_ids:
+                placeholders = ",".join("?" for _ in work_ids)
+                for row in conn.execute(
+                    "SELECT work_id, preferred_title, work_type FROM works WHERE work_id IN (" + placeholders + ")",
+                    work_ids,
+                ).fetchall():
+                    works[str(row["work_id"])] = dict(row)
+            scrape_rows: dict[str, str] = {}
+            for row in conn.execute(
+                "SELECT sb.work_id, sb.status FROM scrape_bindings sb "
+                "WHERE sb.revision_id = ? AND sb.updated_at = ( "
+                "  SELECT MAX(updated_at) FROM scrape_bindings latest "
+                "  WHERE latest.revision_id = sb.revision_id AND latest.work_id = sb.work_id "
+                ")",
+                (revision_id,),
+            ).fetchall():
+                scrape_rows[str(row["work_id"])] = str(row["status"] or "")
+
+        jobs_by_work: dict[str, dict] = {}
+        stage: dict[str, list[dict]] = {"mirror": [], "metadata": [], "projection": []}
+        for row in job_rows:
+            job = dict(row)
+            job_type = str(job["job_type"])
+            work_id = str(job["work_id"] or "")
+            if job_type == "materialize_mirror":
+                stage["mirror"].append(job)
+                jobs_by_work.setdefault(work_id, {})["mirror"] = job
+            elif job_type == "scrape_work":
+                stage["metadata"].append(job)
+                jobs_by_work.setdefault(work_id, {})["metadata"] = job
+            elif job_type == "refresh_projection":
+                stage["projection"].append(job)
+
+        work_units: list[dict] = []
+        for work_id in work_ids:
+            work = works.get(work_id, {})
+            job_pair = jobs_by_work.get(work_id, {})
+            mirror = job_pair.get("mirror")
+            metadata = job_pair.get("metadata")
+            work_units.append({
+                "work_id": work_id,
+                "title": str(work.get("preferred_title") or work_id),
+                "media_type": "movie" if str(work.get("work_type") or "") == "movie" else "tv",
+                "episode_count": int(next(
+                    (row["episode_count"] for row in binding_rows if row["work_id"] == work_id),
+                    0,
+                ) or 0),
+                "asset_count": int(next(
+                    (row["asset_count"] for row in binding_rows if row["work_id"] == work_id),
+                    0,
+                ) or 0),
+                "overall_status": _derive_work_status(
+                    mirror,
+                    metadata,
+                    scrape_rows.get(work_id, ""),
+                ),
+                "mirror": _job_summary(mirror),
+                "metadata": _job_summary(metadata),
+            })
+
+        return {
+            "revision_id": revision_id,
+            "revision_status": str(revision["status"]),
+            "overall_status": _revision_overall_status(work_units, stage),
+            "stage_summary": {
+                "mirror": _stage_summary(stage["mirror"]),
+                "metadata": _stage_summary(stage["metadata"]),
+                "projection": _stage_summary(stage["projection"]),
+            },
+            "work_units": work_units,
+        }
