@@ -137,8 +137,9 @@ def enrich_candidate_aliases(
         media_type = "tv" if media_type in {"tv", "series"} else "movie"
         provider_id = str(item.get("provider_id") or "")
         cache_key = (media_type, provider_id)
-        detail = cache.get(cache_key)
-        if detail is None and budget[0] < max_details:
+        # None 也是一次已完成请求的缓存结果：详情失败不能让同一 Provider
+        # 身份在同一 draft 的其他 Work 上反复请求。
+        if cache_key not in cache and budget[0] < max_details:
             budget[0] += 1
             try:
                 with TMDBClient(bearer_token=config.tmdb_bearer_token) as client:
@@ -150,6 +151,7 @@ def enrich_candidate_aliases(
             except Exception:
                 detail = None
             cache[cache_key] = detail
+        detail = cache.get(cache_key)
         aliases = _extract_aliases(detail, media_type) if detail else []
         enriched.append({**item, "aliases": aliases})
     return enriched

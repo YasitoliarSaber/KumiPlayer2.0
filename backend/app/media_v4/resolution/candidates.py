@@ -124,7 +124,6 @@ def compute_nfo_ownership(
     """
 
     work_dirs: dict[str, set[str]] = {}
-    dir_work_count: dict[str, set[str]] = {}
     for work in graph.works:
         dirs: set[str] = set()
         for evidence, _facts in entries:
@@ -132,8 +131,20 @@ def compute_nfo_ownership(
                 parts = PurePosixPath(evidence.relative_path).parts
                 dirs.add(PurePosixPath(*parts[:-1]).as_posix() if len(parts) > 1 else "")
         work_dirs[work.work_key] = dirs
-        for directory in dirs:
-            dir_work_count.setdefault(directory, set()).add(work.work_key)
+
+    def shares_directory_scope(nfo_parent: str, video_dirs: set[str]) -> bool:
+        """NFO 所在目录须等于或是视频目录的祖先。
+
+        允许 ``Show/tvshow.nfo`` 对应 ``Show/Season 1/*.mkv``，但拒绝
+        ``Backup/Show.nfo`` 仅因文件名相同跨目录绑定媒体库中的 Show。
+        """
+
+        parent_parts = tuple(part.casefold() for part in PurePosixPath(nfo_parent).parts)
+        for directory in video_dirs:
+            directory_parts = tuple(part.casefold() for part in PurePosixPath(directory).parts)
+            if directory_parts[:len(parent_parts)] == parent_parts:
+                return True
+        return False
 
     ownership: dict[str, set[str]] = {}
     ambiguous: list[str] = []
@@ -144,12 +155,17 @@ def compute_nfo_ownership(
         parent = PurePosixPath(*parts[:-1]).as_posix() if len(parts) > 1 else ""
         stem = _normalize_filename_stem(PurePosixPath(evidence.relative_path).stem)
         if stem.casefold() in {"tvshow", "movie"}:
-            owners = set(dir_work_count.get(parent, set()))
+            owners = {
+                work_key for work_key, video_dirs in work_dirs.items()
+                if shares_directory_scope(parent, video_dirs)
+            }
         else:
             stem_norm = _normalize_title(stem)
             owners = {
                 work.work_key for work in graph.works
-                if stem_norm and stem_norm == _normalize_title(work.preferred_title)
+                if stem_norm
+                and stem_norm == _normalize_title(work.preferred_title)
+                and shares_directory_scope(parent, work_dirs.get(work.work_key, set()))
             }
         if len(owners) > 1:
             ambiguous.append(evidence.evidence_id)
@@ -174,12 +190,15 @@ def _nfo_related_titles(
             continue
         if ownership.get(evidence.evidence_id) != {work.work_key}:
             continue
-        stem = _normalize_filename_stem(PurePosixPath(evidence.relative_path).stem)
-        if not stem or is_generic_container_title(stem):
-            continue
-        if stem not in titles:
-            titles.append(stem)
-        found = True
+        for value in (facts.work_title, facts.original_title, *facts.title_candidates):
+            value = (value or "").strip()
+            if not value or value.casefold() in {"tvshow", "movie"}:
+                continue
+            if is_generic_container_title(value):
+                continue
+            if value not in titles:
+                titles.append(value)
+            found = True
     return titles, found
 
 

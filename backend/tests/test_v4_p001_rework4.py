@@ -328,6 +328,85 @@ def test_multi_work_dir_tvshow_nfo_is_ambiguous_and_not_injected(tmp_path, monke
         service.confirm("rev-nfo-amb")
 
 
+def test_failed_alias_detail_is_cached_for_the_whole_draft(monkeypatch):
+    """详情失败也是缓存结果，不能因多个 Work 对同一 ID 重复请求。"""
+
+    from app.media_v4.jobs import metadata as metadata_module
+
+    calls = 0
+
+    class FailingClient:
+        def __init__(self, bearer_token):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get_tv_detail(self, provider_id):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("detail unavailable")
+
+    monkeypatch.setattr(metadata_module, "TMDBClient", FailingClient)
+    monkeypatch.setattr(metadata_module, "load_config", lambda: SimpleNamespace(
+        tmdb_bearer_token="token", artwork_storage_mode="remote", tmdb_timeout=5, proxy_url=None,
+    ))
+    candidate = [{"provider_id": "77", "media_type": "tv", "title": "English", "original_title": "English"}]
+    cache: dict = {}
+    budget = [0]
+    metadata_module.enrich_candidate_aliases(candidate, ["中文名"], detail_cache=cache, detail_budget=budget)
+    metadata_module.enrich_candidate_aliases(candidate, ["中文名"], detail_cache=cache, detail_budget=budget)
+
+    assert calls == 1
+    assert budget == [1]
+
+
+def test_nfo_stem_must_share_work_directory_scope(tmp_path, monkeypatch):
+    """同名 NFO 位于无关目录时不能仅凭标题绑定到作品。"""
+
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = _patch_database(tmp_path, monkeypatch)
+    service = V4RevisionService(database)
+    entries = [
+        _entry("scoped-video", work_title="Show A", relative_path="Library/Show A/Season 1/Show A.S01E01.mkv"),
+        _nfo("unrelated-nfo", "Backup/Show A.nfo", tmdb_id=701, title="Show A"),
+    ]
+    service.create_draft("rev-nfo-scope", entries, candidate_search=lambda *a, **k: [])
+    with database.connect() as conn:
+        rows = conn.execute(
+            "SELECT provider_id FROM revision_work_candidates "
+            "WHERE revision_id = 'rev-nfo-scope' AND evidence = 'sidecar_nfo_provider'"
+        ).fetchall()
+    assert rows == []
+
+
+def test_owned_tvshow_nfo_uses_its_content_titles_as_query(tmp_path, monkeypatch):
+    """目录级 NFO 归属明确时，查询应使用其内容标题而不是 tvshow 文件名。"""
+
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = _patch_database(tmp_path, monkeypatch)
+    service = V4RevisionService(database)
+    captured: list[str] = []
+
+    def search(_work_key, queries, _year, _media_type):
+        captured.extend(queries)
+        return []
+
+    entries = [
+        _entry("query-video", work_title="Opaque Name", relative_path="Show/Season 1/Opaque Name.S01E01.mkv"),
+        _nfo("query-nfo", "Show/tvshow.nfo", tmdb_id=0, title="Provider Title"),
+    ]
+    service.create_draft("rev-nfo-query", entries, candidate_search=search)
+
+    assert "Provider Title" in captured
+    assert "tvshow" not in captured
+
+
 def _client(tmp_path, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
