@@ -11,17 +11,23 @@ from fastapi.testclient import TestClient
 
 def _client(tmp_path, monkeypatch):
     from app.api import media_v4
+
+    _patch_database(tmp_path, monkeypatch)
+    application = FastAPI()
+    application.include_router(media_v4.router)
+    return TestClient(application)
+
+
+def _patch_database(tmp_path, monkeypatch):
+    """给直接调用 scan_source 的测试提供隔离数据库，避免写入真实 data/。"""
+
+    from app.api import media_v4
     from app.media_v4.persistence.database import V4Database
-    from app.media_v4.sources import tree_root
 
     database = V4Database(tmp_path / "api.db")
     database.initialize()
     monkeypatch.setattr(media_v4, "_database", database)
-    # 扫描元数据是树根解析的暂存文件，测试写入临时目录。
-    monkeypatch.setattr(tree_root, "get_data_dir", lambda: tmp_path)
-    application = FastAPI()
-    application.include_router(media_v4.router)
-    return TestClient(application)
+    return database
 
 
 def _payload(revision_id: str = "rev-api"):
@@ -42,6 +48,7 @@ def _payload(revision_id: str = "rev-api"):
 
 
 def test_tree_scan_accepts_utf16_tree_through_both_entries(tmp_path, monkeypatch):
+    _patch_database(tmp_path, monkeypatch)
     from app.api import media_v4
     from app.integrations.openlist.providers import OpenListRouteConfig
 
@@ -369,6 +376,7 @@ def test_preview_with_unknown_title_returns_review_issue_and_confirm_conflict(tm
 
 
 def test_hybrid_tree_scan_reuses_the_openlist_root_identity(tmp_path, monkeypatch):
+    _patch_database(tmp_path, monkeypatch)
     from app.api import media_v4
     from app.integrations.openlist.providers import OpenListRouteConfig
     from app.media_v4.sources.scanner import openlist_root_id
@@ -421,6 +429,7 @@ def test_hybrid_tree_scan_reuses_the_openlist_root_identity(tmp_path, monkeypatc
 
 
 def test_tree_scan_preserves_quark_as_the_content_provider(tmp_path, monkeypatch):
+    _patch_database(tmp_path, monkeypatch)
     from app.api import media_v4
     from app.integrations.openlist.providers import OpenListRouteConfig
 
@@ -455,6 +464,7 @@ def test_tree_scan_preserves_quark_as_the_content_provider(tmp_path, monkeypatch
 
 
 def test_tree_scan_resolves_the_precise_sub_library_root_from_the_tree_location(tmp_path, monkeypatch):
+    _patch_database(tmp_path, monkeypatch)
     from app.api import media_v4
 
     baidu_root = tmp_path / "百度网盘"
@@ -699,3 +709,179 @@ def test_playback_and_tracking_are_user_state_endpoints(tmp_path, monkeypatch):
     )
     assert tracking.status_code == 200
     assert tracking.json()["provider_id"] == "subject-1"
+
+
+def _tree_scan_fixture(tmp_path, monkeypatch):
+    """构造一个可达的子库目录树扫描，返回 (mount, scan, client)。"""
+
+    client = _client(tmp_path, monkeypatch)
+    from app.api import media_v4
+
+    mount = tmp_path / "百度网盘"
+    library = mount / "01动画"
+    media_file = library / "Show" / "Show.S01E01.mkv"
+    media_file.parent.mkdir(parents=True)
+    media_file.write_bytes(b"video")
+    tree = tmp_path / "01动画_文件目录.txt"
+    tree.write_text("Show/Show.S01E01.mkv\n", encoding="utf-8")
+    monkeypatch.setattr(media_v4, "load_config", lambda: SimpleNamespace(
+        pan115_root="",
+        baidu_root=str(mount),
+        openlist_mount_root="",
+        openlist_remote_root="/",
+        openlist_routes=[],
+    ))
+    scan = media_v4.scan_source(media_v4.SourceScanRequest(
+        source="tree",
+        tree_file=str(tree),
+        provider="baidu",
+    ))
+    assert scan["path_validation"]["ok"] is True
+    return mount, scan, client
+
+
+def test_tree_scan_opens_the_txt_exactly_once_end_to_end(tmp_path, monkeypatch):
+    import builtins
+
+    from app.media_v4.sources import scanner
+
+    _patch_database(tmp_path, monkeypatch)
+    mount = tmp_path / "百度网盘"
+    library = mount / "01动画"
+    media_file = library / "Show" / "Show.S01E01.mkv"
+    media_file.parent.mkdir(parents=True)
+    media_file.write_bytes(b"video")
+    tree = tmp_path / "01动画_文件目录.txt"
+    tree.write_text("Show/Show.S01E01.mkv\n", encoding="utf-8")
+
+    from app.api import media_v4
+
+    monkeypatch.setattr(media_v4, "load_config", lambda: SimpleNamespace(
+        pan115_root="",
+        baidu_root=str(mount),
+        openlist_mount_root="",
+        openlist_remote_root="/",
+        openlist_routes=[],
+    ))
+    counter = {"opens": 0}
+    real_open = builtins.open
+
+    def counting_open(*args, **kwargs):
+        counter["opens"] += 1
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(scanner.builtins, "open", counting_open)
+
+    media_v4.scan_source(media_v4.SourceScanRequest(
+        source="tree",
+        tree_file=str(tree),
+        provider="baidu",
+    ))
+
+    assert counter["opens"] == 1
+
+
+def test_preview_ignores_tampered_entry_locators_for_tree_scan(tmp_path, monkeypatch):
+    mount, scan, client = _tree_scan_fixture(tmp_path, monkeypatch)
+    tampered = r"C:\tampered\Show\Show.S01E01.mkv"
+
+    preview = client.post("/api/v4/imports/preview", json={
+        "revision_id": "rev-tamper",
+        "root_id": scan["root_id"],
+        "scan_id": scan["scan_id"],
+        # 前端篡改逐条 locator：这些值绝不能被写入权威证据/Asset。
+        "entries": [{
+            "provider": "baidu",
+            "ingest_method": "directory_tree",
+            "relative_path": "Show/Show.S01E01.mkv",
+            "source_locator": tampered,
+            "playback_locator": tampered,
+        }],
+        "source_locator": r"C:\tampered",
+        "playback_locator": r"C:\tampered",
+    })
+    assert preview.status_code == 200, preview.text
+
+    from app.api import media_v4
+
+    # 后端持久化的证据（preview 的真正输入）必须是权威路径。
+    with media_v4._database.connect() as conn:
+        evidence_rows = conn.execute(
+            "SELECT playback_locator, source_locator FROM source_evidence WHERE scan_id = ?",
+            (scan["scan_id"],),
+        ).fetchall()
+    assert len(evidence_rows) == 1
+    expected = str(mount / "01动画" / "Show" / "Show.S01E01.mkv")
+    assert evidence_rows[0]["playback_locator"] == expected
+    assert evidence_rows[0]["playback_locator"] != tampered
+
+    # 确认后 Asset 也必须来自权威证据，而不是前端改写值。
+    confirmed = client.post("/api/v4/imports/rev-tamper/confirm")
+    assert confirmed.status_code == 200, confirmed.text
+    with media_v4._database.connect() as conn:
+        asset_rows = conn.execute(
+            """
+            SELECT a.playback_locator, a.source_locator
+            FROM revision_bindings rb
+            JOIN assets a ON a.asset_id = rb.asset_id
+            WHERE rb.revision_id = 'rev-tamper'
+            """
+        ).fetchall()
+    assert len(asset_rows) == 1
+    assert asset_rows[0]["playback_locator"] == expected
+    assert asset_rows[0]["playback_locator"] != tampered
+
+
+def test_confirm_requires_validation_record_for_tree_revision(tmp_path, monkeypatch):
+    _mount, scan, client = _tree_scan_fixture(tmp_path, monkeypatch)
+    preview = client.post("/api/v4/imports/preview", json={
+        "revision_id": "rev-lost-validation",
+        "root_id": scan["root_id"],
+        "scan_id": scan["scan_id"],
+        "entries": [],
+    })
+    assert preview.status_code == 200, preview.text
+
+    from app.api import media_v4
+
+    with media_v4._database.connect() as conn:
+        conn.execute("DELETE FROM tree_scan_validation WHERE scan_id = ?", (scan["scan_id"],))
+
+    confirmed = client.post("/api/v4/imports/rev-lost-validation/confirm")
+    assert confirmed.status_code == 409
+    assert "缺少验证记录" in confirmed.json()["detail"]
+
+
+def test_confirm_rechecks_sample_reachability_after_scan(tmp_path, monkeypatch):
+    mount, scan, client = _tree_scan_fixture(tmp_path, monkeypatch)
+    preview = client.post("/api/v4/imports/preview", json={
+        "revision_id": "rev-offline-after-scan",
+        "root_id": scan["root_id"],
+        "scan_id": scan["scan_id"],
+        "entries": [],
+    })
+    assert preview.status_code == 200, preview.text
+
+    # scan 后挂载失效：真实视频文件被移除，confirm 必须失败关闭。
+    (mount / "01动画" / "Show" / "Show.S01E01.mkv").unlink()
+
+    confirmed = client.post("/api/v4/imports/rev-offline-after-scan/confirm")
+    assert confirmed.status_code == 409
+    assert "当前不可访问" in confirmed.json()["detail"]
+
+
+def test_confirmed_tree_revision_confirm_is_idempotent_after_validation_cleanup(tmp_path, monkeypatch):
+    _mount, scan, client = _tree_scan_fixture(tmp_path, monkeypatch)
+    preview = client.post("/api/v4/imports/preview", json={
+        "revision_id": "rev-idempotent",
+        "root_id": scan["root_id"],
+        "scan_id": scan["scan_id"],
+        "entries": [],
+    })
+    assert preview.status_code == 200, preview.text
+
+    first = client.post("/api/v4/imports/rev-idempotent/confirm")
+    assert first.status_code == 200, first.text
+    second = client.post("/api/v4/imports/rev-idempotent/confirm")
+    assert second.status_code == 200, second.text
+    assert second.json()["status"] == "confirmed"

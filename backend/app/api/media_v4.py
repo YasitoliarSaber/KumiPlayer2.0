@@ -30,21 +30,23 @@ from app.media_v4.sources.incremental import (
     scan_openlist_incremental,
     stage_scan_state,
 )
+from app.media_v4.sources.scan_validation import (
+    delete_tree_scan_validation,
+    is_tree_validation_expired,
+    load_tree_scan_validation,
+    samples_currently_reachable,
+    upsert_tree_scan_validation,
+)
 from app.media_v4.sources.scanner import (
     DirectoryTreeReadError,
+    build_directory_tree_evidence,
     openlist_root_id,
-    parse_directory_tree_file,
+    read_directory_tree_text,
     scan_local_directory,
     scan_openlist_directory,
     tree_root_id,
 )
-from app.media_v4.sources.tree_root import (
-    TreePlaybackRootResolver,
-    TreeRootResolution,
-    consume_scan_metadata,
-    load_scan_metadata,
-    stage_scan_metadata,
-)
+from app.media_v4.sources.tree_root import TreePlaybackRootResolver, TreeRootResolution
 from app.media_v4.tracking.store import V4TrackingStore
 
 router = APIRouter(prefix="/api/v4", tags=["media-v4"])
@@ -216,6 +218,97 @@ def _tree_validation_dict(resolution: TreeRootResolution) -> dict:
     }
 
 
+def _persist_tree_scan(
+    database,
+    *,
+    root_id: str,
+    provider: str,
+    scan_id: str,
+    route_id: str,
+    effective_root: str,
+    evidence: list,
+    resolution: TreeRootResolution,
+) -> None:
+    """把目录树扫描的证据与验证事实写入事务约束的 SQLite。
+
+    source_roots / source_scans / source_evidence / tree_scan_validation 一起
+    成为 preview 与 confirm 的后端权威，前端回传的逐条 locator 不再被采信。
+    """
+
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC).isoformat()
+    with database.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO source_roots(
+                root_id, provider, ingest_method, source_locator, playback_locator,
+                route_id, display_name, created_at, updated_at
+            ) VALUES (?, ?, 'directory_tree', ?, ?, ?, '', ?, ?)
+            ON CONFLICT(root_id) DO UPDATE SET
+                provider = excluded.provider,
+                ingest_method = excluded.ingest_method,
+                source_locator = CASE
+                    WHEN excluded.source_locator != '' THEN excluded.source_locator
+                    ELSE source_roots.source_locator
+                END,
+                playback_locator = CASE
+                    WHEN excluded.playback_locator != '' THEN excluded.playback_locator
+                    ELSE source_roots.playback_locator
+                END,
+                route_id = CASE
+                    WHEN excluded.route_id != '' THEN excluded.route_id
+                    ELSE source_roots.route_id
+                END,
+                updated_at = excluded.updated_at
+            """,
+            (root_id, provider, effective_root, effective_root, route_id, now, now),
+        )
+        existing = conn.execute(
+            "SELECT generation FROM source_scans WHERE scan_id = ?", (scan_id,)
+        ).fetchone()
+        if existing is None:
+            generation = conn.execute(
+                "SELECT COALESCE(MAX(generation), 0) + 1 FROM source_scans WHERE root_id = ?",
+                (root_id,),
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO source_scans(scan_id, root_id, generation, status, started_at, finished_at) "
+                "VALUES (?, ?, ?, 'validated', ?, ?)",
+                (scan_id, root_id, generation, now, now),
+            )
+        else:
+            conn.execute(
+                "UPDATE source_scans SET status = 'validated', finished_at = ? WHERE scan_id = ?",
+                (now, scan_id),
+            )
+    V4Repository(database).save_scan_evidence_bulk(evidence)
+    upsert_tree_scan_validation(
+        database,
+        scan_id=scan_id,
+        root_id=root_id,
+        effective_root=effective_root,
+        ok=resolution.ok,
+        hits=resolution.hits,
+        total=resolution.total,
+        reason=resolution.reason,
+        samples=_tree_sample_paths(evidence),
+        candidates=list(resolution.candidates),
+    )
+
+
+def _tree_sample_paths(evidence: list) -> list[str]:
+    """从头/中/尾取有界样本相对路径，供 confirm 时重新校验可达性。"""
+
+    paths = [str(item.relative_path) for item in evidence]
+    if not paths:
+        return []
+    if len(paths) <= 3:
+        return paths
+    indexes = sorted({0, len(paths) - 1, len(paths) // 2})
+    return [paths[index] for index in indexes]
+
+
 def _directory_tree_error_message(exc: DirectoryTreeReadError) -> str:
     if exc.kind == "unreadable":
         return "目录树文件无法打开，请确认文件未被占用或损坏后重新选择"
@@ -262,18 +355,29 @@ def scan_source(request: SourceScanRequest):
             if not config.openlist_mount_root:
                 raise HTTPException(status_code=409, detail="当前内容来源尚未配置本地挂载路径，请先在设置页完成来源映射")
             local_root = derive_local_path(config.openlist_mount_root, _remote_root(config), remote_root)
+            # 同一份已解码文本同时交给根解析与 evidence 构建，只读取一次。
+            tree_text = read_directory_tree_text(request.tree_file)
             resolution = TreePlaybackRootResolver(
                 request.tree_file,
                 configured_roots=[local_root],
-            ).resolve()
-            scan_id, evidence = parse_directory_tree_file(
-                request.tree_file,
+            ).resolve(tree_text)
+            scan_id, evidence = build_directory_tree_evidence(
+                tree_text,
                 root_id=root_id,
                 provider=content_provider,
                 source_root=resolution.root,
                 source_route_id=route_id,
             )
-            stage_scan_metadata(scan_id, _tree_validation_dict(resolution))
+            _persist_tree_scan(
+                get_database(),
+                root_id=root_id,
+                provider=content_provider,
+                scan_id=scan_id,
+                route_id=route_id,
+                effective_root=resolution.root,
+                evidence=evidence,
+                resolution=resolution,
+            )
             stage_scan_state(
                 scan_id,
                 build_tree_baseline_state(root_id, remote_root, evidence),
@@ -284,20 +388,30 @@ def scan_source(request: SourceScanRequest):
             configured_roots = _configured_tree_roots(config, content_provider)
             if not configured_roots:
                 raise HTTPException(status_code=409, detail="当前内容来源尚未配置本地挂载路径，请先在设置页完成来源映射")
+            tree_text = read_directory_tree_text(request.tree_file)
             resolution = TreePlaybackRootResolver(
                 request.tree_file,
                 configured_roots=configured_roots,
-            ).resolve()
+            ).resolve(tree_text)
             effective_root = resolution.root
             identity_root = effective_root or configured_roots[0]
             root_id = tree_root_id(content_provider, identity_root, request.tree_file)
-            scan_id, evidence = parse_directory_tree_file(
-                request.tree_file,
+            scan_id, evidence = build_directory_tree_evidence(
+                tree_text,
                 root_id=root_id,
                 provider=content_provider,
                 source_root=effective_root,
             )
-            stage_scan_metadata(scan_id, _tree_validation_dict(resolution))
+            _persist_tree_scan(
+                get_database(),
+                root_id=root_id,
+                provider=content_provider,
+                scan_id=scan_id,
+                route_id="",
+                effective_root=effective_root,
+                evidence=evidence,
+                resolution=resolution,
+            )
         elif request.source == "openlist":
             from app.api.openlist_v4 import _client, _configured_routes, _remote_root
 
@@ -383,23 +497,23 @@ def scan_source(request: SourceScanRequest):
 @router.post("/imports/preview")
 def preview(request: PreviewRequest):
     database = get_database()
-    if not request.entries and not request.allow_empty:
-        raise HTTPException(status_code=409, detail="空来源必须由用户明确确认后才能替代当前 revision")
-    evidence = _make_entries(request)
+    validation = load_tree_scan_validation(database, request.scan_id)
+    if validation is not None:
+        # 目录树/混合：以后端持久化的证据重建，忽略前端逐条改写。
+        evidence = V4Repository(database).list_scan_evidence(request.scan_id)
+        if validation["root_id"] != request.root_id or not evidence:
+            raise HTTPException(status_code=409, detail="扫描证据与当前请求不一致，请重新扫描")
+        source_locator = validation["effective_root"]
+        playback_locator = validation["effective_root"]
+    else:
+        if not request.entries and not request.allow_empty:
+            raise HTTPException(status_code=409, detail="空来源必须由用户明确确认后才能替代当前 revision")
+        evidence = _make_entries(request)
+        source_locator = request.source_locator
+        playback_locator = request.playback_locator
     parser = V4Parser()
     parsed = [(item, parser.parse(item)) for item in evidence]
     service = V4RevisionService(database)
-    # 扫描元数据是后端权威：preview 不再采信前端拼装的总根副本。
-    scan_meta = load_scan_metadata(request.scan_id)
-    playback_locator = request.playback_locator
-    source_locator = request.source_locator
-    if scan_meta is not None:
-        if scan_meta.get("ok") and scan_meta.get("root"):
-            playback_locator = str(scan_meta["root"])
-            source_locator = str(scan_meta["root"])
-        else:
-            playback_locator = ""
-            source_locator = ""
     try:
         graph = service.create_draft(
             request.revision_id,
@@ -428,24 +542,35 @@ def confirm(revision_id: str):
     service = V4RevisionService(database)
     with database.connect() as conn:
         row = conn.execute(
-            "SELECT scan_id FROM import_revisions WHERE revision_id = ?",
+            "SELECT scan_id, root_id, status FROM import_revisions WHERE revision_id = ?",
             (revision_id,),
         ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail=f"revision 不存在: {revision_id}")
-    scan_meta = load_scan_metadata(row["scan_id"])
-    if scan_meta is not None and not scan_meta.get("ok"):
-        raise HTTPException(
-            status_code=409,
-            detail="目录树媒体路径未验证通过，不能确认导入；请检查来源范围或挂载状态后重新扫描",
-        )
+    if row["status"] == "confirmed":
+        # 幂等：已确认 revision 直接返回成功，不再要求验证记录（确认后会清理）。
+        return {
+            "revision_id": revision_id,
+            "status": "confirmed",
+            "jobs": service.list_jobs(revision_id),
+        }
+    _require_tree_validation(
+        database,
+        row["scan_id"],
+        row["root_id"],
+        require=_revision_has_tree_evidence(database, revision_id),
+    )
     try:
         service.confirm(revision_id)
     except (RevisionBlockedError, ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"revision 不存在: {revision_id}") from exc
-    consume_scan_metadata(row["scan_id"])
+    # 非权威清理：验证记录与扫描加速数据删除失败不能让接口报错。
+    try:
+        delete_tree_scan_validation(database, row["scan_id"])
+    except Exception:
+        pass
     try:
         activate_scan_state(row["scan_id"])
     except OSError:
@@ -456,6 +581,61 @@ def confirm(revision_id: str):
         "status": service.get_status(revision_id),
         "jobs": service.list_jobs(revision_id),
     }
+
+
+def _revision_has_tree_evidence(database, revision_id: str) -> bool:
+    """revision 是否包含目录树来源证据（用于 fail-closed 门控判定）。"""
+
+    with database.connect() as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM revision_evidence re
+            JOIN source_evidence se ON se.evidence_id = re.evidence_id
+            WHERE re.revision_id = ? AND se.ingest_method = 'directory_tree'
+            LIMIT 1
+            """,
+            (revision_id,),
+        ).fetchone()
+    return row is not None
+
+
+
+
+
+def _require_tree_validation(database, scan_id: str, root_id: str, *, require: bool) -> None:
+    """目录树 confirm 必须 fail-closed：验证缺失/损坏/过期/根变化/样本不可达都 409。
+
+    只有 revision 包含 directory_tree 证据时才要求验证记录；本地/OpenList 不适用。
+    """
+
+    if not require:
+        return
+    validation = load_tree_scan_validation(database, scan_id)
+    if validation is None:
+        raise HTTPException(
+            status_code=409,
+            detail="目录树扫描缺少验证记录，请重新扫描后再确认",
+        )
+    if not validation["ok"]:
+        raise HTTPException(
+            status_code=409,
+            detail="目录树媒体路径未验证通过，请检查来源范围或挂载状态后重新扫描",
+        )
+    if validation["root_id"] != root_id:
+        raise HTTPException(
+            status_code=409,
+            detail="扫描根与当前 revision 不一致，请重新扫描",
+        )
+    if is_tree_validation_expired(validation):
+        raise HTTPException(
+            status_code=409,
+            detail="目录树路径验证已过期，请重新扫描后再确认",
+        )
+    if not samples_currently_reachable(validation):
+        raise HTTPException(
+            status_code=409,
+            detail="目录树媒体挂载路径当前不可访问，请检查挂载状态后重新扫描",
+        )
 
 
 @router.patch("/imports/{revision_id}/evidence/{evidence_id}")

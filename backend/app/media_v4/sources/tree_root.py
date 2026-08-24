@@ -1,27 +1,21 @@
-"""目录树精确播放根解析与扫描元数据暂存。
+"""目录树精确播放根解析。
 
 配置中的 provider 总根只是安全边界和候选起点，不等于每个 TXT 实际覆盖的
 媒体作用域根。本模块只构造少量有界候选，并用头/中/尾均匀视频样本验证，
 绝不递归枚举整块网盘；只有唯一全部命中的候选才被采用。
+
+scan 调用方负责只读取和解码 TXT 一次：把同一份已解码文本同时交给
+resolve() 与 evidence 构建，避免重复访问挂载盘。
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from app.core.atomic_json import write_json_atomic
-from app.core.data_lock import DATA_WRITE_LOCK
-from app.core.paths import get_data_dir
-from app.media_v4.sources.scanner import (
-    _path_is_within,
-    read_directory_tree_text,
-    tree_media_relative_paths,
-)
+from app.media_v4.sources.scanner import _path_is_within, tree_media_relative_paths
 
 _MAX_SAMPLES = 3
 
@@ -79,8 +73,7 @@ class TreePlaybackRootResolver:
         self.configured_roots = [str(Path(root).expanduser()) for root in configured_roots]
         self.extra_candidates = [str(Path(root).expanduser()) for root in extra_candidates]
 
-    def resolve(self) -> TreeRootResolution:
-        text = read_directory_tree_text(self.tree_path)
+    def resolve(self, text: str) -> TreeRootResolution:
         relative_paths = tree_media_relative_paths(text)
         samples = _video_samples(relative_paths)
         total = len(samples)
@@ -147,42 +140,3 @@ class TreePlaybackRootResolver:
         for extra in self.extra_candidates:
             add(extra)
         return candidates
-
-
-# ---------------------------------------------------------------
-# 扫描元数据暂存：scan 产生后端权威的播放根与抽样验证结果，
-# preview/confirm 根据 scan_id 读取，不再采信前端拼装的总根副本。
-# ---------------------------------------------------------------
-
-
-def _metadata_root() -> Path:
-    return get_data_dir() / "scan_metadata"
-
-
-def _safe_key(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
-
-
-def _metadata_path(scan_id: str) -> Path:
-    return _metadata_root() / f"{_safe_key(scan_id)}.json"
-
-
-def stage_scan_metadata(scan_id: str, metadata: dict) -> None:
-    path = _metadata_path(scan_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with DATA_WRITE_LOCK:
-        write_json_atomic(path, metadata)
-
-
-def load_scan_metadata(scan_id: str) -> dict | None:
-    try:
-        payload = json.loads(_metadata_path(scan_id).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def consume_scan_metadata(scan_id: str) -> None:
-    """确认成功后清理暂存；失败或放弃的扫描元数据不污染后续确认。"""
-
-    _metadata_path(scan_id).unlink(missing_ok=True)

@@ -22,6 +22,17 @@ def _safe_segment(value: str, fallback: str) -> str:
     return cleaned or fallback
 
 
+def _sample_locators(locators: list[str]) -> list[str]:
+    """头/中/尾有界抽样，最多 3 个，避免大库逐 Asset 访问挂载盘。"""
+
+    if not locators:
+        return []
+    if len(locators) <= 3:
+        return locators
+    indexes = sorted({0, len(locators) - 1, len(locators) // 2})
+    return [locators[index] for index in indexes]
+
+
 @dataclass(frozen=True, slots=True)
 class MaterializeResult:
     status: str
@@ -110,10 +121,13 @@ class V4MirrorMaterializer:
 
         paths: list[str] = []
         try:
-            # 写任何 .strm 前重新校验全部播放定位；任一不可达即整批失败，
-            # 不发布任何 Artifact，也不让 scrape/projection 继续。
-            for row in rows:
-                locator = str(row["playback_locator"] or row["source_locator"] or "")
+            # 写任何 .strm 前按头/中/尾有界抽样复核播放定位；样本任一不可达
+            # 即整批失败，不发布任何 Artifact，也不让 scrape/projection 继续。
+            # 避免大库逐 Asset 访问挂载盘。
+            locators = [
+                str(row["playback_locator"] or row["source_locator"] or "") for row in rows
+            ]
+            for locator in _sample_locators(locators):
                 ok, reason = validate_playback_locator(locator)
                 if not ok:
                     raise RuntimeError(reason)

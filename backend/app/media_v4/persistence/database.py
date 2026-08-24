@@ -7,7 +7,11 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from app.media_v4.persistence.schema_v4 import V4_SCHEMA_VERSION, create_schema_v4
+from app.media_v4.persistence.schema_v4 import (
+    V4_SCHEMA_VERSION,
+    create_schema_v4,
+    migrate_schema_v4_to_v5,
+)
 
 
 class V4ResetRequiredError(RuntimeError):
@@ -51,6 +55,7 @@ class V4Database:
             "tracking_states",
             "source_health",
             "openlist_telemetry",
+            "tree_scan_validation",
         }
     )
     REQUIRED_TRIGGERS = frozenset(
@@ -120,6 +125,17 @@ class V4Database:
                 raise RuntimeError(
                     f"数据库版本 {version} 高于当前程序支持的 {self.CURRENT_SCHEMA_VERSION}，请升级 KumiPlayer"
                 )
+            if version == 4 and self._has_user_tables(conn):
+                # v4 → v5 增量迁移：只新增 tree_scan_validation，保留已确认媒体数据。
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    migrate_schema_v4_to_v5(conn)
+                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+                version = self.CURRENT_SCHEMA_VERSION
             if version < self.CURRENT_SCHEMA_VERSION and self._has_user_tables(conn):
                 raise V4ResetRequiredError(
                     f"数据库版本 {version} 属于旧后端数据架构，需要一次性重置后才能继续；"

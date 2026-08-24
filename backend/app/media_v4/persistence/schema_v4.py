@@ -1,14 +1,14 @@
 """V4 唯一物理数据库结构。
 
-V4 不通过启动时逐列 ALTER 隐式补丁升级。结构变化必须提升 user_version，
-而旧媒体库在 V4 入口只允许一次性重置。
+V4 不通过启动时逐列 ALTER 隐式补丁升级。结构变化必须提升 user_version；
+同一代内旧库仍只允许一次性重置，只有明确的 v4→v5 增量迁移例外。
 """
 
 from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 4
+V4_SCHEMA_VERSION = 5
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -542,6 +542,20 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         END
         """,
         "CREATE INDEX idx_v4_evidence_root_scan ON source_evidence(root_id, scan_id)",
+        """
+        CREATE TABLE tree_scan_validation (
+            scan_id TEXT PRIMARY KEY REFERENCES source_scans(scan_id) ON DELETE CASCADE,
+            root_id TEXT NOT NULL,
+            effective_root TEXT NOT NULL DEFAULT '',
+            ok INTEGER NOT NULL,
+            hits INTEGER NOT NULL DEFAULT 0,
+            total INTEGER NOT NULL DEFAULT 0,
+            reason TEXT NOT NULL DEFAULT '',
+            samples_json TEXT NOT NULL DEFAULT '[]',
+            candidates_json TEXT NOT NULL DEFAULT '[]',
+            validated_at TEXT NOT NULL
+        )
+        """,
         "CREATE UNIQUE INDEX uq_v4_active_revision_per_root "
         "ON import_revisions(root_id) WHERE status = 'confirmed'",
         "CREATE INDEX idx_v4_facts_evidence ON parsed_facts(evidence_id)",
@@ -561,3 +575,33 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
     conn.execute("INSERT INTO v4_meta(key, value) VALUES ('schema', 'v4')")
     conn.execute("INSERT INTO v4_meta(key, value) VALUES ('backend_data_epoch', '4')")
+
+
+def create_tree_scan_validation(conn: sqlite3.Connection) -> None:
+    """创建目录树扫描验证表（v5 新增），供 v4→v5 迁移复用。"""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tree_scan_validation (
+            scan_id TEXT PRIMARY KEY REFERENCES source_scans(scan_id) ON DELETE CASCADE,
+            root_id TEXT NOT NULL,
+            effective_root TEXT NOT NULL DEFAULT '',
+            ok INTEGER NOT NULL,
+            hits INTEGER NOT NULL DEFAULT 0,
+            total INTEGER NOT NULL DEFAULT 0,
+            reason TEXT NOT NULL DEFAULT '',
+            samples_json TEXT NOT NULL DEFAULT '[]',
+            candidates_json TEXT NOT NULL DEFAULT '[]',
+            validated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def migrate_schema_v4_to_v5(conn: sqlite3.Connection) -> None:
+    """v4 → v5 增量迁移：只新增 tree_scan_validation 表，不改动任何既有表。
+
+    用户已有 v4 媒体库通过本迁移保留全部已确认数据；迁移在调用方事务内执行。
+    """
+
+    create_tree_scan_validation(conn)

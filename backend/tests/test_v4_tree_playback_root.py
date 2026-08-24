@@ -4,13 +4,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.media_v4.sources.scanner import read_directory_tree_text
 from app.media_v4.sources.tree_root import (
     TreePlaybackRootResolver,
-    consume_scan_metadata,
-    load_scan_metadata,
-    stage_scan_metadata,
     tree_scope_name,
 )
+
+
+def _resolve(tree: Path, configured_roots: list, extra_candidates: list | None = None):
+    resolver = TreePlaybackRootResolver(
+        tree,
+        configured_roots=configured_roots,
+        extra_candidates=extra_candidates or [],
+    )
+    return resolver.resolve(read_directory_tree_text(tree))
 
 
 def _write_tree(root: Path, name: str, lines: list[str]) -> Path:
@@ -40,7 +47,7 @@ def test_txt_parent_is_used_when_it_is_a_sub_library_of_the_configured_root(tmp_
     media = _make_show(library / "Show")
     tree = _write_tree(library, "01动画_文件目录.txt", ["Show/Show.S01E01.mkv"])
 
-    resolution = TreePlaybackRootResolver(tree, configured_roots=[mount]).resolve()
+    resolution = _resolve(tree, [mount])
 
     assert resolution.ok is True
     assert Path(resolution.root) == library
@@ -53,7 +60,7 @@ def test_total_root_alone_works_for_a_full_mount_export(tmp_path):
     _make_show(mount / "动画" / "Show")
     tree = _write_tree(mount, "根目录_文件目录.txt", ["动画/Show/Show.S01E01.mkv"])
 
-    resolution = TreePlaybackRootResolver(tree, configured_roots=[mount]).resolve()
+    resolution = _resolve(tree, [mount])
 
     assert resolution.ok is True
     assert Path(resolution.root) == mount
@@ -66,7 +73,7 @@ def test_txt_copied_outside_mount_uses_scope_candidate(tmp_path):
     # TXT 被复制到本地清单目录，不在挂载盘内
     tree = _write_tree(tmp_path / "清单", "01动画_文件目录.txt", ["Show/Show.S01E01.mkv"])
 
-    resolution = TreePlaybackRootResolver(tree, configured_roots=[mount]).resolve()
+    resolution = _resolve(tree, [mount])
 
     assert resolution.ok is True
     assert Path(resolution.root) == library
@@ -78,7 +85,7 @@ def test_zero_hit_root_is_rejected(tmp_path):
     library.mkdir(parents=True)  # 目录存在但视频不存在
     tree = _write_tree(library, "01动画_文件目录.txt", ["Show/Show.S01E01.mkv"])
 
-    resolution = TreePlaybackRootResolver(tree, configured_roots=[mount]).resolve()
+    resolution = _resolve(tree, [mount])
 
     assert resolution.ok is False
     assert resolution.root == ""
@@ -94,11 +101,7 @@ def test_ambiguous_multiple_all_hit_roots_are_rejected(tmp_path):
     _make_show(sub_b / "Show")
     tree = _write_tree(tmp_path / "清单", "动画_文件目录.txt", ["Show/Show.S01E01.mkv"])
 
-    resolution = TreePlaybackRootResolver(
-        tree,
-        configured_roots=[sub_a, sub_b],
-        extra_candidates=[],
-    ).resolve()
+    resolution = _resolve(tree, [sub_a, sub_b])
 
     assert resolution.ok is False
     assert "多个候选根" in resolution.reason
@@ -113,7 +116,7 @@ def test_head_middle_tail_sampling_covers_large_trees(tmp_path):
         lines.append(str(media.relative_to(library)).replace("\\", "/"))
     tree = _write_tree(tmp_path / "清单", "动画_文件目录.txt", lines)
 
-    resolution = TreePlaybackRootResolver(tree, configured_roots=[mount]).resolve()
+    resolution = _resolve(tree, [mount])
 
     assert resolution.ok is True
     assert Path(resolution.root) == library
@@ -127,23 +130,8 @@ def test_hybrid_route_local_root_is_accepted_without_duplicate_layer(tmp_path):
     media = _make_show(local_root / "Show")
     tree = _write_tree(tmp_path / "清单", "anime-tree.txt", ["Show/Show.S01E01.mkv"])
 
-    resolution = TreePlaybackRootResolver(tree, configured_roots=[local_root]).resolve()
+    resolution = _resolve(tree, [local_root])
 
     assert resolution.ok is True
     assert Path(resolution.root) == local_root
     assert media.exists()
-
-
-def test_scan_metadata_round_trip_and_consume(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "app.media_v4.sources.tree_root.get_data_dir",
-        lambda: tmp_path,
-    )
-    scan_id = "scan-meta-1"
-    metadata = {"ok": True, "root": str(tmp_path / "root")}
-
-    assert load_scan_metadata(scan_id) is None
-    stage_scan_metadata(scan_id, metadata)
-    assert load_scan_metadata(scan_id) == metadata
-    consume_scan_metadata(scan_id)
-    assert load_scan_metadata(scan_id) is None

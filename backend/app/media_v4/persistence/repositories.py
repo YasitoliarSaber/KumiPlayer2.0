@@ -78,6 +78,57 @@ class V4Repository:
         if self.get_source_evidence(evidence.evidence_id) != evidence:
             raise ValueError(f"不可变 SourceEvidence 冲突: {evidence.evidence_id}")
 
+    def save_scan_evidence_bulk(self, evidence: list[SourceEvidence]) -> None:
+        """同一次扫描的证据在单个事务内幂等写入（目录树权威来源）。"""
+
+        if not evidence:
+            return
+        with self.database.connect() as conn:
+            for item in evidence:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO source_evidence(
+                        evidence_id, scan_id, root_id, provider, source_key, relative_path, entry_kind,
+                        size, mtime, fingerprint, raw_file_id, ingest_method, source_route_id,
+                        source_locator, playback_locator, tmdb_hint_id, tmdb_hint_type,
+                        import_family, target_filename, observed_at, presence_state
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item.evidence_id,
+                        item.scan_id,
+                        item.root_id,
+                        item.provider,
+                        item.source_key,
+                        item.relative_path,
+                        item.entry_kind,
+                        item.size,
+                        item.mtime,
+                        item.fingerprint,
+                        item.raw_file_id,
+                        item.ingest_method,
+                        item.source_route_id,
+                        item.source_locator,
+                        item.playback_locator,
+                        item.tmdb_hint_id,
+                        item.tmdb_hint_type,
+                        item.import_family,
+                        item.target_filename,
+                        item.observed_at,
+                        item.presence_state,
+                    ),
+                )
+
+    def list_scan_evidence(self, scan_id: str) -> list[SourceEvidence]:
+        """读取后端在某次扫描中持久化的全部证据（目录树权威来源）。"""
+
+        with self.database.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM source_evidence WHERE scan_id = ? ORDER BY source_key",
+                (scan_id,),
+            ).fetchall()
+        return [self._row_to_source_evidence(row) for row in rows]
+
     def get_source_evidence(self, evidence_id: str) -> SourceEvidence:
         with self.database.connect() as conn:
             row = conn.execute(
