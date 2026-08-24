@@ -65,9 +65,9 @@ def _persist_candidates(
                 """
                 INSERT OR IGNORE INTO revision_work_candidates(
                     candidate_id, revision_id, work_id, draft_work_key, provider,
-                    provider_id, media_type, title, year, evidence, confidence, status,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    provider_id, media_type, title, original_title, aliases_json, year,
+                    evidence, confidence, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(uuid.uuid4()),
@@ -78,6 +78,8 @@ def _persist_candidates(
                     item.provider_id,
                     item.media_type,
                     item.title,
+                    item.original_title,
+                    json.dumps(list(item.aliases), ensure_ascii=False),
                     item.year,
                     item.evidence,
                     item.confidence,
@@ -187,6 +189,10 @@ class V4RevisionService:
                 provider_id=str(row["provider_id"]),
                 media_type=str(row["media_type"]),
                 title=str(row["title"]),
+                original_title=str(row["original_title"] or ""),
+                aliases=tuple(
+                    str(alias) for alias in json.loads(row["aliases_json"] or "[]")
+                ),
                 year=row["year"],
                 evidence=str(row["evidence"]),
                 confidence=str(row["confidence"]),

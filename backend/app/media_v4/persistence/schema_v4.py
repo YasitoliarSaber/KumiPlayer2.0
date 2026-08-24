@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 6
+V4_SCHEMA_VERSION = 7
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -575,6 +575,8 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             provider_id TEXT NOT NULL,
             media_type TEXT NOT NULL DEFAULT '',
             title TEXT NOT NULL DEFAULT '',
+            original_title TEXT NOT NULL DEFAULT '',
+            aliases_json TEXT NOT NULL DEFAULT '[]',
             year INTEGER,
             evidence TEXT NOT NULL DEFAULT '',
             confidence TEXT NOT NULL DEFAULT 'medium',
@@ -654,6 +656,8 @@ def create_v6_structures(conn: sqlite3.Connection) -> None:
             provider_id TEXT NOT NULL,
             media_type TEXT NOT NULL DEFAULT '',
             title TEXT NOT NULL DEFAULT '',
+            original_title TEXT NOT NULL DEFAULT '',
+            aliases_json TEXT NOT NULL DEFAULT '[]',
             year INTEGER,
             evidence TEXT NOT NULL DEFAULT '',
             confidence TEXT NOT NULL DEFAULT 'medium',
@@ -681,6 +685,13 @@ def migrate_schema_v5_to_v6(conn: sqlite3.Connection) -> None:
     """v5 → v6 增量迁移：新增关系/候选表与作品卡片字段，不改动既有数据。"""
 
     create_v6_structures(conn)
+
+
+def migrate_schema_v6_to_v7(conn: sqlite3.Connection) -> None:
+    """v6 → v7 增量迁移：revision_work_candidates 增加 original_title / aliases_json。"""
+
+    _add_column_if_missing(conn, "revision_work_candidates", "original_title", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "revision_work_candidates", "aliases_json", "TEXT NOT NULL DEFAULT '[]'")
 
 
 def migrate_schema_v4_to_v5(conn: sqlite3.Connection) -> None:

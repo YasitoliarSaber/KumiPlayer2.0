@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import re
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from app.media_v4.domain.models import ParsedFacts, SourceEvidence
 from app.media_v4.generic_container import is_generic_container_name
@@ -52,6 +52,66 @@ def _normalize_filename_stem(stem: str) -> str:
     return re.sub(r"[\s._-]+", " ", value).strip()
 
 
+_NFO_MAX_BYTES = 256 * 1024
+
+
+def _parse_sidecar_nfo(evidence: SourceEvidence) -> tuple[int | None, str, str] | None:
+    """有界、严格编码、只读解析可达 sidecar NFO，提取 tmdb uniqueid 与标题。
+
+    文件不可达、超限、解码失败或 XML 解析失败时返回 None（仅标题证据降级）。
+    """
+
+    import xml.etree.ElementTree as ET
+
+    locator = (evidence.playback_locator or evidence.source_locator or "").strip()
+    if not locator or locator.startswith(("http://", "https://", "local://")):
+        return None
+    try:
+        path = Path(locator)
+        if not path.is_file():
+            return None
+        with open(path, "rb") as handle:
+            raw = handle.read(_NFO_MAX_BYTES + 1)
+        if len(raw) > _NFO_MAX_BYTES:
+            return None
+        try:
+            root = ET.fromstring(raw)
+        except (ET.ParseError, ValueError):
+            # 尝试严格 UTF-16 BOM 后再次解析。
+            try:
+                root = ET.fromstring(raw.decode("utf-8").encode("utf-8"))
+            except (ET.ParseError, ValueError, UnicodeDecodeError):
+                return None
+    except (OSError, ValueError):
+        return None
+
+    tmdb_id: int | None = None
+    for unique in root.findall(".//uniqueid"):
+        if (unique.get("type") or "").casefold() == "tmdb":
+            try:
+                tmdb_id = int((unique.text or "").strip())
+            except ValueError:
+                tmdb_id = None
+            if tmdb_id is not None:
+                break
+    if tmdb_id is None:
+        tmdb_node = root.find(".//tmdbid")
+        if tmdb_node is not None:
+            tmdb_text = tmdb_node.text or ""
+            if tmdb_text.strip().isdigit():
+                tmdb_id = int(tmdb_text.strip())
+
+    def _text(tag: str) -> str:
+        node = root.find(f".//{tag}")
+        if node is None or node.text is None:
+            return ""
+        return node.text.strip()
+
+    title = _text("title")
+    original = _text("originaltitle")
+    return tmdb_id, title, original
+
+
 class V4Parser:
     """从一个 SourceEvidence 生成一个不可变 ParsedFacts。"""
 
@@ -68,12 +128,31 @@ class V4Parser:
         # Work/Season/Episode 解析，不覆盖本地编号。
         if evidence.entry_kind == "metadata" or PurePosixPath(evidence.relative_path).suffix.casefold() == ".nfo":
             stem = PurePosixPath(evidence.relative_path).stem
+            parsed = _parse_sidecar_nfo(evidence)
+            if parsed is None:
+                # 不可达/不可读的 NFO：只保留标题证据，绝不伪造 provider ID。
+                return ParsedFacts(
+                    parsed_fact_id="facts_" + evidence.evidence_id,
+                    evidence_id=evidence.evidence_id,
+                    parser_version=self.VERSION,
+                    resource_type="metadata",
+                    title_candidates=(stem,) if stem else (),
+                    is_importable=False,
+                    is_auxiliary=True,
+                )
+            tmdb_id, title, original_title = parsed
             return ParsedFacts(
                 parsed_fact_id="facts_" + evidence.evidence_id,
                 evidence_id=evidence.evidence_id,
                 parser_version=self.VERSION,
                 resource_type="metadata",
-                title_candidates=(stem,) if stem else (),
+                work_title=title or stem,
+                original_title=original_title or "",
+                title_candidates=tuple(
+                    dict.fromkeys(filter(None, (title or stem, original_title)))
+                ) or (stem,),
+                tmdb_hint_id=tmdb_id,
+                tmdb_hint_type="tv" if tmdb_id else "",
                 is_importable=False,
                 is_auxiliary=True,
             )

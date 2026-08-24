@@ -9,7 +9,7 @@ revision_id + draft_work_key 在确认前持久化；高置信唯一身份用于
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
 
 from app.media_v4.domain.models import (
@@ -19,6 +19,7 @@ from app.media_v4.domain.models import (
     ResolvedWork,
     SourceEvidence,
 )
+from app.media_v4.parsing.parser import _normalize_filename_stem
 
 _SUPPORTED_PROVIDERS = frozenset({"tmdb", "anilist", "bangumi"})
 
@@ -34,6 +35,8 @@ class WorkCandidate:
     evidence: str
     confidence: str
     status: str = "proposed"
+    original_title: str = ""
+    aliases: tuple[str, ...] = field(default_factory=tuple)
 
 
 CandidateSearch = Callable[[str, list[str], int | None, str], list[WorkCandidate]]
@@ -58,13 +61,22 @@ def _score_candidate(
     queries: list[str],
     nfo_titles: list[str],
 ) -> WorkCandidate:
-    """可解释候选评分：标题/原文精确匹配 + 年份一致 → high；否则 medium。"""
+    """可解释候选评分：本地标题集与 provider primary/original/可信 alias
+    完整规范化等值匹配且年份不冲突才 high；禁止前缀/模糊自动匹配。"""
 
     query_norms = {_normalize_title(q) for q in queries}
-    candidate_norm = _normalize_title(candidate.title)
+    query_norms.discard("")
+    local_norms = {_normalize_title(work.preferred_title)} | query_norms
+    local_norms.discard("")
+    provider_norms = {
+        _normalize_title(candidate.title),
+        _normalize_title(candidate.original_title),
+        *(_normalize_title(alias) for alias in candidate.aliases),
+    }
+    provider_norms.discard("")
     # 身份自动确认只接受规范化后的完整标题相等。前缀关系（Show/Showdown）
     # 不构成同一作品的证据，必须留给人工候选处理。
-    exact_title = any(candidate_norm == norm for norm in query_norms if norm)
+    exact_title = bool(provider_norms & local_norms)
     year_ok = candidate.year is None or work.year is None or candidate.year == work.year
     confidence = "high" if exact_title and year_ok else "medium"
     evidence = candidate.evidence
@@ -129,6 +141,31 @@ def _nfo_related_titles(
                 titles.append(stem)
             found = True
     return titles, found
+
+
+def _nfo_evidence_facts(
+    work: ResolvedWork,
+    entries: list[tuple[SourceEvidence, ParsedFacts]],
+) -> list[tuple[SourceEvidence, ParsedFacts]]:
+    """关联同目录/同 stem 的 sidecar NFO 证据事实（含解析出的 provider ID）。"""
+
+    video_dirs: set[str] = set()
+    for evidence, _facts in entries:
+        if evidence.evidence_id in work.source_evidence_ids:
+            parts = PurePosixPath(evidence.relative_path).parts
+            video_dirs.add(PurePosixPath(*parts[:-1]).as_posix() if len(parts) > 1 else "")
+    result: list[tuple[SourceEvidence, ParsedFacts]] = []
+    for evidence, facts in entries:
+        if evidence.entry_kind != "metadata" or facts.is_importable:
+            continue
+        parts = PurePosixPath(evidence.relative_path).parts
+        parent = PurePosixPath(*parts[:-1]).as_posix() if len(parts) > 1 else ""
+        stem = _normalize_filename_stem(PurePosixPath(evidence.relative_path).stem)
+        if parent in video_dirs or (
+            stem and _normalize_title(stem) == _normalize_title(work.preferred_title)
+        ):
+            result.append((evidence, facts))
+    return result
 
 
 def plan_work_candidates(
@@ -210,6 +247,24 @@ def plan_work_candidates(
                     title=work.preferred_title,
                     year=work.year,
                     evidence="parsed_tmdb_hint",
+                    confidence="high",
+                    status="proposed",
+                )
+        # sidecar NFO 内容解析出的 provider ID 是强候选证据（同目录/同 stem 关联）。
+        for _evidence, facts in _nfo_evidence_facts(work, entries):
+            if not facts.tmdb_hint_id or not facts.tmdb_hint_type:
+                continue
+            key = ("tmdb", facts.tmdb_hint_type.casefold(), str(facts.tmdb_hint_id))
+            if key not in candidates:
+                candidates[key] = WorkCandidate(
+                    work_key=work.work_key,
+                    provider="tmdb",
+                    provider_id=str(facts.tmdb_hint_id),
+                    media_type=facts.tmdb_hint_type.casefold(),
+                    title=facts.work_title or work.preferred_title,
+                    original_title=facts.original_title,
+                    year=facts.year_candidate or work.year,
+                    evidence="sidecar_nfo_provider",
                     confidence="high",
                     status="proposed",
                 )
@@ -327,6 +382,8 @@ def default_candidate_search(work_key: str, queries: list[str], year: int | None
                 provider_id=str(item.get("provider_id") or ""),
                 media_type=item.get("media_type") or media_type,
                 title=item.get("title") or query,
+                original_title=item.get("original_title") or "",
+                aliases=tuple(str(alias) for alias in (item.get("aliases") or []) if alias),
                 year=item.get("year"),
                 evidence="online_search",
                 confidence="medium",
