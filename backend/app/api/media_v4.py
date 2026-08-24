@@ -1088,6 +1088,8 @@ def metadata_confirm(request: MetadataConfirmRequest):
         raise HTTPException(status_code=404, detail="候选不存在，请先搜索生成候选")
     if str(candidate["work_id"]) != request.work_id:
         raise HTTPException(status_code=409, detail="候选不属于该作品，无法确认")
+    if str(candidate["revision_id"]) != str(revision["revision_id"]):
+        raise HTTPException(status_code=409, detail="候选不属于当前已确认 revision，请重新搜索")
     if candidate["status"] == "confirmed":
         with database.connect() as conn:
             binding = conn.execute(

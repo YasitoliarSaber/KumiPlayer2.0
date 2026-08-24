@@ -151,7 +151,7 @@ def test_ambiguous_candidates_block_confirm_and_no_scrape_search(tmp_path, monke
     search = _fake_search(
         [
             {"match_query": "Show", "provider_id": 42, "title": "Show", "year": 2024},
-            {"match_query": "Show", "provider_id": 43, "title": "Show 2", "year": 2024},
+            {"match_query": "Show", "provider_id": 43, "title": "Show", "year": 2024},
         ],
     )
     monkeypatch.setattr(candidates_module, "default_candidate_search", search)

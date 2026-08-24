@@ -146,6 +146,26 @@ def test_same_title_different_year_is_not_auto_merged_by_candidates(tmp_path, mo
     assert any(issue.code == "candidate_ambiguous" for issue in graph.issues)
 
 
+def test_candidate_title_prefix_is_not_treated_as_exact_identity(tmp_path, monkeypatch):
+    """Show 与 Showdown 不能仅因前缀相同自动确认同一 Provider 身份。"""
+
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = _patch_database(tmp_path, monkeypatch)
+    service = V4RevisionService(database)
+    search = _search_fn(_candidate("Show", 99, "Showdown", 2024))
+
+    service.create_draft("rev-prefix", [_entry("prefix", work_title="Show")], candidate_search=search)
+
+    with database.connect() as conn:
+        row = conn.execute(
+            "SELECT confidence, status FROM revision_work_candidates WHERE revision_id = 'rev-prefix'"
+        ).fetchone()
+    assert row is not None
+    assert row["confidence"] == "medium"
+    assert row["status"] == "proposed"
+
+
 # ---------------------------------------------------------------------------
 # R7：完整性门控必经 —— 手动确认候选但无镜像产物不得发布。
 # ---------------------------------------------------------------------------
@@ -342,3 +362,46 @@ def test_manual_candidate_belongs_to_active_confirmed_revision(tmp_path, monkeyp
         ).fetchone()
     assert row is not None
     assert row["revision_id"] == "rev-a1"
+
+
+def test_manual_confirm_rejects_candidate_from_superseded_revision(tmp_path, monkeypatch):
+    """候选必须属于当前 active confirmed revision，不能跨 revision 复用。"""
+
+    import uuid
+    from datetime import UTC, datetime
+
+    client = _client(tmp_path, monkeypatch)
+    database = _patch_database(tmp_path, monkeypatch)
+    from app.media_v4.revisions.service import V4RevisionService
+
+    service = V4RevisionService(database)
+    service.create_draft("rev-old", [_entry("old", work_title="Show")], candidate_search=lambda *a, **k: [])
+    service.confirm("rev-old")
+    with database.connect() as conn:
+        work_id = conn.execute("SELECT work_id FROM works LIMIT 1").fetchone()["work_id"]
+
+    fresh_evidence, fresh_facts = _entry("new", work_title="Show")
+    fresh_evidence = replace(fresh_evidence, root_id="root-new", scan_id="scan-new")
+    service.create_draft("rev-new", [(fresh_evidence, fresh_facts)], candidate_search=lambda *a, **k: [])
+    service.confirm("rev-new")
+
+    candidate_id = str(uuid.uuid4())
+    now = datetime.now(UTC).isoformat()
+    with database.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO revision_work_candidates(
+                candidate_id, revision_id, work_id, draft_work_key, provider,
+                provider_id, media_type, title, evidence, confidence, status,
+                created_at, updated_at
+            ) VALUES (?, 'rev-old', ?, 'old-key', 'tmdb', '42', 'tv', 'Show',
+                      'manual_search', 'high', 'proposed', ?, ?)
+            """,
+            (candidate_id, work_id, now, now),
+        )
+
+    response = client.post(
+        "/api/v4/metadata/confirm",
+        json={"work_id": work_id, "candidate_id": candidate_id},
+    )
+    assert response.status_code == 409

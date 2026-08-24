@@ -62,11 +62,9 @@ def _score_candidate(
 
     query_norms = {_normalize_title(q) for q in queries}
     candidate_norm = _normalize_title(candidate.title)
-    exact_title = any(
-        candidate_norm == norm or candidate_norm.startswith(norm)
-        for norm in query_norms
-        if norm
-    )
+    # 身份自动确认只接受规范化后的完整标题相等。前缀关系（Show/Showdown）
+    # 不构成同一作品的证据，必须留给人工候选处理。
+    exact_title = any(candidate_norm == norm for norm in query_norms if norm)
     year_ok = candidate.year is None or work.year is None or candidate.year == work.year
     confidence = "high" if exact_title and year_ok else "medium"
     evidence = candidate.evidence
