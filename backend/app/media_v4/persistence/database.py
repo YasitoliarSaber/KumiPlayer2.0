@@ -310,11 +310,15 @@ class V4Database:
                     raise V4ResetRequiredError(
                         "数据库声明为 V4，但物理结构与唯一 V4 schema 不一致，需要一次性重置" + detail
                     )
-            if self._index_contract(conn) != self._index_contract(expected):
+                if self._foreign_key_contract(conn, table) != self._foreign_key_contract(expected, table):
+                    raise V4ResetRequiredError(
+                        "数据库声明为 V4，但物理结构（外键）与唯一 V4 schema 不一致，需要一次性重置"
+                    )
+            if self._index_contract(conn, self.REQUIRED_TABLES) != self._index_contract(expected, self.REQUIRED_TABLES):
                 raise V4ResetRequiredError(
                     "数据库声明为 V4，但物理结构（索引）与唯一 V4 schema 不一致，需要一次性重置"
                 )
-            if self._trigger_contract(conn) != self._trigger_contract(expected):
+            if self._trigger_contract(conn, self.REQUIRED_TRIGGERS) != self._trigger_contract(expected, self.REQUIRED_TRIGGERS):
                 raise V4ResetRequiredError(
                     "数据库声明为 V4，但物理结构（触发器）与唯一 V4 schema 不一致，需要一次性重置"
                 )
@@ -338,16 +342,28 @@ class V4Database:
         )
 
     @staticmethod
-    def _index_contract(database: sqlite3.Connection) -> tuple[tuple[str, int, tuple[str, ...]], ...]:
+    def _foreign_key_contract(database: sqlite3.Connection, table: str) -> frozenset[tuple[str, str, str, str, str]]:
+        """外键逻辑合同：关联表、列与删除/更新动作，忽略内部编号顺序。"""
+
+        rows = database.execute(f"PRAGMA foreign_key_list({table})").fetchall()
+        return frozenset(
+            (
+                str(row["table"]),
+                str(row["from"]),
+                str(row["to"]),
+                str(row["on_update"]),
+                str(row["on_delete"]),
+            )
+            for row in rows
+        )
+
+    @staticmethod
+    def _index_contract(
+        database: sqlite3.Connection, tables: frozenset[str]
+    ) -> tuple[tuple[str, int, tuple[str, ...]], ...]:
         """受管索引合同：非自动索引的名称、唯一性与列序。"""
 
         contracts: list[tuple[str, int, tuple[str, ...]]] = []
-        tables = [
-            str(row["name"])
-            for row in database.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-            ).fetchall()
-        ]
         for table in sorted(tables):
             for index in database.execute(f"PRAGMA index_list({table})").fetchall():
                 name = str(index["name"])
@@ -361,11 +377,17 @@ class V4Database:
         return tuple(sorted(contracts))
 
     @staticmethod
-    def _trigger_contract(database: sqlite3.Connection) -> frozenset[tuple[str, str]]:
+    def _trigger_contract(
+        database: sqlite3.Connection, trigger_names: frozenset[str]
+    ) -> frozenset[tuple[str, str]]:
         """触发器合同：名称 + 规范化 DDL。"""
 
+        if not trigger_names:
+            return frozenset()
+        placeholders = ", ".join("?" for _ in trigger_names)
         rows = database.execute(
-            "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL"
+            f"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL AND name IN ({placeholders})",
+            tuple(sorted(trigger_names)),
         ).fetchall()
         return frozenset(
             (str(row["name"]), " ".join(str(row["sql"]).split()))

@@ -36,6 +36,9 @@ def _create_v5_layout(path: Path, *, rows: list[tuple]) -> None:
         conn.execute("BEGIN IMMEDIATE")
         create_schema_v4(conn)
         # 用 v5 物理布局重建 source_roots（root_container 等在旧列之后/不存在）
+        # 夹具只模拟 source_roots 的历史列顺序；禁止 rename 同步改写子表 FK，
+        # 否则会人为制造真实迁移中不存在的外键损坏。
+        conn.execute("PRAGMA legacy_alter_table = ON")
         conn.execute("ALTER TABLE source_roots RENAME TO source_roots_legacy")
         conn.execute(
             """
@@ -58,6 +61,7 @@ def _create_v5_layout(path: Path, *, rows: list[tuple]) -> None:
             "SELECT root_id, provider, ingest_method, source_locator, playback_locator, route_id, display_name, enabled, created_at, updated_at FROM source_roots_legacy"
         )
         conn.execute("DROP TABLE source_roots_legacy")
+        conn.execute("PRAGMA legacy_alter_table = OFF")
         # 连续 ALTER：v6 root_container、v8 source_mode/last_scan_mode、v9 retired 字段
         conn.execute("ALTER TABLE source_roots ADD COLUMN root_container TEXT NOT NULL DEFAULT ''")
         conn.execute("ALTER TABLE source_roots ADD COLUMN source_mode TEXT NOT NULL DEFAULT ''")
@@ -219,6 +223,51 @@ def test_broken_default_still_requires_reset(tmp_path):
 
     with pytest.raises(V4ResetRequiredError, match="物理结构"):
         V4Database(db_path).initialize()
+
+
+def test_missing_foreign_key_still_requires_reset(tmp_path):
+    """逻辑列合同相同但关联约束丢失时，不能把损坏库当作健康库。"""
+
+    from app.media_v4.persistence.database import V4ResetRequiredError
+
+    database = _fresh_database(tmp_path)
+    with database.connect() as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("ALTER TABLE source_scans RENAME TO source_scans_full")
+        conn.execute(
+            """
+            CREATE TABLE source_scans (
+                scan_id TEXT PRIMARY KEY,
+                root_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL DEFAULT '',
+                finished_at TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '',
+                UNIQUE(root_id, generation)
+            )
+            """
+        )
+        conn.execute("DROP TABLE source_scans_full")
+        conn.execute("PRAGMA foreign_keys = ON")
+
+    with pytest.raises(V4ResetRequiredError, match="外键"):
+        database.initialize()
+
+
+def test_unmanaged_local_objects_do_not_invalidate_v4_contract(tmp_path):
+    """用户或诊断工具的额外对象不属于 V4 schema 合同，不能阻断启动。"""
+
+    database = _fresh_database(tmp_path)
+    with database.connect() as conn:
+        conn.execute("CREATE TABLE local_diagnostic_note (id INTEGER PRIMARY KEY, note TEXT NOT NULL)")
+        conn.execute("CREATE INDEX idx_local_diagnostic_note ON local_diagnostic_note(note)")
+        conn.execute(
+            "CREATE TRIGGER local_diagnostic_note_audit "
+            "AFTER INSERT ON local_diagnostic_note BEGIN SELECT 1; END"
+        )
+
+    database.initialize()
 
 
 def test_v5_upgrade_creates_v8_v9_v10_objects(tmp_path):
