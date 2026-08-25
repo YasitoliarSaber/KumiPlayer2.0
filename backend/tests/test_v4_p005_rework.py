@@ -89,6 +89,18 @@ def _preview(database, **kwargs):
     return compute_delete_preview(database, **kwargs)
 
 
+def _stored_preview(database, preview_id):
+    """内部权威 preview_json（含 orphan/mixed 判定），DTO 不再返回内部 Work ID。"""
+    import json
+
+    with database.connect() as conn:
+        row = conn.execute(
+            "SELECT preview_json FROM maintenance_operations WHERE operation_id = ?",
+            (preview_id,),
+        ).fetchone()
+    return json.loads(row["preview_json"]) if row else {}
+
+
 def _confirm(database, **kwargs):
     from app.media_v4.maintenance.service import confirm_delete_preview
 
@@ -108,10 +120,12 @@ def test_multi_root_mixed_work_is_orphan_when_all_selected(tmp_path):
     _seed_work_in_root(database, root_id="root-b", work_id="w-other", title="其它")
 
     preview = _preview(database, provider="all")
-    assert "w-both" in preview["orphan_works"], "同时属于全部被选 root 的作品必须退出"
-    assert "w-both" not in preview["mixed_works"]
-    assert "w-only" in preview["orphan_works"]
-    assert "w-other" in preview["orphan_works"]
+    stored = _stored_preview(database, preview["preview_id"])
+    assert "w-both" in stored["orphan_works"], "同时属于全部被选 root 的作品必须退出"
+    assert "w-both" not in stored["mixed_works"]
+    assert "w-only" in stored["orphan_works"]
+    assert "w-other" in stored["orphan_works"]
+    assert preview["orphan_work_count"] == 3
     assert preview["mixed_work_count"] == 0
 
 
@@ -130,11 +144,13 @@ def test_same_provider_multi_root_with_unselected_third_root(tmp_path):
     _seed_work_in_root(database, root_id="root-c", work_id="w-ac", title="AC")
 
     preview = _preview(database, provider="pan115", root_ids=["root-a", "root-b"])
+    stored = _stored_preview(database, preview["preview_id"])
     # w-ab：root-c 未选 → mixed 保留
-    assert "w-ab" in preview["mixed_works"]
-    assert "w-ab" not in preview["orphan_works"]
+    assert "w-ab" in stored["mixed_works"]
+    assert "w-ab" not in stored["orphan_works"]
     # w-ac：仅 root-a 选中，root-c 未选 → mixed 保留
-    assert "w-ac" in preview["mixed_works"]
+    assert "w-ac" in stored["mixed_works"]
+    assert preview["mixed_work_count"] == 2
 
 
 def test_preview_is_persisted_and_confirm_validates_ttl(tmp_path):

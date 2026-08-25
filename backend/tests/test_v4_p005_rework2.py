@@ -8,8 +8,6 @@ operation 续跑；并发 confirm 只有单一执行权；mirror root/scope/dige
 from __future__ import annotations
 
 import json
-import sqlite3
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -134,16 +132,23 @@ def test_fifty_one_artifacts_are_all_planned_and_cleaned(tmp_path):
 
     result = confirm_delete_preview(database, preview_id=preview["preview_id"], scope="pan115", digest=preview["digest"], mirror_root=mirror)
     assert result["status"] == "completed"
-    assert len(result["artifact_results"]) == 51
-    removed = [item for item in result["artifact_results"] if item["status"] == "removed"]
-    assert len(removed) == 51
+    assert result["artifact_count"] == 51
+    assert len(result["artifact_results"]) == 20, "result DTO 最多返回 20 条脱敏摘要"
+    assert all(item["status"] == "removed" for item in result["artifact_results"])
+    # 全部 51 项都持久化结果（不能因截断展示而遗漏执行/记录）。
+    with database.connect() as conn:
+        statuses = [str(r["result_status"]) for r in conn.execute(
+            "SELECT result_status FROM maintenance_operation_items WHERE operation_id = ?",
+            (preview["preview_id"],),
+        ).fetchall()]
+    assert len(statuses) == 51
+    assert set(statuses) == {"removed"}
     assert all(not path.exists() for path in paths)
 
 
 def test_partial_failure_resumes_same_operation_without_repeating_success(tmp_path, monkeypatch):
     """11.14.2-2：一个 artifact 失败 → partial_failed；同 operation resume 只重试未完成项。"""
 
-    from app.media_v4.maintenance import service as maintenance_service
     from app.media_v4.maintenance.service import compute_delete_preview, confirm_delete_preview, resume_operation
 
     database = _fresh_database(tmp_path)
@@ -247,7 +252,7 @@ def test_confirm_rejects_mirror_root_change_without_retiring(tmp_path):
 def test_confirm_rejects_unknown_empty_and_out_of_scope_roots(tmp_path):
     """11.14.2-4b：空/未知/不属 scope 的 root_ids 拒绝，且不退役任何 root。"""
 
-    from app.media_v4.maintenance.service import compute_delete_preview, confirm_delete_preview
+    from app.media_v4.maintenance.service import compute_delete_preview
 
     database = _fresh_database(tmp_path)
     _seed_root(database, root_id="root-a")
@@ -287,8 +292,13 @@ def test_orphan_and_mixed_works_cleanup_consistent(tmp_path):
 
     # 部分 root：只删 root-a → w-ab 仍保留（root-b/c），w-a 退出并清个人状态
     preview = compute_delete_preview(database, provider="pan115", root_ids=["root-a"])
-    assert "w-ab" in preview["mixed_works"]
-    assert "w-a" in preview["orphan_works"]
+    with database.connect() as conn:
+        stored = json.loads(conn.execute(
+            "SELECT preview_json FROM maintenance_operations WHERE operation_id = ?",
+            (preview["preview_id"],),
+        ).fetchone()["preview_json"])
+    assert "w-ab" in stored["mixed_works"]
+    assert "w-a" in stored["orphan_works"]
     confirm_delete_preview(database, preview_id=preview["preview_id"], scope="pan115", digest=preview["digest"])
     with database.connect() as conn:
         hist_a = conn.execute("SELECT 1 FROM playback_history WHERE work_id = 'w-a'").fetchone()

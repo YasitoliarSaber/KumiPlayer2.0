@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -93,7 +94,8 @@ def test_preview_blocks_when_active_jobs_exist(tmp_path):
 
     preview = compute_delete_preview(database, provider="pan115")
     assert preview["blocked"] is True
-    assert preview["blocked_jobs"] != []
+    assert preview["blocked_job_count"] == 1
+    assert preview["blocked_job_types"] == ["materialize_mirror"]
 
 
 def test_mixed_source_work_is_kept(tmp_path):
@@ -104,20 +106,25 @@ def test_mixed_source_work_is_kept(tmp_path):
     _seed_confirmed(database, root_id="root-115", provider="pan115", work_ids=["w-mixed"], scan_id="scan-c", revision_id="rev-c")
 
     preview = compute_delete_preview(database, provider="baidu")
-    assert preview["orphan_works"] == ["w-orphan"]
-    assert preview["mixed_works"] == ["w-mixed"]
+    with database.connect() as conn:
+        stored = json.loads(conn.execute(
+            "SELECT preview_json FROM maintenance_operations WHERE operation_id = ?",
+            (preview["preview_id"],),
+        ).fetchone()["preview_json"])
+    assert stored["orphan_works"] == ["w-orphan"]
+    assert stored["mixed_works"] == ["w-mixed"]
+    assert preview["orphan_work_count"] == 1
+    assert preview["mixed_work_count"] == 1
 
     result = confirm_delete_preview(database, preview_id=preview["preview_id"], scope="baidu", digest=preview["digest"])
     assert result["status"] == "completed"
-    assert result["orphan_works"] == ["w-orphan"]
-    assert result["mixed_works"] == ["w-mixed"]
+    assert result["orphan_work_count"] == 1
+    assert result["mixed_work_count"] == 1
     # 百度 root 退役，115 root 保留
     with database.connect() as conn:
         rows = {str(r["root_id"]): str(r["retired_at"] or "") for r in conn.execute("SELECT root_id, retired_at FROM source_roots").fetchall()}
     assert rows["root-baidu"] != ""
     assert rows["root-115"] == ""
-    # 混合来源 Work 仍然存在（通过 115 活动来源）
-    assert "w-mixed" in result["mixed_works"]
 
 
 def test_confirm_rejects_stale_digest(tmp_path):
