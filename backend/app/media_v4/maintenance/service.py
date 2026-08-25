@@ -452,7 +452,7 @@ def _cleanup_items(database: V4Database, preview_id: str, mirror_root: Path | No
         path_text = str(row["target_path"])
         result_status = str(row["result_status"] or "")
         if result_status in {"removed", "missing"}:
-            results.append({"path": path_text, "status": result_status, "reused": True})
+            results.append({"path": _sanitized_summary(path_text, mirror_root), "status": result_status, "reused": True})
             continue
         status = "pending"
         error = ""
@@ -483,8 +483,19 @@ def _cleanup_items(database: V4Database, preview_id: str, mirror_root: Path | No
                 "UPDATE maintenance_operation_items SET result_status = ?, result_error = ?, updated_at = ? WHERE item_id = ?",
                 (status, error, _now(), item_id),
             )
-        results.append({"path": path_text, "status": status, "error": error or None})
+        results.append({"path": _sanitized_summary(path_text, mirror_root), "status": status, "error": error or None})
     return results, has_failure
+
+
+def _sanitized_summary(path_text: str, mirror_root: Path | None) -> str:
+    """相对镜像根的脱敏摘要；绝不含完整本地绝对路径。"""
+
+    if mirror_root is None:
+        return Path(path_text).name
+    try:
+        return str(Path(path_text).relative_to(mirror_root))
+    except ValueError:
+        return Path(path_text).name
 
 
 def _rebuild_projection(database: V4Database) -> str:

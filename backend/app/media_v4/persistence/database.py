@@ -14,7 +14,6 @@ from app.media_v4.persistence.schema_v4 import (
     create_v8_structures,
     create_v9_structures,
     create_v10_structures,
-    create_v11_structures,
     migrate_schema_v4_to_v5,
     migrate_schema_v5_to_v6,
     migrate_schema_v6_to_v7,
