@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 11
+V4_SCHEMA_VERSION = 12
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -661,6 +661,7 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
     conn.execute("INSERT INTO v4_meta(key, value) VALUES ('schema', 'v4')")
     conn.execute("INSERT INTO v4_meta(key, value) VALUES ('backend_data_epoch', '4')")
+    create_v12_structures(conn)
 
 
 def create_tree_scan_validation(conn: sqlite3.Connection) -> None:
@@ -851,10 +852,32 @@ def create_v11_structures(conn: sqlite3.Connection) -> None:
     )
 
 
+def create_v12_structures(conn: sqlite3.Connection) -> None:
+    """v12 增量结构：维护操作明细按真实 Artifact 唯一。
+
+    maintenance_operation_items 增加 (operation_id, artifact_id) 唯一索引，
+    防止同一操作重复登记同一受管生成物；迁移不重建任何表。
+    """
+
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_maintenance_op_artifact
+        ON maintenance_operation_items(operation_id, artifact_id)
+        """
+    )
+
+
+def migrate_schema_v11_to_v12(conn: sqlite3.Connection) -> None:
+    """v11 → v12 增量迁移：操作明细唯一 Artifact 索引。"""
+
+    create_v12_structures(conn)
+
+
 def migrate_schema_v10_to_v11(conn: sqlite3.Connection) -> None:
     """v10 → v11 增量迁移：维护操作受管列与逐项明细。"""
 
     create_v11_structures(conn)
+    create_v12_structures(conn)
 
 
 def migrate_schema_v9_to_v10(conn: sqlite3.Connection) -> None:

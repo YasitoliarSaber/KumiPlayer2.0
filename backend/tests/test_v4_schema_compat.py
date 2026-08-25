@@ -93,7 +93,7 @@ def test_v5_layout_with_altered_columns_initializes_and_keeps_data(tmp_path):
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
         root = conn.execute("SELECT * FROM source_roots WHERE root_id = 'root-keep'").fetchone()
         assert root is not None
         assert root["provider"] == "pan115"

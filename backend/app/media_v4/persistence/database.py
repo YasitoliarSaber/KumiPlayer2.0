@@ -21,6 +21,7 @@ from app.media_v4.persistence.schema_v4 import (
     migrate_schema_v8_to_v9,
     migrate_schema_v9_to_v10,
     migrate_schema_v10_to_v11,
+    migrate_schema_v11_to_v12,
 )
 
 
@@ -150,11 +151,28 @@ class V4Database:
                 raise RuntimeError(
                     f"数据库版本 {version} 高于当前程序支持的 {self.CURRENT_SCHEMA_VERSION}，请升级 KumiPlayer"
                 )
+            if version == 11 and self._has_user_tables(conn):
+                # v11 → v12 增量迁移：操作明细唯一 Artifact 索引。
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    migrate_schema_v11_to_v12(conn)
+                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    conn.commit()
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    raise V4ResetRequiredError(
+                        "数据库声明为 V4 但物理结构不完整，需要一次性重置；" + str(exc)
+                    ) from exc
+                except Exception:
+                    conn.rollback()
+                    raise
+                version = self.CURRENT_SCHEMA_VERSION
             if version == 10 and self._has_user_tables(conn):
                 # v10 → v11 增量迁移：维护操作受管列与逐项明细。
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     migrate_schema_v10_to_v11(conn)
+                    migrate_schema_v11_to_v12(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -172,6 +190,7 @@ class V4Database:
                 try:
                     migrate_schema_v9_to_v10(conn)
                     migrate_schema_v10_to_v11(conn)
+                    migrate_schema_v11_to_v12(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -190,6 +209,7 @@ class V4Database:
                     migrate_schema_v8_to_v9(conn)
                     migrate_schema_v9_to_v10(conn)
                     migrate_schema_v10_to_v11(conn)
+                    migrate_schema_v11_to_v12(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -209,6 +229,7 @@ class V4Database:
                     migrate_schema_v8_to_v9(conn)
                     migrate_schema_v9_to_v10(conn)
                     migrate_schema_v10_to_v11(conn)
+                    migrate_schema_v11_to_v12(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -229,6 +250,7 @@ class V4Database:
                     migrate_schema_v8_to_v9(conn)
                     migrate_schema_v9_to_v10(conn)
                     migrate_schema_v10_to_v11(conn)
+                    migrate_schema_v11_to_v12(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -250,6 +272,7 @@ class V4Database:
                     migrate_schema_v8_to_v9(conn)
                     migrate_schema_v9_to_v10(conn)
                     migrate_schema_v10_to_v11(conn)
+                    migrate_schema_v11_to_v12(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -272,6 +295,7 @@ class V4Database:
                     migrate_schema_v8_to_v9(conn)
                     migrate_schema_v9_to_v10(conn)
                     migrate_schema_v10_to_v11(conn)
+                    migrate_schema_v11_to_v12(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
