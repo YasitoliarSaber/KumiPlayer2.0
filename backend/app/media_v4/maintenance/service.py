@@ -252,8 +252,11 @@ def compute_delete_preview(database: V4Database, *, provider: str, root_ids: lis
     summaries: list[str] = []
     for path_text in artifact_paths:
         try:
-            rel = Path(path_text).relative_to(mirror_root)
-            summaries.append(str(rel))
+            if mirror_root is None:
+                summaries.append(Path(path_text).name)
+            else:
+                rel = Path(path_text).relative_to(mirror_root)
+                summaries.append(str(rel))
         except ValueError:
             summaries.append(Path(path_text).name)
     preview = {
@@ -611,7 +614,7 @@ def compute_work_delete_preview(database: V4Database, *, work_id: str, mirror_ro
         "artifact_paths": artifact_paths,
         "playback_count": int(playback_count or 0),
         "tracking_count": int(tracking_count or 0),
-        "digest": _digest("work:" + work_id, [{"root_id": "", "revision_id": str(revision["revision_id"])}], [{"work_id": work_id}], artifact_paths),
+        "digest": _digest("work:" + work_id, [{"root_id": "", "revision_id": str(revision["revision_id"])}], [{"work_id": work_id}], artifact_paths, ""),
     }
     return preview
 
