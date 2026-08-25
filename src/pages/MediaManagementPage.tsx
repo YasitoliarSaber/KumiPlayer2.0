@@ -729,8 +729,6 @@ export default function MediaManagementPage() {
     return card.ingest_method === 'local_scan' ? '本地扫描' : card.ingest_method === 'directory_tree' ? '目录树 TXT' : 'OpenList 扫描'
   }
 
-  const sourceModeLabel = (card: V4SourceLibraryCard) => `${providerLabel(card.provider)} · ${sourceMethodLabel(card)}`
-
   const prepareSourceUpdate = (card: V4SourceLibraryCard) => {
     clearResultState()
     setPageMode('import')
@@ -799,7 +797,7 @@ export default function MediaManagementPage() {
               ? '正在处理'
               : card.job_summary.failed > 0 ? '有失败任务' : card.job_summary.cancelled > 0 ? '有已取消任务' : '上次导入已处理完毕'
             return <article className={`media-v4-library-source-card ${card.can_resume ? 'active' : 'settled'}`} key={card.root_id}>
-              <div className="media-v4-library-source-card-top"><MediaProviderIcon provider={providerVisualFor(card.provider)} size={20} /><span className="media-v4-source-card-provider-label">{providerLabel(card.provider)}</span><span className="media-v4-source-card-method-label">{sourceModeLabel(card)}</span><span className={`media-v4-source-card-state media-v4-source-card-state-${card.overall_status ?? 'completed'}`}>{card.overall_status === 'running' ? '进行中' : card.overall_status === 'needs_attention' ? '需要处理' : card.overall_status === 'queued' ? '等待中' : '已完成'}</span></div>
+              <div className="media-v4-library-source-card-top"><MediaProviderIcon provider={providerVisualFor(card.provider)} size={20} /><span className="media-v4-source-card-provider-label">{providerLabel(card.provider)}</span><span className="media-v4-source-card-method-label">{sourceMethodLabel(card)}</span><span className={`media-v4-source-card-state media-v4-source-card-state-${card.overall_status ?? 'completed'}`}>{card.overall_status === 'running' ? '进行中' : card.overall_status === 'needs_attention' ? '需要处理' : card.overall_status === 'queued' ? '等待中' : '已完成'}</span></div>
               <strong title={card.display_name}>{card.display_name}</strong>
               <span className="media-v4-source-card-times">添加于 {formatDate(card.added_at)} · 更新于 {formatDate(card.updated_at)}</span>
               <span className="media-v4-source-card-locator" title={card.source_locator || card.playback_locator}>{card.source_locator || card.playback_locator || '已确认的媒体来源'}</span>
@@ -849,7 +847,11 @@ export default function MediaManagementPage() {
           <LibraryMaintenancePanel
             busy={busy !== ''}
             onPreview={(scope) => mediaV4Api.maintenancePreview(scope)}
-            onConfirm={(preview) => mediaV4Api.maintenanceConfirm({ preview_id: preview.preview_id, scope: preview.scope, digest: preview.digest })}
+            onConfirm={async (preview) => {
+              const result = await mediaV4Api.maintenanceConfirm({ preview_id: preview.preview_id, scope: preview.scope, digest: preview.digest })
+              void refreshSourceCards()
+              return result
+            }}
           />
         </section>
       )}

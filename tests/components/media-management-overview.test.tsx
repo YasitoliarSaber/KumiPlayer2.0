@@ -120,7 +120,8 @@ test('来源卡显示真实来源、添加/更新时间、作品预览与用户�
 
   expect(await screen.findByText('115 动画')).toBeVisible()
   // 内容来源与导入方式严格分层：来源是 115 网盘，OpenList 只是扫描方式。
-  expect(screen.getByText('115 网盘 · OpenList 扫描')).toBeVisible()
+  expect(screen.getByText('115 网盘')).toBeVisible()
+  expect(screen.getByText('OpenList 扫描')).toBeVisible()
   expect(screen.queryByText('OpenList 来源')).not.toBeInTheDocument()
   expect(screen.getByText(/添加于 2026-08-20/)).toBeVisible()
   expect(screen.getByText(/更新于 2026-08-24/)).toBeVisible()

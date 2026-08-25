@@ -116,8 +116,10 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm }: LibraryM
 
       {result && (
         <div className="media-v4-maintenance-result" role="status">
-          <MessageBar intent={result.projection_status === 'ok' ? 'success' : 'warning'}>
-            <MessageBarBody>清理完成：退役 {result.retired_roots.length} 个来源根，{result.orphan_works.length} 部作品退出媒体库，{result.mixed_works.length} 部混合来源保留。</MessageBarBody>
+          <MessageBar intent={result.status === 'completed' ? 'success' : 'warning'}>
+            <MessageBarBody>{result.status === 'completed'
+              ? <>清理完成：退役 {result.retired_roots.length} 个来源根，{result.orphan_works.length} 部作品退出媒体库，{result.mixed_works.length} 部混合来源保留。</>
+              : <>清理未完全完成：来源已退役，但部分受控生成物或媒体库投影未处理完成。请重新生成预览后检查并重试。</>}</MessageBarBody>
           </MessageBar>
           <div className="media-v4-maintenance-result-detail">
             {result.artifact_results.slice(0, 20).map((item) => (

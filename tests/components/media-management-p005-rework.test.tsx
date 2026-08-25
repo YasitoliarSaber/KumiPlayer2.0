@@ -118,23 +118,24 @@ test('有 active revision 时默认停留来源卡 overview，点查看进度才
   expect(screen.getByRole('button', { name: '返回媒体管理' })).toBeVisible()
 })
 
-test('来源卡把内容来源与导入方式分层，不出现“OpenList 来源”', async () => {
+test('来源卡把内容来源与导入方式分层，不重复显示内容来源', async () => {
   api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
-  render(<MediaManagementPage />)
+  const firstView = render(<MediaManagementPage />)
 
   expect(await screen.findByText('115 动画')).toBeVisible()
   // 来源是 115 网盘，OpenList 只是扫描方式。
-  expect(screen.getByText('115 网盘 · OpenList 扫描')).toBeVisible()
+  expect(screen.getByText('115 网盘')).toBeVisible()
+  expect(screen.getByText('OpenList 扫描')).toBeVisible()
+  expect(screen.queryByText('115 网盘 · OpenList 扫描')).not.toBeInTheDocument()
   expect(screen.queryByText('OpenList 来源')).not.toBeInTheDocument()
   // 目录树基线也分层：来源 + 导入方式。
   api.sourceLibraries.mockResolvedValue({
     cards: [cardFixture({ source_mode: 'tree_openlist', ingest_method: 'directory_tree', provider: 'baidu', display_name: '百度动画' })],
   })
-  // 重新渲染以验证第二张卡
-  const { rerender } = render(<MediaManagementPage />)
-  rerender(<MediaManagementPage />)
-  expect(await screen.findByText('百度网盘 · 目录树基线 · OpenList 更新')).toBeVisible()
-  void rerender
+  // 卸载后以第二张卡独立挂载，避免两个页面同时存在导致断言误通过。
+  firstView.unmount()
+  render(<MediaManagementPage />)
+  expect(await screen.findByText('目录树基线 · OpenList 更新')).toBeVisible()
 })
 
 test('维护入口在默认路径可见并展示孤儿历史影响', async () => {
@@ -148,4 +149,22 @@ test('维护入口在默认路径可见并展示孤儿历史影响', async () =>
   await waitFor(() => expect(api.maintenancePreview).toHaveBeenCalledWith('all'))
   // 预览包含孤儿历史/进度/追更影响
   expect(await screen.findByText(/播放历史/)).toBeVisible()
+})
+
+test('确认来源清理后刷新来源卡，并按实际失败状态提示', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
+  api.maintenanceConfirm.mockResolvedValue({
+    preview_id: 'prev-1', scope: 'all', status: 'partial_failed',
+    retired_roots: ['root-115'], orphan_works: ['w-orphan'], mixed_works: [],
+    artifact_results: [{ path: 'K:\\mirror\\a.jpg', status: 'blocked' }], projection_status: 'ok',
+  })
+  render(<MediaManagementPage />)
+  await screen.findByText('115 动画')
+  fireEvent.click(screen.getByRole('button', { name: '媒体库维护' }))
+  fireEvent.click(await screen.findByRole('button', { name: '生成删除预览' }))
+  fireEvent.click(await screen.findByRole('button', { name: '确认清理此来源' }))
+
+  expect(await screen.findByText(/清理未完全完成/)).toBeVisible()
+  expect(screen.queryByText(/^清理完成：/)).not.toBeInTheDocument()
+  await waitFor(() => expect(api.sourceLibraries.mock.calls.length).toBeGreaterThan(1))
 })
