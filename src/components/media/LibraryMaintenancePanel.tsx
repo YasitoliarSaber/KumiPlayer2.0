@@ -103,7 +103,13 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
       {preview && (
         <div className="media-v4-maintenance-preview">
           {preview.blocked && (
-            <MessageBar intent="warning"><MessageBarBody>该来源仍有正在运行的后台任务，清理已阻止；请等待任务完成后再生成预览。</MessageBarBody></MessageBar>
+            <MessageBar intent="warning"><MessageBarBody>该来源仍有 {preview.blocked_job_count} 个正在运行的后台任务（{preview.blocked_job_types.join('、')}），清理已阻止；请等待任务完成后再生成预览。</MessageBarBody></MessageBar>
+          )}
+          {preview.root_names.length > 0 && (
+            <div className="media-v4-maintenance-root-names">
+              <span>将退役来源：</span>
+              {preview.root_names.map((root) => <em key={root.root_id}>{root.root_id}</em>)}
+            </div>
           )}
           <div className="media-v4-summary-numbers">
             <div><strong>{preview.root_count}</strong><span>个来源根</span></div>
@@ -134,7 +140,7 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
         <div className="media-v4-maintenance-result" role="status">
           <MessageBar intent={result.status === 'completed' ? 'success' : 'warning'}>
             <MessageBarBody>
-              {result.status === 'completed' ? `清理完成：退役 ${result.retired_roots.length} 个来源根，${result.orphan_works.length} 部作品退出媒体库，${result.mixed_works.length} 部混合来源保留。`
+              {result.status === 'completed' ? `清理完成：退役 ${result.retired_root_count} 个来源根，${result.orphan_work_count} 部作品退出媒体库，${result.mixed_work_count} 部混合来源保留。`
                 : result.status === 'partial_failed' ? '部分受控生成物清理失败，可重试未完成项；已退役来源不会重新激活。'
                   : result.status === 'projection_failed' ? '文件已清理，但媒体库投影重建失败，可重试投影。'
                     : `清理状态：${result.status}`}
@@ -148,10 +154,10 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
             </div>
           )}
           <div className="media-v4-maintenance-result-detail">
-            {result.artifact_results.slice(0, 20).map((item) => (
+            {result.artifact_results.map((item) => (
               <span key={item.path} className={`artifact-${item.status}`}>{item.status === 'removed' ? '已删除' : item.status === 'missing' ? '已不存在' : item.status === 'blocked' ? '已阻止' : '失败'} · {item.path}</span>
             ))}
-            {result.artifact_results.length === 0 && <span>没有需要清理的受控生成物。</span>}
+            {result.artifact_results.length === 0 && <span>没有需要清理的受控生成物（{result.artifact_count} 项已全部完成或不存在）。</span>}
           </div>
         </div>
       )}

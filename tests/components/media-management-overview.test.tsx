@@ -74,14 +74,15 @@ beforeEach(() => {
   api.maintenancePreview.mockResolvedValue({
     preview_id: 'prev-1', scope: 'all', expires_at: '2026-08-25T02:00:00Z',
     root_count: 1, work_count: 2, orphan_work_count: 1, mixed_work_count: 1, asset_count: 3, artifact_count: 2,
-    artifact_paths: ['K:\\mirror\\a.jpg'], blocked: false, blocked_jobs: [],
+    artifact_summaries: ['root-baidu/a.jpg'], blocked: false, blocked_job_count: 0, blocked_job_types: [],
     warnings: ['源视频、挂载盘媒体、外部 TXT、OpenList 远端对象、配置与凭据始终保留'],
-    roots: [], orphan_works: ['w-orphan'], mixed_works: ['w-mixed'], digest: 'd'.repeat(64),
+    root_names: [{ root_id: 'root-baidu', provider: 'baidu' }], digest: 'd'.repeat(64),
   })
   api.maintenanceConfirm.mockResolvedValue({
     preview_id: 'prev-1', scope: 'all', status: 'completed',
-    retired_roots: ['root-baidu'], orphan_works: ['w-orphan'], mixed_works: ['w-mixed'],
-    artifact_results: [{ path: 'K:\\mirror\\a.jpg', status: 'removed' }], projection_status: 'ok',
+    retired_root_count: 1, root_names: [{ root_id: 'root-baidu', provider: 'baidu' }],
+    orphan_work_count: 1, mixed_work_count: 1, artifact_count: 1,
+    artifact_results: [{ path: 'root-baidu/a.jpg', status: 'removed' }], projection_status: 'ok',
   })
   config.getConfig.mockResolvedValue({
     pan115_root: 'K:\\115网盘', baidu_root: 'K:\\百度网盘', local_root: 'D:\\Media',
@@ -164,5 +165,5 @@ test('删除确认调用 maintenance API 并展示逐项结果', async () => {
     preview_id: 'prev-1', scope: 'all', digest: 'd'.repeat(64),
   }))
   expect(await screen.findByText(/清理完成/)).toBeVisible()
-  expect(screen.getByText(/已删除 · K:\\mirror\\a.jpg/)).toBeVisible()
+  expect(screen.getByText(/已删除 · root-baidu\/a\.jpg/)).toBeVisible()
 })

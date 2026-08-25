@@ -1,5 +1,7 @@
 /** P-005 返工前端回归：active revision 默认停留 overview、来源/导入方式分层、维护入口默认可见。 */
 
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, expect, test, vi } from 'vitest'
 import MediaManagementPage from '../../src/pages/MediaManagementPage'
@@ -69,19 +71,21 @@ beforeEach(() => {
   api.openlistStatus.mockResolvedValue({ root_id: 'r', remote_root: '/', source_mode: '', last_scan_mode: '', has_confirmed_baseline: false })
   api.maintenancePreview.mockResolvedValue({
     preview_id: 'prev-1', scope: 'all', created_at: '2026-08-25T00:00:00Z', expires_at: '2026-08-25T02:00:00Z',
-    root_count: 1, work_count: 2, orphan_work_count: 1, mixed_work_count: 1, asset_count: 3, artifact_count: 2,
-    artifact_paths: ['K:\\mirror\\a.jpg'], blocked: false, blocked_jobs: [],
+    root_ids: ['root-baidu'], root_count: 1, work_count: 2, orphan_work_count: 1, mixed_work_count: 1, asset_count: 3, artifact_count: 2,
+    artifact_summaries: ['root-baidu/a.jpg'], blocked: false, blocked_job_count: 0, blocked_job_types: [],
     history_count: 1, progress_count: 1, tracking_count: 1,
-    warnings: [], roots: [], orphan_works: ['w-orphan'], mixed_works: ['w-mixed'], digest: 'd'.repeat(64),
+    warnings: [], root_names: [{ root_id: 'root-baidu', provider: 'baidu' }], digest: 'd'.repeat(64),
   })
   api.maintenanceConfirm.mockResolvedValue({
     preview_id: 'prev-1', scope: 'all', status: 'completed',
-    retired_roots: ['root-baidu'], orphan_works: ['w-orphan'], mixed_works: ['w-mixed'],
-    artifact_results: [{ path: 'K:\\mirror\\a.jpg', status: 'removed' }], projection_status: 'ok',
+    retired_root_count: 1, root_names: [{ root_id: 'root-baidu', provider: 'baidu' }],
+    orphan_work_count: 1, mixed_work_count: 1, artifact_count: 1,
+    artifact_results: [{ path: 'root-baidu/a.jpg', status: 'removed' }], projection_status: 'ok',
   })
   api.maintenanceResume.mockResolvedValue({
     preview_id: 'prev-1', scope: 'all', status: 'completed',
-    retired_roots: ['root-baidu'], orphan_works: ['w-orphan'], mixed_works: ['w-mixed'],
+    retired_root_count: 1, root_names: [{ root_id: 'root-baidu', provider: 'baidu' }],
+    orphan_work_count: 1, mixed_work_count: 1, artifact_count: 1,
     artifact_results: [{ path: 'root-baidu/a.jpg', status: 'removed', reused: true }], projection_status: 'ok',
   })
   config.getConfig.mockResolvedValue({
@@ -161,8 +165,9 @@ test('确认来源清理后刷新来源卡，并按实际失败状态提示', as
   api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
   api.maintenanceConfirm.mockResolvedValue({
     preview_id: 'prev-1', scope: 'all', status: 'partial_failed',
-    retired_roots: ['root-115'], orphan_works: ['w-orphan'], mixed_works: [],
-    artifact_results: [{ path: 'K:\\mirror\\a.jpg', status: 'blocked' }], projection_status: 'ok',
+    retired_root_count: 1, root_names: [{ root_id: 'root-115', provider: 'pan115' }],
+    orphan_work_count: 1, mixed_work_count: 0, artifact_count: 1,
+    artifact_results: [{ path: 'root-115/a.jpg', status: 'blocked' }], projection_status: 'ok',
   })
   render(<MediaManagementPage />)
   await screen.findByText('115 动画')
@@ -195,7 +200,8 @@ test('部分失败后显示重试按钮并调用 resume API', async () => {
   api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
   api.maintenanceConfirm.mockResolvedValue({
     preview_id: 'prev-1', scope: 'all', status: 'partial_failed',
-    retired_roots: ['root-baidu'], orphan_works: ['w-orphan'], mixed_works: ['w-mixed'],
+    retired_root_count: 1, root_names: [{ root_id: 'root-baidu', provider: 'baidu' }],
+    orphan_work_count: 1, mixed_work_count: 1, artifact_count: 2,
     artifact_results: [{ path: 'root-baidu/a.jpg', status: 'removed' }, { path: 'root-baidu/b.jpg', status: 'failed' }],
     projection_status: 'ok',
   })
@@ -211,4 +217,24 @@ test('部分失败后显示重试按钮并调用 resume API', async () => {
   fireEvent.click(retry)
   await waitFor(() => expect(api.maintenanceResume).toHaveBeenCalledWith('prev-1'))
   expect(await screen.findByText(/清理完成/)).toBeVisible()
+})
+
+
+test('来源卡使用卡宽驱动的容器查询降级（不依赖 viewport 900px）', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
+  const { container } = render(<MediaManagementPage />)
+  await screen.findByText('115 动画')
+
+  const card = container.querySelector('.media-v4-library-source-card')
+  expect(card).not.toBeNull()
+  const identity = container.querySelector('.media-v4-source-card-identity')
+  const scale = container.querySelector('.media-v4-source-card-scale')
+  expect(identity).not.toBeNull()
+  expect(scale).not.toBeNull()
+  // 卡自身声明 inline-size 容器，供 @container (max-width) 卡内单列降级；
+  // jsdom 不计算 container-type，因此锁定 CSS 规则本身。
+  const css = readFileSync(join(__dirname, '../../src/index.css'), 'utf-8')
+  expect(css).toMatch(/container-type:\s*inline-size/)
+  expect(css).toMatch(/@container media-v4-source-card \(max-width: 560px\)/)
+  expect(css).toMatch(/@media \(max-width: 900px\)/)
 })

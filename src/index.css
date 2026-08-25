@@ -13792,10 +13792,24 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-source-card-indeterminate::after { content: ''; position: absolute; inset-block: 0; width: 40%; border-radius: inherit; background: var(--accent-strong); animation: media-v4-indeterminate 1.4s ease-in-out infinite; }
 @keyframes media-v4-indeterminate { 0% { left: -40%; } 100% { left: 100%; } }
 @media (prefers-reduced-motion: reduce) { .media-v4-source-card-indeterminate::after { animation: none; } }
-/* P-005 二次返工：来源卡双区布局（左身份 / 右规模·预览·进度） */
-.media-v4-source-card-identity { display: grid; gap: 6px; align-content: start; min-width: 0; }
-.media-v4-source-card-scale { display: grid; gap: 10px; align-content: start; min-width: 0; }
+/* P-005 二次返工：来源卡双区布局（左身份 / 右规模·预览·进度；卡宽驱动降级） */
+.media-v4-library-source-card {
+  container-type: inline-size;
+  container-name: media-v4-source-card;
+}
+.media-v4-source-card-identity { display: grid; gap: 6px; align-content: start; min-width: 0; grid-column: 1; }
+.media-v4-source-card-scale { display: grid; gap: 10px; align-content: start; min-width: 0; grid-column: 2; }
 .media-v4-source-card-scale .media-v4-source-card-actions { margin-top: 2px; }
+/* 卡宽不足可读最小宽度时，卡内立即单列（不依赖 viewport；覆盖 125%/150% DPI
+   缩放导致的视觉可用宽度收缩）。 */
+@container media-v4-source-card (max-width: 560px) {
+  .media-v4-source-card-identity { grid-column: 1 / -1; }
+  .media-v4-source-card-scale { grid-column: 1 / -1; }
+  .media-v4-library-source-card { grid-template-columns: minmax(0, 1fr); }
+}
+/* 兜底：不支持 container query 的旧 WebView 按 viewport 降级 */
 @media (max-width: 900px) {
   .media-v4-library-source-card { grid-template-columns: 1fr; }
+  .media-v4-source-card-identity { grid-column: 1 / -1; }
+  .media-v4-source-card-scale { grid-column: 1 / -1; }
 }

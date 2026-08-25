@@ -149,14 +149,14 @@ export interface V4MaintenancePreview {
   /** 相对镜像根的脱敏摘要（至多 20 条），绝不含完整本地绝对路径。 */
   artifact_summaries: string[]
   blocked: boolean
-  blocked_jobs: Array<{ job_id: string; job_type: string; status: string }>
+  blocked_job_count: number
+  blocked_job_types: string[]
   history_count?: number
   progress_count?: number
   tracking_count?: number
   warnings: string[]
-  roots: Array<{ root_id: string; provider: string; source_locator: string; revision_id: string; confirmed_at: string }>
-  orphan_works: string[]
-  mixed_works: string[]
+  /** 可读来源根标识（root_id + provider），不含 source locator。 */
+  root_names: Array<{ root_id: string; provider: string }>
   digest: string
 }
 
@@ -164,9 +164,12 @@ export interface V4MaintenanceResult {
   preview_id: string
   scope: string
   status: string
-  retired_roots: string[]
-  orphan_works: string[]
-  mixed_works: string[]
+  retired_root_count: number
+  root_names: Array<{ root_id: string; provider: string }>
+  orphan_work_count: number
+  mixed_work_count: number
+  artifact_count: number
+  /** 相对镜像根的脱敏摘要（至多 20 条）。 */
   artifact_results: Array<{ path: string; status: string; error?: string }>
   projection_status: string
 }
