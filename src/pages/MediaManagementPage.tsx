@@ -797,18 +797,23 @@ export default function MediaManagementPage() {
               ? '正在处理'
               : card.job_summary.failed > 0 ? '有失败任务' : card.job_summary.cancelled > 0 ? '有已取消任务' : '上次导入已处理完毕'
             return <article className={`media-v4-library-source-card ${card.can_resume ? 'active' : 'settled'}`} key={card.root_id}>
-              <div className="media-v4-library-source-card-top"><MediaProviderIcon provider={providerVisualFor(card.provider)} size={20} /><span className="media-v4-source-card-provider-label">{providerLabel(card.provider)}</span><span className="media-v4-source-card-method-label">{sourceMethodLabel(card)}</span><span className={`media-v4-source-card-state media-v4-source-card-state-${card.overall_status ?? 'completed'}`}>{card.overall_status === 'running' ? '进行中' : card.overall_status === 'needs_attention' ? '需要处理' : card.overall_status === 'queued' ? '等待中' : '已完成'}</span></div>
-              <strong title={card.display_name}>{card.display_name}</strong>
-              <span className="media-v4-source-card-times">添加于 {formatDate(card.added_at)} · 更新于 {formatDate(card.updated_at)}</span>
-              <span className="media-v4-source-card-locator" title={card.source_locator || card.playback_locator}>{card.source_locator || card.playback_locator || '已确认的媒体来源'}</span>
-              {card.last_error && <span className="media-v4-source-card-error" role="alert">{card.last_error}</span>}
-              {card.attention_count > 0 && <span className="media-v4-source-card-attention">有 {card.attention_count} 部作品需要处理</span>}
-              <div className="media-v4-source-card-stats"><span>{card.work_count} 部作品</span><span>{card.asset_count} 个文件</span></div>
-              {(card.work_previews ?? []).length > 0 && <div className="media-v4-source-card-previews" aria-label="作品预览">{(card.work_previews ?? []).slice(0, 6).map((work) => <span key={work.work_id} title={`${work.title} · ${work.asset_count_for_source} 个文件`}>{work.title}</span>)}{card.work_count > 6 ? <em>还有 {card.work_count - 6} 部</em> : null}</div>}
-              <div className="media-v4-source-card-progress"><div><span>{card.progress?.message || progressLabel}</span><span>{card.progress?.state === 'running' ? `${card.progress.completed_work_count}/${card.progress.total_work_count} 部` : ''}</span></div>{card.progress?.state === 'running' && card.progress.percent != null ? <i aria-hidden="true"><b style={{ width: `${card.progress.percent}%` }} /></i> : card.progress?.state === 'queued' ? <i className="media-v4-source-card-indeterminate" aria-hidden="true" /> : null}</div>
-              <div className="media-v4-source-card-actions">
-                <Button appearance={card.can_resume ? 'primary' : 'secondary'} onClick={() => void resumeSourceCard(card)}>{card.can_resume ? '查看进度' : '查看上次导入'}</Button>
-                <Button appearance={card.can_resume ? 'secondary' : 'primary'} icon={<ArrowSync24Regular />} disabled={active} onClick={() => prepareSourceUpdate(card)}>检查更新</Button>
+              <div className="media-v4-source-card-identity">
+                <div className="media-v4-library-source-card-top"><MediaProviderIcon provider={providerVisualFor(card.provider)} size={20} /><span className="media-v4-source-card-provider-label">{providerLabel(card.provider)}</span><span className="media-v4-source-card-method-label">{sourceMethodLabel(card)}</span></div>
+                <span className={`media-v4-source-card-state media-v4-source-card-state-${card.overall_status ?? 'completed'}`}>{card.overall_status === 'running' ? '进行中' : card.overall_status === 'needs_attention' ? '需要处理' : card.overall_status === 'queued' ? '等待中' : '已完成'}</span>
+                <strong title={card.display_name}>{card.display_name}</strong>
+                <span className="media-v4-source-card-times">添加于 {formatDate(card.added_at)} · 更新于 {formatDate(card.updated_at)}</span>
+                <span className="media-v4-source-card-locator" title={card.source_locator || card.playback_locator}>{card.source_locator || card.playback_locator || '已确认的媒体来源'}</span>
+                {card.last_error && <span className="media-v4-source-card-error" role="alert">{card.last_error}</span>}
+                {card.attention_count > 0 && <span className="media-v4-source-card-attention">有 {card.attention_count} 部作品需要处理</span>}
+              </div>
+              <div className="media-v4-source-card-scale">
+                <div className="media-v4-source-card-stats"><span>{card.work_count} 部作品</span><span>{card.asset_count} 个文件</span></div>
+                {(card.work_previews ?? []).length > 0 && <div className="media-v4-source-card-previews" aria-label="作品预览">{(card.work_previews ?? []).slice(0, 6).map((work) => <span key={work.work_id} title={`${work.title} · ${work.asset_count_for_source} 个文件`}>{work.title}</span>)}{card.work_count > 6 ? <em>还有 {card.work_count - 6} 部</em> : null}</div>}
+                <div className="media-v4-source-card-progress"><div><span>{card.progress?.message || progressLabel}</span><span>{card.progress?.state === 'running' ? `${card.progress.completed_work_count}/${card.progress.total_work_count} 部` : ''}</span></div>{card.progress?.state === 'running' && card.progress.percent != null ? <i aria-hidden="true"><b style={{ width: `${card.progress.percent}%` }} /></i> : card.progress?.state === 'queued' ? <i className="media-v4-source-card-indeterminate" aria-hidden="true" /> : null}</div>
+                <div className="media-v4-source-card-actions">
+                  <Button appearance={card.can_resume ? 'primary' : 'secondary'} onClick={() => void resumeSourceCard(card)}>{card.can_resume ? '查看进度' : '查看上次导入'}</Button>
+                  <Button appearance={card.can_resume ? 'secondary' : 'primary'} icon={<ArrowSync24Regular />} disabled={active} onClick={() => prepareSourceUpdate(card)}>检查更新</Button>
+                </div>
               </div>
             </article>
           })}
@@ -849,6 +854,11 @@ export default function MediaManagementPage() {
             onPreview={(scope) => mediaV4Api.maintenancePreview(scope)}
             onConfirm={async (preview) => {
               const result = await mediaV4Api.maintenanceConfirm({ preview_id: preview.preview_id, scope: preview.scope, digest: preview.digest })
+              void refreshSourceCards()
+              return result
+            }}
+            onResume={async (previewId) => {
+              const result = await mediaV4Api.maintenanceResume(previewId)
               void refreshSourceCards()
               return result
             }}

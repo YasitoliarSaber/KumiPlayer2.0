@@ -15,6 +15,7 @@ export interface LibraryMaintenancePanelProps {
   busy: boolean
   onPreview: (scope: string) => Promise<V4MaintenancePreview>
   onConfirm: (preview: V4MaintenancePreview) => Promise<V4MaintenanceResult>
+  onResume: (previewId: string) => Promise<V4MaintenanceResult>
 }
 
 const SCOPES = [
@@ -25,13 +26,14 @@ const SCOPES = [
   { value: 'quark', label: '夸克网盘' },
 ]
 
-export function LibraryMaintenancePanel({ busy, onPreview, onConfirm }: LibraryMaintenancePanelProps) {
+export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }: LibraryMaintenancePanelProps) {
   const [scope, setScope] = useState('all')
   const [preview, setPreview] = useState<V4MaintenancePreview | null>(null)
   const [result, setResult] = useState<V4MaintenanceResult | null>(null)
   const [error, setError] = useState('')
   const [previewing, setPreviewing] = useState(false)
   const [confirming, setConfirming] = useState(false)
+  const [resuming, setResuming] = useState(false)
 
   const generatePreview = async () => {
     setError('')
@@ -44,6 +46,20 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm }: LibraryM
       setError(cause instanceof Error ? cause.message : '生成删除预览失败')
     } finally {
       setPreviewing(false)
+    }
+  }
+
+  const resumeDelete = async () => {
+    if (!result) return
+    setError('')
+    setResuming(true)
+    try {
+      const next = await onResume(result.preview_id)
+      setResult(next)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '恢复清理失败')
+    } finally {
+      setResuming(false)
     }
   }
 
@@ -117,10 +133,20 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm }: LibraryM
       {result && (
         <div className="media-v4-maintenance-result" role="status">
           <MessageBar intent={result.status === 'completed' ? 'success' : 'warning'}>
-            <MessageBarBody>{result.status === 'completed'
-              ? <>清理完成：退役 {result.retired_roots.length} 个来源根，{result.orphan_works.length} 部作品退出媒体库，{result.mixed_works.length} 部混合来源保留。</>
-              : <>清理未完全完成：来源已退役，但部分受控生成物或媒体库投影未处理完成。请重新生成预览后检查并重试。</>}</MessageBarBody>
+            <MessageBarBody>
+              {result.status === 'completed' ? `清理完成：退役 ${result.retired_roots.length} 个来源根，${result.orphan_works.length} 部作品退出媒体库，${result.mixed_works.length} 部混合来源保留。`
+                : result.status === 'partial_failed' ? '部分受控生成物清理失败，可重试未完成项；已退役来源不会重新激活。'
+                  : result.status === 'projection_failed' ? '文件已清理，但媒体库投影重建失败，可重试投影。'
+                    : `清理状态：${result.status}`}
+            </MessageBarBody>
           </MessageBar>
+          {(result.status === 'partial_failed' || result.status === 'projection_failed') && (
+            <div className="media-v4-maintenance-retry">
+              <Button appearance="primary" disabled={busy || resuming} onClick={() => void resumeDelete()}>
+                {resuming ? <><Spinner size="tiny" />正在恢复</> : '重试未完成清理'}
+              </Button>
+            </div>
+          )}
           <div className="media-v4-maintenance-result-detail">
             {result.artifact_results.slice(0, 20).map((item) => (
               <span key={item.path} className={`artifact-${item.status}`}>{item.status === 'removed' ? '已删除' : item.status === 'missing' ? '已不存在' : item.status === 'blocked' ? '已阻止' : '失败'} · {item.path}</span>

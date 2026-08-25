@@ -137,14 +137,17 @@ export interface V4SourceLibraryCard {
 export interface V4MaintenancePreview {
   preview_id: string
   scope: string
+  created_at: string
   expires_at: string
+  root_ids: string[]
   root_count: number
   work_count: number
   orphan_work_count: number
   mixed_work_count: number
   asset_count: number
   artifact_count: number
-  artifact_paths: string[]
+  /** 相对镜像根的脱敏摘要（至多 20 条），绝不含完整本地绝对路径。 */
+  artifact_summaries: string[]
   blocked: boolean
   blocked_jobs: Array<{ job_id: string; job_type: string; status: string }>
   history_count?: number
@@ -299,6 +302,9 @@ export const mediaV4Api = {
 
   maintenanceConfirm: (request: { preview_id: string; scope: string; digest: string }) =>
     api.post<V4MaintenanceResult>('/api/v4/library-maintenance/delete-confirm', request),
+
+  maintenanceResume: (previewId: string) =>
+    api.post<V4MaintenanceResult>('/api/v4/library-maintenance/delete-resume', { preview_id: previewId }),
 
   setWorkTitle: (workId: string, title: string) =>
     api.patch<{ work_id: string; title: string }>(`/api/v4/works/${encodeURIComponent(workId)}/title`, { title }),

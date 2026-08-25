@@ -19,6 +19,7 @@ const api = vi.hoisted(() => ({
   cancelDurableScan: vi.fn(),
   maintenancePreview: vi.fn(),
   maintenanceConfirm: vi.fn(),
+  maintenanceResume: vi.fn(),
   trackingWorks: vi.fn(),
 }))
 const config = vi.hoisted(() => ({ getConfig: vi.fn() }))
@@ -77,6 +78,11 @@ beforeEach(() => {
     preview_id: 'prev-1', scope: 'all', status: 'completed',
     retired_roots: ['root-baidu'], orphan_works: ['w-orphan'], mixed_works: ['w-mixed'],
     artifact_results: [{ path: 'K:\\mirror\\a.jpg', status: 'removed' }], projection_status: 'ok',
+  })
+  api.maintenanceResume.mockResolvedValue({
+    preview_id: 'prev-1', scope: 'all', status: 'completed',
+    retired_roots: ['root-baidu'], orphan_works: ['w-orphan'], mixed_works: ['w-mixed'],
+    artifact_results: [{ path: 'root-baidu/a.jpg', status: 'removed', reused: true }], projection_status: 'ok',
   })
   config.getConfig.mockResolvedValue({
     pan115_root: 'K:\\115网盘', baidu_root: 'K:\\百度网盘', local_root: 'D:\\Media',
@@ -164,7 +170,45 @@ test('确认来源清理后刷新来源卡，并按实际失败状态提示', as
   fireEvent.click(await screen.findByRole('button', { name: '生成删除预览' }))
   fireEvent.click(await screen.findByRole('button', { name: '确认清理此来源' }))
 
-  expect(await screen.findByText(/清理未完全完成/)).toBeVisible()
+  expect(await screen.findByText(/部分受控生成物清理失败/)).toBeVisible()
   expect(screen.queryByText(/^清理完成：/)).not.toBeInTheDocument()
   await waitFor(() => expect(api.sourceLibraries.mock.calls.length).toBeGreaterThan(1))
+})
+
+
+test('来源卡使用双区布局（左身份/右规模预览进度）', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
+  const { container } = render(<MediaManagementPage />)
+  await screen.findByText('115 动画')
+
+  const identity = container.querySelector('.media-v4-source-card-identity')
+  const scale = container.querySelector('.media-v4-source-card-scale')
+  expect(identity).not.toBeNull()
+  expect(scale).not.toBeNull()
+  expect(identity!.textContent).toContain('115 网盘')
+  expect(identity!.textContent).toContain('OpenList 扫描')
+  expect(scale!.textContent).toContain('3 部作品')
+  expect(scale!.textContent).toContain('摇曳露营')
+})
+
+test('部分失败后显示重试按钮并调用 resume API', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
+  api.maintenanceConfirm.mockResolvedValue({
+    preview_id: 'prev-1', scope: 'all', status: 'partial_failed',
+    retired_roots: ['root-baidu'], orphan_works: ['w-orphan'], mixed_works: ['w-mixed'],
+    artifact_results: [{ path: 'root-baidu/a.jpg', status: 'removed' }, { path: 'root-baidu/b.jpg', status: 'failed' }],
+    projection_status: 'ok',
+  })
+  render(<MediaManagementPage />)
+  await screen.findByText('115 动画')
+  fireEvent.click(screen.getByRole('button', { name: '媒体库维护' }))
+  await screen.findByRole('heading', { name: '按来源清理' })
+  fireEvent.click(screen.getByRole('button', { name: '生成删除预览' }))
+  fireEvent.click(await screen.findByRole('button', { name: '确认清理此来源' }))
+
+  expect(await screen.findByText(/部分受控生成物清理失败/)).toBeVisible()
+  const retry = await screen.findByRole('button', { name: '重试未完成清理' })
+  fireEvent.click(retry)
+  await waitFor(() => expect(api.maintenanceResume).toHaveBeenCalledWith('prev-1'))
+  expect(await screen.findByText(/清理完成/)).toBeVisible()
 })

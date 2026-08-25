@@ -13466,8 +13466,9 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-source-library-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 10px; }
 .media-v4-library-source-card {
   display: grid;
-  align-content: start;
-  gap: 10px;
+  grid-template-columns: minmax(0, 38%) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
   min-width: 0;
   padding: 14px;
   border: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
@@ -13791,3 +13792,10 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-source-card-indeterminate::after { content: ''; position: absolute; inset-block: 0; width: 40%; border-radius: inherit; background: var(--accent-strong); animation: media-v4-indeterminate 1.4s ease-in-out infinite; }
 @keyframes media-v4-indeterminate { 0% { left: -40%; } 100% { left: 100%; } }
 @media (prefers-reduced-motion: reduce) { .media-v4-source-card-indeterminate::after { animation: none; } }
+/* P-005 二次返工：来源卡双区布局（左身份 / 右规模·预览·进度） */
+.media-v4-source-card-identity { display: grid; gap: 6px; align-content: start; min-width: 0; }
+.media-v4-source-card-scale { display: grid; gap: 10px; align-content: start; min-width: 0; }
+.media-v4-source-card-scale .media-v4-source-card-actions { margin-top: 2px; }
+@media (max-width: 900px) {
+  .media-v4-library-source-card { grid-template-columns: 1fr; }
+}
