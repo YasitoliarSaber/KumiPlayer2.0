@@ -323,6 +323,20 @@ test('来源卡可以回到同一 OpenList 来源执行更新', async () => {
 })
 
 test('任务进度使用用户阶段标签而不是内部 job type', async () => {
+  api.sourceLibraries.mockResolvedValue({
+    cards: [{
+      root_id: 'root-exec', provider: 'pan115', ingest_method: 'openlist_api', source_mode: 'openlist_full',
+      last_scan_mode: 'incremental', has_confirmed_baseline: true, overall_status: 'running',
+      attention_count: 0, last_error: '', source_locator: '/Anime', playback_locator: 'K:\Anime',
+      route_id: 'route-115', display_name: '执行中媒体库', enabled: 1,
+      added_at: '2026-08-25T00:00:00Z', updated_at: '2026-08-25T00:00:00Z',
+      revision_id: 'rev-existing', latest_revision_id: 'rev-existing', revision_state: 'running',
+      evidence_count: 10, work_count: 1, asset_count: 1,
+      work_previews: [], progress: { state: 'running', stage: 'mirror', current_work_id: '', current_work_title: '', completed_work_count: 0, total_work_count: 1, percent: 0, message: '正在生成镜像' },
+      available_actions: ['inspect', 'resume'], can_resume: true,
+      job_summary: { total: 1, queued: 0, running: 1, succeeded: 0, failed: 0, cancelled: 0 },
+    }],
+  })
   localStorage.setItem('kumiplayer.media-v4.active-revision', 'rev-existing')
   api.status.mockResolvedValue({
     revision_id: 'rev-existing',
@@ -359,6 +373,9 @@ test('任务进度使用用户阶段标签而不是内部 job type', async () =>
 
   render(<MediaManagementPage />)
 
+  // P-005 返工：默认停留来源卡 overview，点击“查看进度”后才进入执行面板。
+  fireEvent.click(await screen.findByRole('button', { name: '查看进度' }))
+
   // 用户阶段只出现一次，不按后端 job 数量重复。
   expect(await screen.findByText('生成镜像文件')).toBeVisible()
   expect(screen.getAllByText('生成镜像文件')).toHaveLength(1)
@@ -366,6 +383,20 @@ test('任务进度使用用户阶段标签而不是内部 job type', async () =>
 })
 
 test('失败作品可以从导入进度页精确重试', async () => {
+  api.sourceLibraries.mockResolvedValue({
+    cards: [{
+      root_id: 'root-exec', provider: 'pan115', ingest_method: 'openlist_api', source_mode: 'openlist_full',
+      last_scan_mode: 'incremental', has_confirmed_baseline: true, overall_status: 'running',
+      attention_count: 0, last_error: '', source_locator: '/Anime', playback_locator: 'K:\Anime',
+      route_id: 'route-115', display_name: '执行中媒体库', enabled: 1,
+      added_at: '2026-08-25T00:00:00Z', updated_at: '2026-08-25T00:00:00Z',
+      revision_id: 'rev-existing', latest_revision_id: 'rev-existing', revision_state: 'running',
+      evidence_count: 10, work_count: 1, asset_count: 1,
+      work_previews: [], progress: { state: 'running', stage: 'mirror', current_work_id: '', current_work_title: '', completed_work_count: 0, total_work_count: 1, percent: 0, message: '正在生成镜像' },
+      available_actions: ['inspect', 'resume'], can_resume: true,
+      job_summary: { total: 1, queued: 0, running: 1, succeeded: 0, failed: 0, cancelled: 0 },
+    }],
+  })
   localStorage.setItem('kumiplayer.media-v4.active-revision', 'rev-existing')
   api.status.mockResolvedValue({
     revision_id: 'rev-existing',
@@ -402,6 +433,7 @@ test('失败作品可以从导入进度页精确重试', async () => {
   })
   render(<MediaManagementPage />)
 
+  fireEvent.click(await screen.findByRole('button', { name: '查看进度' }))
   const card = (await screen.findByText('失败作品')).closest('article')!
   fireEvent.click(within(card).getByRole('button', { name: /失败作品/ }))
   fireEvent.click(await within(card).findByRole('button', { name: /重试/ }))

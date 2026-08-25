@@ -181,8 +181,23 @@ test('执行进度只显示三个总体阶段与作品单元，不出现内部 U
     revision_id: 'rev-exec', status: 'confirmed', jobs: [],
     progress: makeProgress(units),
   })
+  api.sourceLibraries.mockResolvedValue({
+    cards: [{
+      root_id: 'root-exec', provider: 'pan115', ingest_method: 'openlist_api', source_mode: 'openlist_full',
+      last_scan_mode: 'incremental', has_confirmed_baseline: true, overall_status: 'running',
+      attention_count: 0, last_error: '', source_locator: '/Anime', playback_locator: 'K:\Anime',
+      route_id: 'route-115', display_name: '执行中媒体库', enabled: 1,
+      added_at: '2026-08-25T00:00:00Z', updated_at: '2026-08-25T00:00:00Z',
+      revision_id: 'rev-exec', latest_revision_id: 'rev-exec', revision_state: 'running',
+      evidence_count: 10, work_count: 1, asset_count: 1,
+      work_previews: [], progress: { state: 'running', stage: 'mirror', current_work_id: '', current_work_title: '', completed_work_count: 0, total_work_count: 1, percent: 0, message: '正在生成镜像' },
+      available_actions: ['inspect', 'resume'], can_resume: true,
+      job_summary: { total: 1, queued: 0, running: 1, succeeded: 0, failed: 0, cancelled: 0 },
+    }],
+  })
   localStorage.setItem('kumiplayer.media-v4.active-revision', 'rev-exec')
   render(<MediaManagementPage />)
+  fireEvent.click(await screen.findByRole('button', { name: '查看进度' }))
 
   await waitFor(() => expect(screen.getByText('作品0')).toBeVisible())
   // 每个用户阶段只出现一次。
@@ -210,8 +225,23 @@ test('失败作品显示原因并可精确重试', async () => {
     ],
     progress: makeProgress(units, { overall_status: 'needs_attention' }),
   })
+  api.sourceLibraries.mockResolvedValue({
+    cards: [{
+      root_id: 'root-exec', provider: 'pan115', ingest_method: 'openlist_api', source_mode: 'openlist_full',
+      last_scan_mode: 'incremental', has_confirmed_baseline: true, overall_status: 'running',
+      attention_count: 0, last_error: '', source_locator: '/Anime', playback_locator: 'K:\Anime',
+      route_id: 'route-115', display_name: '执行中媒体库', enabled: 1,
+      added_at: '2026-08-25T00:00:00Z', updated_at: '2026-08-25T00:00:00Z',
+      revision_id: 'rev-exec', latest_revision_id: 'rev-exec', revision_state: 'running',
+      evidence_count: 10, work_count: 1, asset_count: 1,
+      work_previews: [], progress: { state: 'running', stage: 'mirror', current_work_id: '', current_work_title: '', completed_work_count: 0, total_work_count: 1, percent: 0, message: '正在生成镜像' },
+      available_actions: ['inspect', 'resume'], can_resume: true,
+      job_summary: { total: 1, queued: 0, running: 1, succeeded: 0, failed: 0, cancelled: 0 },
+    }],
+  })
   localStorage.setItem('kumiplayer.media-v4.active-revision', 'rev-exec')
   render(<MediaManagementPage />)
+  fireEvent.click(await screen.findByRole('button', { name: '查看进度' }))
 
   await waitFor(() => expect(screen.getByText('失败作品')).toBeVisible())
   const failedCard = screen.getByText('失败作品').closest('article')!
@@ -232,8 +262,23 @@ test('完成作品默认折叠且支持键盘展开', async () => {
     revision_id: 'rev-exec', status: 'confirmed', jobs: [],
     progress: makeProgress(units),
   })
+  api.sourceLibraries.mockResolvedValue({
+    cards: [{
+      root_id: 'root-exec', provider: 'pan115', ingest_method: 'openlist_api', source_mode: 'openlist_full',
+      last_scan_mode: 'incremental', has_confirmed_baseline: true, overall_status: 'running',
+      attention_count: 0, last_error: '', source_locator: '/Anime', playback_locator: 'K:\Anime',
+      route_id: 'route-115', display_name: '执行中媒体库', enabled: 1,
+      added_at: '2026-08-25T00:00:00Z', updated_at: '2026-08-25T00:00:00Z',
+      revision_id: 'rev-exec', latest_revision_id: 'rev-exec', revision_state: 'running',
+      evidence_count: 10, work_count: 1, asset_count: 1,
+      work_previews: [], progress: { state: 'running', stage: 'mirror', current_work_id: '', current_work_title: '', completed_work_count: 0, total_work_count: 1, percent: 0, message: '正在生成镜像' },
+      available_actions: ['inspect', 'resume'], can_resume: true,
+      job_summary: { total: 1, queued: 0, running: 1, succeeded: 0, failed: 0, cancelled: 0 },
+    }],
+  })
   localStorage.setItem('kumiplayer.media-v4.active-revision', 'rev-exec')
   render(<MediaManagementPage />)
+  fireEvent.click(await screen.findByRole('button', { name: '查看进度' }))
 
   await waitFor(() => expect(screen.getByText('运行中作品')).toBeVisible())
   expect(screen.getByText('已完成 1 部')).toBeVisible()
@@ -252,8 +297,23 @@ test('媒体信息需要人工处理的作品不显示为已完成', async () =>
     revision_id: 'rev-exec', status: 'confirmed', jobs: [],
     progress: makeProgress(units, { overall_status: 'needs_attention' }),
   })
+  api.sourceLibraries.mockResolvedValue({
+    cards: [{
+      root_id: 'root-exec', provider: 'pan115', ingest_method: 'openlist_api', source_mode: 'openlist_full',
+      last_scan_mode: 'incremental', has_confirmed_baseline: true, overall_status: 'running',
+      attention_count: 0, last_error: '', source_locator: '/Anime', playback_locator: 'K:\Anime',
+      route_id: 'route-115', display_name: '执行中媒体库', enabled: 1,
+      added_at: '2026-08-25T00:00:00Z', updated_at: '2026-08-25T00:00:00Z',
+      revision_id: 'rev-exec', latest_revision_id: 'rev-exec', revision_state: 'running',
+      evidence_count: 10, work_count: 1, asset_count: 1,
+      work_previews: [], progress: { state: 'running', stage: 'mirror', current_work_id: '', current_work_title: '', completed_work_count: 0, total_work_count: 1, percent: 0, message: '正在生成镜像' },
+      available_actions: ['inspect', 'resume'], can_resume: true,
+      job_summary: { total: 1, queued: 0, running: 1, succeeded: 0, failed: 0, cancelled: 0 },
+    }],
+  })
   localStorage.setItem('kumiplayer.media-v4.active-revision', 'rev-exec')
   render(<MediaManagementPage />)
+  fireEvent.click(await screen.findByRole('button', { name: '查看进度' }))
 
   await waitFor(() => expect(screen.getByText('待人工确认')).toBeVisible())
   expect(screen.getByText('需要处理')).toBeVisible()

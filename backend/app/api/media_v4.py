@@ -142,6 +142,7 @@ class ArtworkUploadRequest(BaseModel):
     data_base64: str = Field(min_length=1)
 class MaintenancePreviewRequest(BaseModel):
     scope: Literal["local", "pan115", "baidu", "quark", "all"] = "all"
+    root_ids: list[str] | None = None
 
 
 class MaintenanceConfirmRequest(BaseModel):
@@ -1393,6 +1394,7 @@ def library_delete_preview(request: MaintenancePreviewRequest):
         preview = compute_delete_preview(
             get_database(),
             provider=request.scope,
+            root_ids=request.root_ids,
             mirror_root=_configured_mirror_root(),
         )
     except ValueError as exc:

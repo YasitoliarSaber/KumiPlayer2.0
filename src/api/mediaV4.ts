@@ -147,6 +147,9 @@ export interface V4MaintenancePreview {
   artifact_paths: string[]
   blocked: boolean
   blocked_jobs: Array<{ job_id: string; job_type: string; status: string }>
+  history_count?: number
+  progress_count?: number
+  tracking_count?: number
   warnings: string[]
   roots: Array<{ root_id: string; provider: string; source_locator: string; revision_id: string; confirmed_at: string }>
   orphan_works: string[]

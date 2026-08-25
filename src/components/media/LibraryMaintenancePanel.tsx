@@ -99,6 +99,7 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm }: LibraryM
           </div>
           <div className="media-v4-maintenance-groups">
             <div><strong>将删除</strong><span>{preview.orphan_work_count} 部作品的媒体库记录与受控镜像/NFO/图片</span></div>
+            <div><strong>个人状态影响</strong><span>孤儿作品将同步退出播放历史 {preview.history_count ?? 0} 条、播放进度 {preview.progress_count ?? 0} 条、追更状态 {preview.tracking_count ?? 0} 条；混合来源作品的个人状态完整保留。</span></div>
             <div><strong>将保留</strong><span>{preview.mixed_work_count} 部混合来源作品完整保留（含个人状态）</span></div>
             <div><strong>始终保留</strong>
               <ul>{preview.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>

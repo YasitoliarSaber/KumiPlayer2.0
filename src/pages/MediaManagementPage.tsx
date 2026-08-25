@@ -270,8 +270,9 @@ export default function MediaManagementPage() {
     void mediaV4Api.status(savedRevision).then((result) => {
       setJobs(result.jobs)
       if (result.progress) setExecuteProgress(result.progress)
+      // P-005 返工 11.13-1：默认停留来源卡 overview，后台状态只更新卡片；
+      // 用户显式点击“查看进度/上次导入”后才进入 execute。
       setWorkflowStage('execute')
-      setPageMode('import')
     }).catch(() => {
       localStorage.removeItem(ACTIVE_REVISION_KEY)
     })
@@ -699,14 +700,6 @@ export default function MediaManagementPage() {
     }
   }
 
-  const providerLabel = (provider: string) => {
-    if (provider === 'local') return '本地'
-    if (provider === 'pan115') return '115 网盘'
-    if (provider === 'baidu') return '百度网盘'
-    if (provider === 'quark') return '夸克网盘'
-    return '其他来源'
-  }
-
   const formatDate = (value: string) => {
     if (!value) return '未知'
     const date = new Date(value)
@@ -717,14 +710,26 @@ export default function MediaManagementPage() {
     return `${year}-${month}-${day}`
   }
 
-  const sourceModeLabel = (card: V4SourceLibraryCard) => {
-    if (card.source_mode === 'local') return '本地来源'
-    if (card.source_mode === 'tree_snapshot') return '目录树基线'
-    if (card.source_mode === 'tree_openlist') return '目录树 + OpenList'
-    if (card.source_mode === 'openlist_full') return 'OpenList 来源'
-    // 兼容回填前的旧卡：按遗留 ingest_method 展示，不作为新判断依据。
-    return card.ingest_method === 'local_scan' ? '本地来源' : card.ingest_method === 'directory_tree' ? '目录树基线' : 'OpenList 来源'
+  const providerLabel = (provider: string) => {
+    if (provider === 'local') return '本地'
+    if (provider === 'pan115') return '115 网盘'
+    if (provider === 'baidu') return '百度网盘'
+    if (provider === 'quark') return '夸克网盘'
+    return '其他来源'
   }
+
+  // P-005 返工 11.13-2：内容来源与导入方式严格分层。
+  // providerLabel 是内容来源（本地/115/百度/夸克）；sourceMethodLabel 是导入方式。
+  const sourceMethodLabel = (card: V4SourceLibraryCard) => {
+    if (card.source_mode === 'local') return '本地扫描'
+    if (card.source_mode === 'tree_snapshot') return '目录树 TXT'
+    if (card.source_mode === 'tree_openlist') return '目录树基线 · OpenList 更新'
+    if (card.source_mode === 'openlist_full') return 'OpenList 扫描'
+    // 兼容回填前的旧卡：按遗留 ingest_method 展示，不作为新判断依据。
+    return card.ingest_method === 'local_scan' ? '本地扫描' : card.ingest_method === 'directory_tree' ? '目录树 TXT' : 'OpenList 扫描'
+  }
+
+  const sourceModeLabel = (card: V4SourceLibraryCard) => `${providerLabel(card.provider)} · ${sourceMethodLabel(card)}`
 
   const prepareSourceUpdate = (card: V4SourceLibraryCard) => {
     clearResultState()
