@@ -86,6 +86,7 @@ export interface WorkIndex {
   fanart_path: string
   local_poster_path?: string
   local_fanart_path?: string
+  local_clearlogo_path?: string
   clearlogo_path: string
   dir_path: string
   seasons: SeasonIndex[]

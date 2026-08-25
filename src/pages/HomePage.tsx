@@ -14,6 +14,7 @@ import {
 } from '../utils/homeShowcase';
 import { ArrowRight, ChevronLeft, ChevronRight, FolderPlus, LibraryBig } from 'lucide-react';
 import DecodedImage from '../components/ui/DecodedImage';
+import { preferredArtworkPath } from '../utils/artwork';
 
 const categories: { key: CategoryKey; label: string }[] = [
   { key: 'anime_series', label: '番剧' },
@@ -213,7 +214,8 @@ export default function HomePage() {
           </div>
           <div className="home-feature-side">
             {sideFeatured.map((work, index) => {
-              const image = buildAssetUrl(work.fanart_path || work.poster_path, { kind: work.fanart_path ? 'backdrop' : 'poster' });
+              const imagePath = preferredArtworkPath(work, 'fanart') || preferredArtworkPath(work, 'poster');
+              const image = buildAssetUrl(imagePath, { kind: preferredArtworkPath(work, 'fanart') ? 'backdrop' : 'poster' });
               return (
                 <button
                   key={`${work.work_id}-${index}`}
@@ -315,9 +317,10 @@ function metaLine(work: WorkIndex) {
 }
 
 function featureImageUrl(work: WorkIndex) {
+  const fanart = preferredArtworkPath(work, 'fanart');
   return buildAssetUrl(
-    work.fanart_path || work.poster_path,
-    { kind: work.fanart_path ? 'backdrop' : 'poster' },
+    fanart || preferredArtworkPath(work, 'poster'),
+    { kind: fanart ? 'backdrop' : 'poster' },
   );
 }
 

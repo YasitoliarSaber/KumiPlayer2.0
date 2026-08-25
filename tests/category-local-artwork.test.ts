@@ -13,7 +13,7 @@ test('分类页海报网格只请求本地镜像图片', () => {
   assert.match(grid, /<PosterCard[\s\S]*?localArtworkOnly=\{localArtworkOnly\}/);
   assert.match(poster, /localArtworkOnly/);
   assert.match(poster, /isRemoteAssetPath/);
-  assert.match(poster, /local_poster_path/);
+  assert.match(poster, /preferredArtworkPath\(work, artworkKind\)/);
 });
 
 

@@ -9,6 +9,7 @@ import { bangumiApi as v4BangumiApi, buildBangumiImageUrl, type BangumiEpisode, 
 import { playbackApi } from '../api/playback';
 import { cleanDisplayTitle } from '../utils/title';
 import { buildAssetUrl } from '../api/assets';
+import { preferredArtworkPath } from '../utils/artwork';
 import { tasksApi } from '../api/tasks';
 import { libraryApi as v4LibraryApi } from '../api/library';
 import {
@@ -793,9 +794,11 @@ export default function WorkDetailPage() {
   const visibleCast: Array<{ person: any; castKey: string }> = (Array.isArray(work.cast) ? work.cast : []).slice(0, 14)
     .map((person: any, index: number) => ({ person, castKey: `${person.id || person.name || 'cast'}-${index}` }))
     .filter(({ person, castKey }: { person: any; castKey: string }) => Boolean(person.profile_path) && !failedCastKeys.has(castKey));
-  const backdropPath = work.fanart_path || work.poster_path || '';
+  const preferredFanartPath = preferredArtworkPath(work, 'fanart');
+  const preferredPosterPath = preferredArtworkPath(work, 'poster');
+  const backdropPath = preferredFanartPath || preferredPosterPath;
   const fanartImage = backdropPath ? assetUrl(backdropPath, 'detailBackdrop') : '';
-  const posterBackdropImage = work.poster_path ? assetUrl(work.poster_path, 'detailBackdrop') : '';
+  const posterBackdropImage = preferredPosterPath ? assetUrl(preferredPosterPath, 'detailBackdrop') : '';
   const visibleBackdropImage = backdropMode === 'unavailable'
     ? ''
     : backdropMode === 'poster'
@@ -808,7 +811,8 @@ export default function WorkDetailPage() {
     }
     setBackdropMode('unavailable');
   };
-  const clearlogoImage = work.clearlogo_path ? buildAssetUrl(work.clearlogo_path, { kind: 'logo' }) : '';
+  const clearlogoPath = preferredArtworkPath(work, 'clearlogo');
+  const clearlogoImage = clearlogoPath ? buildAssetUrl(clearlogoPath, { kind: 'logo' }) : '';
   const relatedLookup = new Map(works.map((item) => [item.work_id, item]));
   const relatedIds = new Set(relatedWorks.map((item: any) => item.work_id));
   const similarWorks = works
@@ -959,7 +963,7 @@ export default function WorkDetailPage() {
     if (!artworkKind || !artworkFile) return;
     setManagementBusy(true);
     try {
-      await trackingApi.uploadArtwork(work.work_id, artworkKind, artworkFile);
+      await workDetailV4Compatibility.artwork.upload(work.work_id, artworkKind, artworkFile);
       await reloadCurrentWork();
       setArtworkKind(null); setArtworkFile(null); setNotice('手动图片已保存');
     } catch (error) { setNotice((error as Error).message); }
@@ -970,7 +974,7 @@ export default function WorkDetailPage() {
     if (!artworkKind) return;
     setManagementBusy(true);
     try {
-      await trackingApi.restoreArtwork(work.work_id, artworkKind);
+      await workDetailV4Compatibility.artwork.restore(work.work_id, artworkKind);
       await reloadCurrentWork();
       setArtworkKind(null); setArtworkFile(null); setNotice('已恢复在线图片');
     } catch (error) { setNotice((error as Error).message); }
@@ -1320,10 +1324,14 @@ export default function WorkDetailPage() {
       {videoDropActive && <div className="detail-video-drop-overlay"><Upload size={34} /><strong>松开即可识别为当前作品的新剧集</strong><span>不会生成新的作品卡片</span></div>}
       <div className="detail-hero">
         {visibleBackdropImage ? (
-          <>
-            <DecodedImage src={visibleBackdropImage} alt="" className="detail-hero-bg" />
-            <DecodedImage src={visibleBackdropImage} alt="" className="detail-hero-art" onLoad={extractBackdropPalette} onError={handleBackdropImageError} />
-          </>
+            <DecodedImage
+              src={visibleBackdropImage}
+              alt=""
+              className="detail-hero-art"
+              loading="eager"
+              onLoad={extractBackdropPalette}
+              onError={handleBackdropImageError}
+            />
         ) : (
           <div className="detail-hero-placeholder" />
         )}
@@ -1664,7 +1672,7 @@ export default function WorkDetailPage() {
             ref={episodeStripRef}
             className={`detail-episode-grid ${hasEpisodeThumbnails ? 'thumbnail-strip' : effectiveEpisodeView === 'grid' ? 'grid-view' : 'list-view'}`}
           >
-            {episodes.map((episode: any) => {
+            {episodes.map((episode: any, episodeIndex: number) => {
               const rawEpisodeTitle = episode.title || `第 ${episode.episode_number} 集`;
               const episodeTitle = cleanDisplayTitle(rawEpisodeTitle, `第 ${episode.episode_number} 集`);
               const isWatched = watchedEpisodeIds.has(episode.episode_id);
@@ -1687,6 +1695,7 @@ export default function WorkDetailPage() {
                         <DecodedImage
                           src={previewImage}
                           alt=""
+                          loading={episodeIndex < 6 ? 'eager' : 'lazy'}
                           onError={(event) => {
                             if (fanartImage && event.currentTarget.src !== fanartImage) {
                               event.currentTarget.onerror = null;
@@ -1733,6 +1742,7 @@ export default function WorkDetailPage() {
                   <DecodedImage
                     src={assetUrl(person.profile_path, 'poster')}
                     alt={person.name || '演职人员'}
+                    loading="lazy"
                     onError={() => setFailedCastKeys((keys) => new Set(keys).add(castKey))}
                   />
                   <strong title={person.name}>{person.name}</strong>

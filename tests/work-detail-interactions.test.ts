@@ -27,6 +27,12 @@ test('作品详情恢复旧版沉浸式结构而不是简化信息列表', () =>
   assert.doesNotMatch(detail, /work-detail-summary|work-detail-episode-list/);
 });
 
+test('已迁移的图片管理命令直接使用 V4 artwork API', () => {
+  assert.match(detail, /workDetailV4Compatibility\.artwork\.upload\(work\.work_id, artworkKind, artworkFile\)/);
+  assert.match(detail, /workDetailV4Compatibility\.artwork\.restore\(work\.work_id, artworkKind\)/);
+  assert.doesNotMatch(detail, /trackingApi\.uploadArtwork|trackingApi\.restoreArtwork/);
+});
+
 test('作品详情不会在前端重新合并同一作品或重写集号', () => {
   assert.doesNotMatch(detail, /canonical_work_id|setEpisodeNumber|episode_number\s*=/i);
   assert.match(detail, /episode\.season_number === selectedSeason\.season_number/);

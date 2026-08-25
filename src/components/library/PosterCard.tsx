@@ -4,6 +4,7 @@ import { useLibraryStore } from '../../stores/library';
 import { cleanDisplayTitle } from '../../utils/title';
 import { buildAssetUrl, isRemoteAssetPath } from '../../api/assets';
 import { isScrollRecentlyActive } from '../../utils/scrollGesture';
+import { preferredArtworkPath } from '../../utils/artwork';
 import DecodedImage from '../ui/DecodedImage';
 
 interface PosterCardProps {
@@ -60,15 +61,9 @@ function PosterCard({
   }, []);
 
   const isHorizontal = showType === 'recent' || seriesCardImageMode === 'fanart';
-  const imagePath = showType === 'recent'
-    ? work.fanart_path
-    : (seriesCardImageMode === 'fanart' ? work.fanart_path : work.poster_path);
-  const localImagePath = showType === 'recent'
-    ? work.local_fanart_path
-    : (seriesCardImageMode === 'fanart' ? work.local_fanart_path : work.local_poster_path);
-  // 本地优先、远程兜底：localArtworkOnly 只决定优先顺序，本地缺失时仍回退 canonical 远程图。
-  const preferredImagePath = localImagePath || imagePath;
-  const selectedImagePath = localArtworkOnly ? preferredImagePath : imagePath;
+  const artworkKind = showType === 'recent' || seriesCardImageMode === 'fanart' ? 'fanart' : 'poster';
+  // 已确认的本地镜像比远程 metadata URL 更快、更稳定；远程图仍是本地缺失时的兜底。
+  const selectedImagePath = preferredArtworkPath(work, artworkKind);
   const [useOriginalImage, setUseOriginalImage] = useState(false);
   const originalImageUrl = buildAssetUrl(selectedImagePath, {
     kind: isHorizontal ? 'backdrop' : 'poster',

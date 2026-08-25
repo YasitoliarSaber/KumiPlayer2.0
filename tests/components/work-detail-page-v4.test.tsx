@@ -21,9 +21,10 @@ const work = {
   card_type: 'main_series',
   poster_path: '',
   fanart_path: '',
-  local_poster_path: '',
-  local_fanart_path: '',
+  local_poster_path: 'D:/mirror/测试动画/poster.jpg',
+  local_fanart_path: 'D:/mirror/测试动画/fanart.jpg',
   clearlogo_path: 'https://image.tmdb.org/t/p/original/logo.png',
+  local_clearlogo_path: 'D:/mirror/测试动画/clearlogo.png',
   dir_path: '',
   tags: [],
   related_works: [],
@@ -84,6 +85,20 @@ test('按旧版沉浸式结构展示 V4 季度和剧集信息', async () => {
   expect(container.querySelector('.detail-episode-grid.thumbnail-strip')).not.toBeNull();
   expect(screen.getByRole('combobox', { name: '选择季度' })).toBeVisible();
   expect(screen.getByText('启程')).toBeVisible();
+});
+
+test('详情首屏优先复用本地图片，不重复请求同一张背景图', async () => {
+  const { container } = render(<WorkDetailPage />);
+
+  const hero = await screen.findByAltText('', { selector: '.detail-hero-art' });
+  const logo = await screen.findByAltText('测试动画 logo');
+  const episodeImage = container.querySelector('.episode-thumb img');
+
+  expect(hero.getAttribute('src')).toContain('D%3A%2Fmirror%2F%E6%B5%8B%E8%AF%95%E5%8A%A8%E7%94%BB%2Ffanart.jpg');
+  expect(hero).toHaveAttribute('loading', 'eager');
+  expect(container.querySelector('.detail-hero-bg')).toBeNull();
+  expect(logo.getAttribute('src')).toContain('D%3A%2Fmirror%2F%E6%B5%8B%E8%AF%95%E5%8A%A8%E7%94%BB%2Fclearlogo.png');
+  expect(episodeImage).toHaveAttribute('loading', 'eager');
 });
 
 test('播放剧集时沿用 V4 Work、Episode 和首选 Asset 身份', async () => {
