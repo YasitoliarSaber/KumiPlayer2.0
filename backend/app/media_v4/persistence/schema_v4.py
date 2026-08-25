@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 10
+V4_SCHEMA_VERSION = 11
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -617,7 +617,25 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             status TEXT NOT NULL DEFAULT 'pending',
             preview_json TEXT NOT NULL DEFAULT '{}',
             result_json TEXT NOT NULL DEFAULT '{}',
+            digest TEXT NOT NULL DEFAULT '',
+            root_ids_json TEXT NOT NULL DEFAULT '[]',
+            mirror_root_identity TEXT NOT NULL DEFAULT '',
+            expires_at TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE maintenance_operation_items (
+            item_id TEXT PRIMARY KEY,
+            operation_id TEXT NOT NULL REFERENCES maintenance_operations(operation_id) ON DELETE CASCADE,
+            artifact_id TEXT NOT NULL,
+            root_id TEXT NOT NULL,
+            revision_id TEXT NOT NULL,
+            target_path TEXT NOT NULL,
+            plan_status TEXT NOT NULL DEFAULT 'planned',
+            result_status TEXT NOT NULL DEFAULT 'pending',
+            result_error TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL
         )
         """,
@@ -796,6 +814,47 @@ def create_v10_structures(conn: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def create_v11_structures(conn: sqlite3.Connection) -> None:
+    """v11 增量结构：维护操作受管列与逐项明细。
+
+    maintenance_operations 增加 digest/root_ids_json/mirror_root_identity/
+    expires_at 受管列；maintenance_operation_items 保存完整清理计划与逐项
+    执行结果，服务端执行不再依赖前端回传路径或截断数组。
+    """
+
+    _add_column_if_missing(conn, "maintenance_operations", "digest", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "maintenance_operations", "root_ids_json", "TEXT NOT NULL DEFAULT '[]'")
+    _add_column_if_missing(conn, "maintenance_operations", "mirror_root_identity", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "maintenance_operations", "expires_at", "TEXT NOT NULL DEFAULT ''")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS maintenance_operation_items (
+            item_id TEXT PRIMARY KEY,
+            operation_id TEXT NOT NULL REFERENCES maintenance_operations(operation_id) ON DELETE CASCADE,
+            artifact_id TEXT NOT NULL,
+            root_id TEXT NOT NULL,
+            revision_id TEXT NOT NULL,
+            target_path TEXT NOT NULL,
+            plan_status TEXT NOT NULL DEFAULT 'planned',
+            result_status TEXT NOT NULL DEFAULT 'pending',
+            result_error TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    # 旧版 operation 只有 preview_json、无受管 digest/expiry/mirror identity，
+    # 不得再被当作可确认 preview；仅保留为历史结果。
+    conn.execute(
+        "UPDATE maintenance_operations SET status = 'legacy' WHERE status = 'preview' AND digest = ''"
+    )
+
+
+def migrate_schema_v10_to_v11(conn: sqlite3.Connection) -> None:
+    """v10 → v11 增量迁移：维护操作受管列与逐项明细。"""
+
+    create_v11_structures(conn)
 
 
 def migrate_schema_v9_to_v10(conn: sqlite3.Connection) -> None:
