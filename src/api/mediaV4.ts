@@ -141,6 +141,10 @@ export interface V4MaintenancePreview {
   expires_at: string
   root_ids: string[]
   root_count: number
+  /** 尚未确认导入，因此没有可清理媒体库数据的来源根数量。 */
+  skipped_root_count?: number
+  /** 仅按内容来源聚合的跳过说明，不暴露内部 root ID。 */
+  skipped_provider_counts?: Array<{ provider: string; count: number }>
   work_count: number
   orphan_work_count: number
   mixed_work_count: number

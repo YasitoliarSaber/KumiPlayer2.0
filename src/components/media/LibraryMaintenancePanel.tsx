@@ -7,7 +7,21 @@
  */
 
 import { useState } from 'react'
-import { Button, MessageBar, MessageBarBody, Radio, RadioGroup, Spinner } from '@fluentui/react-components'
+import {
+  Button,
+  Dialog,
+  DialogActions,
+  DialogBody,
+  DialogContent,
+  DialogSurface,
+  DialogTitle,
+  DialogTrigger,
+  MessageBar,
+  MessageBarBody,
+  Radio,
+  RadioGroup,
+  Spinner,
+} from '@fluentui/react-components'
 import { Delete24Regular, ShieldCheckmark24Regular } from '@fluentui/react-icons/fonts'
 import type { V4MaintenancePreview, V4MaintenanceResult } from '../../api/mediaV4'
 
@@ -39,6 +53,23 @@ function sourceGroups(roots: V4MaintenancePreview['root_names']): string[] {
   return [...counts.entries()].map(([provider, count]) => `${PROVIDER_LABELS[provider] ?? provider} · ${count} 个来源`)
 }
 
+function skippedSourceSummary(preview: V4MaintenancePreview): string {
+  const count = preview.skipped_root_count ?? 0
+  if (count === 0) return ''
+  const providers = (preview.skipped_provider_counts ?? [])
+    .map((item) => `${PROVIDER_LABELS[item.provider] ?? item.provider} ${item.count} 个`)
+    .join('、')
+  return `${count} 个未完成导入的来源已跳过${providers ? `（${providers}）` : ''}；它们没有可清理的媒体库数据。`
+}
+
+function maintenanceError(cause: unknown, fallback: string): string {
+  const message = cause instanceof Error ? cause.message : fallback
+  if (/没有已确认 revision|来源根\s+root_/u.test(message)) {
+    return '所选范围包含尚未完成导入的来源；请先完成导入，或重新生成删除预览。'
+  }
+  return message.replace(/\broot_[A-Za-z0-9_-]+\b/g, '所选来源')
+}
+
 export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }: LibraryMaintenancePanelProps) {
   const [scope, setScope] = useState('all')
   const [preview, setPreview] = useState<V4MaintenancePreview | null>(null)
@@ -47,6 +78,7 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
   const [previewing, setPreviewing] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [resuming, setResuming] = useState(false)
+  const [confirmOpen, setConfirmOpen] = useState(false)
 
   const generatePreview = async () => {
     setError('')
@@ -56,7 +88,7 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
       const next = await onPreview(scope)
       setPreview(next)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '生成删除预览失败')
+      setError(maintenanceError(cause, '生成删除预览失败'))
     } finally {
       setPreviewing(false)
     }
@@ -70,7 +102,7 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
       const next = await onResume(result.preview_id)
       setResult(next)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '恢复清理失败')
+      setError(maintenanceError(cause, '恢复清理失败'))
     } finally {
       setResuming(false)
     }
@@ -84,8 +116,9 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
       const next = await onConfirm(preview)
       setResult(next)
       setPreview(null)
+      setConfirmOpen(false)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '删除失败')
+      setError(maintenanceError(cause, '删除失败'))
     } finally {
       setConfirming(false)
     }
@@ -99,6 +132,9 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
       </div>
 
       <div className="media-v4-maintenance-scope">
+        <div className="media-v4-maintenance-section-heading">
+          <div><strong>清理范围</strong><span>只选择内容来源；OpenList 是导入方式，不作为清理范围。</span></div>
+        </div>
         <RadioGroup value={scope} onChange={(_, data) => { setScope(data.value); setPreview(null); setResult(null); setError('') }} aria-label="清理来源范围">
           {SCOPES.map((option) => (
             <Radio
@@ -112,7 +148,7 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
       </div>
 
       <div className="media-v4-command-row media-v4-maintenance-actions">
-        <div><strong>生成删除预览</strong><span>预览只计算影响范围，不会删除任何内容。</span></div>
+        <div><strong>先生成预览</strong><span>预览只计算影响范围，不会删除任何内容。</span></div>
         <Button appearance="secondary" icon={<Delete24Regular />} disabled={busy || previewing} onClick={() => void generatePreview()}>
           {previewing ? <Spinner size="tiny" /> : '生成删除预览'}
         </Button>
@@ -122,8 +158,15 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
 
       {preview && (
         <div className="media-v4-maintenance-preview">
+          <div className="media-v4-maintenance-preview-heading">
+            <div><span className="media-stage-eyebrow">删除预览</span><strong>确认受影响范围</strong></div>
+            <span>{preview.work_count} 部作品 · {preview.artifact_count} 项受控生成物</span>
+          </div>
           {preview.blocked && (
             <MessageBar intent="warning"><MessageBarBody>该来源仍有 {preview.blocked_job_count} 个正在运行的后台任务（{preview.blocked_job_types.join('、')}），清理已阻止；请等待任务完成后再生成预览。</MessageBarBody></MessageBar>
+          )}
+          {skippedSourceSummary(preview) && (
+            <MessageBar intent="info"><MessageBarBody>{skippedSourceSummary(preview)}</MessageBarBody></MessageBar>
           )}
           {preview.root_names.length > 0 && (
             <div className="media-v4-maintenance-root-names">
@@ -131,13 +174,10 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
               <div>{sourceGroups(preview.root_names).map((group) => <em key={group}>{group}</em>)}</div>
             </div>
           )}
-          <div className="media-v4-summary-numbers">
+          <div className="media-v4-maintenance-impact" aria-label="清理影响摘要">
             <div><strong>{preview.root_count}</strong><span>个来源根</span></div>
-            <div><strong>{preview.work_count}</strong><span>部作品</span></div>
             <div className="attention"><strong>{preview.orphan_work_count}</strong><span>部将退出媒体库</span></div>
             <div><strong>{preview.mixed_work_count}</strong><span>部混合来源将保留</span></div>
-            <div><strong>{preview.asset_count}</strong><span>个媒体文件</span></div>
-            <div><strong>{preview.artifact_count}</strong><span>项受控生成物</span></div>
           </div>
           <div className="media-v4-maintenance-groups">
             <div><strong>将删除</strong><span>{preview.orphan_work_count} 部作品的媒体库记录与受控镜像/NFO/图片</span></div>
@@ -148,10 +188,10 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
             </div>
           </div>
           <div className="media-v4-maintenance-confirm">
-            <Button appearance="primary" icon={<Delete24Regular />} disabled={busy || confirming || preview.blocked} onClick={() => void confirmDelete()}>
-              {confirming ? <><Spinner size="tiny" />正在清理</> : '确认清理此来源'}
+            <span>确认后将标记来源退役，并精确清理预览列出的受控生成物。</span>
+            <Button appearance="primary" icon={<Delete24Regular />} disabled={busy || confirming || preview.blocked} onClick={() => setConfirmOpen(true)}>
+              继续确认清理
             </Button>
-            <span>确认后将标记来源退役并精确清理预览列出的受控生成物。</span>
           </div>
         </div>
       )}
@@ -181,6 +221,27 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
           </div>
         </div>
       )}
+
+      <Dialog open={confirmOpen} onOpenChange={(_, data) => setConfirmOpen(data.open)}>
+        <DialogSurface className="media-v4-maintenance-dialog">
+          <DialogBody>
+            <DialogTitle>确认清理媒体库记录？</DialogTitle>
+            <DialogContent>
+              {preview
+                ? `将退役 ${preview.root_count} 个来源根，并从媒体库移除 ${preview.orphan_work_count} 部不再有其他来源的作品。源视频、外部 TXT、网盘对象、设置与凭据不会被删除。`
+                : '删除预览已失效，请重新生成。'}
+            </DialogContent>
+            <DialogActions>
+              <DialogTrigger disableButtonEnhancement>
+                <Button appearance="secondary" disabled={confirming}>取消</Button>
+              </DialogTrigger>
+              <Button className="media-v4-maintenance-danger-button" appearance="primary" icon={<Delete24Regular />} disabled={!preview || busy || confirming || preview?.blocked} onClick={() => void confirmDelete()}>
+                {confirming ? <><Spinner size="tiny" />正在清理</> : '确认清理'}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </section>
   )
 }

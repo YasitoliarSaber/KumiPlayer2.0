@@ -98,6 +98,38 @@ def test_preview_blocks_when_active_jobs_exist(tmp_path):
     assert preview["blocked_job_types"] == ["materialize_mirror"]
 
 
+def test_all_scope_skips_unconfirmed_roots_and_keeps_confirmed_cleanup_usable(tmp_path):
+    """全选范围不能被尚未确认、也没有媒体库记录的来源根阻断。"""
+
+    from app.media_v4.maintenance.service import compute_delete_preview, confirm_delete_preview
+
+    database = _fresh_database(tmp_path)
+    _seed_confirmed(database, root_id="root-baidu", provider="baidu", work_ids=["w-baidu"])
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO source_roots(root_id, provider, ingest_method, source_locator, playback_locator, created_at, updated_at) "
+            "VALUES ('root-draft', 'pan115', 'openlist', '/draft', '', 'now', 'now')"
+        )
+
+    preview = compute_delete_preview(database, provider="all")
+
+    assert preview["root_count"] == 1
+    assert preview["skipped_root_count"] == 1
+    assert preview["skipped_provider_counts"] == [{"provider": "pan115", "count": 1}]
+    assert all("root-draft" not in warning for warning in preview["warnings"])
+
+    result = confirm_delete_preview(database, preview_id=preview["preview_id"], scope="all", digest=preview["digest"])
+
+    assert result["status"] == "completed"
+    with database.connect() as conn:
+        retired = {
+            str(row["root_id"]): str(row["retired_at"] or "")
+            for row in conn.execute("SELECT root_id, retired_at FROM source_roots").fetchall()
+        }
+    assert retired["root-baidu"]
+    assert retired["root-draft"] == ""
+
+
 def test_mixed_source_work_is_kept(tmp_path):
     from app.media_v4.maintenance.service import compute_delete_preview, confirm_delete_preview
 

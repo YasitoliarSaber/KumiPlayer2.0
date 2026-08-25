@@ -179,6 +179,40 @@ test('维护预览以内容来源摘要展示，不泄露内部来源根 ID', as
   expect(screen.queryByText(/root_internal_115/)).not.toBeInTheDocument()
 })
 
+test('全选预览会说明未确认来源被安全跳过，而不泄露内部根标识', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
+  api.maintenancePreview.mockResolvedValue({
+    preview_id: 'prev-safe-all', scope: 'all', created_at: '2026-08-25T00:00:00Z', expires_at: '2026-08-25T02:00:00Z',
+    root_ids: ['root-baidu'], root_count: 1, skipped_root_count: 1, skipped_provider_counts: [{ provider: 'pan115', count: 1 }],
+    work_count: 2, orphan_work_count: 1, mixed_work_count: 1, asset_count: 3, artifact_count: 2,
+    artifact_summaries: ['百度/动画/封面.jpg'], blocked: false, blocked_job_count: 0, blocked_job_types: [],
+    history_count: 1, progress_count: 1, tracking_count: 1,
+    warnings: ['1 个尚未确认导入的来源未纳入本次清理，它们没有可清理的媒体库数据'],
+    root_names: [{ root_id: 'root-baidu', provider: 'baidu' }], digest: 'd'.repeat(64),
+  })
+  render(<MediaManagementPage />)
+  await screen.findByText('115 动画')
+  fireEvent.click(screen.getByRole('button', { name: '媒体库维护' }))
+  fireEvent.click(await screen.findByRole('button', { name: '生成删除预览' }))
+
+  expect(await screen.findByText(/1 个未完成导入的来源已跳过/)).toBeVisible()
+  expect(screen.queryByText(/root-draft|root-baidu/)).not.toBeInTheDocument()
+})
+
+test('危险清理在 Fluent 确认对话框中二次确认后才提交', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
+  render(<MediaManagementPage />)
+  await screen.findByText('115 动画')
+  fireEvent.click(screen.getByRole('button', { name: '媒体库维护' }))
+  fireEvent.click(await screen.findByRole('button', { name: '生成删除预览' }))
+
+  fireEvent.click(await screen.findByRole('button', { name: '继续确认清理' }))
+  expect(await screen.findByRole('dialog')).toBeVisible()
+  expect(api.maintenanceConfirm).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: '确认清理' }))
+  await waitFor(() => expect(api.maintenanceConfirm).toHaveBeenCalled())
+})
+
 test('确认来源清理后刷新来源卡，并按实际失败状态提示', async () => {
   api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
   api.maintenanceConfirm.mockResolvedValue({
@@ -191,7 +225,8 @@ test('确认来源清理后刷新来源卡，并按实际失败状态提示', as
   await screen.findByText('115 动画')
   fireEvent.click(screen.getByRole('button', { name: '媒体库维护' }))
   fireEvent.click(await screen.findByRole('button', { name: '生成删除预览' }))
-  fireEvent.click(await screen.findByRole('button', { name: '确认清理此来源' }))
+  fireEvent.click(await screen.findByRole('button', { name: '继续确认清理' }))
+  fireEvent.click(await screen.findByRole('button', { name: '确认清理' }))
 
   expect(await screen.findByText(/部分受控生成物清理失败/)).toBeVisible()
   expect(screen.queryByText(/^清理完成：/)).not.toBeInTheDocument()
@@ -230,7 +265,8 @@ test('部分失败后显示重试按钮并调用 resume API', async () => {
   fireEvent.click(screen.getByRole('button', { name: '媒体库维护' }))
   await screen.findByRole('heading', { name: '按来源清理' })
   fireEvent.click(screen.getByRole('button', { name: '生成删除预览' }))
-  fireEvent.click(await screen.findByRole('button', { name: '确认清理此来源' }))
+  fireEvent.click(await screen.findByRole('button', { name: '继续确认清理' }))
+  fireEvent.click(await screen.findByRole('button', { name: '确认清理' }))
 
   expect(await screen.findByText(/部分受控生成物清理失败/)).toBeVisible()
   const retry = await screen.findByRole('button', { name: '重试未完成清理' })

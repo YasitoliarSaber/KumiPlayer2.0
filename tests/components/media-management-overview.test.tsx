@@ -159,7 +159,8 @@ test('删除确认调用 maintenance API 并展示逐项结果', async () => {
   fireEvent.click(screen.getByRole('button', { name: '媒体库维护' }))
   await screen.findByRole('heading', { name: '按来源清理' })
   fireEvent.click(screen.getByRole('button', { name: '生成删除预览' }))
-  fireEvent.click(await screen.findByRole('button', { name: '确认清理此来源' }))
+  fireEvent.click(await screen.findByRole('button', { name: '继续确认清理' }))
+  fireEvent.click(await screen.findByRole('button', { name: '确认清理' }))
 
   await waitFor(() => expect(api.maintenanceConfirm).toHaveBeenCalledWith({
     preview_id: 'prev-1', scope: 'all', digest: 'd'.repeat(64),

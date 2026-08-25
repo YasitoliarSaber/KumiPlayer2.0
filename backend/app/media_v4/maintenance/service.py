@@ -220,7 +220,25 @@ def compute_delete_preview(database: V4Database, *, provider: str, root_ids: lis
     名称与 warnings）；完整执行路径与内部 root/work 身份只存 SQLite。
     """
 
-    roots = _validate_requested_roots(database, provider, root_ids)
+    requested_roots = _validate_requested_roots(database, provider, root_ids)
+    roots: list[dict] = []
+    skipped_roots: list[dict] = []
+    revisions_by_root: dict[str, dict] = {}
+    for root in requested_roots:
+        revision = _latest_confirmed_revision(database, root["root_id"])
+        if revision is None:
+            # “全部来源”与来源分类清理面向已建立的媒体库。扫描草稿或已取消
+            # 的来源根没有 confirmed revision，也就没有可退役的 V4 媒体库事实；
+            # 它们不应阻断同一范围内其他已确认来源的清理。
+            if root_ids is not None:
+                raise ValueError("所选来源尚未完成导入，无法按媒体库记录清理")
+            skipped_roots.append(root)
+            continue
+        roots.append(root)
+        revisions_by_root[str(root["root_id"])] = revision
+    if not roots:
+        raise ValueError("当前范围没有已确认的媒体库来源，无需清理")
+
     selected_root_ids = {root["root_id"] for root in roots}
     mirror_identity = _mirror_identity(mirror_root)
     root_items: list[dict] = []
@@ -230,9 +248,7 @@ def compute_delete_preview(database: V4Database, *, provider: str, root_ids: lis
     job_snapshot: list[dict] = []
     asset_count = 0
     for root in roots:
-        revision = _latest_confirmed_revision(database, root["root_id"])
-        if revision is None:
-            raise ValueError(f"来源根 {root['root_id']} 没有已确认 revision，无法清理")
+        revision = revisions_by_root[str(root["root_id"])]
         root_items.append({
             "root_id": root["root_id"],
             "provider": root["provider"],
@@ -306,6 +322,22 @@ def compute_delete_preview(database: V4Database, *, provider: str, root_ids: lis
         except ValueError:
             summaries.append(Path(path_text).name)
     # 内部 preview：完整身份与计划，存 SQLite 供确认/恢复逻辑使用。
+    skipped_provider_counts = [
+        {"provider": provider_name, "count": count}
+        for provider_name, count in sorted(
+            ((provider_name, sum(1 for root in skipped_roots if root["provider"] == provider_name))
+            for provider_name in {str(root["provider"]) for root in skipped_roots}),
+            key=lambda item: item[0],
+        )
+    ]
+    warnings = [
+        "源视频、挂载盘媒体、外部 TXT、OpenList 远端对象、配置与凭据始终保留",
+        "混合来源作品会完整保留，仅退出被清理来源的贡献",
+        "孤儿作品的播放历史、进度与追更状态随媒体库退出",
+    ]
+    if skipped_roots:
+        warnings.append(f"{len(skipped_roots)} 个尚未确认导入的来源未纳入本次清理，它们没有可清理的媒体库数据")
+
     preview = {
         "preview_id": preview_id,
         "scope": provider,
@@ -313,6 +345,8 @@ def compute_delete_preview(database: V4Database, *, provider: str, root_ids: lis
         "created_at": now,
         "expires_at": expires_at,
         "root_count": len(root_items),
+        "skipped_root_count": len(skipped_roots),
+        "skipped_provider_counts": skipped_provider_counts,
         "work_count": len(work_items),
         "orphan_work_count": len(orphan_work_ids),
         "mixed_work_count": len(mixed_work_ids),
@@ -325,11 +359,7 @@ def compute_delete_preview(database: V4Database, *, provider: str, root_ids: lis
         "history_count": history_count,
         "progress_count": progress_count,
         "tracking_count": tracking_count,
-        "warnings": [
-            "源视频、挂载盘媒体、外部 TXT、OpenList 远端对象、配置与凭据始终保留",
-            "混合来源作品会完整保留，仅退出被清理来源的贡献",
-            "孤儿作品的播放历史、进度与追更状态随媒体库退出",
-        ],
+        "warnings": warnings,
         "roots": root_items,
         "orphan_works": orphan_work_ids,
         "mixed_works": mixed_work_ids,
@@ -378,6 +408,8 @@ def _public_preview(preview: dict) -> dict:
         "created_at": preview["created_at"],
         "expires_at": preview["expires_at"],
         "root_count": preview["root_count"],
+        "skipped_root_count": preview.get("skipped_root_count", 0),
+        "skipped_provider_counts": preview.get("skipped_provider_counts", []),
         "work_count": preview["work_count"],
         "orphan_work_count": preview["orphan_work_count"],
         "mixed_work_count": preview["mixed_work_count"],
