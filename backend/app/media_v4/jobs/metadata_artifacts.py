@@ -51,9 +51,11 @@ def _episode_nfo(episode: dict) -> bytes:
     root = ET.Element("episodedetails")
     season = int(episode.get("local_season_number") or 0)
     number = int(episode.get("local_episode_number") or episode.get("special_number") or 0)
-    _add(root, "title", episode.get("display_title") or f"第 {number} 集")
+    _add(root, "title", episode.get("title") or episode.get("display_title") or f"第 {number} 集")
     _add(root, "season", season)
     _add(root, "episode", number)
+    _add(root, "plot", episode.get("plot"))
+    _add(root, "runtime", episode.get("runtime"))
     ET.indent(root, space="  ")
     return ET.tostring(root, encoding="utf-8", xml_declaration=True) + b"\n"
 
@@ -89,6 +91,15 @@ def _download_artwork(url: str, path: Path) -> str:
         return _write_atomic(path, response.content)
 
 
+def _artwork_filename(artifact_type: str, source_file_path: str) -> str:
+    """保留 TMDB 图片的安全扩展名，尤其避免把 SVG 标题图伪装成 PNG。"""
+
+    suffix = Path(urlparse(source_file_path).path).suffix.lower()
+    if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".svg"}:
+        suffix = ".jpg" if artifact_type in {"poster", "fanart"} else ".png"
+    return f"{artifact_type}{suffix}"
+
+
 def publish_metadata_artifacts(
     database: V4Database,
     *,
@@ -102,6 +113,11 @@ def publish_metadata_artifacts(
     is_series = target.get("work_type") == "series"
     nfo_path = work_dir / ("tvshow.nfo" if is_series else "movie.nfo")
     artifacts = [("nfo", nfo_path, _write_atomic(nfo_path, _work_nfo(target, metadata)))]
+    episode_metadata = {
+        str(item.get("episode_id")): item
+        for item in metadata.get("episode_mappings") or []
+        if item.get("episode_id")
+    }
     if is_series:
         for episode in target.get("episodes") or []:
             season = int(episode.get("local_season_number") or 0)
@@ -111,17 +127,20 @@ def publish_metadata_artifacts(
             else:
                 season_dir = f"Season {season:02d}"
             episode_path = work_dir / season_dir / f"S{season:02d}E{number:02d}.nfo"
-            artifacts.append(("episode_nfo", episode_path, _write_atomic(episode_path, _episode_nfo(episode))))
+            scraped = episode_metadata.get(str(episode.get("episode_id")), {})
+            artifacts.append(("episode_nfo", episode_path, _write_atomic(episode_path, _episode_nfo({**episode, **scraped}))))
 
     config = load_config()
     if config.artwork_storage_mode != "remote":
-        for artifact_type, key, filename in (
-            ("poster", "poster_url", "poster.jpg"),
-            ("fanart", "fanart_url", "fanart.jpg"),
+        for artifact_type, key in (
+            ("poster", "poster_url"),
+            ("fanart", "fanart_url"),
+            ("clearlogo", "clearlogo_url"),
         ):
             url = str(metadata.get(key) or "")
             if not url:
                 continue
+            filename = _artwork_filename(artifact_type, str(metadata.get(f"{artifact_type}_file_path") or ""))
             try:
                 digest = _download_artwork(url, work_dir / filename)
             except (OSError, httpx.HTTPError):

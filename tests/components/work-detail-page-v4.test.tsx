@@ -23,7 +23,7 @@ const work = {
   fanart_path: '',
   local_poster_path: '',
   local_fanart_path: '',
-  clearlogo_path: '',
+  clearlogo_path: 'https://image.tmdb.org/t/p/original/logo.png',
   dir_path: '',
   tags: [],
   related_works: [],
@@ -38,6 +38,7 @@ const work = {
       season_number: 1,
       episode_number: 1,
       title: '启程',
+      thumb_path: 'https://image.tmdb.org/t/p/w300/still.jpg',
       group_type: 'season',
       kind: 'episode',
       source: 'baidu',
@@ -51,6 +52,10 @@ const work = {
 };
 
 beforeEach(() => {
+  Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+    configurable: true,
+    value: vi.fn(),
+  });
   useUiStore.setState({
     page: 'detail',
     selectedWorkId: work.work_id,
@@ -71,10 +76,12 @@ beforeEach(() => {
 test('按旧版沉浸式结构展示 V4 季度和剧集信息', async () => {
   const { container } = render(<WorkDetailPage />);
 
-  expect(await screen.findByRole('heading', { name: '测试动画' })).toBeVisible();
+  expect(await screen.findByAltText('测试动画 logo')).toBeVisible();
   expect(container.querySelector('.detail-page.detail-classic-page')).not.toBeNull();
   expect(container.querySelector('.detail-hero')).not.toBeNull();
   expect(container.querySelector('.detail-content-drawer')).not.toBeNull();
+  expect(container.querySelector('.detail-hero-logo')).not.toBeNull();
+  expect(container.querySelector('.detail-episode-grid.thumbnail-strip')).not.toBeNull();
   expect(screen.getByRole('combobox', { name: '选择季度' })).toBeVisible();
   expect(screen.getByText('启程')).toBeVisible();
 });
@@ -90,6 +97,14 @@ test('播放剧集时沿用 V4 Work、Episode 和首选 Asset 身份', async () 
     episode_id: 'episode-1',
     asset_id: 'asset-primary',
   }));
+});
+
+test('恢复旧版 Bangumi 同步标签，并保持它绑定当前 V4 Work', async () => {
+  render(<WorkDetailPage />);
+
+  const tag = await screen.findByRole('button', { name: /Bangumi 未匹配/ });
+  expect(tag).toHaveClass('detail-sync-status');
+  expect(tag).toHaveAttribute('aria-haspopup', 'dialog');
 });
 
 test('更多菜单只显示已经接通 V4 的操作', async () => {

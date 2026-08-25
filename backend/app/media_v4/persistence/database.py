@@ -14,6 +14,7 @@ from app.media_v4.persistence.schema_v4 import (
     create_v8_structures,
     create_v9_structures,
     create_v10_structures,
+    create_v13_structures,
     migrate_schema_v4_to_v5,
     migrate_schema_v5_to_v6,
     migrate_schema_v6_to_v7,
@@ -22,6 +23,7 @@ from app.media_v4.persistence.schema_v4 import (
     migrate_schema_v9_to_v10,
     migrate_schema_v10_to_v11,
     migrate_schema_v11_to_v12,
+    migrate_schema_v12_to_v13,
 )
 
 
@@ -82,6 +84,8 @@ class V4Database:
             "maintenance_operation_items",
             "work_overrides",
             "playback_history",
+            "bangumi_matches",
+            "bangumi_episode_sync",
         }
     )
     REQUIRED_TRIGGERS = frozenset(
@@ -151,11 +155,27 @@ class V4Database:
                 raise RuntimeError(
                     f"数据库版本 {version} 高于当前程序支持的 {self.CURRENT_SCHEMA_VERSION}，请升级 KumiPlayer"
                 )
+            if version == 12 and self._has_user_tables(conn):
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    migrate_schema_v12_to_v13(conn)
+                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    conn.commit()
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    raise V4ResetRequiredError(
+                        "数据库声明为 V4 但物理结构不完整，需要一次性重置；" + str(exc)
+                    ) from exc
+                except Exception:
+                    conn.rollback()
+                    raise
+                version = self.CURRENT_SCHEMA_VERSION
             if version == 11 and self._has_user_tables(conn):
                 # v11 → v12 增量迁移：操作明细唯一 Artifact 索引。
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     migrate_schema_v11_to_v12(conn)
+                    migrate_schema_v12_to_v13(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -173,6 +193,7 @@ class V4Database:
                 try:
                     migrate_schema_v10_to_v11(conn)
                     migrate_schema_v11_to_v12(conn)
+                    migrate_schema_v12_to_v13(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -191,6 +212,7 @@ class V4Database:
                     migrate_schema_v9_to_v10(conn)
                     migrate_schema_v10_to_v11(conn)
                     migrate_schema_v11_to_v12(conn)
+                    migrate_schema_v12_to_v13(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -210,6 +232,7 @@ class V4Database:
                     migrate_schema_v9_to_v10(conn)
                     migrate_schema_v10_to_v11(conn)
                     migrate_schema_v11_to_v12(conn)
+                    migrate_schema_v12_to_v13(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -230,6 +253,7 @@ class V4Database:
                     migrate_schema_v9_to_v10(conn)
                     migrate_schema_v10_to_v11(conn)
                     migrate_schema_v11_to_v12(conn)
+                    migrate_schema_v12_to_v13(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -251,6 +275,7 @@ class V4Database:
                     migrate_schema_v9_to_v10(conn)
                     migrate_schema_v10_to_v11(conn)
                     migrate_schema_v11_to_v12(conn)
+                    migrate_schema_v12_to_v13(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -273,6 +298,7 @@ class V4Database:
                     migrate_schema_v9_to_v10(conn)
                     migrate_schema_v10_to_v11(conn)
                     migrate_schema_v11_to_v12(conn)
+                    migrate_schema_v12_to_v13(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -296,6 +322,7 @@ class V4Database:
                     migrate_schema_v9_to_v10(conn)
                     migrate_schema_v10_to_v11(conn)
                     migrate_schema_v11_to_v12(conn)
+                    migrate_schema_v12_to_v13(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -362,6 +389,7 @@ class V4Database:
             create_v8_structures(expected)
             create_v9_structures(expected)
             create_v10_structures(expected)
+            create_v13_structures(expected)
             for table in sorted(self.REQUIRED_TABLES):
                 actual_cols = self._table_contract(conn, table)
                 expected_cols = self._table_contract(expected, table)

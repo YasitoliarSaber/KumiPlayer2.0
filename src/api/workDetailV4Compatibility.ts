@@ -4,7 +4,7 @@ import { mediaV4Api } from './mediaV4';
 
 export const workDetailV4Capabilities = {
   manualScrape: true,
-  bangumiBinding: false,
+  bangumiBinding: true,
   seasonalManagement: true,
   appendEpisodes: false,
   artworkMutation: true,
@@ -43,25 +43,6 @@ export interface ScrapeCandidate {
   vote_average: number;
   score: number;
   source_meta?: Record<string, unknown>;
-}
-
-export interface BangumiMatch {
-  work_id: string;
-  season_number: number | null;
-  subject_id: number;
-  subject_name: string;
-  subject_name_cn: string;
-  episode_map: Record<string, number>;
-}
-
-export interface BangumiEpisode {
-  episode_id: string;
-  season_number: number;
-  episode_number: number;
-  title: string;
-  bangumi_episode_id: number | null;
-  synced: boolean;
-  synced_at: string;
 }
 
 export interface ManualEpisodePreviewItem {
@@ -143,30 +124,6 @@ export const workDetailV4Compatibility = {
       const result = await mediaV4Api.enqueueWorkScrape(workId);
       return { task_id: result.job_id, status: result.status };
     },
-  },
-  bangumi: {
-    getMatch: (_workId: string, _seasonNumber?: number) => unavailable<BangumiMatch>('Bangumi 作品绑定'),
-    syncProgress: (_workId: string, _seasonNumber?: number) => unavailable<Record<string, unknown>>('Bangumi 进度同步'),
-    getEpisodes: (_workId: string, _seasonNumber?: number) => unavailable<{
-      work_id: string;
-      season_number: number | null;
-      match: BangumiMatch | null;
-      match_season_number: number | null;
-      episodes: BangumiEpisode[];
-    }>('Bangumi 剧集映射'),
-    getCollection: (_workId: string, _seasonNumber?: number) => unavailable<{
-      bangumi: Record<string, unknown> | null;
-      match_season_number: number | null;
-    }>('Bangumi 收藏同步'),
-    confirmMatch: (
-      _workId: string,
-      _subjectId: number,
-      _seasonNumber?: number,
-      _subjectName?: string,
-      _subjectNameCn?: string,
-    ) => unavailable<BangumiMatch>('Bangumi 作品绑定'),
-    removeMatch: (_workId: string, _seasonNumber?: number) => unavailable<{ ok: boolean }>('Bangumi 作品绑定'),
-    setCollection: (_workId: string, _type: number, _seasonNumber?: number) => unavailable<Record<string, unknown>>('Bangumi 收藏同步'),
   },
   tracking: {
     scan: async (workId: string, _includeScrape?: boolean) => {

@@ -5,7 +5,7 @@ import { useLibraryStore } from '../stores/library';
 import { useBangumiStore } from '../stores/bangumi';
 import { useUiStore, type CategoryKey } from '../stores/ui';
 import { systemApi } from '../api/system';
-import { bangumiApi as v4BangumiApi, buildBangumiImageUrl } from '../api/bangumi';
+import { bangumiApi as v4BangumiApi, buildBangumiImageUrl, type BangumiEpisode, type BangumiMatch } from '../api/bangumi';
 import { playbackApi } from '../api/playback';
 import { cleanDisplayTitle } from '../utils/title';
 import { buildAssetUrl } from '../api/assets';
@@ -14,8 +14,6 @@ import { libraryApi as v4LibraryApi } from '../api/library';
 import {
   workDetailV4Capabilities,
   workDetailV4Compatibility,
-  type BangumiEpisode,
-  type BangumiMatch,
   type DeletePreviewResponse,
   type ManualEpisodePreviewItem,
   type ScrapeCandidate,
@@ -32,7 +30,7 @@ import {
 
 const scrapeApi = workDetailV4Compatibility.scrape;
 const trackingApi = workDetailV4Compatibility.tracking;
-const bangumiApi = { ...v4BangumiApi, ...workDetailV4Compatibility.bangumi };
+const bangumiApi = v4BangumiApi;
 const libraryApi = { ...v4LibraryApi, ...workDetailV4Compatibility.library };
 
 const bangumiCollectionTypes = [

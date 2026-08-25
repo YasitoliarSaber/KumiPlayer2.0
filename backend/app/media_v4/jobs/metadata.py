@@ -205,9 +205,10 @@ def default_metadata_provider(target: dict) -> dict:
             images = detail.get("images") or {}
             poster = client.select_best_poster(images) or detail.get("poster_path") or ""
             fanart = client.select_best_backdrop(images) or detail.get("backdrop_path") or ""
+            clearlogo = client.select_best_logo(images) or ""
             date = detail.get("first_air_date") if media_type == "tv" else detail.get("release_date")
             runtimes = detail.get("episode_run_time") or [detail.get("runtime") or 0]
-            return {
+            result = {
                 "provider": "tmdb",
                 "provider_id": str(provider_id),
                 "media_type": media_type,
@@ -224,8 +225,13 @@ def default_metadata_provider(target: dict) -> dict:
                 "fanart_url": client.build_image_url(fanart, "original") if fanart else "",
                 "poster_file_path": poster,
                 "fanart_file_path": fanart,
+                "clearlogo_url": client.build_image_url(clearlogo, "original") if clearlogo else "",
+                "clearlogo_file_path": clearlogo,
                 "metadata_state": "ready",
             }
+            if media_type == "tv":
+                result["episode_mappings"] = _build_tv_episode_mappings(client, provider_id, target)
+            return result
     except TMDBClientError as exc:
         return _local_state(
             "source_unavailable",
@@ -233,3 +239,66 @@ def default_metadata_provider(target: dict) -> dict:
         )
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return _local_state("failed", f"获取在线元数据失败: {type(exc).__name__}")
+
+
+def _build_tv_episode_mappings(client: TMDBClient, provider_id: int, target: dict) -> list[dict]:
+    """把已确认的本地 Episode 映射到 TMDB 的标题与剧照。
+
+    本地季度和集号永远不在这里改写；这里只保存 provider 的映射和可展示
+    的远端字段。单个季度的网络错误会降级为没有缩略图，不能把整部作品的
+    已确认元数据判成失败。
+    """
+
+    local_episodes = [
+        item for item in target.get("episodes") or []
+        if str(item.get("episode_id") or "") and str(item.get("episode_kind") or "regular") != "auxiliary"
+    ]
+    by_provider_season: dict[int, list[dict]] = {}
+    for episode in local_episodes:
+        provider_season = _positive_int(episode.get("provider_season_number"))
+        if provider_season is None:
+            provider_season = _positive_int(episode.get("local_season_number"))
+        if provider_season is None:
+            continue
+        by_provider_season.setdefault(provider_season, []).append(episode)
+
+    result: list[dict] = []
+    for provider_season, episodes in sorted(by_provider_season.items()):
+        try:
+            season = client.get_tv_season_episodes(provider_id, provider_season)
+            remote_by_number = {
+                int(item["episode_number"]): item
+                for item in season.get("episodes") or []
+                if _positive_int(item.get("episode_number")) is not None
+            }
+        except TMDBClientError:
+            remote_by_number = {}
+
+        for episode in episodes:
+            provider_episode = _positive_int(episode.get("provider_episode_number"))
+            if provider_episode is None:
+                provider_episode = _positive_int(episode.get("local_episode_number"))
+            if provider_episode is None:
+                continue
+            remote = remote_by_number.get(provider_episode) or {}
+            still = str(remote.get("still_path") or "")
+            mapping = {
+                "episode_id": str(episode["episode_id"]),
+                "provider_season_number": provider_season,
+                "provider_episode_number": provider_episode,
+                "provider_episode_id": str(remote.get("id") or ""),
+                "title": str(remote.get("name") or ""),
+                "plot": str(remote.get("overview") or ""),
+                "runtime": _positive_int(remote.get("runtime")),
+                "still_url": client.build_image_url(still, "w300") if still else "",
+            }
+            result.append(mapping)
+    return result
+
+
+def _positive_int(value) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None

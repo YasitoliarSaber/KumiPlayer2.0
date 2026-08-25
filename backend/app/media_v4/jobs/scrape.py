@@ -103,9 +103,14 @@ class V4ScrapeService:
                     """
                     SELECT e.episode_id, e.local_episode_number, e.absolute_episode_number,
                            e.special_number, e.episode_kind, e.display_title,
-                           s.season_id, s.local_season_number, s.season_kind
+                           s.season_id, s.local_season_number, s.season_kind,
+                           spm.provider_season_number, epm.provider_episode_number
                     FROM episodes e
                     JOIN seasons s ON s.season_id = e.season_id
+                    LEFT JOIN season_provider_mappings spm
+                      ON spm.season_id = s.season_id AND spm.provider = 'tmdb'
+                    LEFT JOIN episode_provider_mappings epm
+                      ON epm.episode_id = e.episode_id AND epm.provider = 'tmdb'
                     WHERE e.work_id = ? AND EXISTS (
                         SELECT 1 FROM revision_bindings rb
                         WHERE rb.revision_id = ? AND rb.episode_id = e.episode_id

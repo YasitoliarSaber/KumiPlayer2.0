@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 12
+V4_SCHEMA_VERSION = 13
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -662,6 +662,7 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
     conn.execute("INSERT INTO v4_meta(key, value) VALUES ('schema', 'v4')")
     conn.execute("INSERT INTO v4_meta(key, value) VALUES ('backend_data_epoch', '4')")
     create_v12_structures(conn)
+    create_v13_structures(conn)
 
 
 def create_tree_scan_validation(conn: sqlite3.Connection) -> None:
@@ -871,6 +872,46 @@ def migrate_schema_v11_to_v12(conn: sqlite3.Connection) -> None:
     """v11 → v12 增量迁移：操作明细唯一 Artifact 索引。"""
 
     create_v12_structures(conn)
+
+
+def create_v13_structures(conn: sqlite3.Connection) -> None:
+    """v13：Bangumi 关联与同步记录进入 V4 SQLite 权威状态。"""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bangumi_matches (
+            work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE CASCADE,
+            season_number INTEGER NOT NULL DEFAULT 0,
+            subject_id INTEGER NOT NULL,
+            subject_name TEXT NOT NULL DEFAULT '',
+            subject_name_cn TEXT NOT NULL DEFAULT '',
+            episode_map_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(work_id, season_number)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bangumi_episode_sync (
+            episode_id TEXT NOT NULL REFERENCES episodes(episode_id) ON DELETE CASCADE,
+            subject_id INTEGER NOT NULL,
+            bangumi_episode_id INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'succeeded',
+            synced_at TEXT NOT NULL,
+            last_error TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(episode_id, subject_id)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bangumi_matches_subject ON bangumi_matches(subject_id)")
+
+
+def migrate_schema_v12_to_v13(conn: sqlite3.Connection) -> None:
+    """v12 → v13：新增 V4 Bangumi 匹配与同步事实表。"""
+
+    create_v13_structures(conn)
 
 
 def migrate_schema_v10_to_v11(conn: sqlite3.Connection) -> None:

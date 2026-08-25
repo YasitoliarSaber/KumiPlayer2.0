@@ -93,7 +93,7 @@ def test_v5_layout_with_altered_columns_initializes_and_keeps_data(tmp_path):
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 13
         root = conn.execute("SELECT * FROM source_roots WHERE root_id = 'root-keep'").fetchone()
         assert root is not None
         assert root["provider"] == "pan115"
@@ -329,3 +329,26 @@ def test_lifespan_with_migrated_layout_database(tmp_path, monkeypatch):
     with TestClient(app) as client:
         response = client.get("/api/health")
         assert response.status_code == 200, response.text
+
+
+def test_v12_database_migrates_bangumi_tables_without_rebuilding_media_state(tmp_path):
+    """详情页恢复 Bangumi 后，现有 v12 库必须原地升级，不能要求用户重置媒体库。"""
+
+    database = _fresh_database(tmp_path)
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO source_roots(root_id, provider, ingest_method, source_locator, playback_locator, created_at, updated_at) "
+            "VALUES ('root-v12', 'baidu', 'tree', '/Anime', 'K:\\Anime', 'now', 'now')"
+        )
+        conn.execute("DROP INDEX idx_bangumi_matches_subject")
+        conn.execute("DROP TABLE bangumi_episode_sync")
+        conn.execute("DROP TABLE bangumi_matches")
+        conn.execute("PRAGMA user_version = 12")
+
+    database.initialize()
+
+    with database.connect() as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 13
+        assert conn.execute("SELECT provider FROM source_roots WHERE root_id = 'root-v12'").fetchone()[0] == "baidu"
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bangumi_matches'").fetchone()
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bangumi_episode_sync'").fetchone()

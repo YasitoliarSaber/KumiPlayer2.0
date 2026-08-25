@@ -42,6 +42,27 @@ export interface BangumiSession {
   last_error_message: string;
 }
 
+/** V4 Work/Season 上持久化的 Bangumi 作品匹配。 */
+export interface BangumiMatch {
+  work_id: string;
+  season_number: number | null;
+  subject_id: number;
+  subject_name: string;
+  subject_name_cn: string;
+  episode_map: Record<string, number>;
+}
+
+/** V4 本地 Episode 与 Bangumi 剧集的只读映射。 */
+export interface BangumiEpisode {
+  episode_id: string;
+  season_number: number;
+  episode_number: number;
+  title: string;
+  bangumi_episode_id: number | null;
+  synced: boolean;
+  synced_at: string;
+}
+
 type FetchJsonOptions = RequestInit & {
   timeoutMs?: number;
 };
@@ -120,6 +141,97 @@ export const bangumiApi = {
       method: 'POST',
       body: JSON.stringify({ keyword, limit, offset, subject_types: subjectTypes }),
       timeoutMs: 12_000,
+    });
+  },
+
+  async getMatch(workId: string, seasonNumber?: number): Promise<BangumiMatch> {
+    const params = seasonNumber !== undefined ? `?season_number=${seasonNumber}` : '';
+    return fetchJson(`${API_BASE}/matches/${workId}${params}`);
+  },
+
+  async confirmMatch(
+    workId: string,
+    subjectId: number,
+    seasonNumber?: number,
+    subjectName?: string,
+    subjectNameCn?: string,
+  ): Promise<BangumiMatch> {
+    return fetchJson(`${API_BASE}/matches/${workId}`, {
+      method: 'POST',
+      body: JSON.stringify({
+        subject_id: subjectId,
+        season_number: seasonNumber,
+        subject_name: subjectName || '',
+        subject_name_cn: subjectNameCn || '',
+      }),
+    });
+  },
+
+  async removeMatch(workId: string, seasonNumber?: number): Promise<{ ok: boolean }> {
+    const params = seasonNumber !== undefined ? `?season_number=${seasonNumber}` : '';
+    return fetchJson(`${API_BASE}/matches/${workId}${params}`, { method: 'DELETE' });
+  },
+
+  async setCollection(workId: string, type: number, seasonNumber?: number): Promise<unknown> {
+    return fetchJson(`${API_BASE}/collections/${workId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ type, season_number: seasonNumber }),
+      timeoutMs: 8_000,
+    });
+  },
+
+  async getCollection(workId: string, seasonNumber?: number): Promise<{
+    bangumi: Record<string, unknown> | null;
+    match_season_number: number | null;
+  }> {
+    const params = seasonNumber !== undefined ? `?season_number=${seasonNumber}` : '';
+    return fetchJson(`${API_BASE}/collections/${workId}${params}`);
+  },
+
+  async getEpisodes(workId: string, seasonNumber?: number): Promise<{
+    work_id: string;
+    season_number: number | null;
+    match: BangumiMatch | null;
+    match_season_number: number | null;
+    episodes: BangumiEpisode[];
+  }> {
+    const params = seasonNumber !== undefined ? `?season_number=${seasonNumber}` : '';
+    return fetchJson(`${API_BASE}/episodes/${workId}${params}`);
+  },
+
+  async markEpisodeWatched(
+    episodeId: string,
+    workId: string,
+    seasonNumber?: number,
+    bangumiEpisodeId?: number,
+  ): Promise<unknown> {
+    return fetchJson(`${API_BASE}/episodes/${episodeId}/watched`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        work_id: workId,
+        season_number: seasonNumber,
+        bangumi_episode_id: bangumiEpisodeId,
+        type: 2,
+      }),
+    });
+  },
+
+  async syncProgress(workId: string, seasonNumber?: number): Promise<{
+    ok: boolean;
+    status: string;
+    work_id: string;
+    season_number: number | null;
+    subject_id: number;
+    remote_done_before: number;
+    local_done_before: number;
+    pulled: number;
+    pushed: number;
+    pending: number;
+  }> {
+    return fetchJson(`${API_BASE}/progress/${workId}/sync`, {
+      method: 'POST',
+      body: JSON.stringify({ season_number: seasonNumber }),
+      timeoutMs: 30_000,
     });
   },
 
