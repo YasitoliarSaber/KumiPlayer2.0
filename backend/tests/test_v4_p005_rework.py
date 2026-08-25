@@ -151,8 +151,8 @@ def test_preview_is_persisted_and_confirm_validates_ttl(tmp_path):
     # 过期（将存储记录时间改为过去）→ 409
     with database.connect() as conn:
         conn.execute(
-            "UPDATE maintenance_operations SET created_at = ?, updated_at = ? WHERE operation_id = ?",
-            ((datetime.now(UTC) - timedelta(hours=2)).isoformat(), (datetime.now(UTC) - timedelta(hours=2)).isoformat(), preview["preview_id"]),
+            "UPDATE maintenance_operations SET expires_at = ? WHERE operation_id = ?",
+            ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), preview["preview_id"]),
         )
     with pytest.raises(ValueError, match="过期"):
         _confirm(database, preview_id=preview["preview_id"], scope="pan115", digest=preview["digest"])

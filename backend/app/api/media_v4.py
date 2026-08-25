@@ -145,6 +145,10 @@ class MaintenancePreviewRequest(BaseModel):
     root_ids: list[str] | None = None
 
 
+class MaintenanceResumeRequest(BaseModel):
+    preview_id: str = Field(min_length=1)
+
+
 class MaintenanceConfirmRequest(BaseModel):
     preview_id: str = Field(min_length=1)
     scope: Literal["local", "pan115", "baidu", "quark", "all"] = "all"
@@ -1419,6 +1423,22 @@ def library_delete_confirm(request: MaintenanceConfirmRequest):
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return result
+
+
+@router.post("/library-maintenance/delete-resume")
+def library_delete_resume(request: MaintenanceResumeRequest):
+    """恢复同一 operation 的未完成清理（partial_failed / projection_failed）。"""
+
+    from app.media_v4.maintenance.service import resume_operation
+
+    try:
+        return resume_operation(
+            get_database(),
+            preview_id=request.preview_id,
+            mirror_root=_configured_mirror_root(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/library")

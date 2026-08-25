@@ -30,18 +30,6 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _digest(provider: str, roots: list[dict], works: list[dict], artifact_paths: list[str]) -> str:
-    payload = {
-        "provider": provider,
-        "roots": sorted({(item["root_id"], item["revision_id"]) for item in roots}),
-        "works": sorted({item["work_id"] for item in works}),
-        "artifacts": sorted(artifact_paths),
-    }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
-    ).hexdigest()
-
-
 def _activity_roots(database: V4Database, provider: str) -> list[dict]:
     with database.connect() as conn:
         if provider == "all":
@@ -115,41 +103,96 @@ def _artifact_rows(database: V4Database, revision_id: str) -> list[dict]:
             (revision_id,),
         ).fetchall()
     return [dict(row) for row in rows]
+def _work_playback_and_tracking(conn, work_id: str) -> None:
+    """孤儿 Work 个人状态清理（播放历史/进度/追更）；必须在调用方事务 conn 内执行。"""
+
+    conn.execute("DELETE FROM playback_history WHERE work_id = ?", (work_id,))
+    conn.execute("DELETE FROM playback_progress WHERE work_id = ?", (work_id,))
+    conn.execute("DELETE FROM tracking_states WHERE work_id = ?", (work_id,))
 
 
-def _work_playback_and_tracking(database: V4Database, work_id: str) -> None:
-    with database.connect() as conn:
-        conn.execute("DELETE FROM playback_progress WHERE work_id = ?", (work_id,))
-        conn.execute("DELETE FROM tracking_states WHERE work_id = ?", (work_id,))
+def _mirror_identity(mirror_root: Path | None) -> str:
+    if mirror_root is None:
+        return ""
+    try:
+        return str(mirror_root.resolve(strict=False))
+    except OSError:
+        return str(mirror_root)
 
 
-def compute_delete_preview(database: V4Database, *, provider: str, root_ids: list[str] | None = None, mirror_root: Path | None = None) -> dict:
-    """构造按来源清理预览（不删除任何东西）并持久化到 maintenance_operations。
+def _whitelisted_artifact_paths(database: V4Database, revision_id: str, mirror_root: Path | None) -> list[str]:
+    """统一白名单：数据库登记、位于受管镜像根内、canonical path 校验。"""
 
-    11.13-3：混合来源判定以 selected_root_ids 为集合；同一 Work 属于本次全部
-    被选 root 时视为将退出。11.13-4：preview 身份、scope、digest、创建/过期
-    时间与状态写入受事务记录，confirm 只接受未过期且完全匹配的预览。
-    """
+    paths: list[str] = []
+    for artifact in _artifact_rows(database, revision_id):
+        path = Path(artifact["target_path"])
+        if mirror_root is None:
+            continue
+        try:
+            resolved = path.resolve(strict=False)
+            root_resolved = mirror_root.resolve(strict=False)
+            if resolved == root_resolved or root_resolved not in resolved.parents:
+                continue
+            if resolved.is_dir() and not resolved.is_symlink():
+                continue
+        except OSError:
+            continue
+        paths.append(str(path))
+    return paths
+
+
+def _digest(provider: str, roots: list[dict], works: list[dict], artifact_paths: list[str], mirror_identity: str) -> str:
+    payload = {
+        "provider": provider,
+        "mirror_root_identity": mirror_identity,
+        "roots": sorted({(item["root_id"], item["revision_id"]) for item in roots}),
+        "works": sorted({item["work_id"] for item in works}),
+        "artifacts": sorted(artifact_paths),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _validate_requested_roots(database: V4Database, provider: str, root_ids: list[str] | None) -> list[dict]:
+    """空、未知、与 scope/provider 不一致的 root 显式拒绝，不静默空操作。"""
 
     if provider not in PROVIDER_SCOPES:
         raise ValueError(f"不支持的来源范围: {provider}")
     roots = _activity_roots(database, provider)
-    if root_ids is not None:
-        requested = set(root_ids)
-        roots = [root for root in roots if root["root_id"] in requested]
+    if root_ids is None:
+        return roots
+    if not root_ids:
+        raise ValueError("未选择任何来源根，请先选择要清理的媒体库")
+    requested = set(root_ids)
+    if len(requested) != len(root_ids):
+        raise ValueError("来源根选择存在重复，请重新选择")
+    selected = [root for root in roots if root["root_id"] in requested]
+    if len(selected) != len(requested):
+        missing = sorted(requested - {root["root_id"] for root in selected})
+        raise ValueError(f"来源根不存在或不属于当前范围: {', '.join(missing)}")
+    return selected
+
+
+def compute_delete_preview(database: V4Database, *, provider: str, root_ids: list[str] | None = None, mirror_root: Path | None = None) -> dict:
+    """后端生成完整清理计划并一次事务写入 operation + 全部 items。
+
+    返回仅包含 count 与至多 20 条相对镜像根的脱敏摘要；完整执行路径只存在于
+    SQLite operation items，前端不得参与执行路径。
+    """
+
+    roots = _validate_requested_roots(database, provider, root_ids)
     selected_root_ids = {root["root_id"] for root in roots}
+    mirror_identity = _mirror_identity(mirror_root)
     root_items: list[dict] = []
     work_items: list[dict] = []
-    artifact_paths: list[str] = []
+    item_rows: list[dict] = []
     blocked_jobs: list[dict] = []
     asset_count = 0
-    history_count = 0
-    progress_count = 0
-    tracking_count = 0
     for root in roots:
         revision = _latest_confirmed_revision(database, root["root_id"])
         if revision is None:
-            continue
+            raise ValueError(f"来源根 {root['root_id']} 没有已确认 revision，无法清理")
         root_items.append({
             "root_id": root["root_id"],
             "provider": root["provider"],
@@ -159,13 +202,11 @@ def compute_delete_preview(database: V4Database, *, provider: str, root_ids: lis
         })
         jobs = _active_jobs(database, revision["revision_id"])
         blocked_jobs.extend(jobs)
-        work_ids = _revision_work_ids(database, revision["revision_id"])
-        for work_id in sorted(work_ids):
-            has_other = _work_has_other_active_source(database, work_id, selected_root_ids)
+        for work_id in sorted(_revision_work_ids(database, revision["revision_id"])):
             work_items.append({
                 "work_id": work_id,
                 "root_id": root["root_id"],
-                "mixed": has_other,
+                "mixed": _work_has_other_active_source(database, work_id, selected_root_ids),
             })
         with database.connect() as conn:
             row = conn.execute(
@@ -173,20 +214,19 @@ def compute_delete_preview(database: V4Database, *, provider: str, root_ids: lis
                 (revision["revision_id"],),
             ).fetchone()
             asset_count += int(row["c"] or 0)
-        for artifact in _artifact_rows(database, revision["revision_id"]):
-            path = Path(artifact["target_path"])
-            if mirror_root is not None:
-                try:
-                    resolved = path.resolve(strict=False)
-                    root_resolved = mirror_root.resolve(strict=False)
-                    if resolved == root_resolved or root_resolved not in resolved.parents:
-                        continue
-                except OSError:
-                    continue
-            artifact_paths.append(str(path))
+        for path_text in _whitelisted_artifact_paths(database, revision["revision_id"], mirror_root):
+            item_rows.append({
+                "root_id": root["root_id"],
+                "revision_id": revision["revision_id"],
+                "artifact_id": f"art-{uuid.uuid4().hex}",
+                "target_path": path_text,
+            })
 
     orphan_work_ids = sorted({item["work_id"] for item in work_items if not item["mixed"]})
     mixed_work_ids = sorted({item["work_id"] for item in work_items if item["mixed"]})
+    history_count = 0
+    progress_count = 0
+    tracking_count = 0
     if orphan_work_ids:
         placeholders = ",".join("?" for _ in orphan_work_ids)
         with database.connect() as conn:
@@ -202,20 +242,33 @@ def compute_delete_preview(database: V4Database, *, provider: str, root_ids: lis
                 "SELECT COUNT(*) AS c FROM tracking_states WHERE work_id IN (" + placeholders + ")",
                 orphan_work_ids,
             ).fetchone()["c"] or 0)
+
+    artifact_paths = [item["target_path"] for item in item_rows]
     now = _now()
+    digest = _digest(provider, root_items, work_items, artifact_paths, mirror_identity)
+    preview_id = "prev_" + uuid.uuid4().hex
+    expires_at = (datetime.now(UTC) + PREVIEW_TTL).isoformat()
+
+    summaries: list[str] = []
+    for path_text in artifact_paths:
+        try:
+            rel = Path(path_text).relative_to(mirror_root)
+            summaries.append(str(rel))
+        except ValueError:
+            summaries.append(Path(path_text).name)
     preview = {
-        "preview_id": "prev_" + uuid.uuid4().hex,
+        "preview_id": preview_id,
         "scope": provider,
         "root_ids": sorted(selected_root_ids),
         "created_at": now,
-        "expires_at": (datetime.now(UTC) + PREVIEW_TTL).isoformat(),
+        "expires_at": expires_at,
         "root_count": len(root_items),
         "work_count": len(work_items),
         "orphan_work_count": len(orphan_work_ids),
         "mixed_work_count": len(mixed_work_ids),
         "asset_count": asset_count,
         "artifact_count": len(artifact_paths),
-        "artifact_paths": artifact_paths[:50],
+        "artifact_summaries": summaries[:20],
         "blocked": bool(blocked_jobs),
         "blocked_jobs": blocked_jobs[:20],
         "history_count": history_count,
@@ -229,30 +282,44 @@ def compute_delete_preview(database: V4Database, *, provider: str, root_ids: lis
         "roots": root_items,
         "orphan_works": orphan_work_ids,
         "mixed_works": mixed_work_ids,
-        "digest": _digest(provider, root_items, work_items, artifact_paths),
+        "digest": digest,
     }
-    # 11.13-4：preview 持久化；同一 preview_id 幂等覆盖为 preview 状态。
     with database.connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO maintenance_operations(operation_id, scope_provider, status, preview_json, result_json, created_at, updated_at)
-            VALUES (?, ?, 'preview', ?, '{}', ?, ?)
-            ON CONFLICT(operation_id) DO UPDATE SET
-                scope_provider = excluded.scope_provider,
-                status = 'preview',
-                preview_json = excluded.preview_json,
-                created_at = excluded.created_at,
-                updated_at = excluded.updated_at
-            """,
-            (preview["preview_id"], provider, json.dumps(preview, ensure_ascii=False), now, now),
-        )
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                """
+                INSERT INTO maintenance_operations(
+                    operation_id, scope_provider, status, preview_json, result_json,
+                    digest, root_ids_json, mirror_root_identity, expires_at, created_at, updated_at
+                ) VALUES (?, ?, 'preview', ?, '{}', ?, ?, ?, ?, ?, ?)
+                """,
+                (preview_id, provider, json.dumps(preview, ensure_ascii=False),
+                 digest, json.dumps(sorted(selected_root_ids), ensure_ascii=False),
+                 mirror_identity, expires_at, now, now),
+            )
+            for index, item in enumerate(item_rows):
+                conn.execute(
+                    """
+                    INSERT INTO maintenance_operation_items(
+                        item_id, operation_id, artifact_id, root_id, revision_id, target_path,
+                        plan_status, result_status, result_error, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'planned', 'pending', '', ?)
+                    """,
+                    (f"item-{preview_id}-{index}", preview_id, item["artifact_id"],
+                     item["root_id"], item["revision_id"], item["target_path"], now),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
     return preview
 
 
 def _load_preview(database: V4Database, preview_id: str) -> dict:
     with database.connect() as conn:
         row = conn.execute(
-            "SELECT operation_id, scope_provider, status, preview_json, result_json, created_at, updated_at "
+            "SELECT operation_id, scope_provider, status, preview_json, result_json, digest, root_ids_json, mirror_root_identity, expires_at, created_at, updated_at "
             "FROM maintenance_operations WHERE operation_id = ?",
             (preview_id,),
         ).fetchone()
@@ -265,132 +332,21 @@ def _load_preview(database: V4Database, preview_id: str) -> dict:
     preview["_status"] = str(row["status"] or "")
     preview["_result_json"] = str(row["result_json"] or "")
     preview["_stored_created_at"] = str(row["created_at"] or "")
+    preview["_stored_digest"] = str(row["digest"] or "")
+    preview["_stored_mirror_identity"] = str(row["mirror_root_identity"] or "")
+    preview["_stored_expires_at"] = str(row["expires_at"] or "")
     return preview
 
 
-def confirm_delete_preview(database: V4Database, *, preview_id: str, scope: str, digest: str, mirror_root: Path | None = None) -> dict:
-    """校验并执行按来源清理。11.13-4/6：只接受未过期且完全匹配的持久化预览；
-    状态机 preview → pending → completed / partial_failed / projection_failed；
-    失败项不得伪装成 completed。"""
+def _recompute_digest_for_preview(database: V4Database, preview: dict, mirror_root: Path | None) -> str:
+    """§11.14.1-5：基于同一完整受管计划与当前状态重新计算 digest。
 
-    if scope not in PROVIDER_SCOPES:
-        raise ValueError(f"不支持的来源范围: {scope}")
-    preview = _load_preview(database, preview_id)
-    if preview.get("_status") == "completed":
-        # 幂等：已完成 operation 直接返回既有结果。
-        try:
-            return json.loads(preview["_result_json"])
-        except (TypeError, ValueError):
-            return {"preview_id": preview_id, "status": "completed"}
-    if preview.get("_status") in {"pending", "cleaning"}:
-        raise ValueError("该清理预览正在执行中，请稍后刷新结果")
-    if preview.get("_status") in {"partial_failed", "projection_failed"}:
-        # 可重试：返回既有结果并提示重新生成预览。
-        try:
-            return json.loads(preview["_result_json"])
-        except (TypeError, ValueError):
-            pass
-    if preview.get("scope") != scope:
-        raise ValueError("删除预览范围与请求不一致，请重新生成")
-    try:
-        created = datetime.fromisoformat(str(preview.get("_stored_created_at") or preview.get("created_at") or ""))
-    except (ValueError, TypeError):
-        created = None
-    if created is None or datetime.now(UTC) - created > PREVIEW_TTL:
-        raise ValueError("删除预览已过期，请重新生成")
-    # 11.13-3：按持久化 root 集合重新计算 digest，任何来源/revision/Artifact/任务变化都拒绝。
-    recomputed = _recompute_digest(database, scope, set(preview.get("root_ids") or []))
-    if recomputed != digest:
-        raise ValueError("来源、revision 或生成物已变化，请重新生成删除预览")
-    if preview.get("digest") != digest:
-        raise ValueError("来源、revision 或生成物已变化，请重新生成删除预览")
-    if preview.get("blocked"):
-        raise ValueError("存在正在运行的后台任务，请等待完成后再清理")
+    preview 与 confirm 使用同一白名单函数；root/revision/任务/镜像根变化都会
+    使重算 digest 与受管 digest 不一致而 fail-closed。
+    """
 
-    provider_scope = scope
-    with database.connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            # 状态机：preview → pending
-            conn.execute(
-                "UPDATE maintenance_operations SET status = 'pending', updated_at = ? WHERE operation_id = ?",
-                (_now(), preview_id),
-            )
-            for root in preview["roots"]:
-                conn.execute(
-                    "UPDATE source_roots SET retired_at = ?, retired_reason = '用户按来源清理', updated_at = ? WHERE root_id = ?",
-                    (_now(), _now(), root["root_id"]),
-                )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-    # 孤儿 Work 的播放历史/进度/追更随媒体库退出（事务外独立写入，避免锁）
-    for work_id in preview["orphan_works"]:
-        _work_playback_and_tracking(database, work_id)
-        with database.connect() as conn:
-            conn.execute("DELETE FROM playback_history WHERE work_id = ?", (work_id,))
-
-    # 文件系统清理（白名单精确执行，逐项记结果；失败不影响退役标记）
-    cleanup_results: list[dict] = []
-    has_artifact_failure = False
-    for path_text in preview["artifact_paths"]:
-        path = Path(path_text)
-        try:
-            if mirror_root is not None:
-                resolved = path.resolve(strict=False)
-                root_resolved = mirror_root.resolve(strict=False)
-                if resolved == root_resolved or root_resolved not in resolved.parents:
-                    cleanup_results.append({"path": path_text, "status": "blocked"})
-                    has_artifact_failure = True
-                    continue
-            if path.is_dir() and not path.is_symlink():
-                cleanup_results.append({"path": path_text, "status": "blocked"})
-                has_artifact_failure = True
-                continue
-            if path.exists() or path.is_symlink():
-                path.unlink()
-                cleanup_results.append({"path": path_text, "status": "removed"})
-            else:
-                cleanup_results.append({"path": path_text, "status": "missing"})
-        except OSError as exc:
-            cleanup_results.append({"path": path_text, "status": "failed", "error": str(exc)})
-            has_artifact_failure = True
-
-    # 投影重建；失败必须进入 projection_failed，不得伪装完成。
-    projection_status = "ok"
-    try:
-        V4LibraryProjection(database).rebuild()
-    except Exception as exc:  # noqa: BLE001
-        projection_status = f"failed: {exc}"
-
-    if has_artifact_failure:
-        operation_status = "partial_failed"
-    elif projection_status != "ok":
-        operation_status = "projection_failed"
-    else:
-        operation_status = "completed"
-    result = {
-        "preview_id": preview_id,
-        "scope": provider_scope,
-        "status": operation_status,
-        "retired_roots": [root["root_id"] for root in preview["roots"]],
-        "orphan_works": preview["orphan_works"],
-        "mixed_works": preview["mixed_works"],
-        "artifact_results": cleanup_results,
-        "projection_status": projection_status,
-    }
-    with database.connect() as conn:
-        conn.execute(
-            "UPDATE maintenance_operations SET status = ?, result_json = ?, updated_at = ? WHERE operation_id = ?",
-            (operation_status, json.dumps(result, ensure_ascii=False), _now(), preview_id),
-        )
-    return result
-
-
-def _recompute_digest(database: V4Database, provider: str, selected_root_ids: set[str]) -> str:
-    """按持久化 preview 的 root 集合重新计算 digest；与 compute_delete_preview 完全一致。"""
-
+    selected_root_ids = set(preview.get("root_ids") or [])
+    provider = str(preview.get("scope") or "")
     roots = [root for root in _activity_roots(database, provider) if root["root_id"] in selected_root_ids]
     root_items: list[dict] = []
     work_items: list[dict] = []
@@ -409,10 +365,203 @@ def _recompute_digest(database: V4Database, provider: str, selected_root_ids: se
                 "root_id": root["root_id"],
                 "mixed": _work_has_other_active_source(database, work_id, selected_root_ids),
             })
-        artifact_paths.extend(
-            str(item["target_path"]) for item in _artifact_rows(database, revision["revision_id"])
+        artifact_paths.extend(_whitelisted_artifact_paths(database, revision["revision_id"], mirror_root))
+    return _digest(provider, root_items, work_items, artifact_paths, str(preview.get("_stored_mirror_identity") or ""))
+
+
+def _verify_preview(database: V4Database, preview_id: str, scope: str, digest: str, mirror_root: Path | None) -> dict:
+    if scope not in PROVIDER_SCOPES:
+        raise ValueError(f"不支持的来源范围: {scope}")
+    preview = _load_preview(database, preview_id)
+    status = preview.get("_status")
+    if status == "completed":
+        try:
+            return json.loads(preview["_result_json"])
+        except (TypeError, ValueError):
+            return {"preview_id": preview_id, "status": "completed"}
+    if status in {"pending", "cleaning"}:
+        raise ValueError("该清理正在执行中，请稍后刷新结果")
+    if preview.get("scope") != scope:
+        raise ValueError("删除预览范围与请求不一致，请重新生成")
+    # 先校验镜像根身份（§11.14.1-5），避免 mirror 变化被 digest 错误掩盖。
+    if _mirror_identity(mirror_root) != preview.get("_stored_mirror_identity"):
+        raise ValueError("镜像根目录已变化，请重新生成删除预览")
+    if preview.get("_stored_digest") != digest or preview.get("digest") != digest:
+        raise ValueError("来源、revision 或生成物已变化，请重新生成删除预览")
+    if _recompute_digest_for_preview(database, preview, mirror_root) != preview.get("_stored_digest"):
+        raise ValueError("来源、revision 或生成物已变化，请重新生成删除预览")
+    try:
+        expires = datetime.fromisoformat(str(preview.get("_stored_expires_at") or ""))
+    except (ValueError, TypeError):
+        expires = None
+    if expires is None or datetime.now(UTC) > expires:
+        raise ValueError("删除预览已过期，请重新生成")
+    if preview.get("blocked"):
+        raise ValueError("存在正在运行的后台任务，请等待完成后再清理")
+    return preview
+
+
+def _persist_operation_status(database: V4Database, preview_id: str, status: str, result: dict) -> None:
+    with database.connect() as conn:
+        conn.execute(
+            "UPDATE maintenance_operations SET status = ?, result_json = ?, updated_at = ? WHERE operation_id = ?",
+            (status, json.dumps(result, ensure_ascii=False), _now(), preview_id),
         )
-    return _digest(provider, root_items, work_items, artifact_paths)
+
+
+def _retire_and_cleanup_personal_state(database: V4Database, preview_id: str, preview: dict) -> None:
+    now = _now()
+    with database.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = conn.execute(
+                "UPDATE maintenance_operations SET status = 'pending', updated_at = ? "
+                "WHERE operation_id = ? AND status = 'preview'",
+                (now, preview_id),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise ValueError("该清理预览已被其他请求处理或状态不允许确认，请刷新结果")
+            for root in preview["roots"]:
+                conn.execute(
+                    "UPDATE source_roots SET retired_at = ?, retired_reason = '用户按来源清理', updated_at = ? WHERE root_id = ?",
+                    (now, now, root["root_id"]),
+                )
+            for work_id in preview["orphan_works"]:
+                _work_playback_and_tracking(conn, work_id)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def _cleanup_items(database: V4Database, preview_id: str, mirror_root: Path | None) -> tuple[list[dict], bool]:
+    with database.connect() as conn:
+        rows = conn.execute(
+            "SELECT item_id, target_path, result_status FROM maintenance_operation_items "
+            "WHERE operation_id = ? ORDER BY item_id",
+            (preview_id,),
+        ).fetchall()
+    results: list[dict] = []
+    has_failure = False
+    for row in rows:
+        item_id = str(row["item_id"])
+        path_text = str(row["target_path"])
+        result_status = str(row["result_status"] or "")
+        if result_status in {"removed", "missing"}:
+            results.append({"path": path_text, "status": result_status, "reused": True})
+            continue
+        status = "pending"
+        error = ""
+        path = Path(path_text)
+        try:
+            if mirror_root is not None:
+                resolved = path.resolve(strict=False)
+                root_resolved = mirror_root.resolve(strict=False)
+                if resolved == root_resolved or root_resolved not in resolved.parents:
+                    status = "blocked"
+                    has_failure = True
+                    continue
+            if path.is_dir() and not path.is_symlink():
+                status = "blocked"
+                has_failure = True
+                continue
+            if path.exists() or path.is_symlink():
+                path.unlink()
+                status = "removed"
+            else:
+                status = "missing"
+        except OSError as exc:
+            status = "failed"
+            error = str(exc)
+            has_failure = True
+        with database.connect() as conn:
+            conn.execute(
+                "UPDATE maintenance_operation_items SET result_status = ?, result_error = ?, updated_at = ? WHERE item_id = ?",
+                (status, error, _now(), item_id),
+            )
+        results.append({"path": path_text, "status": status, "error": error or None})
+    return results, has_failure
+
+
+def _rebuild_projection(database: V4Database) -> str:
+    try:
+        V4LibraryProjection(database).rebuild()
+        return "ok"
+    except Exception as exc:  # noqa: BLE001
+        return f"failed: {exc}"
+
+
+def confirm_delete_preview(database: V4Database, *, preview_id: str, scope: str, digest: str, mirror_root: Path | None = None) -> dict:
+    preview = _verify_preview(database, preview_id, scope, digest, mirror_root)
+    if isinstance(preview, dict) and preview.get("status") == "completed":
+        return preview
+    _retire_and_cleanup_personal_state(database, preview_id, preview)
+    cleanup_results, has_artifact_failure = _cleanup_items(database, preview_id, mirror_root)
+    projection_status = _rebuild_projection(database)
+    if has_artifact_failure:
+        operation_status = "partial_failed"
+    elif projection_status != "ok":
+        operation_status = "projection_failed"
+    else:
+        operation_status = "completed"
+    result = {
+        "preview_id": preview_id,
+        "scope": scope,
+        "status": operation_status,
+        "retired_roots": [root["root_id"] for root in preview["roots"]],
+        "orphan_works": preview["orphan_works"],
+        "mixed_works": preview["mixed_works"],
+        "artifact_results": cleanup_results,
+        "projection_status": projection_status,
+    }
+    _persist_operation_status(database, preview_id, operation_status, result)
+    return result
+
+
+def resume_operation(database: V4Database, *, preview_id: str, mirror_root: Path | None = None) -> dict:
+    """partial_failed / projection_failed 基于同一 operation 恢复；不重新生成 preview。"""
+
+    preview = _load_preview(database, preview_id)
+    status = preview.get("_status")
+    if status == "completed":
+        try:
+            return json.loads(preview["_result_json"])
+        except (TypeError, ValueError):
+            return {"preview_id": preview_id, "status": "completed"}
+    if status not in {"partial_failed", "projection_failed"}:
+        raise ValueError("该清理预览当前不可恢复，请刷新结果")
+    if _mirror_identity(mirror_root) != preview.get("_stored_mirror_identity"):
+        raise ValueError("镜像根目录已变化，请重新生成删除预览")
+    now = _now()
+    with database.connect() as conn:
+        cursor = conn.execute(
+            "UPDATE maintenance_operations SET status = 'pending', updated_at = ? "
+            "WHERE operation_id = ? AND status IN ('partial_failed', 'projection_failed')",
+            (now, preview_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("该清理预览已被其他请求处理，请刷新结果")
+    cleanup_results, has_artifact_failure = _cleanup_items(database, preview_id, mirror_root)
+    projection_status = _rebuild_projection(database)
+    if has_artifact_failure:
+        operation_status = "partial_failed"
+    elif projection_status != "ok":
+        operation_status = "projection_failed"
+    else:
+        operation_status = "completed"
+    result = {
+        "preview_id": preview_id,
+        "scope": preview.get("scope", ""),
+        "status": operation_status,
+        "retired_roots": [root["root_id"] for root in preview.get("roots", [])],
+        "orphan_works": preview.get("orphan_works", []),
+        "mixed_works": preview.get("mixed_works", []),
+        "artifact_results": cleanup_results,
+        "projection_status": projection_status,
+    }
+    _persist_operation_status(database, preview_id, operation_status, result)
+    return result
 
 
 def _scope_from_digest_preview(preview: dict) -> str:
@@ -489,8 +638,7 @@ def confirm_work_delete(database: V4Database, *, work_id: str, preview_id: str, 
                 """,
                 (work_id, json.dumps(payload, ensure_ascii=False), _now(), _now()),
             )
-            conn.execute("DELETE FROM playback_progress WHERE work_id = ?", (work_id,))
-            conn.execute("DELETE FROM tracking_states WHERE work_id = ?", (work_id,))
+            _work_playback_and_tracking(conn, work_id)
             conn.commit()
         except Exception:
             conn.rollback()
