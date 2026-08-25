@@ -13,6 +13,7 @@ from app.media_v4.persistence.schema_v4 import (
     create_v6_structures,
     create_v8_structures,
     create_v9_structures,
+    create_v10_structures,
     migrate_schema_v4_to_v5,
     migrate_schema_v5_to_v6,
     migrate_schema_v6_to_v7,
@@ -20,6 +21,15 @@ from app.media_v4.persistence.schema_v4 import (
     migrate_schema_v8_to_v9,
     migrate_schema_v9_to_v10,
 )
+
+
+def _normalize_default(value) -> str:
+    """规范化默认值字面量：去空白、统一引号，避免引号写法差异误判。"""
+
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return text.replace("\\'", "'").replace('"', "'")
 
 
 class V4ResetRequiredError(RuntimeError):
@@ -66,6 +76,9 @@ class V4Database:
             "tree_scan_validation",
             "work_relations",
             "revision_work_candidates",
+            "maintenance_operations",
+            "work_overrides",
+            "playback_history",
         }
     )
     REQUIRED_TRIGGERS = frozenset(
@@ -190,12 +203,14 @@ class V4Database:
                     raise
                 version = self.CURRENT_SCHEMA_VERSION
             if version == 5 and self._has_user_tables(conn):
-                # v5 → v6 增量迁移：新增关系/候选表与作品卡片字段。
+                # v5 → v10 连续迁移：关系/候选表、来源根级模式、退役字段与 v10 表。
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     migrate_schema_v5_to_v6(conn)
                     migrate_schema_v6_to_v7(conn)
                     migrate_schema_v7_to_v8(conn)
+                    migrate_schema_v8_to_v9(conn)
+                    migrate_schema_v9_to_v10(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -247,6 +262,13 @@ class V4Database:
                 raise
 
     def _validate_physical_schema(self, conn: sqlite3.Connection) -> None:
+        """P-009：用逻辑 schema 合同校验，不逐字比较 DDL 文本。
+
+        显式迁移允许新列按历史顺序追加；空库初始 CREATE 可把同字段置于
+        任意定义位置。两者只要列名/类型/默认值/约束、索引、外键与触发器
+        合同一致，就视为兼容。真正缺表、缺列、约束不符或缺触发器仍 fail-closed。
+        """
+
         objects: dict[str, set[str]] = {
             row["type"]: set()
             for row in conn.execute(
@@ -275,25 +297,77 @@ class V4Database:
             create_v6_structures(expected)
             create_v8_structures(expected)
             create_v9_structures(expected)
-            expected_signature = self._schema_signature(expected)
+            create_v10_structures(expected)
+            for table in sorted(self.REQUIRED_TABLES):
+                actual_cols = self._table_contract(conn, table)
+                expected_cols = self._table_contract(expected, table)
+                if actual_cols != expected_cols:
+                    missing = expected_cols - actual_cols
+                    detail = f"（表 {table}"
+                    if missing:
+                        detail += " 缺失列/约束: " + ", ".join(sorted(map(str, missing)))[:200]
+                    detail += "）"
+                    raise V4ResetRequiredError(
+                        "数据库声明为 V4，但物理结构与唯一 V4 schema 不一致，需要一次性重置" + detail
+                    )
+            if self._index_contract(conn) != self._index_contract(expected):
+                raise V4ResetRequiredError(
+                    "数据库声明为 V4，但物理结构（索引）与唯一 V4 schema 不一致，需要一次性重置"
+                )
+            if self._trigger_contract(conn) != self._trigger_contract(expected):
+                raise V4ResetRequiredError(
+                    "数据库声明为 V4，但物理结构（触发器）与唯一 V4 schema 不一致，需要一次性重置"
+                )
         finally:
             expected.close()
-        actual_signature = self._schema_signature(conn)
-        if actual_signature != expected_signature:
-            raise V4ResetRequiredError(
-                "数据库声明为 V4，但物理结构与唯一 V4 schema 不一致，需要一次性重置"
-            )
 
     @staticmethod
-    def _schema_signature(conn: sqlite3.Connection) -> tuple[tuple[str, str, str], ...]:
-        rows = conn.execute(
-            """
-            SELECT type, name, sql
-            FROM sqlite_master
-            WHERE type IN ('table', 'index', 'trigger')
-              AND name NOT LIKE 'sqlite_%'
-              AND sql IS NOT NULL
-            ORDER BY type, name
-            """
+    def _table_contract(database: sqlite3.Connection, table: str) -> frozenset[tuple]:
+        """表逻辑合同：列名/声明类型/NOT NULL/默认值/主键位序，忽略物理列顺序（cid）。"""
+
+        rows = database.execute(f"PRAGMA table_info({table})").fetchall()
+        return frozenset(
+            (
+                str(row["name"]),
+                str(row["type"] or "").upper(),
+                int(row["notnull"] or 0),
+                _normalize_default(row["dflt_value"]),
+                int(row["pk"] or 0),
+            )
+            for row in rows
+        )
+
+    @staticmethod
+    def _index_contract(database: sqlite3.Connection) -> tuple[tuple[str, int, tuple[str, ...]], ...]:
+        """受管索引合同：非自动索引的名称、唯一性与列序。"""
+
+        contracts: list[tuple[str, int, tuple[str, ...]]] = []
+        tables = [
+            str(row["name"])
+            for row in database.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        ]
+        for table in sorted(tables):
+            for index in database.execute(f"PRAGMA index_list({table})").fetchall():
+                name = str(index["name"])
+                if name.startswith("sqlite_autoindex_"):
+                    continue
+                columns = tuple(
+                    str(row["name"])
+                    for row in database.execute(f"PRAGMA index_info({name})").fetchall()
+                )
+                contracts.append((name, int(index["unique"] or 0), columns))
+        return tuple(sorted(contracts))
+
+    @staticmethod
+    def _trigger_contract(database: sqlite3.Connection) -> frozenset[tuple[str, str]]:
+        """触发器合同：名称 + 规范化 DDL。"""
+
+        rows = database.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL"
         ).fetchall()
-        return tuple((str(row[0]), str(row[1]), " ".join(str(row[2]).split())) for row in rows)
+        return frozenset(
+            (str(row["name"]), " ".join(str(row["sql"]).split()))
+            for row in rows
+        )

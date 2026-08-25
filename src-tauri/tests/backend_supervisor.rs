@@ -116,7 +116,55 @@ fn a_legacy_backend_without_identity_is_labelled_explicitly() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. 健康检查等待循环（启动期 30 秒与重启期 30 秒共用）
+// P-009：重启失败提示按运行模式区分，且不泄漏凭据/Token
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+#[test]
+fn restart_failure_message_distinguishes_bundled_and_source_without_leaking_tokens() {
+    use supervisor::{restart_backend_with, BackendProcess};
+
+    let check_message = |kind: &str, token: &str| {
+        let stops = AtomicUsize::new(0);
+        let supervisor = ScriptedSupervisor {
+            stops: &stops,
+            start: Box::new(|| Ok(Some(spawn_sentinel_backend()))),
+            healthy: false,
+            timings: fast_timings(),
+        };
+        let context = RuntimeContext::new(
+            kind,
+            std::path::PathBuf::from(r"D:\KumiPlayer"),
+            "instance-under-test",
+            token,
+        );
+        let process = BackendProcess::new(None);
+        let result = restart_backend_with(&process, &context, &supervisor);
+        let message = result.expect_err("不健康时必须失败").to_string();
+        assert!(message.contains("未能恢复"), "提示应包含恢复失败信息：{message}");
+        assert!(!message.contains(token), "提示不得泄漏 API Token：{message}");
+        assert!(
+            !message.contains("token-under-test"),
+            "提示不得泄漏会话 Token：{message}"
+        );
+        message
+    };
+
+    let bundled = check_message("bundled", "secret-token-a");
+    let source = check_message("source", "secret-token-b");
+
+    assert!(
+        bundled.contains("内置后端") && bundled.contains("安装包"),
+        "bundled 失败提示应指向安装包运行时，实际：{bundled}"
+    );
+    assert!(
+        source.contains("开发版 Python 后端") && source.contains("诊断日志"),
+        "source 失败提示应指向开发版 Python 与诊断日志，实际：{source}"
+    );
+    assert_ne!(bundled, source, "两种运行模式的失败提示必须可区分");
+}
+
+
 // ---------------------------------------------------------------------------
 
 #[test]

@@ -392,7 +392,16 @@ pub fn restart_backend_with(
 
     // 新后端起来了却始终不健康：必须先清理，否则它会脱离桌面壳管理继续占着端口。
     supervisor.stop(process)?;
-    Err("后端在 30 秒内未能恢复，请打开日志查看详细信息".to_string())
+    let log_path = diagnostic_log_path(context).unwrap_or_else(|_| PathBuf::from("后端诊断日志"));
+    let reason = if context.kind == "bundled" {
+        "内置后端在 30 秒内未能恢复（可能安装包运行时缺失或损坏），请重新安装完整版本"
+    } else {
+        "开发版 Python 后端在 30 秒内未能恢复，请检查本机 Python 环境与依赖"
+    };
+    Err(format!(
+        "{reason}；后端启动 stderr 已写入诊断日志：{}",
+        log_path.display()
+    ))
 }
 
 pub fn protect_backend(mut child: Child) -> Result<ManagedBackend, String> {
@@ -404,6 +413,21 @@ pub fn protect_backend(mut child: Child) -> Result<ManagedBackend, String> {
             Err(error)
         }
     }
+}
+
+/// P-009：诊断日志路径（backend-stderr.log，按运行模式定位 data 目录）。
+fn diagnostic_log_path(context: &RuntimeContext) -> Result<PathBuf, String> {
+    let data_dir = data_dir_for(context)?;
+    let logs_dir = data_dir.join("logs");
+    std::fs::create_dir_all(&logs_dir)
+        .map_err(|error| format!("无法创建诊断日志目录：{error}"))?;
+    Ok(logs_dir.join("backend-stderr.log"))
+}
+
+/// P-009：打开诊断日志（截断旧内容，保证单次启动有界）。
+fn diagnostic_log_file(context: &RuntimeContext) -> Result<std::fs::File, String> {
+    let path = diagnostic_log_path(context)?;
+    std::fs::File::create(path).map_err(|error| format!("无法打开诊断日志：{error}"))
 }
 
 fn start_bundled_backend(context: &RuntimeContext) -> Result<Option<ManagedBackend>, String> {
@@ -419,7 +443,7 @@ fn start_bundled_backend(context: &RuntimeContext) -> Result<Option<ManagedBacke
     let child = command
         .current_dir(runtime_dir)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(diagnostic_log_file(context)?))
         .spawn()
         .map_err(|error| format!("内置后端无法启动，安装包可能不完整：{error}"))?;
     protect_backend(child).map(Some)
@@ -450,7 +474,7 @@ fn start_python_backend(context: &RuntimeContext) -> Result<ManagedBackend, Stri
         .arg(BACKEND_PORT.to_string())
         .current_dir(&backend_dir)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(diagnostic_log_file(context)?))
         .spawn()
         .map_err(|error| format!("无法启动 Python 后端：{error}"))?;
     protect_backend(child)
