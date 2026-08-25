@@ -19,6 +19,7 @@ export interface V4ExecutionProgressProps {
 }
 
 const STAGE_KEYS = ['mirror', 'metadata', 'projection'] as const
+const COMPLETED_PREVIEW_COUNT = 4
 
 function StageSummary({ stageKey, progress }: { stageKey: (typeof STAGE_KEYS)[number]; progress: V4ExecutionProgress }) {
   const summary = progress.stage_summary[stageKey]
@@ -70,6 +71,7 @@ export function V4ExecutionProgress({ progress, busyRetryId, onRetry }: V4Execut
   const sorted = sortWorkUnits(progress.work_units)
   const active = sorted.filter((unit) => unit.overall_status !== 'completed')
   const completed = sorted.filter((unit) => unit.overall_status === 'completed')
+  const visibleCompleted = completedOpen ? completed : completed.slice(0, COMPLETED_PREVIEW_COUNT)
   const mirrorTotal = progress.stage_summary.mirror.total
   const mirrorDone = progress.stage_summary.mirror.succeeded + progress.stage_summary.mirror.failed + progress.stage_summary.mirror.cancelled
   const percent = mirrorTotal > 0 ? Math.round((mirrorDone / mirrorTotal) * 100) : 0
@@ -100,14 +102,15 @@ export function V4ExecutionProgress({ progress, busyRetryId, onRetry }: V4Execut
       </div>
       {completed.length > 0 && (
         <div className="media-v4-completed-block">
-          <button type="button" className="media-v4-completed-toggle" aria-expanded={completedOpen} onClick={() => setCompletedOpen((value) => !value)}>
-            {completedOpen ? <ChevronDown24Regular aria-hidden="true" /> : <ChevronRight24Regular aria-hidden="true" />}
-            <span>已完成 {completed.length} 部</span>
-          </button>
-          {completedOpen && (
-            <div className="media-v4-work-progress-list">
-              {completed.map((unit) => <WorkUnit key={unit.work_id} unit={unit} busyRetryId={busyRetryId} onRetry={onRetry} />)}
-            </div>
+          <div className="media-v4-completed-heading"><strong>已完成 {completed.length} 部</strong><span>可展开查看每部作品的执行结果</span></div>
+          <div className="media-v4-work-progress-list">
+            {visibleCompleted.map((unit) => <WorkUnit key={unit.work_id} unit={unit} busyRetryId={busyRetryId} onRetry={onRetry} />)}
+          </div>
+          {completed.length > COMPLETED_PREVIEW_COUNT && (
+            <button type="button" className="media-v4-completed-toggle" aria-expanded={completedOpen} onClick={() => setCompletedOpen((value) => !value)}>
+              {completedOpen ? <ChevronDown24Regular aria-hidden="true" /> : <ChevronRight24Regular aria-hidden="true" />}
+              <span>{completedOpen ? '收起已完成作品' : `显示其余 ${completed.length - COMPLETED_PREVIEW_COUNT} 部`}</span>
+            </button>
           )}
         </div>
       )}

@@ -161,6 +161,24 @@ test('维护入口在默认路径可见并展示孤儿历史影响', async () =>
   expect(await screen.findByText(/播放历史/)).toBeVisible()
 })
 
+test('维护预览以内容来源摘要展示，不泄露内部来源根 ID', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
+  api.maintenancePreview.mockResolvedValue({
+    preview_id: 'prev-readable', scope: 'all', created_at: '2026-08-25T00:00:00Z', expires_at: '2026-08-25T02:00:00Z',
+    root_ids: ['root_internal_115_a', 'root_internal_115_b'], root_count: 2, work_count: 2, orphan_work_count: 1, mixed_work_count: 1, asset_count: 3, artifact_count: 2,
+    artifact_summaries: ['115/动画/封面.jpg'], blocked: false, blocked_job_count: 0, blocked_job_types: [],
+    history_count: 1, progress_count: 1, tracking_count: 1, warnings: [],
+    root_names: [{ root_id: 'root_internal_115_a', provider: 'pan115' }, { root_id: 'root_internal_115_b', provider: 'pan115' }], digest: 'd'.repeat(64),
+  })
+  render(<MediaManagementPage />)
+  await screen.findByText('115 动画')
+  fireEvent.click(screen.getByRole('button', { name: '媒体库维护' }))
+  fireEvent.click(await screen.findByRole('button', { name: '生成删除预览' }))
+
+  expect(await screen.findByText('115 网盘 · 2 个来源')).toBeVisible()
+  expect(screen.queryByText(/root_internal_115/)).not.toBeInTheDocument()
+})
+
 test('确认来源清理后刷新来源卡，并按实际失败状态提示', async () => {
   api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
   api.maintenanceConfirm.mockResolvedValue({
@@ -194,6 +212,8 @@ test('来源卡使用双区布局（左身份/右规模预览进度）', async (
   expect(identity!.textContent).toContain('OpenList 扫描')
   expect(scale!.textContent).toContain('3 部作品')
   expect(scale!.textContent).toContain('摇曳露营')
+  expect(screen.getByRole('list', { name: '作品预览' })).toBeVisible()
+  expect(screen.getByRole('listitem', { name: '摇曳露营' })).toBeVisible()
 })
 
 test('部分失败后显示重试按钮并调用 resume API', async () => {

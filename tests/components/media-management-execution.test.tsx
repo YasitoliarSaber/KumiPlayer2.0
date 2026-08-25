@@ -253,7 +253,7 @@ test('失败作品显示原因并可精确重试', async () => {
   await waitFor(() => expect(tasks.retry).toHaveBeenCalledWith('mirror-w-bad'))
 })
 
-test('完成作品默认折叠且支持键盘展开', async () => {
+test('完成作品保留可见的作品摘要，避免完成页只剩总数', async () => {
   const units = [
     workUnit('w-run', '运行中作品', 'running_mirror'),
     workUnit('w-done', '已完成作品', 'completed'),
@@ -282,10 +282,6 @@ test('完成作品默认折叠且支持键盘展开', async () => {
 
   await waitFor(() => expect(screen.getByText('运行中作品')).toBeVisible())
   expect(screen.getByText('已完成 1 部')).toBeVisible()
-  const toggle = screen.getByRole('button', { name: /已完成 1 部/ })
-  expect(toggle).toHaveAttribute('aria-expanded', 'false')
-  fireEvent.click(toggle)
-  expect(toggle).toHaveAttribute('aria-expanded', 'true')
   expect(await screen.findByText('已完成作品')).toBeVisible()
 })
 

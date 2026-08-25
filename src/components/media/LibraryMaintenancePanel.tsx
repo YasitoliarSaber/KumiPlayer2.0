@@ -19,12 +19,25 @@ export interface LibraryMaintenancePanelProps {
 }
 
 const SCOPES = [
-  { value: 'all', label: '全部来源' },
-  { value: 'local', label: '本地' },
-  { value: 'pan115', label: '115 网盘' },
-  { value: 'baidu', label: '百度网盘' },
-  { value: 'quark', label: '夸克网盘' },
+  { value: 'all', label: '全部来源', description: '清理所有已导入的媒体库来源' },
+  { value: 'local', label: '本地', description: '只清理本机物理磁盘的媒体库记录' },
+  { value: 'pan115', label: '115 网盘', description: '只清理来自 115 网盘的媒体库记录' },
+  { value: 'baidu', label: '百度网盘', description: '只清理来自百度网盘的媒体库记录' },
+  { value: 'quark', label: '夸克网盘', description: '只清理来自夸克网盘的媒体库记录' },
 ]
+
+const PROVIDER_LABELS: Record<string, string> = {
+  local: '本地',
+  pan115: '115 网盘',
+  baidu: '百度网盘',
+  quark: '夸克网盘',
+}
+
+function sourceGroups(roots: V4MaintenancePreview['root_names']): string[] {
+  const counts = new Map<string, number>()
+  for (const root of roots) counts.set(root.provider, (counts.get(root.provider) ?? 0) + 1)
+  return [...counts.entries()].map(([provider, count]) => `${PROVIDER_LABELS[provider] ?? provider} · ${count} 个来源`)
+}
 
 export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }: LibraryMaintenancePanelProps) {
   const [scope, setScope] = useState('all')
@@ -87,7 +100,14 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
 
       <div className="media-v4-maintenance-scope">
         <RadioGroup value={scope} onChange={(_, data) => { setScope(data.value); setPreview(null); setResult(null); setError('') }} aria-label="清理来源范围">
-          {SCOPES.map((option) => <Radio key={option.value} value={option.value} label={option.label} />)}
+          {SCOPES.map((option) => (
+            <Radio
+              key={option.value}
+              className="media-v4-maintenance-scope-option"
+              value={option.value}
+              label={<span className="media-v4-maintenance-scope-copy"><strong>{option.label}</strong><span>{option.description}</span></span>}
+            />
+          ))}
         </RadioGroup>
       </div>
 
@@ -107,8 +127,8 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
           )}
           {preview.root_names.length > 0 && (
             <div className="media-v4-maintenance-root-names">
-              <span>将退役来源：</span>
-              {preview.root_names.map((root) => <em key={root.root_id}>{root.root_id}</em>)}
+              <span>将退役来源</span>
+              <div>{sourceGroups(preview.root_names).map((group) => <em key={group}>{group}</em>)}</div>
             </div>
           )}
           <div className="media-v4-summary-numbers">
