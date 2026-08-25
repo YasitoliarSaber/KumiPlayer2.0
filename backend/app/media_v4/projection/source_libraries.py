@@ -1,6 +1,6 @@
 """P-005：来源卡只读 read model。
 
-聚合活动来源根的权威事实：首次/最近确认时间、作品规模、紧凑作品预览与
+聚合活动来源根的权威事实：首次/最近确认时间、作品规模与
 P-003 作品级进度。所有 membership 只来自最新活动 confirmed revision 的
 revision_bindings，不按标题/路径猜测；退役来源统一过滤。
 """
@@ -97,7 +97,6 @@ def list_source_cards(database: V4Database) -> list[dict]:
         job_summary = summaries.get(str(row["revision_id"]), {
             "total": 0, "queued": 0, "running": 0, "succeeded": 0, "failed": 0, "cancelled": 0,
         })
-        work_previews = _work_previews(database, str(row["revision_id"]), progress)
         cards.append({
             "root_id": str(row["root_id"]),
             "provider": str(row["provider"] or ""),
@@ -125,7 +124,6 @@ def list_source_cards(database: V4Database) -> list[dict]:
                 if unit.get("overall_status") in {"failed", "cancelled", "needs_attention"}
             ),
             "last_error": _first_error(progress),
-            "work_previews": work_previews,
             "progress": {
                 "state": progress.get("overall_status") or "completed",
                 "stage": _progress_stage(progress),
@@ -153,47 +151,6 @@ def _safe_progress(progress_service: V4RevisionService, revision_id: str) -> dic
         return progress_service.get_execution_progress(revision_id)
     except KeyError:
         return {}
-
-
-def _work_previews(database: V4Database, revision_id: str, progress: dict) -> list[dict]:
-    current_work_ids = {
-        str(unit["work_id"])
-        for unit in progress.get("work_units") or []
-        if unit.get("overall_status") in {"running_mirror", "running_metadata"}
-    }
-    with database.connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT
-                w.work_id, w.preferred_title AS title, w.year, w.work_type,
-                (SELECT COUNT(DISTINCT rb2.episode_id) FROM revision_bindings rb2
-                 WHERE rb2.revision_id = ? AND rb2.work_id = w.work_id) AS episode_count,
-                (SELECT COUNT(DISTINCT rb3.asset_id) FROM revision_bindings rb3
-                 WHERE rb3.revision_id = ? AND rb3.work_id = w.work_id AND rb3.asset_id IS NOT NULL) AS asset_count
-            FROM revision_bindings rb
-            JOIN works w ON w.work_id = rb.work_id
-            WHERE rb.revision_id = ? AND rb.work_id != ''
-            GROUP BY w.work_id
-            ORDER BY
-                CASE WHEN w.work_id IN ({current}) THEN 0 ELSE 1 END,
-                w.preferred_title COLLATE NOCASE,
-                w.work_id
-            LIMIT 6
-            """.format(current=",".join("?" for _ in current_work_ids)),
-            (revision_id, revision_id, revision_id, *current_work_ids),
-        ).fetchall()
-    return [
-        {
-            "work_id": str(row["work_id"]),
-            "title": str(row["title"] or row["work_id"]),
-            "year": row["year"],
-            "media_type": "movie" if str(row["work_type"] or "") == "movie" else "tv",
-            "poster_path": "",
-            "episode_count": int(row["episode_count"] or 0),
-            "asset_count_for_source": int(row["asset_count"] or 0),
-        }
-        for row in rows
-    ]
 
 
 def _first_error(progress: dict) -> str:
@@ -246,10 +203,9 @@ def _progress_percent(progress: dict) -> int | None:
 def _progress_message(progress: dict) -> str:
     overall = progress.get("overall_status")
     if overall == "running":
-        title = _current_work_title(progress)
         stage = _progress_stage(progress)
         label = {"mirror": "正在生成镜像", "metadata": "正在获取媒体信息", "projection": "正在更新媒体库"}.get(stage, "处理中")
-        return f"{label}" + (f"《{title}》" if title else "")
+        return label
     if overall == "needs_attention":
         return "有任务需要处理"
     if overall == "queued":

@@ -773,7 +773,7 @@ export default function MediaManagementPage() {
           {pageMode === 'overview' ? (
             <>
               <Button appearance="subtle" icon={<ShieldCheckmark24Regular />} onClick={() => setPageMode('maintenance')}>媒体库维护</Button>
-              <Button className="media-primary-command" appearance="primary" icon={<Add24Regular />} onClick={() => setPageMode('import')}>导入媒体</Button>
+              <Button className="media-primary-command" appearance="primary" icon={<Add24Regular />} onClick={startNewImport}>导入媒体</Button>
             </>
           ) : (
             <Button appearance="subtle" icon={<ArrowLeft24Regular />} onClick={() => setPageMode('overview')}>返回媒体管理</Button>
@@ -802,17 +802,15 @@ export default function MediaManagementPage() {
                 <span className={`media-v4-source-card-state media-v4-source-card-state-${card.overall_status ?? 'completed'}`}>{card.overall_status === 'running' ? '进行中' : card.overall_status === 'needs_attention' ? '需要处理' : card.overall_status === 'queued' ? '等待中' : '已完成'}</span>
                 <strong title={card.display_name}>{card.display_name}</strong>
                 <span className="media-v4-source-card-times">添加于 {formatDate(card.added_at)} · 最近更新 {formatDate(card.updated_at)}</span>
-                <span className="media-v4-source-card-origin">已确认媒体来源</span>
                 {card.last_error && <span className="media-v4-source-card-error" role="alert">{card.last_error}</span>}
                 {card.attention_count > 0 && <span className="media-v4-source-card-attention">有 {card.attention_count} 部作品需要处理</span>}
               </div>
               <div className="media-v4-source-card-scale">
                 <div className="media-v4-source-card-stats"><span>{card.work_count} 部作品</span><span>{card.asset_count} 个文件</span></div>
-                {(card.work_previews ?? []).length > 0 && <ul className="media-v4-source-card-previews" aria-label="作品预览">{(card.work_previews ?? []).slice(0, 6).map((work) => <li key={work.work_id} aria-label={work.title} title={`${work.title} · ${work.asset_count_for_source} 个文件`}>{work.title}</li>)}{card.work_count > 6 ? <li className="media-v4-source-card-more">还有 {card.work_count - 6} 部</li> : null}</ul>}
                 <div className="media-v4-source-card-progress"><div><span>{card.progress?.message || progressLabel}</span><span>{card.progress?.state === 'running' ? `${card.progress.completed_work_count}/${card.progress.total_work_count} 部` : ''}</span></div>{card.progress?.state === 'running' && card.progress.percent != null ? <i aria-hidden="true"><b style={{ width: `${card.progress.percent}%` }} /></i> : card.progress?.state === 'queued' ? <i className="media-v4-source-card-indeterminate" aria-hidden="true" /> : null}</div>
                 <div className="media-v4-source-card-actions">
-                  <Button appearance={card.can_resume ? 'primary' : 'secondary'} onClick={() => void resumeSourceCard(card)}>{card.can_resume ? '查看进度' : '查看上次导入'}</Button>
-                  <Button appearance={card.can_resume ? 'secondary' : 'primary'} icon={<ArrowSync24Regular />} disabled={active} onClick={() => prepareSourceUpdate(card)}>检查更新</Button>
+                  <Button className={`media-v4-source-card-action ${card.can_resume ? 'primary' : 'secondary'}`} appearance={card.can_resume ? 'primary' : 'secondary'} icon={<Database24Regular />} onClick={() => void resumeSourceCard(card)}>{card.can_resume ? '查看进度' : '查看上次导入'}</Button>
+                  <Button className={`media-v4-source-card-action ${card.can_resume ? 'secondary' : 'primary'}`} appearance={card.can_resume ? 'secondary' : 'primary'} icon={<ArrowSync24Regular />} disabled={active} onClick={() => prepareSourceUpdate(card)}>检查更新</Button>
                 </div>
               </div>
             </article>
@@ -842,7 +840,7 @@ export default function MediaManagementPage() {
       {!sourceCardsLoading && sourceCards.length === 0 && drafts.length === 0 && (
         <section className="media-v4-source-empty" aria-label="空媒体库">
           <div className="media-v4-empty"><strong>还没有导入任何媒体库</strong><span>点击“导入媒体”开始建立你的第一个来源。</span></div>
-          <Button className="media-primary-command" appearance="primary" icon={<Add24Regular />} onClick={() => setPageMode('import')}>导入媒体</Button>
+          <Button className="media-primary-command" appearance="primary" icon={<Add24Regular />} onClick={startNewImport}>导入媒体</Button>
         </section>
       )}
       </>}

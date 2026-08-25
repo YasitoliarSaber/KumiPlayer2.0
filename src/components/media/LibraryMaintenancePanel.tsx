@@ -9,20 +9,14 @@
 import { useState } from 'react'
 import {
   Button,
-  Dialog,
-  DialogActions,
-  DialogBody,
-  DialogContent,
-  DialogSurface,
-  DialogTitle,
-  DialogTrigger,
+  Checkbox,
   MessageBar,
   MessageBarBody,
   Radio,
   RadioGroup,
   Spinner,
 } from '@fluentui/react-components'
-import { Delete24Regular, ShieldCheckmark24Regular } from '@fluentui/react-icons/fonts'
+import { Delete24Regular, ShieldCheckmark24Regular } from '@fluentui/react-icons'
 import type { V4MaintenancePreview, V4MaintenanceResult } from '../../api/mediaV4'
 
 export interface LibraryMaintenancePanelProps {
@@ -78,7 +72,7 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
   const [previewing, setPreviewing] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [resuming, setResuming] = useState(false)
-  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [confirmationChecked, setConfirmationChecked] = useState(false)
 
   const generatePreview = async () => {
     setError('')
@@ -87,6 +81,7 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
     try {
       const next = await onPreview(scope)
       setPreview(next)
+      setConfirmationChecked(false)
     } catch (cause) {
       setError(maintenanceError(cause, '生成删除预览失败'))
     } finally {
@@ -116,7 +111,7 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
       const next = await onConfirm(preview)
       setResult(next)
       setPreview(null)
-      setConfirmOpen(false)
+      setConfirmationChecked(false)
     } catch (cause) {
       setError(maintenanceError(cause, '删除失败'))
     } finally {
@@ -135,7 +130,7 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
         <div className="media-v4-maintenance-section-heading">
           <div><strong>清理范围</strong><span>只选择内容来源；OpenList 是导入方式，不作为清理范围。</span></div>
         </div>
-        <RadioGroup value={scope} onChange={(_, data) => { setScope(data.value); setPreview(null); setResult(null); setError('') }} aria-label="清理来源范围">
+        <RadioGroup value={scope} onChange={(_, data) => { setScope(data.value); setPreview(null); setResult(null); setError(''); setConfirmationChecked(false) }} aria-label="清理来源范围">
           {SCOPES.map((option) => (
             <Radio
               key={option.value}
@@ -188,9 +183,14 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
             </div>
           </div>
           <div className="media-v4-maintenance-confirm">
-            <span>确认后将标记来源退役，并精确清理预览列出的受控生成物。</span>
-            <Button appearance="primary" icon={<Delete24Regular />} disabled={busy || confirming || preview.blocked} onClick={() => setConfirmOpen(true)}>
-              继续确认清理
+            <Checkbox
+              checked={confirmationChecked}
+              disabled={busy || confirming || preview.blocked}
+              label="我已确认清理范围；源视频、外部 TXT 和设置不会被删除"
+              onChange={(_, data) => setConfirmationChecked(Boolean(data.checked))}
+            />
+            <Button className="media-v4-maintenance-danger-button" appearance="primary" icon={<Delete24Regular />} disabled={!confirmationChecked || busy || confirming || preview.blocked} onClick={() => void confirmDelete()}>
+              {confirming ? <><Spinner size="tiny" />正在清理</> : '确认清理'}
             </Button>
           </div>
         </div>
@@ -221,27 +221,6 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
           </div>
         </div>
       )}
-
-      <Dialog open={confirmOpen} onOpenChange={(_, data) => setConfirmOpen(data.open)}>
-        <DialogSurface className="media-v4-maintenance-dialog">
-          <DialogBody>
-            <DialogTitle>确认清理媒体库记录？</DialogTitle>
-            <DialogContent>
-              {preview
-                ? `将退役 ${preview.root_count} 个来源根，并从媒体库移除 ${preview.orphan_work_count} 部不再有其他来源的作品。源视频、外部 TXT、网盘对象、设置与凭据不会被删除。`
-                : '删除预览已失效，请重新生成。'}
-            </DialogContent>
-            <DialogActions>
-              <DialogTrigger disableButtonEnhancement>
-                <Button appearance="secondary" disabled={confirming}>取消</Button>
-              </DialogTrigger>
-              <Button className="media-v4-maintenance-danger-button" appearance="primary" icon={<Delete24Regular />} disabled={!preview || busy || confirming || preview?.blocked} onClick={() => void confirmDelete()}>
-                {confirming ? <><Spinner size="tiny" />正在清理</> : '确认清理'}
-              </Button>
-            </DialogActions>
-          </DialogBody>
-        </DialogSurface>
-      </Dialog>
     </section>
   )
 }

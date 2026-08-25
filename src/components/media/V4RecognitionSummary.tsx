@@ -8,7 +8,7 @@
 
 import { useState } from 'react'
 import { Button, Dialog, DialogActions, DialogBody, DialogContent, DialogSurface, DialogTitle, Input, Select } from '@fluentui/react-components'
-import { ChevronDown24Regular, ChevronRight24Regular, Dismiss24Regular, Warning24Regular } from '@fluentui/react-icons/fonts'
+import { ChevronDown24Regular, ChevronRight24Regular, Dismiss24Regular, Warning24Regular } from '@fluentui/react-icons'
 import type { V4Preview, V4ReviewIssue, V4SourceEvidence } from '../../api/mediaV4'
 import { buildWorkSummaries, type RecognitionSummary, type WorkSummary } from '../../lib/mediaSummary'
 

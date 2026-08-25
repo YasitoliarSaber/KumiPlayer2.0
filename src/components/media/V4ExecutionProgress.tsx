@@ -8,7 +8,7 @@
 
 import { useState } from 'react'
 import { Button, ProgressBar } from '@fluentui/react-components'
-import { CheckmarkCircle24Filled, ChevronDown24Regular, ChevronRight24Regular, DismissCircle24Regular, ErrorCircle24Regular, SpinnerIosRegular } from '@fluentui/react-icons/fonts'
+import { CheckmarkCircle24Filled, ChevronDown24Regular, ChevronRight24Regular, DismissCircle24Regular, ErrorCircle24Regular, SpinnerIosRegular } from '@fluentui/react-icons'
 import type { V4ExecutionProgress, V4WorkProgressUnit } from '../../api/mediaV4'
 import { STAGE_LABELS, WORK_PROGRESS_LABELS, sortWorkUnits } from '../../lib/mediaSummary'
 

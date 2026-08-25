@@ -199,17 +199,18 @@ test('全选预览会说明未确认来源被安全跳过，而不泄露内部�
   expect(screen.queryByText(/root-draft|root-baidu/)).not.toBeInTheDocument()
 })
 
-test('危险清理在 Fluent 确认对话框中二次确认后才提交', async () => {
+test('危险清理必须经确认复选框后才能提交', async () => {
   api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
   render(<MediaManagementPage />)
   await screen.findByText('115 动画')
   fireEvent.click(screen.getByRole('button', { name: '媒体库维护' }))
   fireEvent.click(await screen.findByRole('button', { name: '生成删除预览' }))
 
-  fireEvent.click(await screen.findByRole('button', { name: '继续确认清理' }))
-  expect(await screen.findByRole('dialog')).toBeVisible()
+  const confirm = await screen.findByRole('button', { name: '确认清理' })
+  expect(confirm).toBeDisabled()
   expect(api.maintenanceConfirm).not.toHaveBeenCalled()
-  fireEvent.click(screen.getByRole('button', { name: '确认清理' }))
+  fireEvent.click(screen.getByRole('checkbox', { name: '我已确认清理范围；源视频、外部 TXT 和设置不会被删除' }))
+  fireEvent.click(confirm)
   await waitFor(() => expect(api.maintenanceConfirm).toHaveBeenCalled())
 })
 
@@ -225,7 +226,7 @@ test('确认来源清理后刷新来源卡，并按实际失败状态提示', as
   await screen.findByText('115 动画')
   fireEvent.click(screen.getByRole('button', { name: '媒体库维护' }))
   fireEvent.click(await screen.findByRole('button', { name: '生成删除预览' }))
-  fireEvent.click(await screen.findByRole('button', { name: '继续确认清理' }))
+  fireEvent.click(await screen.findByRole('checkbox', { name: '我已确认清理范围；源视频、外部 TXT 和设置不会被删除' }))
   fireEvent.click(await screen.findByRole('button', { name: '确认清理' }))
 
   expect(await screen.findByText(/部分受控生成物清理失败/)).toBeVisible()
@@ -234,7 +235,7 @@ test('确认来源清理后刷新来源卡，并按实际失败状态提示', as
 })
 
 
-test('来源卡使用双区布局（左身份/右规模预览进度）', async () => {
+test('来源卡只保留来源摘要和 Fluent 操作按钮', async () => {
   api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
   const { container } = render(<MediaManagementPage />)
   await screen.findByText('115 动画')
@@ -246,9 +247,10 @@ test('来源卡使用双区布局（左身份/右规模预览进度）', async (
   expect(identity!.textContent).toContain('115 网盘')
   expect(identity!.textContent).toContain('OpenList 扫描')
   expect(scale!.textContent).toContain('3 部作品')
-  expect(scale!.textContent).toContain('摇曳露营')
-  expect(screen.getByRole('list', { name: '作品预览' })).toBeVisible()
-  expect(screen.getByRole('listitem', { name: '摇曳露营' })).toBeVisible()
+  expect(scale!.textContent).not.toContain('摇曳露营')
+  expect(screen.queryByRole('list', { name: '作品预览' })).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '查看进度' })).toBeVisible()
+  expect(screen.getByRole('button', { name: '检查更新' })).toBeVisible()
 })
 
 test('部分失败后显示重试按钮并调用 resume API', async () => {
@@ -265,7 +267,7 @@ test('部分失败后显示重试按钮并调用 resume API', async () => {
   fireEvent.click(screen.getByRole('button', { name: '媒体库维护' }))
   await screen.findByRole('heading', { name: '按来源清理' })
   fireEvent.click(screen.getByRole('button', { name: '生成删除预览' }))
-  fireEvent.click(await screen.findByRole('button', { name: '继续确认清理' }))
+  fireEvent.click(await screen.findByRole('checkbox', { name: '我已确认清理范围；源视频、外部 TXT 和设置不会被删除' }))
   fireEvent.click(await screen.findByRole('button', { name: '确认清理' }))
 
   expect(await screen.findByText(/部分受控生成物清理失败/)).toBeVisible()

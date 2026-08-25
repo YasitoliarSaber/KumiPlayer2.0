@@ -78,16 +78,6 @@ export interface V4LibraryCard {
   asset_count: number
 }
 
-export interface V4WorkPreview {
-  work_id: string
-  title: string
-  year: number | null
-  media_type: 'tv' | 'movie'
-  poster_path: string
-  episode_count: number
-  asset_count_for_source: number
-}
-
 export interface V4SourceLibraryCard {
   root_id: string
   provider: string
@@ -111,7 +101,6 @@ export interface V4SourceLibraryCard {
   evidence_count: number
   work_count: number
   asset_count: number
-  work_previews: V4WorkPreview[]
   progress: {
     state: string
     stage: string

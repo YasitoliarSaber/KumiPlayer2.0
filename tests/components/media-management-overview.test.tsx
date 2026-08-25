@@ -115,7 +115,7 @@ test('空媒体库只显示空状态与导入主按钮', async () => {
   expect(screen.queryByRole('navigation', { name: '导入步骤' })).not.toBeInTheDocument()
 })
 
-test('来源卡显示真实来源、添加/更新时间、作品预览与用户级进度', async () => {
+test('来源卡只显示来源摘要与操作，不展示具体作品名', async () => {
   api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
   render(<MediaManagementPage />)
 
@@ -126,13 +126,26 @@ test('来源卡显示真实来源、添加/更新时间、作品预览与用户�
   expect(screen.queryByText('OpenList 来源')).not.toBeInTheDocument()
   expect(screen.getByText(/添加于 2026-08-20/)).toBeVisible()
   expect(screen.getByText(/更新于 2026-08-24/)).toBeVisible()
-  // 作品预览与规模主信息。
-  expect(screen.getByText('摇曳露营')).toBeVisible()
-  expect(screen.getByText('孤独摇滚')).toBeVisible()
+  // 卡片只承担来源管理，不重复展示作品库内容。
+  expect(screen.queryByText('摇曳露营')).not.toBeInTheDocument()
+  expect(screen.queryByText('孤独摇滚')).not.toBeInTheDocument()
+  expect(screen.queryByRole('list', { name: '作品预览' })).not.toBeInTheDocument()
   expect(screen.getByText('3 部作品')).toBeVisible()
   // 用户级进度而非 raw 任务数。
   expect(screen.getByText('上次导入已处理完毕')).toBeVisible()
   expect(screen.queryByText(/6 个任务/)).not.toBeInTheDocument()
+})
+
+test('新导入不会恢复到保存的上次执行步骤', async () => {
+  localStorage.setItem('kumiplayer.media-v4.active-revision', 'rev-existing')
+  api.status.mockResolvedValue({ revision_id: 'rev-existing', status: 'confirmed', jobs: [], progress: null })
+  render(<MediaManagementPage />)
+
+  await screen.findByRole('heading', { name: '媒体库' })
+  fireEvent.click(screen.getByRole('button', { name: '导入媒体' }))
+
+  expect(await screen.findByRole('button', { name: '本地目录' })).toBeVisible()
+  expect(screen.getByRole('navigation', { name: '导入步骤' }).querySelector('li[aria-current="step"]')?.textContent).toContain('选择来源')
 })
 
 test('媒体库维护入口生成预览并分组展示', async () => {
@@ -159,7 +172,7 @@ test('删除确认调用 maintenance API 并展示逐项结果', async () => {
   fireEvent.click(screen.getByRole('button', { name: '媒体库维护' }))
   await screen.findByRole('heading', { name: '按来源清理' })
   fireEvent.click(screen.getByRole('button', { name: '生成删除预览' }))
-  fireEvent.click(await screen.findByRole('button', { name: '继续确认清理' }))
+  fireEvent.click(await screen.findByRole('checkbox', { name: '我已确认清理范围；源视频、外部 TXT 和设置不会被删除' }))
   fireEvent.click(await screen.findByRole('button', { name: '确认清理' }))
 
   await waitFor(() => expect(api.maintenanceConfirm).toHaveBeenCalledWith({

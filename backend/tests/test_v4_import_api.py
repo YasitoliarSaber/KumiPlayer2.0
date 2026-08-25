@@ -351,6 +351,8 @@ def test_confirmed_source_has_a_reopenable_card_with_live_job_summary(tmp_path, 
     assert card["job_summary"]["total"] > 0
     assert card["job_summary"]["queued"] > 0
     assert card["can_resume"] is True
+    # 来源卡是来源管理入口，不携带作品名预览，避免重复投影和无关查询。
+    assert "work_previews" not in card
 
 
 def test_source_card_list_omits_unconfirmed_drafts(tmp_path, monkeypatch):
