@@ -65,7 +65,8 @@ _AUXILIARY_PATTERNS = [
     re.compile(r"\[PV\d*\]", re.IGNORECASE),
     re.compile(r"(?:^|[^A-Za-z])PV\d+", re.IGNORECASE),
     re.compile(r"(?:^|[^A-Za-z])PV(?:\s|$|[([])", re.IGNORECASE),
-    re.compile(r"[\[【]MV(?:\s+[^\]】]+)?[\]】]", re.IGNORECASE),
+    re.compile(r"[\[【]MV\d*(?:\s+[^\]】]+)?[\]】]", re.IGNORECASE),
+    re.compile(r"[\[【]TEASER\d*[\]】]", re.IGNORECASE),
     re.compile(r"\[CM\d*\]", re.IGNORECASE),
     re.compile(r"(?:^|[^A-Za-z])CM\d+", re.IGNORECASE),
     re.compile(r"\[MENU\d*\]", re.IGNORECASE),
@@ -368,20 +369,25 @@ def _extract_top_category(relative_path: str, source: str = "pan115") -> str:
 
 
 def _extract_local_series_container(relative_path: str, source: str = "pan115") -> str:
-    """提取本地合集根目录作为系列容器。
+    """提取用户整理的合集根目录作为系列容器。
 
-    本地库经常是：
+    本地库与目录树都可能是：
     [VCB-Studio] Yuru Camp / Yuru Camp / ...
     [VCB-Studio] Yuru Camp / Yuru Camp Season 2 / ...
+    动画 / 摇曳露营 系列 / 房间露营 / ...
 
-    这种第一层不是作品本身的季，而是用户整理好的系列合集。后续生成
-    LibraryIndex 时应按这个系列聚合，而不是把每个季度拆成卡片。
+    这种容器不是作品本身的季。显式季度仍归主系列；标题明显不同且不是
+    季度目录的子作品应保留独立身份。该结构事实与来源协议无关，不能只对
+    本地扫描生效。
     """
-    if source != "local":
-        return ""
     parts = [p for p in relative_path.replace("\\", "/").split("/") if p]
-    if len(parts) >= 3 and _is_local_collection_dir(parts[0]):
+    if source == "local" and len(parts) >= 3 and _is_local_collection_dir(parts[0]):
         return parts[0]
+    work_index = _source_work_index(parts, source)
+    if work_index is not None and len(parts) >= work_index + 3:
+        container = parts[work_index]
+        if _is_local_collection_dir(container):
+            return container
     return ""
 
 
@@ -659,7 +665,7 @@ def _check_auxiliary(filename: str, parent_dirs: list[str]) -> MediaGuess | None
 
 def _extract_auxiliary_title(filename: str) -> str:
     """从文件名提取附属视频标题。"""
-    m = re.search(r"(PV\s*\d*|CM\s*\d*|MV\s*\d*|MENU\s*\d*|TRAILER\s*\d*|EYECATCH\s*\d*|TV\s*SPOT\s*\d*)", filename, re.IGNORECASE)
+    m = re.search(r"(PV\s*\d*|CM\s*\d*|MV\s*\d*|MENU\s*\d*|TRAILER\s*\d*|TEASER\s*\d*|EYECATCH\s*\d*|TV\s*SPOT\s*\d*)", filename, re.IGNORECASE)
     if m:
         return re.sub(r"\s+", "", m.group(1)).upper()
     if re.search(r"菜单", filename):
@@ -687,7 +693,18 @@ def _check_standalone(filename: str, parent_dirs: list[str], work_container: str
                 effective_media_type = "movie"
             movie_title = ""
             if effective_media_type == "movie":
-                movie_title = _extract_bracket_movie_title(filename)
+                matching_dir = next(
+                    (d for d in deeper_dirs if keyword.lower() in d.lower()),
+                    "",
+                )
+                directory_title = _clean_standalone_dir_title(matching_dir)
+                if directory_title and not _is_generic_movie_directory_title(directory_title):
+                    movie_title = directory_title
+                else:
+                    movie_title = (
+                        _extract_bracket_movie_title(filename)
+                        or _extract_release_movie_title(filename)
+                    )
             guess = MediaGuess(
                 work_title=movie_title,
                 title=movie_title,
@@ -843,6 +860,8 @@ def _check_local_collection_subwork(
 
     if _same_title_for_collection(subwork_title, series_title):
         return None
+    if _is_explicit_series_season_subwork(subwork_dir, series_title):
+        return None
     if _is_explicit_series_season_subwork(subwork_title, series_title):
         return None
     if _looks_like_standalone_movie_title(subwork_title):
@@ -922,6 +941,14 @@ def _same_title_for_collection(left: str, right: str) -> bool:
 def _is_explicit_series_season_subwork(subwork_title: str, series_title: str) -> bool:
     normalized_subwork = _normalize_collection_title(subwork_title)
     normalized_series = _normalize_collection_title(series_title)
+    # 合集内部的显式季度标记本身就是强结构事实，不要求子目录再次重复
+    # 父系列标题。真实目录常用「1.篇名.[S1].年份」表示季度篇章。
+    if re.search(r"(?i)\[\s*S\d{1,2}(?:\.\d+)?\s*\]", subwork_title):
+        return True
+    if re.search(r"(?i)(?:^|[\s._-])S\d{1,2}(?:[\s._-]|$)", subwork_title):
+        return True
+    if re.search(r"第\s*(?:\d+|[一二三四五六七八九十]+)\s*季", subwork_title):
+        return True
     patterns = [
         re.compile(r"\bS(?:eason)?\s*\d+\b", re.IGNORECASE),
         re.compile(r"\b\d+(?:st|nd|rd|th)\s+Season\b", re.IGNORECASE),
@@ -1102,13 +1129,13 @@ def _check_path_context_special(
                 # 保留原始目录名作为标题线索
                 # original_title 也保留子作品目录，供 M08 刮削使用
                 guess = MediaGuess(
-                    work_title=movie_title if relation_type == "movie" else "",
+                    work_title=movie_title,
                     card_type="standalone",
                     media_type=media_type,
                     group_type="movie",
                     relation_type=relation_type,
                     year=dir_year,
-                    title=(movie_title or d) if relation_type == "movie" else d,
+                    title=movie_title or d,
                     original_title=d,  # 子作品目录也写入 original_title
                     reasons=[f"路径上下文目录 '{d}' 含 '{keyword}'，识别为独立卡片 ({relation_type})"],
                 )
@@ -1744,6 +1771,7 @@ def recognize_media(
     existing_work_title: str = "",
     existing_year: int | None = None,
     root_container: str = "",
+    allow_verified_titles: bool = True,
 ) -> MediaGuess:
     """识别单个视频文件的媒体结构
 
@@ -1768,7 +1796,7 @@ def recognize_media(
     top_category = _extract_top_category(relative_path, source)
     local_series_container = _extract_local_series_container(relative_path, source)
     tmdb_hint_id, tmdb_hint_type = _extract_tmdb_hint(relative_path)
-    if tmdb_hint_id is None:
+    if tmdb_hint_id is None and allow_verified_titles:
         from app.recognition.verified_titles import match_verified_tmdb_binding
 
         verified_binding = match_verified_tmdb_binding(relative_path)
@@ -1845,9 +1873,11 @@ def recognize_media(
         return guess
 
     # 4. 已通过官方资料/TMDB 核实的系列特别篇，优先于“总集篇=电影”等通用弱规则。
-    from app.recognition.verified_titles import match_verified_series_special
+    verified_special = None
+    if allow_verified_titles:
+        from app.recognition.verified_titles import match_verified_series_special
 
-    verified_special = match_verified_series_special(relative_path, filename)
+        verified_special = match_verified_series_special(relative_path, filename)
     if verified_special:
         guess = MediaGuess(
             work_title=verified_special.series_title,

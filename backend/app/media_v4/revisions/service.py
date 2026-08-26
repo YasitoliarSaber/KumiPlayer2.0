@@ -257,11 +257,35 @@ def _structural_key(relative_path: str) -> str:
     return ""
 
 
-def _lookup_work_by_key(conn, work_key: str) -> str:
+def _lookup_work_by_key(conn, work_key: str, *, exclude_work_id: str = "") -> str:
     row = conn.execute(
         "SELECT work_id FROM works WHERE identity_key = ?", (work_key,)
     ).fetchone()
-    return str(row["work_id"]) if row else ""
+    if row:
+        return str(row["work_id"])
+    # 显式合集产生 series:<title>:<type> 身份；同一父作品若在较早 revision
+    # 以普通 title 身份确认，关系仍应通过已持久化别名确定性复用。只接受唯一
+    # 命中，避免同名作品被静默串联。
+    if not work_key.startswith("series:"):
+        return ""
+    try:
+        normalized_title, media_type = work_key[len("series:"):].rsplit(":", 1)
+    except ValueError:
+        return ""
+    work_type = "movie" if media_type == "movie" else "series" if media_type == "tv" else ""
+    if not normalized_title or not work_type:
+        return ""
+    rows = conn.execute(
+        """
+        SELECT DISTINCT works.work_id
+        FROM works
+        JOIN work_aliases ON work_aliases.work_id = works.work_id
+        WHERE work_aliases.normalized_title = ? AND works.work_type = ?
+          AND (? = '' OR works.work_id != ?)
+        """,
+        (normalized_title, work_type, exclude_work_id, exclude_work_id),
+    ).fetchall()
+    return str(rows[0]["work_id"]) if len(rows) == 1 else ""
 
 
 class RevisionBlockedError(RuntimeError):
@@ -774,9 +798,13 @@ class V4RevisionService:
                 # P-001 7.7 R4：持久化作品关系；父 Work 可能只存在于已确认数据库。
                 for relation in graph.relations:
                     parent_work_id = work_ids.get(relation.parent_work_key)
-                    if not parent_work_id:
-                        parent_work_id = _lookup_work_by_key(conn, relation.parent_work_key)
                     child_work_id = work_ids.get(relation.child_work_key)
+                    if not parent_work_id:
+                        parent_work_id = _lookup_work_by_key(
+                            conn,
+                            relation.parent_work_key,
+                            exclude_work_id=child_work_id or "",
+                        )
                     if not parent_work_id or not child_work_id:
                         # 父 Work 不存在时保存明确待解析记录，不静默丢弃。
                         conn.execute(

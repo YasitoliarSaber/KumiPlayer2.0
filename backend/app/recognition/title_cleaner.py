@@ -22,6 +22,10 @@ _RE_SERIES_CATALOG_SUFFIX = re.compile(
 )
 _RE_RELEASE_LANGUAGE_SUFFIX = re.compile(r"\s+(?:内封中字|内封简繁|简繁内封|中字内封)$")
 
+# 目录树导出或 Windows 复制同名目录时常在发布标签后追加 ``(1)``。
+# 只有紧跟方括号发布/画质标签时才删除，避免误伤作品名本身的“第 1 部”。
+_RE_FILESYSTEM_COPY_SUFFIX = re.compile(r"(?<=\])\s*[（(]\d+[）)]$")
+
 # 方括号 token 正则
 _RE_BRACKET_TOKEN = re.compile(r"\[([^\]]*)\]")
 
@@ -211,6 +215,11 @@ def clean_work_title_container(container: str) -> TitleCleanResult:
     if release_cleaned != cleaned:
         cleaned = release_cleaned
         applied.append("去掉发布语言尾注")
+
+    copy_suffix_cleaned = _RE_FILESYSTEM_COPY_SUFFIX.sub("", cleaned).strip()
+    if copy_suffix_cleaned != cleaned:
+        cleaned = copy_suffix_cleaned
+        applied.append("去掉同名目录复制序号")
 
     # 3. 处理字幕组方括号标签
     brackets = _RE_BRACKET_TOKEN.findall(cleaned)

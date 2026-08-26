@@ -12,7 +12,16 @@ from pathlib import Path, PurePosixPath
 from app.media_v4.domain.models import ParsedFacts, SourceEvidence
 from app.media_v4.generic_container import is_generic_container_name
 from app.media_v4.sources.adapters import provider_to_source
-from app.recognition.media import recognize_media
+from app.recognition.media import (
+    _extract_work_container,
+    _is_bracket_heavy,
+    _is_generic_category_name,
+    _is_group_folder,
+    _is_series_container,
+    _looks_like_plain_season_dir,
+    _parse_work_title_and_year,
+    recognize_media,
+)
 
 _SEASON_TOKEN = re.compile(r"(?i)(S\d{1,2})")
 _EPISODE_TOKEN = re.compile(r"(?i)(E\d{1,3})(?:\s*[-~]\s*E?(\d{1,3}))?")
@@ -50,6 +59,86 @@ def _normalize_filename_stem(stem: str) -> str:
 
     value = re.sub(r"[\{【\[]\s*tmdb-?\s*\d+\s*[\}】\]]", "", stem, flags=re.IGNORECASE).strip()
     return re.sub(r"[\s._-]+", " ", value).strip()
+
+
+def _normalized_container(value: str) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", (value or "").casefold())
+
+
+def _effective_root_container(
+    relative_path: str,
+    requested_root_container: str,
+) -> str:
+    """只在路径能证明它是作品边界时采用扫描器传入的容器名。
+
+    ``root_container`` 历史上既被用于 MediaUnit 的作品边界，也曾被误传为
+    整个扫描范围（根目录/新番/01动画）。后者若进入作品身份，会把整库误合
+    成一张卡。这里保留单作品根、显式系列合集根和路径同名容器三种可证实情形。
+    """
+
+    root = (requested_root_container or "").strip()
+    if not root or _is_generic_category_name(root):
+        return ""
+    parts = [part for part in PurePosixPath(relative_path).parts if part]
+    directories = parts[:-1]
+    normalized_root = _normalized_container(root)
+    if normalized_root and any(
+        _normalized_container(part) == normalized_root for part in directories
+    ):
+        return root
+    if _is_series_container(root) and not _is_bracket_heavy(root):
+        return root
+    if not directories or _is_root_internal_structure(directories[0]):
+        return root
+    return ""
+
+
+def _is_root_internal_structure(value: str) -> bool:
+    """首段是否是单作品根内部结构，而不是媒体分类目录。"""
+
+    normalized = (value or "").strip()
+    if not normalized:
+        return False
+    return bool(
+        _is_group_folder(normalized)
+        or _looks_like_plain_season_dir(normalized)
+        or re.fullmatch(r"\d{1,3}", normalized)
+    )
+
+
+def _structural_series_group(relative_path: str, source: str) -> str:
+    """从完整路径恢复旧版 MediaUnit 的显式系列合集身份。"""
+
+    container = _extract_work_container(relative_path, source)
+    explicit_collection = bool(
+        re.search(r"(?i)(?:系列|合集|\bseries\b|\bcollection\b)\s*$", container)
+    )
+    parts = [part for part in PurePosixPath(relative_path).parts if part]
+    directories = parts[:-1]
+    try:
+        container_index = directories.index(container)
+    except ValueError:
+        child = ""
+    else:
+        child = directories[container_index + 1] if container_index + 1 < len(directories) else ""
+    explicit_season_child = bool(
+        child
+        and (
+            _is_root_internal_structure(child)
+            or re.search(
+                r"(?i)(?:\[S\d{1,2}(?:\.\d+)?\]|S\d{1,2}\s*$|Season\s*\d+|第\s*\d+\s*季)",
+                child,
+            )
+        )
+    )
+    if (
+        not container
+        or _is_bracket_heavy(container)
+        or not (_is_series_container(container) or explicit_collection or explicit_season_child)
+    ):
+        return ""
+    title, _ = _parse_work_title_and_year(container)
+    return title.strip()
 
 
 _NFO_MAX_BYTES = 256 * 1024
@@ -171,7 +260,7 @@ class V4Parser:
         parts = PurePosixPath(evidence.relative_path).parts
         parse_relative = evidence.relative_path
         existing_title = existing_work_title
-        if parts and is_generic_container_name(parts[0]):
+        if parts and _is_root_internal_structure(parts[0]):
             parse_relative = PurePosixPath(*parts[1:]).as_posix() if len(parts) > 1 else ""
             if not existing_title:
                 # 首层是通用容器时，从文件名提取稳定系列名作为权威作品名。
@@ -184,12 +273,20 @@ class V4Parser:
                     existing_title = filename_title
         filename = PurePosixPath(parse_relative).name
         source = provider_to_source(evidence.provider)
+        effective_root_container = _effective_root_container(
+            parse_relative,
+            root_container,
+        )
         guess = recognize_media(
             filename,
             parse_relative,
             source=source,
             existing_work_title=existing_title,
-            root_container=root_container,
+            root_container=effective_root_container,
+            # verified_titles 是旧版“确认后学习结果”，不能反向成为 V4
+            # 首次解析事实。V4 的可信身份由显式 hint、NFO、既有 binding
+            # 与候选解析阶段统一处理。
+            allow_verified_titles=False,
         )
 
         season_match = _SEASON_TOKEN.search(filename)
@@ -216,8 +313,16 @@ class V4Parser:
         )
         edition_tags = tuple(tag for pattern, tag in _EDITION_TOKENS if pattern.search(stem))
         release_match = _RELEASE_GROUP.search(stem)
+        structural_series_group = _structural_series_group(parse_relative, source)
+        resolved_series_group = guess.series_group
+        resolved_relation_type = guess.relation_type
+        if structural_series_group and guess.card_type != "standalone":
+            # 子季度可有独立本地标题（After Story / 第三季副标题），但作品归属
+            # 必须服从路径已经明确声明的系列合集边界；电影/外传独立卡不吸收。
+            resolved_series_group = structural_series_group
+            resolved_relation_type = resolved_relation_type or "main"
         title_candidates = _unique_non_empty(
-            (guess.work_title, guess.series_group, guess.original_title)
+            (guess.work_title, resolved_series_group, guess.original_title)
         )
         return ParsedFacts(
             parsed_fact_id="facts_" + evidence.evidence_id,
@@ -228,9 +333,9 @@ class V4Parser:
             group_type=group_type,
             work_title=guess.work_title,
             original_title=guess.original_title,
-            series_group=guess.series_group,
+            series_group=resolved_series_group,
             card_type=guess.card_type,
-            relation_type=guess.relation_type,
+            relation_type=resolved_relation_type,
             show_type="",
             title_candidates=title_candidates,
             year_candidate=guess.year,

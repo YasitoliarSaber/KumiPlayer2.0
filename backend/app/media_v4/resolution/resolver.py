@@ -17,6 +17,13 @@ from app.media_v4.domain.models import (
     SourceEvidence,
 )
 from app.media_v4.generic_container import is_generic_container_title
+from app.media_v4.sources.adapters import provider_to_source
+from app.recognition.media import (
+    _extract_work_container,
+    _is_bracket_heavy,
+    _is_series_container,
+    _parse_work_title_and_year,
+)
 
 
 def _normalize_title(value: str) -> str:
@@ -43,9 +50,83 @@ def _effective_media_type(facts: ParsedFacts) -> str:
     return (facts.media_type or facts.group_type or "unknown").casefold()
 
 
-def _work_key(facts: ParsedFacts) -> str:
+def _main_series_identity_title(facts: ParsedFacts) -> str:
+    """返回整批目录结构已经明确提供的主系列身份。
+
+    旧版会先按作品边界聚合，再把季度/特别篇挂到边界代表的系列；V4
+    逐文件事实仍保留了同一语义的 ``series_group``，Resolver 必须消费它，
+    不能继续用每个子季度自己的 ``work_title + year`` 拆卡。独立电影和
+    外传由 ``card_type=standalone`` 隔离，不会被父系列吸收。
+    """
+
+    if facts.card_type == "standalone":
+        return ""
+    series = (facts.series_group or "").strip()
+    if not series or is_generic_container_title(series):
+        return ""
+    if facts.relation_type == "main":
+        return series
+    work = (facts.work_title or "").strip()
+    if _normalize_title(series) != _normalize_title(work):
+        return series
+    original = facts.original_title or ""
+    # 明确的多季度/合集容器即使第一季标题与系列名相同，也仍是系列身份。
+    if re.search(
+        r"(?i)(?:\.S\d+\s*[-~]\s*S\d+|\[S\d+\].*\[S\d+\]|\+(?:SP|OVA|OAD|剧场版|电影|特别篇)|(?:系列|合集|\bseries\b|\bcollection\b)\s*$)",
+        original,
+    ):
+        return series
+    return ""
+
+
+def _boundary_work_key(evidence: SourceEvidence, facts: ParsedFacts) -> str:
+    """恢复旧版 MediaUnit 的作品边界身份，但不生成最终 Work ID。
+
+    边界只约束同一次来源树里的主系列条目；独立电影/外传不继承父边界。
+    最终跨来源身份仍由 confirmed candidate/provider binding 负责。
+    """
+
+    if facts.card_type == "standalone":
+        return ""
+    source = provider_to_source(evidence.provider)
+    container = _extract_work_container(evidence.relative_path, source)
+    if not container or is_generic_container_title(container):
+        return ""
+    title, year = _parse_work_title_and_year(container)
+    normalized = _normalize_title(title)
+    if not normalized or _is_placeholder_title(normalized):
+        return ""
+    media_type = _effective_media_type(facts)
+    resolved_series = _normalize_title(facts.series_group)
+    if (
+        facts.group_type == "special"
+        and facts.card_type != "standalone"
+        and resolved_series
+        and not _is_placeholder_title(resolved_series)
+        and resolved_series != normalized
+    ):
+        # 特别篇副标题可能成为独立目录名；当识别器已经通过通用副标题规则
+        # 收口到主系列时，边界键必须消费该事实，不能再用原目录全名拆卡。
+        return f"title:{resolved_series}:{facts.year_candidate or year or ''}:{media_type}"
+    explicit_collection = bool(
+        (_is_series_container(container) and not _is_bracket_heavy(container))
+        or re.search(r"(?i)(?:系列|合集|\bseries\b|\bcollection\b)\s*$", container)
+    )
+    if explicit_collection:
+        return f"series:{normalized}:{media_type}"
+    return f"title:{normalized}:{year or facts.year_candidate or ''}:{media_type}"
+
+
+def _work_key(facts: ParsedFacts, evidence: SourceEvidence | None = None) -> str:
     if facts.tmdb_hint_id and facts.tmdb_hint_type:
         return f"provider:{facts.tmdb_hint_type.casefold()}:{facts.tmdb_hint_id}"
+    if evidence is not None:
+        boundary_key = _boundary_work_key(evidence, facts)
+        if boundary_key:
+            return boundary_key
+    series_title = _main_series_identity_title(facts)
+    if series_title:
+        return f"series:{_normalize_title(series_title)}:{_effective_media_type(facts)}"
     # 当前作品身份优先：独立/外传/电影子作品用 work_title；只有 work_title
     # 是通用容器/占位时才用稳定的 series_group 聚合（P-001 7.3.C）。
     identity_title = facts.work_title or (facts.title_candidates or ("",))[0]
@@ -68,8 +149,7 @@ def _relation_work_key(facts: ParsedFacts) -> str:
     if not facts.series_group or is_generic_container_title(facts.series_group):
         return ""
     media_type = (facts.media_type or facts.group_type or "unknown").casefold()
-    year = str(facts.year_candidate or "")
-    return f"title:{_normalize_title(facts.series_group)}:{year}:{media_type}"
+    return f"series:{_normalize_title(facts.series_group)}:{media_type}"
 
 
 def _relation_work_key_from_row(row: dict) -> str:
@@ -80,8 +160,7 @@ def _relation_work_key_from_row(row: dict) -> str:
         return ""
     # 子作品是电影时，父系列仍常是 TV；关系键保留目录解析到的父系列类型。
     media_type = str(row.get("relation_media_type") or row.get("media_type") or "unknown").casefold()
-    year = str(row.get("year") or "")
-    return f"title:{_normalize_title(series_group)}:{year}:{media_type}"
+    return f"series:{_normalize_title(series_group)}:{media_type}"
 
 
 def _edition_key(facts: ParsedFacts) -> str:
@@ -97,6 +176,17 @@ class MediaResolver:
         episode_rows: OrderedDict[tuple, dict] = OrderedDict()
         work_asset_rows: OrderedDict[tuple[str, str], list[str]] = OrderedDict()
         issues: list[ResolutionIssue] = []
+        # 单文件解析只能看到当前路径；整批图谱则能看到同一目录边界中由
+        # Season/Special 条目声明的主系列身份。只采用 relation_type=main
+        # 的结构事实，外传/电影的父系列关系不能反向吞并当前作品。
+        structural_series_identities = {
+            (_normalize_title(facts.series_group), _effective_media_type(facts))
+            for _evidence, facts in entries
+            if facts.card_type != "standalone"
+            and facts.relation_type == "main"
+            and facts.series_group
+            and not is_generic_container_title(facts.series_group)
+        }
 
         for evidence, facts in entries:
             if not facts.is_importable or facts.is_auxiliary:
@@ -110,7 +200,22 @@ class MediaResolver:
                     )
                 )
             identity_title = facts.work_title or (facts.title_candidates or ("",))[0]
-            key = _work_key(facts)
+            key = _work_key(facts, evidence)
+            if facts.card_type != "standalone":
+                media_type = _effective_media_type(facts)
+                matching_series = next(
+                    (
+                        normalized
+                        for normalized in (
+                            _normalize_title(facts.work_title),
+                            _normalize_title(facts.series_group),
+                        )
+                        if (normalized, media_type) in structural_series_identities
+                    ),
+                    "",
+                )
+                if matching_series:
+                    key = f"series:{matching_series}:{media_type}"
             if not key:
                 generic = bool(identity_title.strip()) and is_generic_container_title(identity_title)
                 issues.append(
@@ -225,6 +330,8 @@ class MediaResolver:
                         "asset_ids": [],
                         "title_norms": {_normalize_title(identity_title)},
                         "has_provider_identity": bool(facts.tmdb_hint_id and facts.tmdb_hint_type),
+                        "has_structural_series_identity": bool(_main_series_identity_title(facts)),
+                        "has_boundary_identity": bool(_boundary_work_key(evidence, facts)),
                     },
                 )
                 # Episode → Asset 合并的 Work 身份防线：同一 Episode 若出现
@@ -234,6 +341,10 @@ class MediaResolver:
                 if (
                     title_norm
                     and title_norm not in episode["title_norms"]
+                    and not (
+                        episode["has_structural_series_identity"]
+                        or episode["has_boundary_identity"]
+                    )
                     and not (episode["has_provider_identity"] and bool(facts.tmdb_hint_id and facts.tmdb_hint_type))
                 ):
                     episode["title_norms"].add(title_norm)

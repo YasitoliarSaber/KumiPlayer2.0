@@ -51,6 +51,11 @@ _GENERIC_TOKENS = frozenset({
     "特别篇",
     "未分类",
     "其他",
+    "合集",
+    "系列",
+    "根目录",
+    "媒体库",
+    "library",
 })
 
 # S01 / S1 / Season 1 / Season1 / 第1季 / 第 1 季
