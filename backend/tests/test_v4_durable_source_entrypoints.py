@@ -83,6 +83,104 @@ def test_local_durable_entrypoint_returns_before_the_directory_scan_finishes(tmp
     assert len(preview.json()["works"]) == 1
 
 
+def test_local_durable_entrypoint_keeps_online_candidate_search_out_of_preview_request(
+    tmp_path,
+    monkeypatch,
+):
+    """联网候选解析必须属于耐久任务，完成后的 preview 只能读取草稿。"""
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api import media_v4
+    from app.media_v4.resolution import candidates as candidate_service
+    from app.media_v4.sources.adapters import SourceEntry, to_source_evidence
+    from app.media_v4.sources.durable_scan import get_durable_scan
+
+    database = _fresh_database(tmp_path)
+    monkeypatch.setattr(media_v4, "_database", database)
+    expected_root_id, _locator = media_v4._local_root_identity("D:/Media")
+    candidate_started = threading.Event()
+    release_candidate = threading.Event()
+    search_calls: list[str] = []
+
+    def local_scan(_root_path, **_kwargs):
+        evidence = to_source_evidence(SourceEntry(
+            root_id=expected_root_id,
+            scan_id="scan-inner",
+            provider="local",
+            ingest_method="local_scan",
+            relative_path="Show/Show.S01E01.mkv",
+            source_key="Show/Show.S01E01.mkv",
+            source_locator="D:/Media/Show/Show.S01E01.mkv",
+            playback_locator="D:/Media/Show/Show.S01E01.mkv",
+        ))
+        return expected_root_id, "scan-inner", [evidence]
+
+    def slow_candidate_search(work_key, *_args, **_kwargs):
+        search_calls.append(work_key)
+        candidate_started.set()
+        assert release_candidate.wait(3)
+        return []
+
+    monkeypatch.setattr(media_v4, "scan_local_directory", local_scan)
+    monkeypatch.setattr(candidate_service, "default_candidate_search", slow_candidate_search)
+    monkeypatch.setattr(media_v4, "load_config", lambda: SimpleNamespace(
+        openlist_server_url="https://openlist.example.test",
+        openlist_remote_root="/",
+        pan115_root="",
+        baidu_root="",
+        openlist_mount_root="X:/OpenList",
+        openlist_routes=[],
+    ))
+    application = FastAPI()
+    application.include_router(media_v4.router)
+    client = TestClient(application)
+
+    started_at = time.monotonic()
+    response = client.post("/api/v4/sources/scans", json={
+        "source": "local",
+        "root_path": "D:/Media",
+        "revision_id": "rev-background-recognition",
+        "source_display_name": "本地媒体库",
+    })
+    elapsed = time.monotonic() - started_at
+
+    assert response.status_code == 200, response.text
+    scan_id = response.json()["scan_id"]
+    assert elapsed < 0.5
+    assert candidate_started.wait(1)
+    assert get_durable_scan(database, scan_id)["status"] == "running"
+
+    release_candidate.set()
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and get_durable_scan(database, scan_id)["status"] == "running":
+        time.sleep(0.02)
+    assert get_durable_scan(database, scan_id)["status"] == "completed"
+
+    compact_status = client.get(
+        f"/api/v4/sources/scans/{scan_id}?include_entries=false"
+    )
+    assert compact_status.status_code == 200
+    assert compact_status.json()["evidence_count"] == 1
+    assert compact_status.json()["entries"] == []
+
+    preview_started_at = time.monotonic()
+    preview = client.post("/api/v4/imports/preview", json={
+        "revision_id": "rev-background-recognition",
+        "root_id": expected_root_id,
+        "scan_id": scan_id,
+        "entries": [],
+        "source_display_name": "本地媒体库",
+    })
+    preview_elapsed = time.monotonic() - preview_started_at
+
+    assert preview.status_code == 200, preview.text
+    assert preview_elapsed < 0.5
+    assert len(preview.json()["works"]) == 1
+    assert len(search_calls) == 1
+
+
 def test_tree_durable_entrypoint_defers_txt_reading_until_after_task_creation(tmp_path, monkeypatch):
     """目录树读取也不能卡在 HTTP 请求内，完成后证据必须归属该 durable scan。"""
 

@@ -125,6 +125,8 @@ class SourceScanRequest(BaseModel):
     provider: str = "local"
     source_root: str = ""
     scan_mode: Literal["auto", "full", "incremental"] = "auto"
+    revision_id: str = ""
+    source_display_name: str = ""
 
 
 
@@ -726,6 +728,27 @@ def scan_source(request: SourceScanRequest):
 @router.post("/imports/preview")
 def preview(request: PreviewRequest):
     database = get_database()
+    # 新导入链会在 durable SourceScan 后台阶段完成识别与候选解析。这里优先
+    # 读取已落库草稿，绝不能因为用户打开预览而再次发起 TMDB 请求。
+    with database.connect() as conn:
+        existing_revision = conn.execute(
+            "SELECT root_id, scan_id, status FROM import_revisions WHERE revision_id = ?",
+            (request.revision_id,),
+        ).fetchone()
+    if existing_revision is not None:
+        if (
+            str(existing_revision["root_id"]) != request.root_id
+            or str(existing_revision["scan_id"]) != request.scan_id
+        ):
+            raise HTTPException(status_code=409, detail="识别草稿与当前扫描不一致，请重新扫描")
+        if str(existing_revision["status"]) != "draft":
+            raise HTTPException(status_code=409, detail="当前识别结果已经不是可编辑草稿")
+        graph = V4RevisionService(database).load_draft_graph(request.revision_id)
+        return {
+            "revision_id": request.revision_id,
+            "status": "draft",
+            **_graph_to_dict(graph),
+        }
     durable_evidence = _completed_scan_evidence(
         database,
         root_id=request.root_id,
@@ -1051,6 +1074,57 @@ def _local_root_identity(path: str) -> tuple[str, str]:
     return root_id, str(root)
 
 
+def _durable_draft_finalizer(
+    database: V4Database,
+    request: SourceScanRequest,
+    *,
+    root_id: str,
+    scan_id: str,
+):
+    """把识别和候选解析绑定到耐久来源任务；旧调用方未传 revision 时兼容跳过。"""
+
+    revision_id = request.revision_id.strip()
+    if not revision_id:
+        return None
+
+    def finalize(evidence: list[SourceEvidence]) -> None:
+        with database.connect() as conn:
+            root = conn.execute(
+                """
+                SELECT provider, source_locator, playback_locator, route_id,
+                       display_name, root_container, source_mode
+                FROM source_roots WHERE root_id = ?
+                """,
+                (root_id,),
+            ).fetchone()
+        if root is None:
+            raise ValueError("来源根记录不存在，请重新扫描")
+        root_container = str(root["root_container"] or "")
+        parser = V4Parser()
+        parsed = [
+            (item, parser.parse(item, root_container=root_container))
+            for item in evidence
+        ]
+        V4RevisionService(database).create_draft(
+            revision_id,
+            parsed,
+            root_id=root_id,
+            scan_id=scan_id,
+            source_provider=str(root["provider"] or (evidence[0].provider if evidence else "local")),
+            source_metadata={
+                "display_name": request.source_display_name or str(root["display_name"] or ""),
+                "source_locator": str(root["source_locator"] or ""),
+                "playback_locator": str(root["playback_locator"] or ""),
+                "route_id": str(root["route_id"] or ""),
+                "root_container": root_container,
+            },
+            source_mode=str(root["source_mode"] or ""),
+            _evidence_already_persisted=True,
+        )
+
+    return finalize
+
+
 def _start_durable_local_scan(request: SourceScanRequest) -> dict:
     from app.media_v4.sources.durable_scan import create_durable_scan
 
@@ -1080,6 +1154,12 @@ def _start_durable_local_scan(request: SourceScanRequest) -> dict:
             request.root_path,
             excluded_roots=_configured_cloud_roots(config),
         )[1:],
+        finalize_fn=_durable_draft_finalizer(
+            database,
+            request,
+            root_id=root_id,
+            scan_id=scan_id,
+        ),
     )
     return {"scan_id": scan_id, "root_id": root_id, "scan_mode": "local", "source_mode": "local", "status": "running"}
 
@@ -1169,7 +1249,19 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
         except DirectoryTreeReadError as exc:
             raise ValueError(_directory_tree_error_message(exc)) from exc
 
-    create_durable_scan(database, scan_id=scan_id, root_id=root_id, kind="full", scan_fn=scan_tree)
+    create_durable_scan(
+        database,
+        scan_id=scan_id,
+        root_id=root_id,
+        kind="full",
+        scan_fn=scan_tree,
+        finalize_fn=_durable_draft_finalizer(
+            database,
+            request,
+            root_id=root_id,
+            scan_id=scan_id,
+        ),
+    )
     return {"scan_id": scan_id, "root_id": root_id, "scan_mode": scan_mode, "source_mode": source_mode, "status": "running"}
 
 
@@ -1242,6 +1334,12 @@ def start_durable_scan(request: SourceScanRequest):
                 routes=routes,
             ),
             state_fn=lambda: state,
+            finalize_fn=_durable_draft_finalizer(
+                database,
+                request,
+                root_id=root_id,
+                scan_id=scan_id,
+            ),
         )
         return {"scan_id": scan_id, "root_id": root_id, "scan_mode": "incremental", "status": "running"}
     directory_observations: dict[str, float | None] = {}
@@ -1273,16 +1371,26 @@ def start_durable_scan(request: SourceScanRequest):
             directory_observations=directory_observations,
         ),
         state_fn=lambda: build_full_scan_state(root_id, remote_root, directory_observations),
+        finalize_fn=_durable_draft_finalizer(
+            database,
+            request,
+            root_id=root_id,
+            scan_id=scan_id,
+        ),
     )
     return {"scan_id": scan_id, "root_id": root_id, "scan_mode": "full", "status": "running"}
 
 
 @router.get("/sources/scans/{scan_id}")
-def get_durable_scan(scan_id: str):
+def get_durable_scan(scan_id: str, include_entries: bool = True):
     from app.media_v4.sources.durable_scan import get_durable_scan
 
     try:
-        result = get_durable_scan(get_database(), scan_id)
+        result = get_durable_scan(
+            get_database(),
+            scan_id,
+            include_entries=include_entries,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"扫描任务不存在: {scan_id}") from exc
     return result

@@ -48,6 +48,7 @@ def create_durable_scan(
     kind: str,
     scan_fn: Callable[..., tuple],
     state_fn: Callable[[], dict] | None = None,
+    finalize_fn: Callable[[list], None] | None = None,
 ) -> str:
     """登记 durable scan 并启动后台线程执行；立即返回 scan_id。"""
 
@@ -93,6 +94,12 @@ def create_durable_scan(
             V4Repository(database).save_scan_evidence_bulk(evidence)
             if cancel.is_set():
                 raise _CancelledScan()
+            # 识别、候选解析与草稿持久化也是来源任务的一部分。它们可以联网且
+            # 耗时，必须留在后台线程；只有草稿可读取后 SourceScan 才能完成。
+            if finalize_fn is not None:
+                finalize_fn(evidence)
+            if cancel.is_set():
+                raise _CancelledScan()
             with database.connect() as conn:
                 conn.execute(
                     "UPDATE source_scans SET status = 'completed', finished_at = ?, error = '' WHERE scan_id = ?",
@@ -124,7 +131,12 @@ class _CancelledScan(Exception):
     pass
 
 
-def get_durable_scan(database: V4Database, scan_id: str) -> dict:
+def get_durable_scan(
+    database: V4Database,
+    scan_id: str,
+    *,
+    include_entries: bool = True,
+) -> dict:
     with database.connect() as conn:
         row = conn.execute(
             "SELECT scan_id, root_id, status, started_at, finished_at, error "
@@ -135,11 +147,17 @@ def get_durable_scan(database: V4Database, scan_id: str) -> dict:
             raise KeyError(scan_id)
         status = str(row["status"])
         entries = []
+        evidence_count = 0
         if status == "completed":
-            entries = [
-                _evidence_dict(item)
-                for item in V4Repository(database).list_scan_evidence(scan_id)
-            ]
+            evidence_count = int(conn.execute(
+                "SELECT COUNT(*) FROM source_evidence WHERE scan_id = ?",
+                (scan_id,),
+            ).fetchone()[0])
+            if include_entries:
+                entries = [
+                    _evidence_dict(item)
+                    for item in V4Repository(database).list_scan_evidence(scan_id)
+                ]
     return {
         "scan_id": scan_id,
         "root_id": str(row["root_id"]),
@@ -147,6 +165,7 @@ def get_durable_scan(database: V4Database, scan_id: str) -> dict:
         "started_at": str(row["started_at"] or ""),
         "finished_at": str(row["finished_at"] or ""),
         "error": str(row["error"] or ""),
+        "evidence_count": evidence_count,
         "entries": entries,
     }
 

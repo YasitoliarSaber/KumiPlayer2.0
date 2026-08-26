@@ -180,6 +180,7 @@ export default function MediaManagementPage() {
     root_id: string
     scan_id: string
     entries: V4SourceEvidence[]
+    evidence_count: number
     scan_mode?: 'local' | 'tree_snapshot' | 'tree_baseline' | 'incremental' | 'full'
     source_mode?: string
     scan_stats?: { requested_directories?: number; rolling_verified?: number; changed_directories?: number }
@@ -489,6 +490,7 @@ export default function MediaManagementPage() {
         root_id: string
         scan_id: string
         entries: V4SourceEvidence[]
+        evidence_count: number
         scan_mode?: 'local' | 'tree_snapshot' | 'tree_baseline' | 'incremental' | 'full'
         source_mode?: string
         scan_stats?: { requested_directories?: number; rolling_verified?: number; changed_directories?: number }
@@ -501,6 +503,8 @@ export default function MediaManagementPage() {
           provider: selectedProvider,
           source_root: selectedSourceRoot,
           scan_mode: scanMode === 'incremental' ? 'incremental' : 'full',
+          revision_id: nextRevisionId,
+          source_display_name: metadata.source_display_name,
         })
         setScanTask({ scan_id: task.scan_id, status: 'running' })
         while (true) {
@@ -508,7 +512,7 @@ export default function MediaManagementPage() {
           const state = await mediaV4Api.durableScan(task.scan_id)
           setScanTask({ scan_id: task.scan_id, status: state.status })
           if (state.status === 'completed') {
-            result = { root_id: state.root_id || task.root_id, scan_id: task.scan_id, entries: state.entries, scan_mode: task.scan_mode as 'local' | 'tree_snapshot' | 'tree_baseline' | 'incremental' | 'full', source_mode: task.source_mode || (task.scan_mode === 'incremental' ? openlistBaseline?.source_mode || 'openlist_full' : 'openlist_full') }
+            result = { root_id: state.root_id || task.root_id, scan_id: task.scan_id, entries: [], evidence_count: state.evidence_count ?? state.entries.length, scan_mode: task.scan_mode as 'local' | 'tree_snapshot' | 'tree_baseline' | 'incremental' | 'full', source_mode: task.source_mode || (task.scan_mode === 'incremental' ? openlistBaseline?.source_mode || 'openlist_full' : 'openlist_full') }
             break
           }
           if (state.status === 'failed' || state.status === 'cancelled') {
@@ -520,12 +524,12 @@ export default function MediaManagementPage() {
       const nextScan = { ...result, source_metadata: metadata }
       setScan(nextScan)
       setAllowEmpty(false)
-      if (result.entries.length > 0) {
+      if (result.evidence_count > 0) {
         const previewResult = await mediaV4Api.preview({
           revision_id: nextRevisionId,
           root_id: result.root_id,
           scan_id: result.scan_id,
-          entries: result.entries,
+          entries: [],
           allow_empty: false,
           source_mode: result.source_mode || '',
           ...metadata,
@@ -553,7 +557,7 @@ export default function MediaManagementPage() {
 
   const buildPreview = async () => {
     if (!scan) return
-    if (scan.entries.length === 0 && !allowEmpty) {
+    if (scan.evidence_count === 0 && !allowEmpty) {
       setError('来源当前为空；必须明确确认后才能移除该来源先前导入的媒体')
       return
     }
@@ -565,7 +569,7 @@ export default function MediaManagementPage() {
         revision_id: nextRevisionId,
         root_id: scan.root_id,
         scan_id: scan.scan_id,
-        entries: scan.entries,
+        entries: [],
         allow_empty: allowEmpty,
         source_mode: scan.source_mode || '',
         ...scan.source_metadata,
@@ -660,6 +664,7 @@ export default function MediaManagementPage() {
         root_id: draft.root_id,
         scan_id: draft.scan_id,
         entries: evidence.entries,
+        evidence_count: evidence.entries.length,
         source_metadata: {
           source_display_name: '',
           source_locator: draft.source_locator || '',
@@ -1039,12 +1044,12 @@ export default function MediaManagementPage() {
 
       {workflowStage === 'review' && scan && <section className="media-stage-shell media-v4-stage-panel media-v4-review-card">
         <div className="media-stage-header">
-          <div className="media-stage-heading"><span className="media-stage-icon" aria-hidden="true"><CheckmarkCircle24Regular /></span><div><span className="media-stage-eyebrow">第 2 步</span><h2>检查识别结果</h2><p>已扫描 {scan.entries.length} 个媒体条目。默认按作品摘要检查，需要处理的条目会置顶。</p></div></div>
-          {!preview && <Button appearance="secondary" disabled={busy !== '' || (scan.entries.length === 0 && !allowEmpty)} onClick={() => void buildPreview()}>{busy === 'preview' ? <Spinner size="tiny" /> : '生成识别预览'}</Button>}
+          <div className="media-stage-heading"><span className="media-stage-icon" aria-hidden="true"><CheckmarkCircle24Regular /></span><div><span className="media-stage-eyebrow">第 2 步</span><h2>检查识别结果</h2><p>已扫描 {scan.evidence_count} 个媒体条目。默认按作品摘要检查，需要处理的条目会置顶。</p></div></div>
+          {!preview && <Button appearance="secondary" disabled={busy !== '' || (scan.evidence_count === 0 && !allowEmpty)} onClick={() => void buildPreview()}>{busy === 'preview' ? <Spinner size="tiny" /> : '生成识别预览'}</Button>}
         </div>
         {scan.scan_mode === 'incremental' && <MessageBar intent="info"><MessageBarBody>本次使用 OpenList 增量核对：请求 {scan.scan_stats?.requested_directories || 0} 个目录，其中滚动抽查 {scan.scan_stats?.rolling_verified || 0} 个、变化优先核对 {scan.scan_stats?.changed_directories || 0} 个。</MessageBarBody></MessageBar>}
         {scan.scan_mode === 'tree_baseline' && <MessageBar intent="info"><MessageBarBody>TXT 基线已建立。确认本次导入后，再扫描同一 OpenList 目录时会自动进入风险受控增量核对。</MessageBarBody></MessageBar>}
-        {!preview && <div className="media-v4-empty">{scan.entries.length === 0 ? <Checkbox checked={allowEmpty} onChange={(_, data) => setAllowEmpty(Boolean(data.checked))} label="我确认该来源当前确实为空，并允许移除它先前导入的媒体" /> : '正在生成识别结果…'}</div>}
+        {!preview && <div className="media-v4-empty">{scan.evidence_count === 0 ? <Checkbox checked={allowEmpty} onChange={(_, data) => setAllowEmpty(Boolean(data.checked))} label="我确认该来源当前确实为空，并允许移除它先前导入的媒体" /> : '正在生成识别结果…'}</div>}
         {preview && <>
           {preview.issues.length > 0 && <MessageBar intent="warning"><MessageBarBody>发现 {preview.issues.length} 个需要人工处理的问题；未解决前不能确认。</MessageBarBody></MessageBar>}
           <V4RecognitionSummary

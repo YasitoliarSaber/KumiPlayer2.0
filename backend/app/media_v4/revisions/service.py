@@ -11,7 +11,12 @@ from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
-from app.media_v4.domain.models import ParsedFacts, ResolvedMediaGraph, SourceEvidence
+from app.media_v4.domain.models import (
+    ParsedFacts,
+    ResolutionIssue,
+    ResolvedMediaGraph,
+    SourceEvidence,
+)
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.persistence.repositories import V4Repository
 from app.media_v4.resolution import candidates as candidate_service
@@ -1123,6 +1128,45 @@ class V4RevisionService:
         if row is None:
             raise KeyError(revision_id)
         return row["status"]
+
+    def load_draft_graph(self, revision_id: str) -> ResolvedMediaGraph:
+        """从已持久化事实与冻结候选重建草稿，不再执行在线搜索。"""
+
+        with self.database.connect() as conn:
+            revision = conn.execute(
+                "SELECT status FROM import_revisions WHERE revision_id = ?",
+                (revision_id,),
+            ).fetchone()
+            if revision is None:
+                raise KeyError(revision_id)
+            if revision["status"] != "draft":
+                raise RuntimeError("只有 draft revision 可以读取识别预览")
+            issue_rows = conn.execute(
+                """
+                SELECT code, evidence_id, message
+                FROM revision_issues
+                WHERE revision_id = ? AND resolved = 0
+                ORDER BY issue_id
+                """,
+                (revision_id,),
+            ).fetchall()
+
+        entries = self._load_revision_entries(revision_id)
+        graph = self.resolver.resolve(entries)
+        candidates_by_key = self._load_draft_candidates(revision_id)
+        graph = candidate_service.merge_graph(
+            graph,
+            _merge_map_from_candidates(candidates_by_key),
+        )
+        issues = tuple(
+            ResolutionIssue(
+                code=str(row["code"]),
+                evidence_id=str(row["evidence_id"] or ""),
+                message=str(row["message"]),
+            )
+            for row in issue_rows
+        )
+        return replace(graph, issues=issues)
 
     def apply_override(
         self,

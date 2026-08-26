@@ -355,10 +355,12 @@ export const mediaV4Api = {
     provider?: string
     source_root?: string
     scan_mode?: 'full' | 'incremental'
+    revision_id?: string
+    source_display_name?: string
   }) => api.post<{ scan_id: string; root_id: string; scan_mode: string; source_mode?: string; status: string }>('/api/v4/sources/scans', request),
 
-  durableScan: (scanId: string) =>
-    api.get<{ scan_id: string; root_id: string; status: string; started_at: string; finished_at: string; error: string; entries: V4SourceEvidence[] }>(`/api/v4/sources/scans/${encodeURIComponent(scanId)}`),
+  durableScan: (scanId: string, includeEntries = false) =>
+    api.get<{ scan_id: string; root_id: string; status: string; started_at: string; finished_at: string; error: string; evidence_count: number; entries: V4SourceEvidence[] }>(`/api/v4/sources/scans/${encodeURIComponent(scanId)}?include_entries=${includeEntries ? 'true' : 'false'}`),
 
   cancelDurableScan: (scanId: string) =>
     api.post<{ scan_id: string; status: string }>(`/api/v4/sources/scans/${encodeURIComponent(scanId)}/cancel`),

@@ -114,13 +114,16 @@ async function scanLocal(revisionId: string) {
   fireEvent.click(await screen.findByRole('button', { name: '导入媒体' }))
   const input = await screen.findByRole('textbox', { name: '本机媒体文件夹' })
   fireEvent.change(input, { target: { value: 'D:\\Anime' } })
-  api.scan.mockResolvedValue({
-    root_id: 'root-local', scan_id: 'scan-1', entries: [
-      { evidence_id: 'ev-1', scan_id: 'scan-1', root_id: 'root-local', source_key: 'Show/Show.S01E01.mkv', relative_path: 'Show/Show.S01E01.mkv', entry_kind: 'video', provider: 'local', source_locator: 'Show/Show.S01E01.mkv', playback_locator: 'D:\\Anime\\Show\\Show.S01E01.mkv', ingest_method: 'local_scan' },
-    ],
+  api.durableScan.mockResolvedValue({
+    scan_id: 'scan-durable', root_id: 'root', status: 'completed', started_at: '',
+    finished_at: '', error: '', evidence_count: 1, entries: [],
   })
   fireEvent.click(screen.getByRole('button', { name: '扫描并识别' }))
   await waitFor(() => expect(api.preview).toHaveBeenCalled())
+  expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({
+    revision_id: expect.stringMatching(/^rev-/),
+  }))
+  expect(api.preview).toHaveBeenCalledWith(expect.objectContaining({ entries: [] }))
   api.preview.mockResolvedValue({
     revision_id: revisionId,
     status: 'draft',
@@ -152,10 +155,9 @@ test('识别预览聚合作品摘要，不逐集平铺', async () => {
   fireEvent.click(await screen.findByRole('button', { name: '导入媒体' }))
   const input = await screen.findByRole('textbox', { name: '本机媒体文件夹' })
   fireEvent.change(input, { target: { value: 'D:\Anime' } })
-  api.scan.mockResolvedValue({
-    root_id: 'root-local', scan_id: 'scan-1', entries: [
-      { evidence_id: 'ev-1', scan_id: 'scan-1', root_id: 'root-local', source_key: 'Show/Show.S01E01.mkv', relative_path: 'Show/Show.S01E01.mkv', entry_kind: 'video', provider: 'local', source_locator: 'Show/Show.S01E01.mkv', playback_locator: 'D:\Anime\Show\Show.S01E01.mkv', ingest_method: 'local_scan' },
-    ],
+  api.durableScan.mockResolvedValue({
+    scan_id: 'scan-durable', root_id: 'root', status: 'completed', started_at: '',
+    finished_at: '', error: '', evidence_count: 1, entries: [],
   })
   api.preview.mockResolvedValue({
     revision_id: 'rev-big', status: 'draft',

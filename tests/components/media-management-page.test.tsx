@@ -132,7 +132,7 @@ test('目录树使用真实网盘提供商、官网入口和设置中的播放�
   })
   fireEvent.click(screen.getByRole('button', { name: '扫描并识别' }))
 
-  await waitFor(() => expect(api.scan).toHaveBeenCalledWith(expect.objectContaining({
+  await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({
     source: 'tree',
     provider: 'quark',
     source_root: 'K:\\夸克网盘\\动画',
@@ -189,6 +189,10 @@ test('已确认基线的 OpenList 默认增量扫描并保留完整校验', asyn
   await waitFor(() => expect(api.durableScan).toHaveBeenCalledWith('scan-durable'))
 
   api.startDurableScan.mockClear()
+  await waitFor(
+    () => expect(screen.getByRole('button', { name: '完整校验' })).toBeEnabled(),
+    { timeout: 3000 },
+  )
   fireEvent.click(screen.getByRole('button', { name: '完整校验' }))
   await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({
     source: 'openlist',
@@ -222,13 +226,13 @@ test('混合入口首次要求 TXT 基线且未确认前禁用增量', async () 
   expect(screen.getByRole('button', { name: '增量扫描' })).toBeDisabled()
   fireEvent.click(screen.getByRole('button', { name: '建立 TXT 基线' }))
 
-  await waitFor(() => expect(api.scan).toHaveBeenCalledWith(expect.objectContaining({
+  await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({
     source: 'hybrid',
     root_path: '/115/Anime',
     tree_file: 'K:\\115网盘\\动画\\目录树.txt',
     provider: 'pan115',
     source_root: 'K:\\115网盘\\Anime',
-    scan_mode: 'auto',
+    scan_mode: 'full',
   })))
 })
 
@@ -262,14 +266,15 @@ test('本地来源路径有效后提交统一 V4 扫描请求', async () => {
   fireEvent.change(input, { target: { value: 'D:\\Anime' } })
   fireEvent.click(screen.getByRole('button', { name: '扫描并识别' }))
 
-  await waitFor(() => expect(api.scan).toHaveBeenCalledWith({
+  await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({
     source: 'local',
     root_path: 'D:\\Anime',
     tree_file: '',
     provider: 'local',
-    source_root: '',
-    scan_mode: 'auto',
-  }))
+    source_root: 'D:\\Anime',
+    scan_mode: 'full',
+    revision_id: expect.stringMatching(/^rev-/),
+  })))
 })
 
 test('来源卡展示持久化进度并可恢复查看任务', async () => {
