@@ -1,7 +1,7 @@
 /** P-005 媒体管理首页层级与媒体库维护入口测试。 */
 
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, expect, test, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import MediaManagementPage from '../../src/pages/MediaManagementPage'
 
 const api = vi.hoisted(() => ({
@@ -92,6 +92,10 @@ beforeEach(() => {
   tasks.retry.mockResolvedValue({ status: 'pending' })
 })
 
+afterEach(() => {
+  cleanup()
+})
+
 test('默认进入媒体管理首页，只有来源卡与命令栏，不显示三步导入', async () => {
   api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
   render(<MediaManagementPage />)
@@ -107,12 +111,27 @@ test('默认进入媒体管理首页，只有来源卡与命令栏，不显示�
   expect(screen.getByRole('button', { name: '返回媒体管理' })).toBeVisible()
 })
 
-test('空媒体库只显示空状态与导入主按钮', async () => {
+test('空媒体库只保留命令栏中的一个导入主按钮', async () => {
   render(<MediaManagementPage />)
 
   expect(await screen.findByText('还没有导入任何媒体库')).toBeVisible()
-  expect(screen.getAllByRole('button', { name: '导入媒体' }).length).toBeGreaterThan(0)
+  expect(screen.getAllByRole('button', { name: '导入媒体' })).toHaveLength(1)
   expect(screen.queryByRole('navigation', { name: '导入步骤' })).not.toBeInTheDocument()
+})
+
+test('本地导入创建耐久扫描任务而不等待同步扫描响应', async () => {
+  api.startDurableScan.mockResolvedValue({ scan_id: 'scan-local-1', root_id: 'root-local', scan_mode: 'local', status: 'running' })
+  api.durableScan.mockResolvedValue({
+    scan_id: 'scan-local-1', root_id: 'root-local', status: 'completed', error: '', entries: [],
+  })
+  render(<MediaManagementPage />)
+
+  await screen.findByRole('heading', { name: '媒体库' })
+  fireEvent.click(screen.getByRole('button', { name: '导入媒体' }))
+  fireEvent.click(await screen.findByRole('button', { name: '扫描并识别' }))
+
+  await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({ source: 'local' })))
+  expect(api.scan).not.toHaveBeenCalled()
 })
 
 test('来源卡只显示来源摘要与操作，不展示具体作品名', async () => {
@@ -125,7 +144,7 @@ test('来源卡只显示来源摘要与操作，不展示具体作品名', async
   expect(screen.getByText('OpenList 扫描')).toBeVisible()
   expect(screen.queryByText('OpenList 来源')).not.toBeInTheDocument()
   expect(screen.getByText(/添加于 2026-08-20/)).toBeVisible()
-  expect(screen.getByText(/更新于 2026-08-24/)).toBeVisible()
+  expect(screen.getByText(/最近更新 2026-08-24/)).toBeVisible()
   // 卡片只承担来源管理，不重复展示作品库内容。
   expect(screen.queryByText('摇曳露营')).not.toBeInTheDocument()
   expect(screen.queryByText('孤独摇滚')).not.toBeInTheDocument()
@@ -142,7 +161,7 @@ test('新导入不会恢复到保存的上次执行步骤', async () => {
   render(<MediaManagementPage />)
 
   await screen.findByRole('heading', { name: '媒体库' })
-  fireEvent.click(screen.getByRole('button', { name: '导入媒体' }))
+  fireEvent.click(screen.getAllByRole('button', { name: '导入媒体' })[0])
 
   expect(await screen.findByRole('button', { name: '本地目录' })).toBeVisible()
   expect(screen.getByRole('navigation', { name: '导入步骤' }).querySelector('li[aria-current="step"]')?.textContent).toContain('选择来源')
@@ -155,7 +174,7 @@ test('媒体库维护入口生成预览并分组展示', async () => {
   fireEvent.click(screen.getByRole('button', { name: '媒体库维护' }))
 
   expect(await screen.findByRole('heading', { name: '按来源清理' })).toBeVisible()
-  expect(screen.getByRole('radio', { name: '全部来源' })).toBeChecked()
+  expect(screen.getByRole('radio', { name: /^全部来源/ })).toBeChecked()
   expect(screen.queryByRole('radio', { name: /OpenList/ })).not.toBeInTheDocument()
 
   fireEvent.click(screen.getByRole('button', { name: '生成删除预览' }))

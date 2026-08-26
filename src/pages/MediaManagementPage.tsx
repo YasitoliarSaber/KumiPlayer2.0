@@ -462,8 +462,7 @@ export default function MediaManagementPage() {
       if (action === 'incremental') scanMode = 'incremental'
       else if (action === 'full') scanMode = 'full'
       else if (requestSource === 'openlist') scanMode = openlistBaseline?.has_confirmed_baseline ? 'incremental' : 'full'
-      // P-004：OpenList 大扫描走 durable SourceScan，可离开、可查询、可取消；
-      // 本地/目录树保持同步扫描。
+      // 所有来源都先创建 durable SourceScan；大目录与目录树读取不能占用 HTTP 请求。
       let result: {
         root_id: string
         scan_id: string
@@ -472,11 +471,13 @@ export default function MediaManagementPage() {
         source_mode?: string
         scan_stats?: { requested_directories?: number; rolling_verified?: number; changed_directories?: number }
       }
-      if (requestSource === 'openlist') {
+      {
         const task = await mediaV4Api.startDurableScan({
-          source: 'openlist',
-          root_path: remoteRoot,
+          source: requestSource,
+          root_path: requestSource === 'local' ? path : kind === 'hybrid' ? remoteRoot : requestSource === 'openlist' ? remoteRoot : providerRoot(selectedProvider, remoteRoot) || 'tree',
+          tree_file: requestSource === 'tree' || kind === 'hybrid' ? path : '',
           provider: selectedProvider,
+          source_root: selectedSourceRoot,
           scan_mode: scanMode === 'incremental' ? 'incremental' : 'full',
         })
         setScanTask({ scan_id: task.scan_id, status: 'running' })
@@ -485,7 +486,7 @@ export default function MediaManagementPage() {
           const state = await mediaV4Api.durableScan(task.scan_id)
           setScanTask({ scan_id: task.scan_id, status: state.status })
           if (state.status === 'completed') {
-            result = { root_id: task.root_id, scan_id: task.scan_id, entries: state.entries, scan_mode: task.scan_mode === 'incremental' ? 'incremental' : 'full', source_mode: task.scan_mode === 'incremental' ? openlistBaseline?.source_mode || 'openlist_full' : 'openlist_full' }
+            result = { root_id: state.root_id || task.root_id, scan_id: task.scan_id, entries: state.entries, scan_mode: task.scan_mode as 'local' | 'tree_snapshot' | 'tree_baseline' | 'incremental' | 'full', source_mode: task.source_mode || (task.scan_mode === 'incremental' ? openlistBaseline?.source_mode || 'openlist_full' : 'openlist_full') }
             break
           }
           if (state.status === 'failed' || state.status === 'cancelled') {
@@ -493,15 +494,6 @@ export default function MediaManagementPage() {
           }
         }
         setScanTask(null)
-      } else {
-        result = await mediaV4Api.scan({
-          source: requestSource,
-          root_path: requestSource === 'local' ? path : kind === 'hybrid' ? remoteRoot : providerRoot(provider) || 'tree',
-          tree_file: requestSource === 'tree' || kind === 'hybrid' ? path : '',
-          provider: selectedProvider,
-          source_root: requestSource === 'tree' || kind === 'hybrid' ? selectedSourceRoot : '',
-          scan_mode: scanMode,
-        })
       }
       const nextScan = { ...result, source_metadata: metadata }
       setScan(nextScan)
@@ -840,7 +832,6 @@ export default function MediaManagementPage() {
       {!sourceCardsLoading && sourceCards.length === 0 && drafts.length === 0 && (
         <section className="media-v4-source-empty" aria-label="空媒体库">
           <div className="media-v4-empty"><strong>还没有导入任何媒体库</strong><span>点击“导入媒体”开始建立你的第一个来源。</span></div>
-          <Button className="media-primary-command" appearance="primary" icon={<Add24Regular />} onClick={startNewImport}>导入媒体</Button>
         </section>
       )}
       </>}

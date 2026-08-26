@@ -351,9 +351,11 @@ export const mediaV4Api = {
   startDurableScan: (request: {
     source?: string
     root_path?: string
+    tree_file?: string
     provider?: string
+    source_root?: string
     scan_mode?: 'full' | 'incremental'
-  }) => api.post<{ scan_id: string; root_id: string; scan_mode: string; status: string }>('/api/v4/sources/scans', request),
+  }) => api.post<{ scan_id: string; root_id: string; scan_mode: string; source_mode?: string; status: string }>('/api/v4/sources/scans', request),
 
   durableScan: (scanId: string) =>
     api.get<{ scan_id: string; root_id: string; status: string; started_at: string; finished_at: string; error: string; entries: V4SourceEvidence[] }>(`/api/v4/sources/scans/${encodeURIComponent(scanId)}`),

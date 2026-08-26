@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from dataclasses import asdict
@@ -374,6 +375,8 @@ def _persist_tree_scan(
     resolution: TreeRootResolution,
     source_mode: str = "",
     last_scan_mode: str = "",
+    durable: bool = False,
+    save_evidence: bool = True,
 ) -> None:
     """把目录树扫描的证据与验证事实写入事务约束的 SQLite。
 
@@ -446,12 +449,13 @@ def _persist_tree_scan(
                 "VALUES (?, ?, ?, 'validated', ?, ?)",
                 (scan_id, root_id, generation, now, now),
             )
-        else:
+        elif not durable:
             conn.execute(
                 "UPDATE source_scans SET status = 'validated', finished_at = ? WHERE scan_id = ?",
                 (now, scan_id),
             )
-    V4Repository(database).save_scan_evidence_bulk(evidence)
+    if save_evidence:
+        V4Repository(database).save_scan_evidence_bulk(evidence)
     upsert_tree_scan_validation(
         database,
         scan_id=scan_id,
@@ -993,13 +997,148 @@ def list_source_libraries():
     return {"cards": list_source_cards(get_database())}
 
 
+def _local_root_identity(path: str) -> tuple[str, str]:
+    """为耐久本地扫描预先登记稳定来源根，不枚举目录内容。"""
+
+    root = Path(path).expanduser().resolve()
+    root_id = "root_" + hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:24]
+    return root_id, str(root)
+
+
+def _start_durable_local_scan(request: SourceScanRequest) -> dict:
+    from app.media_v4.sources.durable_scan import create_durable_scan
+
+    if not request.root_path.strip():
+        raise HTTPException(status_code=400, detail="本地媒体目录不能为空")
+    database = get_database()
+    root_id, locator = _local_root_identity(request.root_path)
+    _ensure_root_container(
+        database,
+        root_id=root_id,
+        provider="local",
+        ingest_method="local_scan",
+        locator=locator,
+        route_id="",
+        root_container=_container_name(locator),
+        source_mode="local",
+        last_scan_mode="local",
+    )
+    scan_id = "scan_" + uuid.uuid4().hex
+    config = load_config()
+    create_durable_scan(
+        database,
+        scan_id=scan_id,
+        root_id=root_id,
+        kind="full",
+        scan_fn=lambda: scan_local_directory(
+            request.root_path,
+            excluded_roots=_configured_cloud_roots(config),
+        )[1:],
+    )
+    return {"scan_id": scan_id, "root_id": root_id, "scan_mode": "local", "source_mode": "local", "status": "running"}
+
+
+def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
+    """目录树与 TXT+OpenList 基线共享后台读取/证据持久化路径。"""
+
+    from app.media_v4.sources.durable_scan import create_durable_scan
+
+    if not request.tree_file:
+        detail = "目录树 + OpenList 增量需要先选择 TXT 基线文件" if request.source == "hybrid" else "目录树 TXT 文件不能为空"
+        raise HTTPException(status_code=400, detail=detail)
+    config = load_config()
+    content_provider = request.provider if request.provider in {"pan115", "baidu", "quark"} else "unknown"
+    source_mode = "tree_openlist" if request.source == "hybrid" else "tree_snapshot"
+    scan_mode = "tree_baseline" if request.source == "hybrid" else "tree_snapshot"
+    route_id = ""
+    configured_roots = _configured_tree_roots(config, content_provider)
+
+    if request.source == "hybrid":
+        from app.api.openlist_v4 import _configured_routes, _remote_root
+
+        username, _password, credential_state = resolve_openlist_credentials()
+        if credential_state == "unavailable":
+            raise HTTPException(status_code=503, detail="本机凭据管理器暂时不可用，请稍后重试")
+        if not config.openlist_server_url or not username:
+            raise HTTPException(status_code=400, detail="请先在设置页完成 OpenList 连接配置")
+        remote_root = normalize_remote_path(request.root_path.strip() or _remote_root(config))
+        routes = _configured_routes(config)
+        route_id, content_provider = provider_for_remote(routes, remote_root)
+        if not route_id:
+            raise HTTPException(status_code=409, detail="当前 OpenList 目录未匹配已保存的内容来源路由")
+        if not config.openlist_mount_root:
+            raise HTTPException(status_code=409, detail="当前内容来源尚未配置本地挂载路径，请先在设置页完成来源映射")
+        configured_roots = [derive_local_path(config.openlist_mount_root, _remote_root(config), remote_root)]
+        root_id = openlist_root_id(config.openlist_server_url, username, remote_root)
+    else:
+        if not configured_roots:
+            raise HTTPException(status_code=409, detail="当前内容来源尚未配置本地挂载路径，请先在设置页完成来源映射")
+        root_id = tree_root_id(content_provider, configured_roots[0], request.tree_file)
+
+    database = get_database()
+    identity_root = configured_roots[0]
+    _ensure_root_container(
+        database,
+        root_id=root_id,
+        provider=content_provider,
+        ingest_method="directory_tree",
+        locator=identity_root,
+        route_id=route_id,
+        root_container=_container_name(identity_root),
+        source_mode=source_mode,
+        last_scan_mode=scan_mode,
+    )
+    scan_id = "scan_" + uuid.uuid4().hex
+
+    def scan_tree():
+        try:
+            tree_text = read_directory_tree_text(request.tree_file)
+            resolution = TreePlaybackRootResolver(request.tree_file, configured_roots=configured_roots).resolve(tree_text)
+            _scan_id, evidence = build_directory_tree_evidence(
+                tree_text,
+                root_id=root_id,
+                provider=content_provider,
+                source_root=resolution.root,
+                source_route_id=route_id,
+                scan_id=scan_id,
+            )
+            _persist_tree_scan(
+                database,
+                root_id=root_id,
+                provider=content_provider,
+                scan_id=scan_id,
+                route_id=route_id,
+                effective_root=resolution.root,
+                root_container=_container_name(resolution.root or identity_root),
+                evidence=evidence,
+                resolution=resolution,
+                source_mode=source_mode,
+                last_scan_mode=scan_mode,
+                durable=True,
+                save_evidence=False,
+            )
+            if request.source == "hybrid":
+                stage_scan_state(scan_id, build_tree_baseline_state(root_id, remote_root, evidence))
+            return scan_id, evidence
+        except DirectoryTreeReadError as exc:
+            raise ValueError(_directory_tree_error_message(exc)) from exc
+
+    create_durable_scan(database, scan_id=scan_id, root_id=root_id, kind="full", scan_fn=scan_tree)
+    return {"scan_id": scan_id, "root_id": root_id, "scan_mode": scan_mode, "source_mode": source_mode, "status": "running"}
+
+
 @router.post("/sources/scans")
 def start_durable_scan(request: SourceScanRequest):
-    """为 OpenList 完整/增量扫描创建 durable SourceScan 并立即返回任务身份。
+    """为所有来源创建 durable SourceScan 并立即返回任务身份。
 
     大库扫描可离开、可查询、可取消；完成后 evidence 持久化到该 scan 下，
     preview 只消费 completed scan。SourceScan 不进入 confirmed revision jobs。
     """
+
+    if request.source == "local":
+        return _start_durable_local_scan(request)
+    if request.source in {"tree", "hybrid"}:
+        return _start_durable_tree_scan(request)
 
     from app.api.openlist_v4 import _client, _configured_routes, _remote_root
     from app.media_v4.sources.durable_scan import create_durable_scan
