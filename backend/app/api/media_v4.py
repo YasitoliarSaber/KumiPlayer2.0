@@ -216,6 +216,23 @@ def _make_entries(request: PreviewRequest):
     ]
 
 
+def _completed_scan_evidence(database: V4Database, *, root_id: str, scan_id: str) -> list[SourceEvidence] | None:
+    """读取耐久扫描的权威证据；未完成扫描仍不能进入 preview。"""
+
+    with database.connect() as conn:
+        row = conn.execute(
+            "SELECT root_id, status FROM source_scans WHERE scan_id = ?",
+            (scan_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    if str(row["root_id"]) != root_id:
+        raise HTTPException(status_code=409, detail="扫描证据与当前来源根不一致，请重新扫描")
+    if str(row["status"]) != "completed":
+        return None
+    return V4Repository(database).list_scan_evidence(scan_id)
+
+
 def _confirmed_source_evidence(root_id: str):
     """读取来源根当前 confirmed revision 的完整证据快照。"""
 
@@ -709,8 +726,32 @@ def scan_source(request: SourceScanRequest):
 @router.post("/imports/preview")
 def preview(request: PreviewRequest):
     database = get_database()
+    durable_evidence = _completed_scan_evidence(
+        database,
+        root_id=request.root_id,
+        scan_id=request.scan_id,
+    )
     validation = load_tree_scan_validation(database, request.scan_id)
-    if validation is not None:
+    evidence_is_persisted = durable_evidence is not None
+    if durable_evidence is not None:
+        # 所有耐久扫描完成后，证据已经以 scan_id 持久化。preview 只能消费
+        # 这份后端快照，不接收前端回传的 entries，避免重复写入或篡改。
+        if not durable_evidence and not request.allow_empty:
+            raise HTTPException(status_code=409, detail="空来源必须由用户明确确认后才能替代当前 revision")
+        evidence = durable_evidence
+        if validation is not None:
+            # 耐久目录树同样必须遵守 P-008 的验证事实，不能因为扫描已完成就
+            # 跳过精确播放根校验。
+            if validation["root_id"] != request.root_id:
+                raise HTTPException(status_code=409, detail="扫描证据与当前请求不一致，请重新扫描")
+            source_locator = validation["effective_root"]
+            playback_locator = validation["effective_root"]
+            source_route_id = ""
+        else:
+            source_locator = request.source_locator
+            playback_locator = request.playback_locator
+            source_route_id = request.source_route_id
+    elif validation is not None:
         # 目录树/混合：以后端持久化的证据重建，忽略前端逐条改写。
         evidence = V4Repository(database).list_scan_evidence(request.scan_id)
         if validation["root_id"] != request.root_id or not evidence:
@@ -732,11 +773,15 @@ def preview(request: PreviewRequest):
     root_container = ""
     with database.connect() as conn:
         root_row = conn.execute(
-            "SELECT root_container FROM source_roots WHERE root_id = ?",
+            "SELECT source_locator, playback_locator, route_id, root_container FROM source_roots WHERE root_id = ?",
             (request.root_id,),
         ).fetchone()
         if root_row is not None:
             root_container = str(root_row["root_container"] or "")
+            if evidence_is_persisted and validation is None:
+                source_locator = str(root_row["source_locator"] or source_locator)
+                playback_locator = str(root_row["playback_locator"] or playback_locator)
+                source_route_id = str(root_row["route_id"] or source_route_id)
     parsed = [(item, parser.parse(item, root_container=root_container)) for item in evidence]
     service = V4RevisionService(database)
     try:
@@ -753,6 +798,7 @@ def preview(request: PreviewRequest):
                 "root_container": root_container,
             },
             source_mode=request.source_mode,
+            _evidence_already_persisted=evidence_is_persisted,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

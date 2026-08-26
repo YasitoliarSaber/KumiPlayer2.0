@@ -352,6 +352,7 @@ class V4RevisionService:
         source_metadata: dict[str, str] | None = None,
         source_mode: str = "",
         _publish: bool = False,
+        _evidence_already_persisted: bool = False,
         _override_payloads: dict[str, dict] | None = None,
         candidate_search: CandidateSearch | None = None,
     ) -> ResolvedMediaGraph:
@@ -488,7 +489,8 @@ class V4RevisionService:
         # never replaces the previously parsed payload.
         if not _publish:
             for evidence, facts in entries:
-                self.repository.save_source_evidence(evidence)
+                if not _evidence_already_persisted:
+                    self.repository.save_source_evidence(evidence)
                 self.repository.save_parsed_facts(facts)
 
         graph_digest = hashlib.sha256(

@@ -70,6 +70,18 @@ def test_local_durable_entrypoint_returns_before_the_directory_scan_finishes(tmp
     assert completed["status"] == "completed"
     assert [entry["relative_path"] for entry in completed["entries"]] == ["Show/Show.S01E01.mkv"]
 
+    # durable scan 完成后，preview 必须只消费持久化的证据；前端不应再携带
+    # 可被篡改、也可能导致重复写入的完整 entries 快照。
+    preview = client.post("/api/v4/imports/preview", json={
+        "revision_id": "rev-durable-local",
+        "root_id": expected_root_id,
+        "scan_id": scan_id,
+        "entries": [],
+        "source_display_name": "本地媒体库",
+    })
+    assert preview.status_code == 200, preview.text
+    assert len(preview.json()["works"]) == 1
+
 
 def test_tree_durable_entrypoint_defers_txt_reading_until_after_task_creation(tmp_path, monkeypatch):
     """目录树读取也不能卡在 HTTP 请求内，完成后证据必须归属该 durable scan。"""

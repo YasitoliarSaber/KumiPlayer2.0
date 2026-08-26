@@ -3,6 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import MediaManagementPage from '../../src/pages/MediaManagementPage'
+import { ApiError } from '../../src/api/client'
 
 const api = vi.hoisted(() => ({
   scan: vi.fn(),
@@ -117,6 +118,18 @@ test('空媒体库只保留命令栏中的一个导入主按钮', async () => {
   expect(await screen.findByText('还没有导入任何媒体库')).toBeVisible()
   expect(screen.getAllByRole('button', { name: '导入媒体' })).toHaveLength(1)
   expect(screen.queryByRole('navigation', { name: '导入步骤' })).not.toBeInTheDocument()
+})
+
+test('来源卡首次短暂断连后自动重试，并移除过期连接错误', async () => {
+  api.sourceLibraries
+    .mockRejectedValueOnce(new ApiError(503, '无法连接 KumiPlayer 后端，请重试或使用恢复界面重启后端'))
+    .mockResolvedValueOnce({ cards: [cardFixture()] })
+
+  render(<MediaManagementPage />)
+
+  expect(await screen.findByText('115 动画')).toBeVisible()
+  expect(api.sourceLibraries).toHaveBeenCalledTimes(2)
+  expect(screen.queryByText('无法连接 KumiPlayer 后端，请重试或使用恢复界面重启后端')).not.toBeInTheDocument()
 })
 
 test('本地导入创建耐久扫描任务而不等待同步扫描响应', async () => {

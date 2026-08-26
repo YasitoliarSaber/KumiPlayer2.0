@@ -18,6 +18,7 @@ import {
 } from '@fluentui/react-icons'
 import { mediaV4Api, type V4DraftSummary, type V4Job, type V4OpenlistBaselineStatus, type V4Preview, type V4SourceEvidence, type V4SourceLibraryCard } from '../api/mediaV4'
 import type { V4ExecutionProgress } from '../api/mediaV4'
+import { ApiError } from '../api/client'
 import { configApi, type PublicConfig } from '../api/config'
 import { openlistApi } from '../api/openlist'
 import { tasksApi } from '../api/tasks'
@@ -41,6 +42,15 @@ type SourceCardMetadata = {
 }
 
 const ACTIVE_REVISION_KEY = 'kumiplayer.media-v4.active-revision'
+const TRANSIENT_BACKEND_RETRY_DELAY_MS = 300
+
+function isTransientBackendFailure(cause: unknown) {
+  return cause instanceof ApiError && (cause.status === 408 || cause.status === 503)
+}
+
+function isTransientBackendMessage(message: string) {
+  return message.startsWith('无法连接 KumiPlayer 后端') || message.startsWith('请求超时')
+}
 
 const SOURCE_OPTIONS: Array<{
   kind: ImportKind
@@ -207,12 +217,24 @@ export default function MediaManagementPage() {
     sourceCardsRefreshInFlight.current = true
     setSourceCardsLoading(true)
     try {
-      const [cardsResult, draftsResult] = await Promise.all([
+      const loadCards = () => Promise.all([
         mediaV4Api.sourceLibraries(),
         mediaV4Api.drafts().catch(() => ({ drafts: [] as V4DraftSummary[] })),
       ])
+      let result: Awaited<ReturnType<typeof loadCards>>
+      try {
+        result = await loadCards()
+      } catch (cause) {
+        // 桌面壳刚拉起后端时，首个请求可能早于监听端口就绪。只对明确的
+        // 可恢复连接错误重试一次，避免把服务端校验/业务错误静默吞掉。
+        if (!isTransientBackendFailure(cause)) throw cause
+        await new Promise<void>((resolve) => window.setTimeout(resolve, TRANSIENT_BACKEND_RETRY_DELAY_MS))
+        result = await loadCards()
+      }
+      const [cardsResult, draftsResult] = result
       setSourceCards(cardsResult.cards)
       setDrafts(draftsResult.drafts)
+      setError((current) => isTransientBackendMessage(current) ? '' : current)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法读取已导入媒体库')
     } finally {
