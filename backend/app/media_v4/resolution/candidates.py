@@ -105,6 +105,13 @@ def build_query_inputs(work: ResolvedWork, entries: list[tuple[SourceEvidence, P
         # Provider 身份查询输入；否则 Heya Camp 会被 Yuru Camp 候选吸收。
         for value in (facts.work_title, facts.original_title, *facts.title_candidates):
             value = (value or "").strip()
+            # title_candidates 由解析层提供给展示与诊断，也会包含父系列标题。
+            # 当前 Work 已经是独立子作品时，父系列仅能建立 relation，绝不能
+            # 参与自身 Provider 检索或精确评分，否则父系列别名会制造伪歧义。
+            parent_norm = _normalize_title(facts.series_group)
+            work_norm = _normalize_title(facts.work_title)
+            if parent_norm and parent_norm != work_norm and _normalize_title(value) == parent_norm:
+                continue
             if value and not is_generic_container_title(value) and value not in queries:
                 queries.append(value)
     if work.preferred_title and work.preferred_title not in queries:
@@ -248,10 +255,13 @@ def plan_work_candidates(
             if evidence.evidence_id in evidence_ids
         ]
         # 1) 显式 hint：高置信候选。
-        hint_ids: list[tuple[str, str]] = []
+        hint_ids: list[tuple[str, str, str]] = []
         for _evidence, facts in related:
             if facts.tmdb_hint_id and facts.tmdb_hint_type:
-                hint = (facts.tmdb_hint_type.casefold(), str(facts.tmdb_hint_id))
+                media_type = facts.tmdb_hint_type.casefold()
+                if media_type not in {"movie", "tv"}:
+                    continue
+                hint = ("tmdb", media_type, str(facts.tmdb_hint_id))
                 if hint not in hint_ids:
                     hint_ids.append(hint)
         # 2) 既有 provider binding。
@@ -294,14 +304,14 @@ def plan_work_candidates(
                 candidates[key] = scored
 
         # hint 未出现在候选里时补为高置信 proposed。
-        for provider, provider_id in hint_ids:
-            key = (provider, "tv", provider_id)
+        for provider, media_type, provider_id in hint_ids:
+            key = (provider, media_type, provider_id)
             if key not in candidates:
                 candidates[key] = WorkCandidate(
                     work_key=work.work_key,
                     provider=provider,
                     provider_id=provider_id,
-                    media_type="tv",
+                    media_type=media_type,
                     title=work.preferred_title,
                     year=work.year,
                     evidence="parsed_tmdb_hint",

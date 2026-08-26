@@ -29,6 +29,20 @@ def _is_placeholder_title(value: str) -> bool:
     return is_generic_container_title(value)
 
 
+def _effective_media_type(facts: ParsedFacts) -> str:
+    """解析图的作品类型以显式 Provider 身份为准，不改写原始事实。
+
+    目录里的 SP、PV、菜单只描述文件在本地的组织方式。若来源已经给出
+    TMDB movie/tv hint，它才是 Work 的权威媒体类型；这能避免电影的花絮
+    被聚合成 TV 特别篇。
+    """
+
+    hinted = facts.tmdb_hint_type.casefold()
+    if facts.tmdb_hint_id and hinted in {"movie", "tv"}:
+        return hinted
+    return (facts.media_type or facts.group_type or "unknown").casefold()
+
+
 def _work_key(facts: ParsedFacts) -> str:
     if facts.tmdb_hint_id and facts.tmdb_hint_type:
         return f"provider:{facts.tmdb_hint_type.casefold()}:{facts.tmdb_hint_id}"
@@ -43,7 +57,7 @@ def _work_key(facts: ParsedFacts) -> str:
     title = _normalize_title(identity_title)
     if _is_placeholder_title(title):
         return ""
-    media_type = (facts.media_type or facts.group_type or "unknown").casefold()
+    media_type = _effective_media_type(facts)
     year = str(facts.year_candidate or "")
     return f"title:{title}:{year}:{media_type}"
 
@@ -64,7 +78,8 @@ def _relation_work_key_from_row(row: dict) -> str:
     series_group = str(row.get("series_group") or "")
     if not series_group or is_generic_container_title(series_group):
         return ""
-    media_type = str(row.get("media_type") or "unknown").casefold()
+    # 子作品是电影时，父系列仍常是 TV；关系键保留目录解析到的父系列类型。
+    media_type = str(row.get("relation_media_type") or row.get("media_type") or "unknown").casefold()
     year = str(row.get("year") or "")
     return f"title:{_normalize_title(series_group)}:{year}:{media_type}"
 
@@ -117,7 +132,8 @@ class MediaResolver:
                 {
                     "title": identity_title,
                     "year": facts.year_candidate,
-                    "media_type": facts.media_type or "unknown",
+                    "media_type": _effective_media_type(facts),
+                    "relation_media_type": (facts.media_type or facts.group_type or "unknown").casefold(),
                     "card_type": facts.card_type,
                     "show_type": facts.show_type,
                     "series_group": facts.series_group,
@@ -129,7 +145,7 @@ class MediaResolver:
                 work["evidence_ids"].append(evidence.evidence_id)
 
             edition_key = _edition_key(facts)
-            if facts.media_type == "movie" or facts.group_type == "movie":
+            if _effective_media_type(facts) == "movie":
                 movie_assets = work_asset_rows.setdefault((key, edition_key), [])
                 if evidence.evidence_id not in movie_assets:
                     movie_assets.append(evidence.evidence_id)
