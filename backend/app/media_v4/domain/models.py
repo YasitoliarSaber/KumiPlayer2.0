@@ -52,6 +52,7 @@ class ParsedFacts:
     year_candidate: int | None = None
     season_token_raw: str = ""
     episode_token_raw: str = ""
+    episode_title: str = ""
     season_candidate: int | None = None
     episode_candidate: int | None = None
     absolute_episode_candidate: int | None = None
@@ -108,6 +109,7 @@ class ResolvedEpisode:
     season_kind: str
     episode_kind: str
     special_number: int | None
+    display_title: str
     edition_key: str
     asset_evidence_ids: tuple[str, ...] = field(default_factory=tuple)
     provider_season_number: int | None = None

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 
 from app.media_v4.domain.models import (
     ParsedFacts,
@@ -17,6 +17,7 @@ from app.media_v4.domain.models import (
     SourceEvidence,
 )
 from app.media_v4.generic_container import is_generic_container_title
+from app.media_v4.parsing.episode_titles import ensure_special_title_number
 from app.media_v4.sources.adapters import provider_to_source
 from app.recognition.media import (
     _extract_work_container,
@@ -168,6 +169,29 @@ def _edition_key(facts: ParsedFacts) -> str:
     return "+".join(tags) or "default"
 
 
+def _resolved_entry_work_key(
+    evidence: SourceEvidence,
+    facts: ParsedFacts,
+    structural_series_identities: set[tuple[str, str]],
+) -> str:
+    key = _work_key(facts, evidence)
+    if facts.card_type == "standalone":
+        return key
+    media_type = _effective_media_type(facts)
+    matching_series = next(
+        (
+            normalized
+            for normalized in (
+                _normalize_title(facts.work_title),
+                _normalize_title(facts.series_group),
+            )
+            if (normalized, media_type) in structural_series_identities
+        ),
+        "",
+    )
+    return f"series:{matching_series}:{media_type}" if matching_series else key
+
+
 class MediaResolver:
     """Resolver 只负责聚合，不修改输入事实、不淘汰 Asset。"""
 
@@ -187,6 +211,42 @@ class MediaResolver:
             and facts.series_group
             and not is_generic_container_title(facts.series_group)
         }
+        explicit_special_numbers: dict[str, set[int]] = defaultdict(set)
+        for evidence, facts in entries:
+            if facts.group_type != "special" and not facts.special_candidate:
+                continue
+            key = _resolved_entry_work_key(evidence, facts, structural_series_identities)
+            number = facts.special_number or facts.episode_candidate
+            if key and number is not None and number > 0:
+                explicit_special_numbers[key].add(number)
+        next_special_number = {
+            key: max(numbers, default=0) + 1
+            for key, numbers in explicit_special_numbers.items()
+        }
+        allocated_unnumbered_specials: dict[tuple[str, str], int] = {}
+        for evidence, facts in sorted(
+            entries,
+            key=lambda item: (item[0].relative_path.casefold(), item[0].evidence_id),
+        ):
+            if facts.group_type != "special" and not facts.special_candidate:
+                continue
+            if (facts.special_number or facts.episode_candidate or 0) > 0:
+                continue
+            key = _resolved_entry_work_key(evidence, facts, structural_series_identities)
+            if not key:
+                continue
+            title_identity = _normalize_title(facts.episode_title) or _normalize_title(
+                evidence.relative_path
+            )
+            allocation_key = (key, title_identity)
+            if allocation_key in allocated_unnumbered_specials:
+                continue
+            special_number = next_special_number.get(key, 1)
+            while special_number in explicit_special_numbers.get(key, set()):
+                special_number += 1
+            allocated_unnumbered_specials[allocation_key] = special_number
+            explicit_special_numbers[key].add(special_number)
+            next_special_number[key] = special_number + 1
 
         for evidence, facts in entries:
             if not facts.is_importable or facts.is_auxiliary:
@@ -200,22 +260,7 @@ class MediaResolver:
                     )
                 )
             identity_title = facts.work_title or (facts.title_candidates or ("",))[0]
-            key = _work_key(facts, evidence)
-            if facts.card_type != "standalone":
-                media_type = _effective_media_type(facts)
-                matching_series = next(
-                    (
-                        normalized
-                        for normalized in (
-                            _normalize_title(facts.work_title),
-                            _normalize_title(facts.series_group),
-                        )
-                        if (normalized, media_type) in structural_series_identities
-                    ),
-                    "",
-                )
-                if matching_series:
-                    key = f"series:{matching_series}:{media_type}"
+            key = _resolved_entry_work_key(evidence, facts, structural_series_identities)
             if not key:
                 generic = bool(identity_title.strip()) and is_generic_container_title(identity_title)
                 issues.append(
@@ -258,10 +303,20 @@ class MediaResolver:
 
             local_season: int | None
             local_episodes: tuple[int | None, ...]
+            resolved_special_number: int | None
             if facts.group_type == "special" or facts.special_candidate:
                 local_season = 0
                 local_episodes = (None,)
-                special_number = facts.special_number or facts.episode_candidate
+                resolved_special_number = facts.special_number or facts.episode_candidate
+                if resolved_special_number is None or resolved_special_number <= 0:
+                    title_identity = _normalize_title(facts.episode_title) or _normalize_title(
+                        evidence.relative_path
+                    )
+                    resolved_special_number = allocated_unnumbered_specials[(key, title_identity)]
+                display_title = ensure_special_title_number(
+                    facts.episode_title,
+                    resolved_special_number,
+                )
                 season_kind = "special"
                 episode_kind = "special"
             else:
@@ -270,7 +325,8 @@ class MediaResolver:
                     local_episodes = tuple(range(facts.episode_range[0], facts.episode_range[1] + 1))
                 else:
                     local_episodes = (facts.episode_candidate,)
-                special_number = None
+                resolved_special_number = None
+                display_title = facts.episode_title
                 season_kind = "regular"
                 episode_kind = "regular" if facts.group_type == "season" else facts.group_type or "unknown"
 
@@ -284,7 +340,7 @@ class MediaResolver:
                         str(local_season),
                         str(local_episode),
                         str(absolute_group_key),
-                        str(special_number),
+                        str(resolved_special_number),
                     )
                 )
                 episode_identity = (
@@ -292,7 +348,7 @@ class MediaResolver:
                     local_season,
                     local_episode,
                     absolute_group_key,
-                    special_number,
+                    resolved_special_number,
                     edition_key,
                 )
                 existing_episode = episode_rows.get(episode_identity)
@@ -325,7 +381,8 @@ class MediaResolver:
                         "absolute_episode_number": facts.absolute_episode_candidate,
                         "season_kind": season_kind,
                         "episode_kind": episode_kind,
-                        "special_number": special_number,
+                        "special_number": resolved_special_number,
+                        "display_title": display_title,
                         "edition_key": edition_key,
                         "asset_ids": [],
                         "title_norms": {_normalize_title(identity_title)},
@@ -398,6 +455,7 @@ class MediaResolver:
                 season_kind=row["season_kind"],
                 episode_kind=row["episode_kind"],
                 special_number=row["special_number"],
+                display_title=row["display_title"],
                 edition_key=row["edition_key"],
                 asset_evidence_ids=tuple(row["asset_ids"]),
             )

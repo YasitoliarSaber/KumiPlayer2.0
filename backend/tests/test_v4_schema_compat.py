@@ -93,7 +93,7 @@ def test_v5_layout_with_altered_columns_initializes_and_keeps_data(tmp_path):
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 13
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
         root = conn.execute("SELECT * FROM source_roots WHERE root_id = 'root-keep'").fetchone()
         assert root is not None
         assert root["provider"] == "pan115"
@@ -348,7 +348,43 @@ def test_v12_database_migrates_bangumi_tables_without_rebuilding_media_state(tmp
     database.initialize()
 
     with database.connect() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 13
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
         assert conn.execute("SELECT provider FROM source_roots WHERE root_id = 'root-v12'").fetchone()[0] == "baidu"
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bangumi_matches'").fetchone()
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bangumi_episode_sync'").fetchone()
+
+
+def test_v13_database_adds_immutable_episode_title_fact_without_losing_rows(tmp_path):
+    from app.media_v4.persistence.database import V4Database
+
+    database = V4Database(tmp_path / "v13-to-v14.db")
+    database.initialize()
+    with database.connect() as conn:
+        conn.execute("ALTER TABLE parsed_facts DROP COLUMN episode_title")
+        conn.execute(
+            "INSERT INTO source_roots(root_id, provider, ingest_method, source_locator, playback_locator, created_at, updated_at) "
+            "VALUES ('root-v13', 'local', 'local_scan', 'D:/Anime', 'D:/Anime', 'now', 'now')"
+        )
+        conn.execute(
+            "INSERT INTO source_scans(scan_id, root_id, generation, started_at, finished_at, status) "
+            "VALUES ('scan-v13', 'root-v13', 1, 'now', 'now', 'succeeded')"
+        )
+        conn.execute(
+            "INSERT INTO source_evidence(evidence_id, scan_id, root_id, source_key, relative_path, entry_kind) "
+            "VALUES ('evidence-v13', 'scan-v13', 'root-v13', 'special', 'Show/SP01.mkv', 'video')"
+        )
+        conn.execute(
+            "INSERT INTO parsed_facts(parsed_fact_id, evidence_id, parser_version) "
+            "VALUES ('facts-v13', 'evidence-v13', 'v13')"
+        )
+        conn.execute("PRAGMA user_version = 13")
+
+    database.initialize()
+
+    with database.connect() as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(parsed_facts)")}
+        assert "episode_title" in columns
+        assert conn.execute(
+            "SELECT episode_title FROM parsed_facts WHERE parsed_fact_id = 'facts-v13'"
+        ).fetchone()[0] == ""

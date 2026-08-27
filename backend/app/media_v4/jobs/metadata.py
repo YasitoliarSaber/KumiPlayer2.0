@@ -277,7 +277,10 @@ def _build_tv_episode_mappings(client: TMDBClient, provider_id: int, target: dic
         for episode in episodes:
             provider_episode = _positive_int(episode.get("provider_episode_number"))
             if provider_episode is None:
-                provider_episode = _positive_int(episode.get("local_episode_number"))
+                if str(episode.get("season_kind") or "") == "special":
+                    provider_episode = _positive_int(episode.get("special_number"))
+                else:
+                    provider_episode = _positive_int(episode.get("local_episode_number"))
             if provider_episode is None:
                 continue
             remote = remote_by_number.get(provider_episode) or {}

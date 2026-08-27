@@ -993,7 +993,7 @@ class V4RevisionService:
                                 episode.absolute_episode_number,
                                 episode.special_number,
                                 episode.episode_kind,
-                                "",
+                                episode.display_title,
                             ),
                         )
                     else:

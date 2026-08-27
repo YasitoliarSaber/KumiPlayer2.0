@@ -14,6 +14,11 @@ import httpx
 
 from app.core.config import load_config
 from app.media_v4.jobs.paths import work_directory_name
+from app.media_v4.parsing.episode_titles import (
+    ensure_special_title_number,
+    is_generic_special_title,
+    is_special_marker_only,
+)
 from app.media_v4.persistence.database import V4Database
 
 
@@ -51,7 +56,21 @@ def _episode_nfo(episode: dict) -> bytes:
     root = ET.Element("episodedetails")
     season = int(episode.get("local_season_number") or 0)
     number = int(episode.get("local_episode_number") or episode.get("special_number") or 0)
-    _add(root, "title", episode.get("title") or episode.get("display_title") or f"第 {number} 集")
+    local_title = str(episode.get("display_title") or "").strip()
+    scraped_title = str(episode.get("title") or "").strip()
+    is_special = season == 0 or episode.get("season_kind") == "special"
+    if is_special:
+        if local_title and not (
+            is_special_marker_only(local_title) or is_generic_special_title(local_title)
+        ):
+            title = ensure_special_title_number(local_title, number)
+        elif scraped_title and not is_generic_special_title(scraped_title):
+            title = ensure_special_title_number(scraped_title, number)
+        else:
+            title = ensure_special_title_number(local_title or scraped_title, number)
+    else:
+        title = scraped_title or local_title or f"第 {number} 集"
+    _add(root, "title", title)
     _add(root, "season", season)
     _add(root, "episode", number)
     _add(root, "plot", episode.get("plot"))

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 13
+V4_SCHEMA_VERSION = 14
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -117,6 +117,7 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             year_candidate INTEGER,
             season_token_raw TEXT NOT NULL DEFAULT '',
             episode_token_raw TEXT NOT NULL DEFAULT '',
+            episode_title TEXT NOT NULL DEFAULT '',
             season_candidate INTEGER,
             episode_candidate INTEGER,
             absolute_episode_candidate INTEGER,
@@ -912,6 +913,12 @@ def migrate_schema_v12_to_v13(conn: sqlite3.Connection) -> None:
     """v12 → v13：新增 V4 Bangumi 匹配与同步事实表。"""
 
     create_v13_structures(conn)
+
+
+def migrate_schema_v13_to_v14(conn: sqlite3.Connection) -> None:
+    """v13 → v14：ParsedFacts 保存不可变本地剧集标题。"""
+
+    _add_column_if_missing(conn, "parsed_facts", "episode_title", "TEXT NOT NULL DEFAULT ''")
 
 
 def migrate_schema_v10_to_v11(conn: sqlite3.Connection) -> None:

@@ -174,6 +174,23 @@ def test_special_episode_nfo_keeps_zero_season_number():
     assert "<episode>2</episode>" in payload
 
 
+def test_special_episode_nfo_keeps_distinct_local_title_when_scraper_is_generic():
+    from app.media_v4.jobs.metadata_artifacts import _episode_nfo
+
+    payload = _episode_nfo(
+        {
+            "local_season_number": 0,
+            "special_number": 2,
+            "season_kind": "special",
+            "display_title": "SP02 - 温泉小剧场",
+            "title": "特别篇",
+        }
+    ).decode("utf-8")
+
+    assert "<title>SP02 - 温泉小剧场</title>" in payload
+    assert "<title>特别篇</title>" not in payload
+
+
 def test_runner_uses_configured_metadata_provider_for_scrape(tmp_path):
     from app.media_v4.jobs.runner import V4JobRunner
     from app.media_v4.persistence.database import V4Database

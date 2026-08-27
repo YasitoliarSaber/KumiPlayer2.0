@@ -87,10 +87,54 @@ test('按旧版沉浸式结构展示 V4 季度和剧集信息', async () => {
   expect(screen.getByText('启程')).toBeVisible();
 });
 
+test('特别篇使用 SP 编号并显示彼此可区分的本地标题', async () => {
+  const specialWork = {
+    ...work,
+    seasons: [
+      { season_id: 'season-special', season_number: 0, group_type: 'special', label: '特别篇', episode_count: 2 },
+    ],
+    episodes: [
+      {
+        ...work.episodes[0],
+        episode_id: 'special-1',
+        season_number: 0,
+        episode_number: null,
+        special_number: 1,
+        title: 'SP01 - 露营小剧场',
+        group_type: 'special',
+        kind: 'special',
+      },
+      {
+        ...work.episodes[0],
+        episode_id: 'special-2',
+        season_number: 0,
+        episode_number: null,
+        special_number: 2,
+        title: 'SP02 - 温泉小剧场',
+        group_type: 'special',
+        kind: 'special',
+      },
+    ],
+  };
+  useUiStore.setState({ selectedSeasonNumber: 0 });
+  useLibraryStore.setState({
+    works: [specialWork as never],
+    getWorkDetail: vi.fn().mockResolvedValue(specialWork),
+  });
+
+  render(<WorkDetailPage />);
+
+  expect(await screen.findByText('SP01 - 露营小剧场')).toBeVisible();
+  expect(screen.getByText('SP02 - 温泉小剧场')).toBeVisible();
+  expect(screen.getAllByText('SP01').length).toBeGreaterThan(0);
+  expect(screen.getAllByText('SP02').length).toBeGreaterThan(0);
+});
+
 test('详情首屏优先复用本地图片，不重复请求同一张背景图', async () => {
   const { container } = render(<WorkDetailPage />);
 
-  const hero = await screen.findByAltText('', { selector: '.detail-hero-art' });
+  await screen.findByAltText('测试动画 logo');
+  const hero = container.querySelector('.detail-hero-art') as HTMLImageElement;
   const logo = await screen.findByAltText('测试动画 logo');
   const episodeImage = container.querySelector('.episode-thumb img');
 

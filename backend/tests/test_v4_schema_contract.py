@@ -18,7 +18,7 @@ def test_empty_database_creates_one_strict_v4_schema(tmp_path):
     database.initialize()
 
     with database.connect() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 13
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
         tables = {
             row[0]
             for row in conn.execute(
@@ -72,7 +72,7 @@ def test_future_database_version_is_rejected(tmp_path):
 
     path = tmp_path / "future.db"
     with sqlite3.connect(path) as conn:
-        conn.execute("PRAGMA user_version = 14")
+        conn.execute("PRAGMA user_version = 15")
 
     with pytest.raises(RuntimeError, match="高于当前程序支持"):
         V4Database(path).initialize()

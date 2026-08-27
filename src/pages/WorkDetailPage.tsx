@@ -782,7 +782,7 @@ export default function WorkDetailPage() {
     || work.show_type === 'live_movie';
   const isSeries = !isMovie && (work.show_type === 'anime_series' || work.show_type === 'live_series');
   const continueEpisodeTitle = continueTarget
-    ? cleanDisplayTitle(continueTarget.title || '', `第 ${continueTarget.episode_number || '?'} 集`)
+    ? cleanDisplayTitle(continueTarget.title || '', episodeFallbackTitle(continueTarget))
     : '';
   const continueEpisodeCode = continueTarget ? formatEpisodeCode(continueTarget) : '';
   const continueCompactLabel = !isMovie && isSeries
@@ -1681,8 +1681,8 @@ export default function WorkDetailPage() {
             className={`detail-episode-grid ${hasEpisodeThumbnails ? 'thumbnail-strip' : effectiveEpisodeView === 'grid' ? 'grid-view' : 'list-view'}`}
           >
             {episodes.map((episode: any, episodeIndex: number) => {
-              const rawEpisodeTitle = episode.title || `第 ${episode.episode_number} 集`;
-              const episodeTitle = cleanDisplayTitle(rawEpisodeTitle, `第 ${episode.episode_number} 集`);
+              const rawEpisodeTitle = episode.title || episodeFallbackTitle(episode);
+              const episodeTitle = cleanDisplayTitle(rawEpisodeTitle, episodeFallbackTitle(episode));
               const isWatched = watchedEpisodeIds.has(episode.episode_id);
               const isCurrent = continueTarget?.episode_id === episode.episode_id;
               const previewImage = episode.thumb_path ? assetUrl(episode.thumb_path, 'episode') : fanartImage;
@@ -1696,7 +1696,7 @@ export default function WorkDetailPage() {
                   <button
                     onClick={() => handlePlay(episode.episode_id)}
                     className="episode-button min-w-0 flex flex-1 items-center gap-3 text-left"
-                    aria-label={`${isWatched ? '已看完，' : ''}播放第 ${episode.episode_number} 集：${episodeTitle}`}
+                    aria-label={`${isWatched ? '已看完，' : ''}播放${episodeAriaNumberLabel(episode)}：${episodeTitle}`}
                   >
                     <span className="episode-thumb" aria-hidden="true">
                       {previewImage ? (
@@ -1719,7 +1719,7 @@ export default function WorkDetailPage() {
                     </span>
                     <span className="episode-card-copy">
                     <span className="text-base font-semibold tabular-nums" style={{ color: 'var(--text-muted)' }}>
-                      {String(episode.episode_number).padStart(2, '0')}
+                      {episodeNumberLabel(episode)}
                     </span>
                     <span className="min-w-0 flex-1 truncate text-sm" style={{ color: 'var(--text)' }} title={rawEpisodeTitle}>
                       {episodeTitle}
@@ -1802,9 +1802,9 @@ export default function WorkDetailPage() {
                   key={episode.episode_id}
                   className={`${continueTarget?.episode_id === episode.episode_id ? 'current' : ''} ${watchedEpisodeIds.has(episode.episode_id) ? 'watched' : ''}`}
                   onClick={() => revealEpisodeInStrip(index)}
-                  title={cleanDisplayTitle(episode.title || '', `第 ${episode.episode_number} 集`)}
+                  title={cleanDisplayTitle(episode.title || '', episodeFallbackTitle(episode))}
                 >
-                  {String(episode.episode_number).padStart(2, '0')}
+                  {episodeNumberLabel(episode)}
                 </button>
               ))}
             </div>
@@ -2006,9 +2006,36 @@ function manualEpisodeStatusLabel(status: ManualEpisodePreviewItem['status']) {
 }
 
 function formatEpisodeCode(episode: any) {
+  if (isSpecialEpisode(episode)) return episodeNumberLabel(episode);
   const season = Math.max(0, Number(episode?.season_number || 0));
   const number = Math.max(0, Number(episode?.episode_number || 0));
   return `S${String(season).padStart(2, '0')}E${String(number).padStart(2, '0')}`;
+}
+
+function isSpecialEpisode(episode: any) {
+  return normalizedGroupType(episode?.group_type) === 'special'
+    || episode?.kind === 'special'
+    || Number(episode?.season_number ?? -1) === 0 && episode?.special_number != null;
+}
+
+function episodeNumberLabel(episode: any) {
+  if (isSpecialEpisode(episode)) {
+    const number = Math.max(0, Number(episode?.special_number ?? episode?.episode_number ?? 0));
+    return `SP${String(number).padStart(2, '0')}`;
+  }
+  return String(Math.max(0, Number(episode?.episode_number || 0))).padStart(2, '0');
+}
+
+function episodeAriaNumberLabel(episode: any) {
+  return isSpecialEpisode(episode)
+    ? episodeNumberLabel(episode)
+    : `第 ${episode?.episode_number ?? '?'} 集`;
+}
+
+function episodeFallbackTitle(episode: any) {
+  return isSpecialEpisode(episode)
+    ? `特别篇 ${episodeNumberLabel(episode)}`
+    : `第 ${episode?.episode_number ?? '?'} 集`;
 }
 
 function providerDisplayLabel(provider?: string): string {
@@ -2073,7 +2100,9 @@ function resolveContinueEpisode(episodes: any[], historyEpisodeId: string, watch
   const ordered = [...episodes].sort((a: any, b: any) => {
     const seasonDiff = Number(a.season_number || 0) - Number(b.season_number || 0);
     if (seasonDiff !== 0) return seasonDiff;
-    return Number(a.episode_number || 0) - Number(b.episode_number || 0);
+    const aNumber = isSpecialEpisode(a) ? a.special_number : a.episode_number;
+    const bNumber = isSpecialEpisode(b) ? b.special_number : b.episode_number;
+    return Number(aNumber || 0) - Number(bNumber || 0);
   });
   const historyEpisode = ordered.find((episode: any) => episode.episode_id === historyEpisodeId) || null;
   // 历史集无论是否已完成，都作为当前显示上下文：完成瞬间不得回退到全季第一集未观看，

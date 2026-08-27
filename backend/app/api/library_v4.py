@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import json
+import re
+from collections import Counter
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.api.media_v4 import get_database
+from app.media_v4.parsing.episode_titles import (
+    clean_special_episode_title,
+    ensure_special_title_number,
+    is_generic_special_title,
+    is_special_marker_only,
+)
 from app.media_v4.projection.library import V4LibraryProjection
 
 router = APIRouter(prefix="/api/library", tags=["library"])
@@ -17,6 +25,39 @@ class WatchStatusRequest(BaseModel):
     status: str | None = None
     note: str | None = None
     favorite: bool | None = None
+
+
+def _normalized_display_title(value) -> str:
+    return re.sub(r"[\s._\-:：·]+", "", str(value or "")).casefold()
+
+
+def _episode_display_title(
+    row,
+    scraped_episode: dict,
+    *,
+    work_title: str,
+    scraped_special_title_counts: Counter,
+) -> str:
+    scraped_title = " ".join(str(scraped_episode.get("title") or "").split()).strip()
+    if str(row["season_kind"] or "") != "special":
+        return scraped_title or str(row["display_title"] or "")
+
+    special_number = row["special_number"]
+    local_title = str(row["display_title"] or "").strip()
+    if not local_title:
+        local_title = clean_special_episode_title(
+            str(row["relative_path"] or ""),
+            work_title=work_title,
+            special_number=special_number,
+        )
+    local_title = ensure_special_title_number(local_title, special_number)
+
+    normalized_scraped = _normalized_display_title(scraped_title)
+    scraped_is_usable = bool(scraped_title) and not is_generic_special_title(scraped_title)
+    scraped_is_unique = scraped_special_title_counts.get(normalized_scraped, 0) <= 1
+    if scraped_is_usable and scraped_is_unique and is_special_marker_only(local_title):
+        return scraped_title
+    return local_title or scraped_title or ensure_special_title_number("", special_number)
 
 
 def _card_payload(card: dict, override: dict | None = None) -> dict:
@@ -176,7 +217,7 @@ def get_work_detail(work_id: str):
             """
             SELECT DISTINCT e.*, s.local_season_number, s.season_kind, s.title AS season_title,
                    a.asset_id, a.root_id, a.playback_locator, a.source_locator,
-                   a.availability_state, se.provider
+                   a.availability_state, se.provider, se.relative_path
             FROM revision_bindings rb
             JOIN import_revisions ir ON ir.revision_id = rb.revision_id
             JOIN episodes e ON e.episode_id = rb.episode_id
@@ -239,6 +280,16 @@ def get_work_detail(work_id: str):
         for item in metadata.get("episode_mappings") or []
         if item.get("episode_id")
     }
+    unique_special_ids = {
+        str(row["episode_id"])
+        for row in episodes
+        if str(row["season_kind"] or "") == "special"
+    }
+    scraped_special_title_counts = Counter(
+        _normalized_display_title(episode_metadata.get(episode_id, {}).get("title"))
+        for episode_id in unique_special_ids
+        if _normalized_display_title(episode_metadata.get(episode_id, {}).get("title"))
+    )
 
     episode_map: dict[str, dict] = {}
     source_locations: dict[str, list[str]] = {}
@@ -253,7 +304,12 @@ def get_work_detail(work_id: str):
                 "episode_number": row["local_episode_number"],
                 "absolute_episode_number": row["absolute_episode_number"],
                 "special_number": row["special_number"],
-                "title": scraped_episode.get("title") or row["display_title"] or "",
+                "title": _episode_display_title(
+                    row,
+                    scraped_episode,
+                    work_title=str(work["preferred_title"] or ""),
+                    scraped_special_title_counts=scraped_special_title_counts,
+                ),
                 "plot": scraped_episode.get("plot") or "",
                 "runtime": scraped_episode.get("runtime"),
                 "thumb_path": (

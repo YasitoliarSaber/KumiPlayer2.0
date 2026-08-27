@@ -164,14 +164,14 @@ class V4Repository:
                     parsed_fact_id, evidence_id, parser_version, resource_type, media_type,
                     group_type, work_title, original_title, series_group, card_type,
                     relation_type, show_type, title_candidates_json,
-                    year_candidate, season_token_raw, episode_token_raw, season_candidate,
+                    year_candidate, season_token_raw, episode_token_raw, episode_title, season_candidate,
                     episode_candidate, absolute_episode_candidate, special_candidate,
                     episode_range_json, special_number, tmdb_hint_id, tmdb_hint_type,
                     release_group, edition_tags_json, quality_tags_json, confidence,
                     needs_review, is_importable, is_auxiliary, reasons_json, warnings_json
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -191,6 +191,7 @@ class V4Repository:
                     facts.year_candidate,
                     facts.season_token_raw,
                     facts.episode_token_raw,
+                    facts.episode_title,
                     facts.season_candidate,
                     facts.episode_candidate,
                     facts.absolute_episode_candidate,
@@ -239,6 +240,7 @@ class V4Repository:
             year_candidate=row["year_candidate"],
             season_token_raw=row["season_token_raw"],
             episode_token_raw=row["episode_token_raw"],
+            episode_title=row["episode_title"],
             season_candidate=row["season_candidate"],
             episode_candidate=row["episode_candidate"],
             absolute_episode_candidate=row["absolute_episode_candidate"],

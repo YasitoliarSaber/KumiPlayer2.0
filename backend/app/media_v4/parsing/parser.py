@@ -11,6 +11,10 @@ from pathlib import Path, PurePosixPath
 
 from app.media_v4.domain.models import ParsedFacts, SourceEvidence
 from app.media_v4.generic_container import is_generic_container_name
+from app.media_v4.parsing.episode_titles import (
+    clean_special_episode_title,
+    extract_special_episode_number,
+)
 from app.media_v4.sources.adapters import provider_to_source
 from app.recognition.media import (
     _extract_work_container,
@@ -324,6 +328,20 @@ class V4Parser:
         title_candidates = _unique_non_empty(
             (guess.work_title, resolved_series_group, guess.original_title)
         )
+        episode_title = (guess.title or "").strip()
+        special_number = guess.special_number
+        if group_type == "special":
+            source_special_number = extract_special_episode_number(
+                PurePosixPath(evidence.relative_path.replace("\\", "/")).stem
+            )
+            special_number = source_special_number or guess.special_number
+            episode_title = clean_special_episode_title(
+                evidence.relative_path,
+                work_title=guess.work_title,
+                original_title=guess.original_title,
+                series_group=resolved_series_group,
+                special_number=special_number,
+            )
         return ParsedFacts(
             parsed_fact_id="facts_" + evidence.evidence_id,
             evidence_id=evidence.evidence_id,
@@ -341,12 +359,13 @@ class V4Parser:
             year_candidate=guess.year,
             season_token_raw=season_token,
             episode_token_raw=episode_token,
+            episode_title=episode_title,
             season_candidate=guess.season_number,
             episode_candidate=guess.episode_number,
             absolute_episode_candidate=absolute_candidate,
             special_candidate=group_type == "special",
             episode_range=episode_range,
-            special_number=guess.special_number,
+            special_number=special_number,
             tmdb_hint_id=guess.tmdb_hint_id,
             tmdb_hint_type=guess.tmdb_hint_type,
             release_group=release_match.group(1) if release_match else "",
