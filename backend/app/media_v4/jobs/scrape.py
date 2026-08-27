@@ -184,6 +184,10 @@ class V4ScrapeService:
             binding_status = "confirmed" if ready else (
                 str(result.get("metadata_state") or "") or "waiting_metadata"
             )
+            result = {
+                **result,
+                "metadata_state": "ready" if ready else binding_status,
+            }
             binding_provider = provider_name if ready else "local"
             binding_provider_id = provider_id if ready else ""
             with self.database.connect() as conn:
@@ -264,6 +268,15 @@ class V4ScrapeService:
                 conn.execute(
                     "UPDATE jobs SET status = 'succeeded', updated_at = ?, last_error = '' WHERE job_id = ?",
                     (now, job_id),
+                )
+                # 每个 Work 刮削结果落库后都使投影失效。前端轮询会按需合并重建，
+                # 因而已成功的作品无需等待整批任务结束即可进入对应作品页。
+                conn.execute(
+                    """
+                    INSERT INTO v4_meta(key, value) VALUES ('library_projection_dirty', ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (now,),
                 )
         except Exception as exc:
             with self.database.connect() as conn:

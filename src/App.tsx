@@ -87,8 +87,8 @@ export default function App() {
       try {
         const snapshot = await mediaV4Api.library();
         if (!disposed && snapshot.digest && snapshot.digest !== lastDigest) {
-          if (lastDigest !== '') loadLibrary();
           lastDigest = snapshot.digest;
+          void loadLibrary({ force: true });
         }
       } catch {
         // 网络失败保留现有媒体库快照。

@@ -341,6 +341,7 @@ class V4Database:
                 )
             if version == self.CURRENT_SCHEMA_VERSION and self._has_user_tables(conn):
                 self._validate_physical_schema(conn)
+                self._reconcile_source_root_activity(conn)
                 return
 
             conn.execute("BEGIN IMMEDIATE")
@@ -351,6 +352,39 @@ class V4Database:
             except Exception:
                 conn.rollback()
                 raise
+
+    @staticmethod
+    def _reconcile_source_root_activity(conn: sqlite3.Connection) -> None:
+        """修复“先退役、后重新确认”却仍被当成退役来源的旧状态。
+
+        维护清理发生在最后一次确认之后时仍保持退役；只有较新的 confirmed
+        revision 能证明用户确实重新建立了该来源。这个不变量也让升级前已经
+        完成、但来源卡消失的导入在下次启动时自动恢复。
+        """
+
+        cursor = conn.execute(
+            """
+            UPDATE source_roots AS sr
+            SET retired_at = '', retired_reason = ''
+            WHERE sr.retired_at != ''
+              AND EXISTS (
+                  SELECT 1
+                  FROM import_revisions ir
+                  WHERE ir.root_id = sr.root_id
+                    AND ir.status = 'confirmed'
+                    AND ir.confirmed_at != ''
+                    AND julianday(ir.confirmed_at) > julianday(sr.retired_at)
+              )
+            """
+        )
+        if cursor.rowcount > 0:
+            conn.execute(
+                """
+                INSERT INTO v4_meta(key, value)
+                VALUES ('library_projection_dirty', datetime('now'))
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """
+            )
 
     def _validate_physical_schema(self, conn: sqlite3.Connection) -> None:
         """P-009：用逻辑 schema 合同校验，不逐字比较 DDL 文本。

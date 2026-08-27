@@ -1140,6 +1140,23 @@ class V4RevisionService:
                     "UPDATE import_revisions SET status = 'confirmed', confirmed_at = ? WHERE revision_id = ?",
                     (created_at, revision_id),
                 )
+                # 确认即代表该来源重新进入媒体库。来源卡必须在任务开始时就可见，
+                # 不能等镜像、刮削和最终投影全部完成后才恢复。
+                conn.execute(
+                    """
+                    UPDATE source_roots
+                    SET retired_at = '', retired_reason = '', updated_at = ?
+                    WHERE root_id = ?
+                    """,
+                    (created_at, root_id),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO v4_meta(key, value) VALUES ('library_projection_dirty', ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (created_at,),
+                )
                 self._enqueue_execution_jobs(conn, revision_id, set(work_ids.values()), created_at)
                 conn.commit()
             except Exception:

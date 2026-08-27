@@ -56,6 +56,18 @@ class V4LibraryProjection:
             )
         return LibrarySnapshot(generation_id, str(generation["digest"]), cards)
 
+    def ensure_current(self) -> LibrarySnapshot:
+        """读取最新投影；权威事实有变化时按需原子重建。"""
+
+        snapshot = self.current()
+        with self.database.connect() as conn:
+            dirty = conn.execute(
+                "SELECT 1 FROM v4_meta WHERE key = 'library_projection_dirty'"
+            ).fetchone()
+        if snapshot is None or dirty is not None:
+            return self.rebuild()
+        return snapshot
+
     def rebuild(self) -> LibrarySnapshot:
         generation_id = str(uuid.uuid4())
         now = _now()
@@ -254,6 +266,7 @@ class V4LibraryProjection:
                     "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                     (generation_id,),
                 )
+                conn.execute("DELETE FROM v4_meta WHERE key = 'library_projection_dirty'")
                 conn.execute(
                     "DELETE FROM library_generations WHERE generation_id != ?",
                     (generation_id,),

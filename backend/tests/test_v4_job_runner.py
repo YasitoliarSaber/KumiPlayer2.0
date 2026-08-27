@@ -76,6 +76,54 @@ def test_runner_materializes_scrapes_and_publishes_projection(tmp_path):
     assert card["metadata"]["plot"] == "metadata reached the projection"
 
 
+def test_successful_scrape_marks_projection_dirty_and_becomes_visible_before_final_job(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.media_v4.jobs.runner import V4JobRunner
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "incremental-projection.db")
+    database.initialize()
+    service = V4RevisionService(database)
+    service.create_draft("rev-incremental", [_entry()])
+    service.confirm("rev-incremental")
+    def remote_artwork():
+        return SimpleNamespace(artwork_storage_mode="remote")
+
+    monkeypatch.setattr("app.media_v4.jobs.completeness.load_config", remote_artwork)
+    monkeypatch.setattr("app.media_v4.jobs.metadata_artifacts.load_config", remote_artwork)
+    runner = V4JobRunner(
+        database,
+        metadata_provider=lambda _target: {
+            "provider": "tmdb",
+            "provider_id": "9",
+            "title": "Runner Online",
+            "plot": "published before the final projection job",
+            "poster_url": "https://image.tmdb.org/t/p/w780/poster.jpg",
+            "fanart_url": "https://image.tmdb.org/t/p/w1280/fanart.jpg",
+        },
+    )
+    before = runner.projection.rebuild()
+    jobs = service.list_jobs("rev-incremental")
+    mirror = next(item for item in jobs if item["job_type"] == "materialize_mirror")
+    scrape = next(item for item in jobs if item["job_type"] == "scrape_work")
+
+    runner.process_job(mirror["job_id"], mirror_root=tmp_path / "mirror")
+    runner.process_job(scrape["job_id"], mirror_root=tmp_path / "mirror")
+
+    after = runner.projection.ensure_current()
+    assert after.digest != before.digest
+    assert after.cards[0]["metadata"]["metadata_state"] == "ready"
+    assert after.cards[0]["title"] == "Runner Online"
+    with database.connect() as conn:
+        final_job = conn.execute(
+            "SELECT status FROM jobs WHERE revision_id = ? AND job_type = 'refresh_projection'",
+            ("rev-incremental",),
+        ).fetchone()
+    assert final_job["status"] == "queued"
+
+
 def test_failed_scrape_blocks_projection_until_the_failed_job_is_retried(tmp_path):
     import pytest
 

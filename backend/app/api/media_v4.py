@@ -1737,7 +1737,7 @@ def library_delete_resume(request: MaintenanceResumeRequest):
 @router.get("/library")
 def library():
     projection = V4LibraryProjection(get_database())
-    snapshot = projection.current() or projection.rebuild()
+    snapshot = projection.ensure_current()
     return {
         "generation_id": snapshot.generation_id,
         "digest": snapshot.digest,

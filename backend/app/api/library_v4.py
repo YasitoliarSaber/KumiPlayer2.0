@@ -82,7 +82,7 @@ def _card_payload(card: dict, override: dict | None = None) -> dict:
 def _library_snapshot():
     database = get_database()
     projection = V4LibraryProjection(database)
-    return projection.current() or projection.rebuild()
+    return projection.ensure_current()
 
 
 def _work_overrides_map(work_ids: list[str]) -> dict[str, dict]:

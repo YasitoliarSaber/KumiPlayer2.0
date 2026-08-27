@@ -13447,6 +13447,17 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-page .media-flow-title h1 { font-size: 26px; line-height: 1.2; text-wrap: balance; }
 .media-v4-page .media-flow-title p { max-width: 680px; margin: 2px 0 0; color: var(--text-secondary); font-size: 13px; line-height: 1.55; }
 .media-v4-new-import.fui-Button { flex: 0 0 auto; min-height: 34px; }
+.media-v4-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.media-v4-header-secondary-actions,
+.media-v4-header-primary-actions { display: flex; align-items: center; gap: 8px; }
+.media-v4-header-primary-actions {
+  padding-inline-start: 14px;
+  border-inline-start: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
+}
 
 .media-v4-source-libraries {
   display: grid;

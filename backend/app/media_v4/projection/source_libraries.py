@@ -37,7 +37,7 @@ def list_source_cards(database: V4Database) -> list[dict]:
                 latest.revision_id,
                 latest.confirmed_at,
                 (
-                    SELECT COUNT(*) FROM revision_bindings rb
+                    SELECT COUNT(DISTINCT rb.work_id) FROM revision_bindings rb
                     WHERE rb.revision_id = latest.revision_id AND rb.work_id != ''
                 ) AS work_count,
                 (

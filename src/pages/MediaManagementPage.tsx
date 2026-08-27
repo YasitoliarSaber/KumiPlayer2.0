@@ -788,16 +788,22 @@ export default function MediaManagementPage() {
               ? '按来源清理 KumiPlayer 媒体库数据与受控生成物。'
               : '选择一个媒体来源，检查识别结果，然后建立可播放的媒体库。'}</p>
         </div>
-        <div className="media-v4-header-actions">
+        <div className="media-v4-header-actions" role="toolbar" aria-label="媒体库操作">
           {pageMode === 'overview' ? (
             <>
-              <Button appearance="subtle" icon={<ShieldCheckmark24Regular />} onClick={() => setPageMode('maintenance')}>媒体库维护</Button>
-              <Button className="media-primary-command" appearance="primary" icon={<Add24Regular />} onClick={startNewImport}>导入媒体</Button>
+              <div className="media-v4-header-secondary-actions">
+                <Button appearance="subtle" icon={<ShieldCheckmark24Regular />} onClick={() => setPageMode('maintenance')}>媒体库维护</Button>
+              </div>
+              <div className="media-v4-header-primary-actions">
+                <Button className="media-primary-command" appearance="primary" icon={<Add24Regular />} onClick={startNewImport}>导入媒体</Button>
+              </div>
             </>
           ) : (
-            <Button appearance="subtle" icon={<ArrowLeft24Regular />} onClick={() => setPageMode('overview')}>返回媒体管理</Button>
+            <div className="media-v4-header-secondary-actions">
+              <Button appearance="subtle" icon={<ArrowLeft24Regular />} onClick={() => setPageMode('overview')}>返回媒体管理</Button>
+            </div>
           )}
-          {pageMode === 'import' && showReset && <Button className="media-v4-new-import" appearance="subtle" icon={<ArrowReset24Regular />} onClick={startNewImport}>重新开始</Button>}
+          {pageMode === 'import' && showReset && <div className="media-v4-header-primary-actions"><Button className="media-v4-new-import" appearance="subtle" icon={<ArrowReset24Regular />} onClick={startNewImport}>重新开始</Button></div>}
         </div>
       </header>
 
