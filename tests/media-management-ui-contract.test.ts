@@ -20,6 +20,18 @@ test('来源卡只携带来源摘要与标准操作按钮，不渲染作品预�
   assert.match(page, /media-v4-source-card-action \$\{card\.can_resume \? 'secondary' : 'primary'\}/)
 })
 
+test('未确认 draft 不在媒体库概览生成来源卡', () => {
+  assert.doesNotMatch(page, /mediaV4Api\.drafts\(\)/)
+  assert.doesNotMatch(page, /aria-label="待继续导入"/)
+  assert.doesNotMatch(page, /resumeDraft/)
+})
+
+test('来源卡使用 WinUI GridView 式方形卡片，不拉伸为整行面板', () => {
+  assert.match(styles, /\.media-v4-library-source-card\s*\{[^}]*aspect-ratio:\s*1\s*\/\s*1/s)
+  assert.match(styles, /\.media-v4-source-library-grid\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fill,\s*minmax\(/s)
+  assert.doesNotMatch(styles, /repeat\(auto-fit,\s*minmax\(540px,\s*1fr\)\)/)
+})
+
 test('媒体管理的图标使用 SVG 图标组件，不依赖缺失的字体图标', () => {
   assert.doesNotMatch(maintenance, /@fluentui\/react-icons\/fonts/)
   assert.doesNotMatch(execution, /@fluentui\/react-icons\/fonts/)

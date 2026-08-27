@@ -34,7 +34,7 @@ export default function App() {
   const appearanceMode = useUiStore((state) => state.appearanceMode);
   const setSeriesCardImageMode = useUiStore((state) => state.setSeriesCardImageMode);
   const setPosterSize = useUiStore((state) => state.setPosterSize);
-  const goManage = useUiStore((state) => state.goManage);
+  const goManageView = useUiStore((state) => state.goManageView);
   const loadLibrary = useLibraryStore((state) => state.loadLibrary);
   const { restoreSession, verifySession } = useBangumiStore();
   const { startHeartbeat, stopHeartbeat, startHealthPolling, stopHealthPolling } = useConnectionStore();
@@ -64,7 +64,7 @@ export default function App() {
     void listenForTreeFileDrop((event) => {
       if (event.type !== 'drop' || event.paths.length !== 1) return;
       queueDroppedTreePath(event.paths[0]);
-      goManage();
+      goManageView('import');
     }).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;
@@ -74,7 +74,7 @@ export default function App() {
       disposed = true;
       unlisten?.();
     };
-  }, [appConfig?.setup_completed, goManage, page, queueDroppedTreePath, setupOverride]);
+  }, [appConfig?.setup_completed, goManageView, page, queueDroppedTreePath, setupOverride]);
 
   useEffect(() => {
     if (!appConfig?.setup_completed) return undefined;

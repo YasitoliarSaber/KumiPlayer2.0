@@ -16,7 +16,7 @@ import {
   FolderOpen24Regular,
   ScanObject24Regular,
 } from '@fluentui/react-icons'
-import { mediaV4Api, type V4DraftSummary, type V4Job, type V4OpenlistBaselineStatus, type V4Preview, type V4SourceEvidence, type V4SourceLibraryCard } from '../api/mediaV4'
+import { mediaV4Api, type V4Job, type V4OpenlistBaselineStatus, type V4Preview, type V4SourceEvidence, type V4SourceLibraryCard } from '../api/mediaV4'
 import type { V4ExecutionProgress } from '../api/mediaV4'
 import { ApiError } from '../api/client'
 import { configApi, type PublicConfig } from '../api/config'
@@ -160,6 +160,8 @@ export default function MediaManagementPage() {
   const pendingDroppedTreePath = useMediaWorkflowStore((state) => state.pendingDroppedTreePath)
   const consumeDroppedTreePath = useMediaWorkflowStore((state) => state.consumeDroppedTreePath)
   const goSettings = useUiStore((state) => state.goSettings)
+  const pageMode = useUiStore((state) => state.manageView)
+  const goManageView = useUiStore((state) => state.goManageView)
   const [kind, setKind] = useState<ImportKind>('local')
   const [path, setPath] = useState('')
   const [provider, setProvider] = useState<Exclude<ProviderId, 'local' | 'other'>>('pan115')
@@ -170,11 +172,9 @@ export default function MediaManagementPage() {
   const [browserSession, setBrowserSession] = useState(0)
   const [openlistBaseline, setOpenlistBaseline] = useState<V4OpenlistBaselineStatus | null>(null)
   const [sourceCards, setSourceCards] = useState<V4SourceLibraryCard[]>([])
-  const [drafts, setDrafts] = useState<V4DraftSummary[]>([])
   const [sourceCardsLoading, setSourceCardsLoading] = useState(true)
   const [revisionId, setRevisionId] = useState('')
   const [workflowStage, setWorkflowStage] = useState<WorkflowStage>('source')
-  const [pageMode, setPageMode] = useState<'overview' | 'import' | 'maintenance'>('overview')
   const [executeProgress, setExecuteProgress] = useState<V4ExecutionProgress | null>(null)
   const [scan, setScan] = useState<{
     root_id: string
@@ -218,10 +218,7 @@ export default function MediaManagementPage() {
     sourceCardsRefreshInFlight.current = true
     setSourceCardsLoading(true)
     try {
-      const loadCards = () => Promise.all([
-        mediaV4Api.sourceLibraries(),
-        mediaV4Api.drafts().catch(() => ({ drafts: [] as V4DraftSummary[] })),
-      ])
+      const loadCards = () => mediaV4Api.sourceLibraries()
       let result: Awaited<ReturnType<typeof loadCards>>
       try {
         result = await loadCards()
@@ -232,9 +229,7 @@ export default function MediaManagementPage() {
         await new Promise<void>((resolve) => window.setTimeout(resolve, TRANSIENT_BACKEND_RETRY_DELAY_MS))
         result = await loadCards()
       }
-      const [cardsResult, draftsResult] = result
-      setSourceCards(cardsResult.cards)
-      setDrafts(draftsResult.drafts)
+      setSourceCards(result.cards)
       setError((current) => isTransientBackendMessage(current) ? '' : current)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法读取已导入媒体库')
@@ -536,7 +531,7 @@ export default function MediaManagementPage() {
         })
         setPreview(previewResult)
         setWorkflowStage('review')
-        setPageMode('import')
+        goManageView('import')
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '来源扫描失败')
@@ -577,7 +572,7 @@ export default function MediaManagementPage() {
       setRevisionId(nextRevisionId)
       setPreview(result)
       setWorkflowStage('review')
-      setPageMode('import')
+      goManageView('import')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '识别预览失败')
     } finally {
@@ -598,7 +593,7 @@ export default function MediaManagementPage() {
       const status = await mediaV4Api.status(revisionId)
       if (status.progress) setExecuteProgress(status.progress)
       setWorkflowStage('execute')
-      setPageMode('import')
+      goManageView('import')
       void refreshSourceCards()
       if (kind === 'openlist' || kind === 'hybrid') void refreshOpenlistBaseline(remoteRoot)
     } catch (cause) {
@@ -640,50 +635,12 @@ export default function MediaManagementPage() {
   }
 
   const startNewImport = () => {
-    setPageMode('import')
+    goManageView('import')
     setKind('local')
     setPath(config?.local_root || '')
     setProvider('pan115')
     setRemoteRoot(config?.openlist_remote_root || '/')
     clearResultState()
-  }
-
-  const resumeDraft = async (draft: V4DraftSummary) => {
-    setError('')
-    setBusy('preview')
-    try {
-      const evidence = await mediaV4Api.revisionEvidence(draft.revision_id)
-      const result = await mediaV4Api.preview({
-        revision_id: draft.revision_id,
-        root_id: draft.root_id,
-        scan_id: draft.scan_id,
-        entries: evidence.entries,
-        allow_empty: false,
-      })
-      setScan({
-        root_id: draft.root_id,
-        scan_id: draft.scan_id,
-        entries: evidence.entries,
-        evidence_count: evidence.entries.length,
-        source_metadata: {
-          source_display_name: '',
-          source_locator: draft.source_locator || '',
-          playback_locator: draft.playback_locator || '',
-          source_route_id: '',
-        },
-      })
-      setRevisionId(draft.revision_id)
-      setPreview(result)
-      setJobs([])
-      setExecuteProgress(null)
-      setOverrideDrafts({})
-      setWorkflowStage('review')
-      setPageMode('import')
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '无法恢复未完成的导入草稿')
-    } finally {
-      setBusy('')
-    }
   }
 
   const resumeSourceCard = async (card: V4SourceLibraryCard) => {
@@ -697,7 +654,7 @@ export default function MediaManagementPage() {
       setPreview(null)
       localStorage.setItem(ACTIVE_REVISION_KEY, card.revision_id)
       setWorkflowStage('execute')
-      setPageMode('import')
+      goManageView('import')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法读取该媒体库的导入进度')
     }
@@ -750,7 +707,7 @@ export default function MediaManagementPage() {
 
   const prepareSourceUpdate = (card: V4SourceLibraryCard) => {
     clearResultState()
-    setPageMode('import')
+    goManageView('import')
     setBrowserSession((current) => current + 1)
     const nextProvider = card.provider === 'baidu' || card.provider === 'quark' ? card.provider : 'pan115'
     setProvider(nextProvider)
@@ -792,7 +749,7 @@ export default function MediaManagementPage() {
           {pageMode === 'overview' ? (
             <>
               <div className="media-v4-header-secondary-actions">
-                <Button appearance="subtle" icon={<ShieldCheckmark24Regular />} onClick={() => setPageMode('maintenance')}>媒体库维护</Button>
+                <Button appearance="subtle" icon={<ShieldCheckmark24Regular />} onClick={() => goManageView('maintenance')}>媒体库维护</Button>
               </div>
               <div className="media-v4-header-primary-actions">
                 <Button className="media-primary-command" appearance="primary" icon={<Add24Regular />} onClick={startNewImport}>导入媒体</Button>
@@ -800,7 +757,7 @@ export default function MediaManagementPage() {
             </>
           ) : (
             <div className="media-v4-header-secondary-actions">
-              <Button appearance="subtle" icon={<ArrowLeft24Regular />} onClick={() => setPageMode('overview')}>返回媒体管理</Button>
+              <Button appearance="subtle" icon={<ArrowLeft24Regular />} onClick={() => goManageView('overview')}>返回媒体管理</Button>
             </div>
           )}
           {pageMode === 'import' && showReset && <div className="media-v4-header-primary-actions"><Button className="media-v4-new-import" appearance="subtle" icon={<ArrowReset24Regular />} onClick={startNewImport}>重新开始</Button></div>}
@@ -842,27 +799,7 @@ export default function MediaManagementPage() {
           })}
         </div>}
       </section>}
-
-
-
-      {drafts.length > 0 && <section className="media-v4-source-libraries media-v4-draft-libraries" aria-label="待继续导入">
-        <div className="media-v4-source-libraries-heading">
-          <div><span>尚未确认的导入草稿</span><h2>待继续导入</h2><p>这些来源还没有完成确认，不会进入媒体库来源卡；可以继续检查识别结果。</p></div>
-        </div>
-        <div className="media-v4-source-library-grid">
-          {drafts.map((draft) => (
-            <article className="media-v4-library-source-card media-v4-draft-card" key={draft.revision_id}>
-              <div className="media-v4-library-source-card-top"><MediaProviderIcon provider={providerVisualFor(draft.provider)} size={20} /><span>{draft.source_mode === 'tree_snapshot' || draft.source_mode === 'tree_openlist' ? '目录树草稿' : draft.source_mode === 'openlist_full' ? 'OpenList 草稿' : draft.provider === 'local' ? '本地草稿' : '导入草稿'}</span></div>
-              <strong title={draft.source_locator}>{draft.source_locator || '未命名草稿'}</strong>
-              <span className="media-v4-source-card-locator">{draft.evidence_count} 个媒体条目{draft.issue_count > 0 ? ` · ${draft.issue_count} 项需处理` : ''}</span>
-              <div className="media-v4-source-card-actions">
-                <Button appearance="primary" disabled={busy !== ''} onClick={() => void resumeDraft(draft)}>{busy === 'preview' ? <Spinner size="tiny" /> : '继续检查识别结果'}</Button>
-              </div>
-            </article>
-          ))}
-        </div>
-      </section>}
-      {!sourceCardsLoading && sourceCards.length === 0 && drafts.length === 0 && (
+      {!sourceCardsLoading && sourceCards.length === 0 && (
         <section className="media-v4-source-empty" aria-label="空媒体库">
           <div className="media-v4-empty"><strong>还没有导入任何媒体库</strong><span>点击“导入媒体”开始建立你的第一个来源。</span></div>
         </section>

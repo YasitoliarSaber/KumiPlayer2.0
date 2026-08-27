@@ -13474,10 +13474,12 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-source-libraries-heading h2 { margin: 0; color: var(--text); font-size: 18px; line-height: 1.25; }
 .media-v4-source-libraries-heading p { max-width: 620px; margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .media-v4-source-card-loading { display: flex; align-items: center; gap: 8px; min-height: 82px; color: var(--text-secondary); font-size: 13px; }
-.media-v4-source-library-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 10px; }
+.media-v4-source-library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 300px)); justify-content: start; gap: 14px; }
 .media-v4-library-source-card {
   display: grid;
-  grid-template-columns: minmax(0, 38%) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  aspect-ratio: 1 / 1;
   gap: 16px;
   align-items: start;
   min-width: 0;
@@ -13820,40 +13822,30 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-source-card-indeterminate::after { content: ''; position: absolute; inset-block: 0; width: 40%; border-radius: inherit; background: var(--accent-strong); animation: media-v4-indeterminate 1.4s ease-in-out infinite; }
 @keyframes media-v4-indeterminate { 0% { left: -40%; } 100% { left: 100%; } }
 @media (prefers-reduced-motion: reduce) { .media-v4-source-card-indeterminate::after { animation: none; } }
-/* P-005 二次返工：来源卡双区布局（左身份 / 右规模·预览·进度；卡宽驱动降级） */
-.media-v4-source-library-grid { grid-template-columns: repeat(auto-fit, minmax(540px, 1fr)); gap: 14px; }
+/* 来源卡采用 WinUI GridView 的等尺寸项目形态。每个已确认来源独立成方形卡片，
+   不随剩余宽度拉伸成横向面板；未确认 draft 不进入这里。 */
+.media-v4-source-library-grid { grid-template-columns: repeat(auto-fill, minmax(270px, 300px)); justify-content: start; gap: 14px; }
 .media-v4-library-source-card {
-  container-type: inline-size;
-  container-name: media-v4-source-card;
-  grid-template-columns: minmax(210px, .9fr) minmax(0, 1.1fr);
-  gap: 18px;
-  min-height: 164px;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  aspect-ratio: 1 / 1;
+  gap: 14px;
+  min-height: 0;
+  overflow: hidden;
   padding: 16px;
 }
-.media-v4-source-card-identity { display: grid; gap: 7px; align-content: start; min-width: 0; grid-column: 1; }
-.media-v4-source-card-scale { display: grid; gap: 9px; align-content: start; min-width: 0; grid-column: 2; }
+.media-v4-source-card-identity { display: grid; gap: 7px; align-content: start; min-width: 0; }
+.media-v4-source-card-scale { display: grid; gap: 9px; align-content: end; min-width: 0; }
 .media-v4-source-card-scale .media-v4-source-card-actions { margin-top: 2px; }
 .media-v4-source-card-identity > strong { overflow: hidden; color: var(--text); font-size: 16px; font-weight: 650; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
 .media-v4-source-card-stats { gap: 6px; }
 .media-v4-source-card-stats span { padding: 4px 8px; border-radius: 999px; font-size: 12px; }
-.media-v4-source-card-actions { justify-content: flex-start; margin-top: auto; }
+.media-v4-source-card-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); justify-content: stretch; margin-top: auto; }
 .media-v4-source-card-actions .media-v4-source-card-action.fui-Button { min-width: 0; min-height: 34px; padding-inline: 13px; border-radius: 999px; font-weight: 650; }
+.media-v4-source-card-actions .media-v4-source-card-action.fui-Button { width: 100%; }
 .media-v4-source-card-action.primary.fui-Button { box-shadow: 0 6px 14px color-mix(in srgb, var(--accent-strong) 16%, transparent); }
 .media-v4-source-card-action.secondary.fui-Button { border-color: color-mix(in srgb, var(--border) 70%, transparent); background: color-mix(in srgb, var(--control-bg) 72%, transparent); }
 .media-v4-source-card-action.secondary.fui-Button:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent-strong) 28%, var(--border)); background: color-mix(in srgb, var(--control-hover) 80%, transparent); }
-/* 卡宽不足可读最小宽度时，卡内立即单列（不依赖 viewport；覆盖 125%/150% DPI
-   缩放导致的视觉可用宽度收缩）。 */
-@container media-v4-source-card (max-width: 560px) {
-  .media-v4-source-card-identity { grid-column: 1 / -1; }
-  .media-v4-source-card-scale { grid-column: 1 / -1; }
-  .media-v4-library-source-card { grid-template-columns: minmax(0, 1fr); }
-}
-/* 兜底：不支持 container query 的旧 WebView 按 viewport 降级 */
-@media (max-width: 900px) {
-  .media-v4-library-source-card { grid-template-columns: 1fr; }
-  .media-v4-source-card-identity { grid-column: 1 / -1; }
-  .media-v4-source-card-scale { grid-column: 1 / -1; }
-}
 
 /* 媒体库维护：参考 WinUI CommandBar / RadioButtons / InfoBar / ContentDialog。
    范围、预览与确认各自承担一个步骤，避免把所有信息堆进同权重的大卡片。 */
@@ -13911,10 +13903,8 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-completed-toggle { justify-self: start; padding: 5px 8px; border: 1px solid color-mix(in srgb, var(--border) 76%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--surface-raised) 70%, transparent); font-size: 12px; }
 .media-v4-completed-toggle:hover { border-color: color-mix(in srgb, var(--accent-strong) 42%, var(--border)); color: var(--text); }
 
-@media (max-width: 1160px) {
-  .media-v4-source-library-grid { grid-template-columns: 1fr; }
-}
 @media (max-width: 760px) {
+  .media-v4-source-library-grid { grid-template-columns: minmax(0, 1fr); }
   .media-v4-maintenance-scope-option { flex-basis: 100%; }
   .media-v4-maintenance-preview-heading { align-items: start; flex-direction: column; gap: 4px; }
   .media-v4-maintenance-impact > div { min-width: 118px; }

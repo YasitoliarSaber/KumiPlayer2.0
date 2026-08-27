@@ -18,7 +18,8 @@ test('媒体管理页面只使用 V4 revision/job/work 合同', () => {
   const page = readFileSync(new URL('../src/pages/MediaManagementPage.tsx', import.meta.url), 'utf8');
   const client = readFileSync(new URL('../src/api/mediaV4.ts', import.meta.url), 'utf8');
 
-  assert.match(page, /mediaV4Api\.scan/);
+  assert.match(page, /mediaV4Api\.startDurableScan/);
+  assert.match(page, /mediaV4Api\.durableScan/);
   assert.match(page, /mediaV4Api\.preview/);
   assert.match(page, /mediaV4Api\.confirm/);
   assert.match(page, /revisionId/);
@@ -36,7 +37,7 @@ test('全局 TXT 拖放仍只进入 V4 媒体导入页', () => {
 
   assert.match(app, /listenForTreeFileDrop/);
   assert.match(app, /queueDroppedTreePath/);
-  assert.match(app, /goManage\(\)/);
+  assert.match(app, /goManageView\('import'\)/);
   assert.match(fileDrop, /extension === 'txt'/);
   assert.match(page, /consumeDroppedTreePath/);
   assert.doesNotMatch(page, /DroppedTreeDialog|importsApi|mediaPresetsApi/);

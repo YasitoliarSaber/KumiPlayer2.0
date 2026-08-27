@@ -3,6 +3,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, expect, test, vi } from 'vitest'
 import MediaManagementPage from '../../src/pages/MediaManagementPage'
+import { useUiStore } from '../../src/stores/ui'
 
 const api = vi.hoisted(() => ({
   scan: vi.fn(),
@@ -21,7 +22,6 @@ const api = vi.hoisted(() => ({
 const config = vi.hoisted(() => ({ getConfig: vi.fn() }))
 const openlist = vi.hoisted(() => ({ browse: vi.fn(), getRoutes: vi.fn() }))
 const tasks = vi.hoisted(() => ({ retry: vi.fn() }))
-const goSettings = vi.hoisted(() => vi.fn())
 
 vi.mock('../../src/api/mediaV4', () => ({ mediaV4Api: api }))
 vi.mock('../../src/api/config', () => ({ configApi: config }))
@@ -36,9 +36,6 @@ vi.mock('../../src/stores/mediaWorkflow', () => ({
     pendingDroppedTreePath: '',
     consumeDroppedTreePath: vi.fn(),
   }),
-}))
-vi.mock('../../src/stores/ui', () => ({
-  useUiStore: (selector: (state: { goSettings: typeof goSettings }) => unknown) => selector({ goSettings }),
 }))
 
 function makeProgress(units: Array<Record<string, unknown>>, overrides: Record<string, unknown> = {}) {
@@ -73,6 +70,7 @@ function workUnit(workId: string, title: string, overallStatus: string, extra: R
 beforeEach(() => {
   localStorage.clear()
   vi.clearAllMocks()
+  useUiStore.setState({ page: 'manage', manageView: 'overview', navigationHistory: [], forwardHistory: [], canGoBack: false, canGoForward: false, query: '' })
   api.scan.mockResolvedValue({ root_id: 'root-local', scan_id: 'scan-1', entries: [] })
   api.preview.mockResolvedValue({
     revision_id: 'rev-preview',

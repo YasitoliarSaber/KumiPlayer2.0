@@ -11,6 +11,7 @@ export type SortId = 'recent' | 'title' | 'titleDesc' | 'rating' | 'year' | 'rat
 export type SourceId = 'all' | 'pan115' | 'baidu' | 'local' | 'openlist';
 export type SeriesCardImageMode = 'poster' | 'fanart';
 export type SidebarMode = 'hidden' | 'compact' | 'expanded';
+export type ManageView = 'overview' | 'import' | 'maintenance';
 type VisibleSidebarMode = Exclude<SidebarMode, 'hidden'>;
 
 export interface CategoryScrollRestore {
@@ -35,6 +36,7 @@ interface NavigationLocation {
   activeCategory: LibraryView | null;
   selectedWorkId: string | null;
   query: string;
+  manageView: ManageView;
 }
 
 const MAX_NAVIGATION_HISTORY = 50;
@@ -43,6 +45,7 @@ interface UiState {
   page: AppPage;
   activeCategory: LibraryView | null;
   selectedWorkId: string | null;
+  manageView: ManageView;
   navigationHistory: NavigationLocation[];
   forwardHistory: NavigationLocation[];
   canGoBack: boolean;
@@ -67,6 +70,7 @@ interface UiState {
   goCategory: (category: LibraryView) => void;
   goDetail: (workId: string) => void;
   goManage: () => void;
+  goManageView: (view: ManageView) => void;
   goSettings: () => void;
   goPlayerTuning: () => void;
   goBack: () => void;
@@ -94,6 +98,7 @@ function currentLocation(state: UiState): NavigationLocation {
     activeCategory: state.activeCategory,
     selectedWorkId: state.selectedWorkId,
     query: state.query,
+    manageView: state.manageView,
   };
 }
 
@@ -102,7 +107,8 @@ function navigate(state: UiState, target: NavigationLocation): Partial<UiState> 
   const unchanged = current.page === target.page
     && current.activeCategory === target.activeCategory
     && current.selectedWorkId === target.selectedWorkId
-    && current.query === target.query;
+    && current.query === target.query
+    && current.manageView === target.manageView;
 
   if (unchanged) return target;
 
@@ -122,6 +128,7 @@ export const useUiStore = create<UiState>()(
       page: 'home',
       activeCategory: null,
       selectedWorkId: null,
+      manageView: 'overview',
       navigationHistory: [],
       forwardHistory: [],
       canGoBack: false,
@@ -140,15 +147,15 @@ export const useUiStore = create<UiState>()(
       selectedSeasonByWork: {},
       categoryScrollRestore: null,
 
-      goHome: () => set((state) => ({ ...navigate(state, { page: 'home', activeCategory: null, selectedWorkId: null, query: '' }), categoryScrollRestore: null })),
-      goFavorites: () => set((state) => ({ ...navigate(state, { page: 'favorites', activeCategory: null, selectedWorkId: null, query: '' }), categoryScrollRestore: null })),
-      goRecent: () => set((state) => ({ ...navigate(state, { page: 'recent', activeCategory: null, selectedWorkId: null, query: '' }), categoryScrollRestore: null })),
+      goHome: () => set((state) => ({ ...navigate(state, { page: 'home', activeCategory: null, selectedWorkId: null, query: '', manageView: state.manageView }), categoryScrollRestore: null })),
+      goFavorites: () => set((state) => ({ ...navigate(state, { page: 'favorites', activeCategory: null, selectedWorkId: null, query: '', manageView: state.manageView }), categoryScrollRestore: null })),
+      goRecent: () => set((state) => ({ ...navigate(state, { page: 'recent', activeCategory: null, selectedWorkId: null, query: '', manageView: state.manageView }), categoryScrollRestore: null })),
       goCategory: (category) => set((state) => {
         // 只有从详情页返回当前正在浏览的分类时才保留待恢复的滚动位置；
         // 其他分类导航一律清空，避免过期位置污染下一次进入。
         const keepRestore = state.page === 'detail' && state.activeCategory === category;
         return {
-          ...navigate(state, { page: 'category', activeCategory: category, selectedWorkId: null, query: '' }),
+          ...navigate(state, { page: 'category', activeCategory: category, selectedWorkId: null, query: '', manageView: state.manageView }),
           categoryScrollRestore: keepRestore ? state.categoryScrollRestore : null,
         };
       }),
@@ -165,13 +172,14 @@ export const useUiStore = create<UiState>()(
           }
         }
         return {
-          ...navigate(state, { page: 'detail', activeCategory: state.activeCategory, selectedWorkId: workId, query: '' }),
+          ...navigate(state, { page: 'detail', activeCategory: state.activeCategory, selectedWorkId: workId, query: '', manageView: state.manageView }),
           ...(restore ? { categoryScrollRestore: restore } : {}),
         };
       }),
-      goManage: () => set((state) => ({ ...navigate(state, { page: 'manage', activeCategory: null, selectedWorkId: null, query: '' }), categoryScrollRestore: null })),
-      goSettings: () => set((state) => ({ ...navigate(state, { page: 'settings', activeCategory: null, selectedWorkId: null, query: '' }), categoryScrollRestore: null })),
-      goPlayerTuning: () => set((state) => ({ ...navigate(state, { page: 'player-tuning', activeCategory: null, selectedWorkId: null, query: '' }), categoryScrollRestore: null })),
+      goManage: () => set((state) => ({ ...navigate(state, { page: 'manage', activeCategory: null, selectedWorkId: null, query: '', manageView: 'overview' }), categoryScrollRestore: null })),
+      goManageView: (view) => set((state) => ({ ...navigate(state, { page: 'manage', activeCategory: null, selectedWorkId: null, query: '', manageView: view }), categoryScrollRestore: null })),
+      goSettings: () => set((state) => ({ ...navigate(state, { page: 'settings', activeCategory: null, selectedWorkId: null, query: '', manageView: state.manageView }), categoryScrollRestore: null })),
+      goPlayerTuning: () => set((state) => ({ ...navigate(state, { page: 'player-tuning', activeCategory: null, selectedWorkId: null, query: '', manageView: state.manageView }), categoryScrollRestore: null })),
       goBack: () => set((state) => {
         const target = state.navigationHistory.at(-1);
         if (!target) return state;

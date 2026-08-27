@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, expect, test, vi } from 'vitest'
 import MediaManagementPage from '../../src/pages/MediaManagementPage'
+import { useUiStore } from '../../src/stores/ui'
 
 const api = vi.hoisted(() => ({
   scan: vi.fn(),
@@ -27,7 +28,6 @@ const api = vi.hoisted(() => ({
 const config = vi.hoisted(() => ({ getConfig: vi.fn() }))
 const openlist = vi.hoisted(() => ({ browse: vi.fn(), getRoutes: vi.fn() }))
 const tasks = vi.hoisted(() => ({ retry: vi.fn() }))
-const goSettings = vi.hoisted(() => vi.fn())
 
 vi.mock('../../src/api/mediaV4', () => ({ mediaV4Api: api }))
 vi.mock('../../src/api/config', () => ({ configApi: config }))
@@ -39,9 +39,6 @@ vi.mock('../../src/stores/mediaWorkflow', () => ({
     pendingDroppedTreePath: '',
     consumeDroppedTreePath: vi.fn(),
   }),
-}))
-vi.mock('../../src/stores/ui', () => ({
-  useUiStore: (selector: (state: { goSettings: typeof goSettings }) => unknown) => selector({ goSettings }),
 }))
 
 function cardFixture(overrides: Record<string, unknown> = {}) {
@@ -64,6 +61,7 @@ function cardFixture(overrides: Record<string, unknown> = {}) {
 beforeEach(() => {
   localStorage.clear()
   vi.clearAllMocks()
+  useUiStore.setState({ page: 'manage', manageView: 'overview', navigationHistory: [], forwardHistory: [], canGoBack: false, canGoForward: false, query: '' })
   api.scan.mockResolvedValue({ root_id: 'root-local', scan_id: 'scan-1', entries: [] })
   api.preview.mockResolvedValue({ revision_id: 'rev', status: 'draft', works: [], episodes: [], work_assets: [], issues: [] })
   api.sourceLibraries.mockResolvedValue({ cards: [] })
@@ -278,7 +276,7 @@ test('部分失败后显示重试按钮并调用 resume API', async () => {
 })
 
 
-test('来源卡使用卡宽驱动的容器查询降级（不依赖 viewport 900px）', async () => {
+test('来源卡使用 GridView 式固定方形项目布局', async () => {
   api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
   const { container } = render(<MediaManagementPage />)
   await screen.findByText('115 动画')
@@ -289,10 +287,10 @@ test('来源卡使用卡宽驱动的容器查询降级（不依赖 viewport 900p
   const scale = container.querySelector('.media-v4-source-card-scale')
   expect(identity).not.toBeNull()
   expect(scale).not.toBeNull()
-  // 卡自身声明 inline-size 容器，供 @container (max-width) 卡内单列降级；
-  // jsdom 不计算 container-type，因此锁定 CSS 规则本身。
+  // 来源卡按等尺寸项目排列，避免宽卡把页面撑成维护表格；
+  // jsdom 不计算实际尺寸，因此锁定 CSS 结构合同本身。
   const css = readFileSync(join(__dirname, '../../src/index.css'), 'utf-8')
-  expect(css).toMatch(/container-type:\s*inline-size/)
-  expect(css).toMatch(/@container media-v4-source-card \(max-width: 560px\)/)
-  expect(css).toMatch(/@media \(max-width: 900px\)/)
+  expect(css).toContain('grid-template-columns: repeat(auto-fill, minmax(270px, 300px));')
+  expect(css).toContain('aspect-ratio: 1 / 1;')
+  expect(css).not.toContain('repeat(auto-fit, minmax(540px, 1fr))')
 })

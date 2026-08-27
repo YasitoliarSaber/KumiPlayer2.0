@@ -4,6 +4,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { beforeEach, expect, test, vi } from 'vitest'
 import MediaManagementPage from '../../src/pages/MediaManagementPage'
 import OpenListFolderBrowser from '../../src/components/media/OpenListFolderBrowser'
+import { useUiStore } from '../../src/stores/ui'
 
 const api = vi.hoisted(() => ({
   scan: vi.fn(),
@@ -34,9 +35,6 @@ vi.mock('../../src/stores/mediaWorkflow', () => ({
     consumeDroppedTreePath: vi.fn(),
   }),
 }))
-vi.mock('../../src/stores/ui', () => ({
-  useUiStore: (selector: (state: { goSettings: () => void }) => unknown) => selector({ goSettings: vi.fn() }),
-}))
 
 const routes = [
   { route_id: 'route-115', label: '115 网盘', remote_prefix: '/115', provider_id: 'pan115', enabled: true, local_path: 'K:\\115网盘', local_available: true },
@@ -59,6 +57,7 @@ function browseResult(path: string, cacheStatus: 'fresh' | 'stale' | 'none' = 'f
 beforeEach(() => {
   localStorage.clear()
   vi.clearAllMocks()
+  useUiStore.setState({ page: 'manage', manageView: 'overview', navigationHistory: [], forwardHistory: [], canGoBack: false, canGoForward: false, query: '' })
   api.scan.mockResolvedValue({ root_id: 'root-local', scan_id: 'scan-1', entries: [] })
   api.preview.mockResolvedValue({ revision_id: 'rev', status: 'draft', works: [], episodes: [], work_assets: [], issues: [] })
   api.status.mockResolvedValue({ revision_id: 'rev', status: 'confirmed', jobs: [] })
@@ -114,7 +113,7 @@ test('来源卡使用图标与状态徽标，不再出现文字方块', async ()
   expect(screen.queryByText('115', { selector: '.media-v4-provider-mark' })).not.toBeInTheDocument()
 })
 
-test('待继续导入草稿可以恢复识别预览', async () => {
+test('未确认草稿不进入媒体库概览，只有确认后的来源才建立来源卡', async () => {
   api.drafts.mockResolvedValue({
     drafts: [{
       revision_id: 'rev-draft', root_id: 'root-draft', scan_id: 'scan-draft', created_at: '2026-08-25T00:00:00Z',
@@ -122,20 +121,13 @@ test('待继续导入草稿可以恢复识别预览', async () => {
       evidence_count: 12, issue_count: 1,
     }],
   })
-  api.preview.mockResolvedValue({
-    revision_id: 'rev-draft', status: 'draft',
-    works: [{ work_key: 'w1', preferred_title: '恢复的作品', year: 2024, media_type: 'tv', source_evidence_ids: ['ev-1'] }],
-    episodes: [{ work_key: 'w1', episode_key: 'w1-1', local_season_number: 1, local_episode_number: 1, absolute_episode_number: null, season_kind: 'regular', episode_kind: 'regular', special_number: null, edition_key: 'default', asset_evidence_ids: ['ev-1'] }],
-    work_assets: [], issues: [],
-  })
   render(<MediaManagementPage />)
 
-  expect(await screen.findByText('待继续导入')).toBeVisible()
-  expect(screen.getByText('12 个媒体条目 · 1 项需处理')).toBeVisible()
-  fireEvent.click(screen.getByRole('button', { name: '继续检查识别结果' }))
-  await waitFor(() => expect(api.revisionEvidence).toHaveBeenCalledWith('rev-draft'))
-  expect(await screen.findByRole('heading', { name: '检查识别结果' })).toBeVisible()
-  expect(screen.getByText('恢复的作品')).toBeVisible()
+  expect(await screen.findByText('还没有导入任何媒体库')).toBeVisible()
+  expect(screen.queryByText('待继续导入')).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '继续检查识别结果' })).not.toBeInTheDocument()
+  expect(api.drafts).not.toHaveBeenCalled()
+  expect(api.revisionEvidence).not.toHaveBeenCalled()
 })
 
 test('OpenList 缓存过期时展示提示且刷新可获取最新', async () => {
