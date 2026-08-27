@@ -66,6 +66,7 @@ def _card_payload(card: dict, override: dict | None = None) -> dict:
         "fanart_path": metadata.get("fanart_url") or "",
         "local_poster_path": local_poster,
         "local_fanart_path": local_fanart,
+        "local_clearlogo_path": local_clearlogo,
         "clearlogo_path": metadata.get("clearlogo_url") or metadata.get("clearlogo_path") or local_clearlogo,
         "dir_path": "",
         "related_works": metadata.get("related_works") or [],
@@ -255,7 +256,12 @@ def get_work_detail(work_id: str):
                 "title": scraped_episode.get("title") or row["display_title"] or "",
                 "plot": scraped_episode.get("plot") or "",
                 "runtime": scraped_episode.get("runtime"),
-                "thumb_path": scraped_episode.get("still_url") or scraped_episode.get("thumb_path") or "",
+                "thumb_path": (
+                    scraped_episode.get("local_thumb_path")
+                    or scraped_episode.get("still_url")
+                    or scraped_episode.get("thumb_path")
+                    or ""
+                ),
                 "group_type": "season" if row["season_kind"] == "regular" else row["season_kind"],
                 "kind": row["episode_kind"],
                 "playback_locator": "",
@@ -360,6 +366,7 @@ def get_work_detail(work_id: str):
         "fanart_path": metadata.get("fanart_url") or "",
         "local_poster_path": local_poster,
         "local_fanart_path": local_fanart,
+        "local_clearlogo_path": local_clearlogo,
         "clearlogo_path": metadata.get("clearlogo_url") or metadata.get("clearlogo_path") or local_clearlogo,
         "dir_path": "",
         "related_works": metadata.get("related_works") or [],

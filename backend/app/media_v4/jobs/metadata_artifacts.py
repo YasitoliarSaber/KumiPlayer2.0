@@ -71,24 +71,26 @@ def _write_atomic(path: Path, payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _download_artwork(url: str, path: Path) -> str:
+def _artwork_client(config) -> httpx.Client:
+    timeout = min(max(int(config.tmdb_timeout or 10), 3), 12)
+    return httpx.Client(
+        timeout=timeout,
+        proxy=config.proxy_url or None,
+        http2=True,
+        limits=httpx.Limits(max_connections=12, max_keepalive_connections=6, keepalive_expiry=60.0),
+    )
+
+
+def _download_artwork(url: str, path: Path, *, client: httpx.Client) -> str:
     parsed = urlparse(url)
     if parsed.scheme != "https" or parsed.hostname != "image.tmdb.org":
         return ""
-    config = load_config()
-    timeout = min(max(int(config.tmdb_timeout or 10), 3), 12)
-    client = (
-        httpx.Client(timeout=timeout, proxy=config.proxy_url)
-        if config.proxy_url
-        else httpx.Client(timeout=timeout)
-    )
-    with client:
-        response = client.get(url)
-        response.raise_for_status()
-        content_type = response.headers.get("content-type", "")
-        if not content_type.startswith("image/") or len(response.content) > 25 * 1024 * 1024:
-            return ""
-        return _write_atomic(path, response.content)
+    response = client.get(url)
+    response.raise_for_status()
+    content_type = response.headers.get("content-type", "")
+    if not content_type.startswith("image/") or len(response.content) > 25 * 1024 * 1024:
+        return ""
+    return _write_atomic(path, response.content)
 
 
 def _artwork_filename(artifact_type: str, source_file_path: str) -> str:
@@ -98,6 +100,59 @@ def _artwork_filename(artifact_type: str, source_file_path: str) -> str:
     if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".svg"}:
         suffix = ".jpg" if artifact_type in {"poster", "fanart"} else ".png"
     return f"{artifact_type}{suffix}"
+
+
+def _episode_thumb_filename(season: int, number: int, source_url: str) -> str:
+    suffix = Path(urlparse(source_url).path).suffix.lower()
+    if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+        suffix = ".jpg"
+    return f"S{season:02d}E{number:02d}-thumb{suffix}"
+
+
+def _materialize_local_artwork(
+    *,
+    config,
+    work_dir: Path,
+    target: dict,
+    metadata: dict,
+    episode_metadata: dict[str, dict],
+    artifacts: list[tuple[str, Path, str]],
+) -> None:
+    with _artwork_client(config) as client:
+        if target.get("work_type") == "series":
+            for episode in target.get("episodes") or []:
+                scraped = episode_metadata.get(str(episode.get("episode_id")), {})
+                still_url = str(scraped.get("still_url") or "")
+                if not still_url:
+                    continue
+                season = int(episode.get("local_season_number") or 0)
+                number = int(episode.get("local_episode_number") or episode.get("special_number") or 0)
+                season_dir = "Specials" if season == 0 or episode.get("season_kind") == "special" else f"Season {season:02d}"
+                thumb_path = work_dir / season_dir / _episode_thumb_filename(season, number, still_url)
+                try:
+                    digest = _download_artwork(still_url, thumb_path, client=client)
+                except (OSError, httpx.HTTPError):
+                    digest = ""
+                if digest:
+                    artifacts.append(("episode_thumb", thumb_path, digest))
+                    scraped["local_thumb_path"] = str(thumb_path)
+
+        for artifact_type, key in (
+            ("poster", "poster_url"),
+            ("fanart", "fanart_url"),
+            ("clearlogo", "clearlogo_url"),
+        ):
+            url = str(metadata.get(key) or "")
+            if not url:
+                continue
+            filename = _artwork_filename(artifact_type, str(metadata.get(f"{artifact_type}_file_path") or ""))
+            try:
+                digest = _download_artwork(url, work_dir / filename, client=client)
+            except (OSError, httpx.HTTPError):
+                digest = ""
+            if digest:
+                artifacts.append((artifact_type, work_dir / filename, digest))
+                metadata[f"local_{artifact_type}_path"] = str(work_dir / filename)
 
 
 def publish_metadata_artifacts(
@@ -118,6 +173,8 @@ def publish_metadata_artifacts(
         for item in metadata.get("episode_mappings") or []
         if item.get("episode_id")
     }
+    config = load_config()
+    download_local_artwork = config.artwork_storage_mode != "remote"
     if is_series:
         for episode in target.get("episodes") or []:
             season = int(episode.get("local_season_number") or 0)
@@ -130,24 +187,15 @@ def publish_metadata_artifacts(
             scraped = episode_metadata.get(str(episode.get("episode_id")), {})
             artifacts.append(("episode_nfo", episode_path, _write_atomic(episode_path, _episode_nfo({**episode, **scraped}))))
 
-    config = load_config()
-    if config.artwork_storage_mode != "remote":
-        for artifact_type, key in (
-            ("poster", "poster_url"),
-            ("fanart", "fanart_url"),
-            ("clearlogo", "clearlogo_url"),
-        ):
-            url = str(metadata.get(key) or "")
-            if not url:
-                continue
-            filename = _artwork_filename(artifact_type, str(metadata.get(f"{artifact_type}_file_path") or ""))
-            try:
-                digest = _download_artwork(url, work_dir / filename)
-            except (OSError, httpx.HTTPError):
-                digest = ""
-            if digest:
-                artifacts.append((artifact_type, work_dir / filename, digest))
-                metadata[f"local_{artifact_type}_path"] = str(work_dir / filename)
+    if download_local_artwork:
+        _materialize_local_artwork(
+            config=config,
+            work_dir=work_dir,
+            target=target,
+            metadata=metadata,
+            episode_metadata=episode_metadata,
+            artifacts=artifacts,
+        )
 
     now = _now()
     with database.connect() as conn:

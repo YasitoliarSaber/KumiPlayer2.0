@@ -290,7 +290,8 @@ def _build_tv_episode_mappings(client: TMDBClient, provider_id: int, target: dic
                 "title": str(remote.get("name") or ""),
                 "plot": str(remote.get("overview") or ""),
                 "runtime": _positive_int(remote.get("runtime")),
-                "still_url": client.build_image_url(still, "w300") if still else "",
+                # 详情页横向卡片至少需要 w500；w300 在高 DPI 下既模糊又会被前端再次改写。
+                "still_url": client.build_image_url(still, "w500") if still else "",
             }
             result.append(mapping)
     return result

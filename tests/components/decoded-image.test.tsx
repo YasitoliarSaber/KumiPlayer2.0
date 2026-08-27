@@ -50,6 +50,34 @@ test('图片完成解码后才通知调用方参与界面切换', async () => {
   await waitFor(() => expect(onDecoded).toHaveBeenCalledTimes(1));
 });
 
+test('详情缩略图加载完成后立即显示，但解码回调仍等待真正完成', async () => {
+  let finishDecode: (() => void) | undefined;
+  const onDecoded = vi.fn();
+  Object.defineProperty(HTMLImageElement.prototype, 'decode', {
+    configurable: true,
+    value: vi.fn(() => new Promise<void>((resolve) => {
+      finishDecode = resolve;
+    })),
+  });
+
+  render(
+    <DecodedImage
+      src="http://127.0.0.1/episode.jpg"
+      alt="剧集缩略图"
+      revealOnLoad
+      onDecoded={onDecoded}
+    />,
+  );
+  const image = screen.getByRole('img', { name: '剧集缩略图' });
+
+  fireEvent.load(image);
+  expect(image).toHaveAttribute('data-image-state', 'ready');
+  expect(onDecoded).not.toHaveBeenCalled();
+
+  finishDecode?.();
+  await waitFor(() => expect(onDecoded).toHaveBeenCalledTimes(1));
+});
+
 test('图片加载失败时保留稳定占位，不暴露浏览器破图或白底', () => {
   render(<DecodedImage src="http://127.0.0.1/missing.jpg" alt="失效海报" />);
   const image = screen.getByRole('img', { name: '失效海报', hidden: true });

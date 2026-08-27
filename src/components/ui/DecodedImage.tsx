@@ -3,12 +3,14 @@ import { useLayoutEffect, useRef, useState, type ImgHTMLAttributes } from 'react
 type ImageState = 'loading' | 'ready' | 'error';
 type DecodedImageProps = ImgHTMLAttributes<HTMLImageElement> & {
   onDecoded?: (image: HTMLImageElement) => void;
+  revealOnLoad?: boolean;
 };
 
 export default function DecodedImage({
   className = '',
   decoding = 'async',
   onDecoded,
+  revealOnLoad = false,
   onError,
   onLoad,
   src,
@@ -17,7 +19,19 @@ export default function DecodedImage({
   const imageRef = useRef<HTMLImageElement | null>(null);
   const generationRef = useRef(0);
   const readyGenerationRef = useRef(0);
+  const decodedGenerationRef = useRef(0);
   const [imageState, setImageState] = useState<ImageState>(src ? 'loading' : 'error');
+
+  const revealImage = (image: HTMLImageElement, generation: number) => {
+    if (
+      generationRef.current === generation
+      && imageRef.current === image
+      && readyGenerationRef.current !== generation
+    ) {
+      readyGenerationRef.current = generation;
+      setImageState('ready');
+    }
+  };
 
   const revealDecodedImage = async (image: HTMLImageElement, generation: number) => {
     try {
@@ -28,10 +42,10 @@ export default function DecodedImage({
     if (
       generationRef.current === generation
       && imageRef.current === image
-      && readyGenerationRef.current !== generation
+      && decodedGenerationRef.current !== generation
     ) {
-      readyGenerationRef.current = generation;
-      setImageState('ready');
+      decodedGenerationRef.current = generation;
+      revealImage(image, generation);
       onDecoded?.(image);
     }
   };
@@ -43,9 +57,10 @@ export default function DecodedImage({
 
     const image = imageRef.current;
     if (src && image?.complete && image.naturalWidth > 0) {
+      if (revealOnLoad) revealImage(image, generation);
       void revealDecodedImage(image, generation);
     }
-  }, [src]);
+  }, [src, revealOnLoad]);
 
   const stateClassName = imageState === 'ready' ? 'is-ready' : 'is-pending';
 
@@ -59,6 +74,7 @@ export default function DecodedImage({
       className={`decoded-image ${stateClassName} ${className}`.trim()}
       onLoad={(event) => {
         onLoad?.(event);
+        if (revealOnLoad) revealImage(event.currentTarget, generationRef.current);
         void revealDecodedImage(event.currentTarget, generationRef.current);
       }}
       onError={(event) => {

@@ -19,3 +19,9 @@ test('非首屏详情缩略图与所有浏览卡片不抢占首屏图片请求',
   assert.match(posterCard, /selectedImagePath = preferredArtworkPath\(work, artworkKind\)/);
   assert.match(home, /preferredArtworkPath\(work, 'fanart'\)/);
 });
+
+test('标题图和首屏剧集图在加载完成后立即显现，背景图仍保持完整解码切换', () => {
+  assert.match(detail, /className="detail-hero-logo"[\s\S]{0,220}revealOnLoad/);
+  assert.match(detail, /loading=\{episodeIndex < 6 \? 'eager' : 'lazy'\}[\s\S]{0,180}revealOnLoad/);
+  assert.doesNotMatch(detail, /className="detail-hero-art"[\s\S]{0,180}revealOnLoad/);
+});

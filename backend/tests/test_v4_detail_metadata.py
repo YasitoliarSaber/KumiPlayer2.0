@@ -89,7 +89,7 @@ def test_default_metadata_provider_emits_logo_and_episode_stills(monkeypatch):
         "title": "Online Episode",
         "plot": "Episode plot",
         "runtime": 24,
-        "still_url": "https://image.tmdb.org/t/p/w300/still.jpg",
+        "still_url": "https://image.tmdb.org/t/p/w500/still.jpg",
     }]
 
 

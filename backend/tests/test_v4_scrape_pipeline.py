@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 
 def _entry(evidence_id: str):
     from app.media_v4.domain.models import ParsedFacts, SourceEvidence
@@ -132,6 +135,73 @@ def test_scrape_metadata_does_not_overwrite_local_episode_number(tmp_path, monke
     assert row["local_episode_number"] == 1
     assert tuple(episode_mapping) == (9, 99)
     assert season_mapping["provider_season_number"] == 9
+
+
+def test_local_artwork_mode_materializes_episode_stills_as_v4_artifacts(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.media_v4.jobs import completeness as completeness_module
+    from app.media_v4.jobs import metadata_artifacts as artifacts_module
+    from app.media_v4.jobs.scrape import V4ScrapeService
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "episode-artwork.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-episode-artwork", [_entry("a")])
+    revisions.confirm("rev-episode-artwork")
+    scrape = V4ScrapeService(database)
+    job = scrape.enqueue_for_revision("rev-episode-artwork")[0]
+    with database.connect() as conn:
+        episode_id = conn.execute("SELECT episode_id FROM episodes").fetchone()[0]
+
+    local_config = SimpleNamespace(artwork_storage_mode="local", tmdb_timeout=5, proxy_url=None)
+    monkeypatch.setattr(artifacts_module, "load_config", lambda: local_config)
+    monkeypatch.setattr(completeness_module, "load_config", lambda: local_config)
+
+    downloaded: list[tuple[str, str]] = []
+    download_clients: list[object] = []
+
+    def fake_download(url, path, *, client=None):
+        assert client is not None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"image")
+        downloaded.append((url, str(path)))
+        download_clients.append(client)
+        return "image-digest"
+
+    monkeypatch.setattr(artifacts_module, "_download_artwork", fake_download)
+    mirror_root = tmp_path / "mirror"
+    scrape.process(
+        job["job_id"],
+        lambda _target: {
+            **_ready_metadata(),
+            "episode_mappings": [{
+                "episode_id": episode_id,
+                "still_url": "https://image.tmdb.org/t/p/w500/still.jpg",
+            }],
+        },
+        mirror_root=mirror_root,
+    )
+
+    with database.connect() as conn:
+        binding = conn.execute(
+            "SELECT metadata_json FROM scrape_bindings WHERE revision_id = 'rev-episode-artwork'"
+        ).fetchone()
+        episode_thumb = conn.execute(
+            "SELECT target_path FROM artifacts WHERE revision_id = 'rev-episode-artwork' "
+            "AND artifact_type = 'episode_thumb'"
+        ).fetchone()
+
+    metadata = json.loads(binding["metadata_json"])
+    local_thumb = metadata["episode_mappings"][0]["local_thumb_path"]
+    assert episode_thumb is not None
+    assert episode_thumb["target_path"] == local_thumb
+    assert local_thumb.endswith("Season 01\\S01E01-thumb.jpg")
+    assert ("https://image.tmdb.org/t/p/w500/still.jpg", local_thumb) in downloaded
+    assert len({id(client) for client in download_clients}) == 1
+    assert Path(local_thumb).read_bytes() == b"image"
 
 
 def test_invalid_scrape_mapping_is_rejected_before_metadata_files_are_published(tmp_path):

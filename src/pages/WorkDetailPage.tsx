@@ -1329,6 +1329,7 @@ export default function WorkDetailPage() {
               alt=""
               className="detail-hero-art"
               loading="eager"
+              fetchPriority="high"
               onLoad={extractBackdropPalette}
               onError={handleBackdropImageError}
             />
@@ -1347,7 +1348,14 @@ export default function WorkDetailPage() {
 
       <section className="detail-hero-copy" aria-label="作品概要" style={{ pointerEvents: 'auto' }}>
         {clearlogoImage ? (
-          <DecodedImage src={clearlogoImage} alt={`${work.title} logo`} className="detail-hero-logo" />
+          <DecodedImage
+            src={clearlogoImage}
+            alt={`${work.title} logo`}
+            className="detail-hero-logo"
+            loading="eager"
+            fetchPriority="high"
+            revealOnLoad
+          />
         ) : (
           <h1 title={work.title}>{work.title}</h1>
         )}
@@ -1696,6 +1704,8 @@ export default function WorkDetailPage() {
                           src={previewImage}
                           alt=""
                           loading={episodeIndex < 6 ? 'eager' : 'lazy'}
+                          fetchPriority={episodeIndex < 2 ? 'high' : 'auto'}
+                          revealOnLoad
                           onError={(event) => {
                             if (fanartImage && event.currentTarget.src !== fanartImage) {
                               event.currentTarget.onerror = null;

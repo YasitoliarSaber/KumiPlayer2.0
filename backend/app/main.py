@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from app.api.assets import close_remote_asset_client
 from app.api.assets import router as assets_router
 from app.api.bangumi import router as bangumi_router
 from app.api.config import router as config_router
@@ -57,6 +58,7 @@ async def lifespan(app: FastAPI):
     finally:
         stop_jobs.set()
         await job_worker
+        await close_remote_asset_client(app)
         from app.media_v4.playback.session import get_v4_playback_manager
 
         get_v4_playback_manager(database).stop()

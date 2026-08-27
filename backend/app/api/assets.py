@@ -10,6 +10,7 @@ GET /api/assets?path=<path>  返回 mirror 目录下的图片/NFO 文件
 - 只允许特定扩展名
 """
 
+import asyncio
 import hashlib
 import mimetypes
 import time
@@ -17,7 +18,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 
 from app.core.config import load_config
@@ -131,8 +132,53 @@ def _validate_remote_asset_url(url: str):
     return validate_remote_asset_url(url)
 
 
+async def _get_remote_asset_client(app, proxy_url: str | None) -> httpx.AsyncClient:
+    """复用 HTTP/2 连接，避免详情页每张图片都重新建立代理与 TLS 会话。"""
+
+    state = app.state
+    lock = getattr(state, "remote_asset_client_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        state.remote_asset_client_lock = lock
+
+    async with lock:
+        client = getattr(state, "remote_asset_client", None)
+        active_proxy = getattr(state, "remote_asset_client_proxy", None)
+        if client is not None and not client.is_closed and active_proxy == proxy_url:
+            return client
+        if client is not None and not client.is_closed:
+            await client.aclose()
+
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(15.0, connect=5.0),
+            follow_redirects=False,
+            proxy=proxy_url,
+            http2=True,
+            limits=httpx.Limits(
+                max_connections=24,
+                max_keepalive_connections=12,
+                keepalive_expiry=60.0,
+            ),
+        )
+        state.remote_asset_client = client
+        state.remote_asset_client_proxy = proxy_url
+        return client
+
+
+async def close_remote_asset_client(app) -> None:
+    client = getattr(app.state, "remote_asset_client", None)
+    if client is not None and not client.is_closed:
+        await client.aclose()
+    app.state.remote_asset_client = None
+    app.state.remote_asset_client_proxy = None
+    app.state.remote_asset_client_lock = None
+
+
 @router.get("/remote")
-async def proxy_remote_asset(url: str = Query(..., description="Trusted metadata image URL")):
+async def proxy_remote_asset(
+    request: Request,
+    url: str = Query(..., description="Trusted metadata image URL"),
+):
     """Proxy trusted metadata artwork without allowing arbitrary outbound requests."""
     try:
         _validate_remote_asset_url(url)
@@ -153,13 +199,9 @@ async def proxy_remote_asset(url: str = Query(..., description="Trusted metadata
 
     config = load_config()
     try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(15.0, connect=5.0),
-            follow_redirects=False,
-            proxy=config.proxy_url or None,
-        ) as client:
-            remote = await client.get(url, headers={"Accept": "image/avif,image/webp,image/*"})
-            remote.raise_for_status()
+        client = await _get_remote_asset_client(request.app, config.proxy_url or None)
+        remote = await client.get(url, headers={"Accept": "image/avif,image/webp,image/*"})
+        remote.raise_for_status()
     except httpx.HTTPError as exc:
         _REMOTE_FAILURES[url] = time.monotonic()
         raise HTTPException(status_code=502, detail="远程图片加载失败") from exc

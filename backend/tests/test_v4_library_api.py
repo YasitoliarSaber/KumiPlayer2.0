@@ -80,12 +80,14 @@ def test_detail_projects_saved_scrape_metadata_without_rewriting_local_identity(
             "certification": "PG-13",
             "certification_country": "US",
             "clearlogo_url": "/logo.png",
+            "local_clearlogo_path": "D:/mirror/Show/clearlogo.png",
             "tags": ["热血"],
             "episode_mappings": [{
                 "episode_id": episode_id,
                 "title": "刮削后的单集标题",
                 "plot": "单集简介",
                 "still_url": "/still.jpg",
+                "local_thumb_path": "D:/mirror/Show/Season 01/S01E01-thumb.jpg",
                 "runtime": 24,
             }],
         }
@@ -115,11 +117,12 @@ def test_detail_projects_saved_scrape_metadata_without_rewriting_local_identity(
     assert body["certification"] == "PG-13"
     assert body["certification_country"] == "US"
     assert body["clearlogo_path"] == "/logo.png"
+    assert body["local_clearlogo_path"] == "D:/mirror/Show/clearlogo.png"
     assert body["tags"] == ["热血"]
     assert body["episodes"][0]["episode_id"] == episode_id
     assert body["episodes"][0]["episode_number"] == 1
     assert body["episodes"][0]["title"] == "刮削后的单集标题"
-    assert body["episodes"][0]["thumb_path"] == "/still.jpg"
+    assert body["episodes"][0]["thumb_path"] == "D:/mirror/Show/Season 01/S01E01-thumb.jpg"
 
 
 def test_watch_status_patch_preserves_omitted_fields_and_rescan_is_v4_projection(tmp_path, monkeypatch):
