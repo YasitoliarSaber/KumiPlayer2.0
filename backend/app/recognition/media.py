@@ -326,6 +326,53 @@ def _extract_parent_dirs(relative_path: str, n: int = 2) -> list[str]:
     return dirs[-n:] if len(dirs) >= n else dirs
 
 
+# 系列根目录下的结构容器：只承担组织职责，不提供作品身份。
+_SUBWORK_STRUCTURAL_DIRS = frozenset({
+    "specials", "special", "sp", "sps", "extras", "bonus", "menu",
+    "trailers", "ncop", "nced", "oped", "pv", "cm", "ova", "oad",
+    "opening", "ending", "chapters", "others", "misc",
+})
+
+
+def _own_title_subwork_override(filename: str, parent_dirs: list[str], work_container: str) -> str:
+    """文件名与即时父目录同名、且父目录标题独立于容器时，父目录即作品。
+
+    ``摇曳露营/Heya Camp△/Heya Camp△ [01].mkv`` 的作品身份来自 Heya Camp△
+    而不是外层系列容器，否则外传会被主系列容器吞并、与主系列季集冲突。
+    季容器（X Season N／第N季／S2）、特典/OP/ED 等结构目录，以及文件名
+    与子作品目录不同名的命名课程（如 1.立志篇/鬼灭之刃 01.mkv）都不触发。
+    """
+
+    parent = parent_dirs[-1] if parent_dirs else ""
+    if not parent or not work_container:
+        return ""
+    parent_title = _clean_standalone_dir_title(parent)
+    container_title = _clean_standalone_dir_title(work_container)
+    if not parent_title or parent_title.casefold() == container_title.casefold():
+        return ""
+    lowered = parent.strip().casefold()
+    if lowered in _SUBWORK_STRUCTURAL_DIRS:
+        return ""
+    if _looks_like_plain_season_dir(parent):
+        return ""
+    if re.search(
+        r"(?:\b(?:S|Season)\s*\d+|\d+(?:st|nd|rd|th)\s+Season|第\s*\d+\s*季)\s*$",
+        parent,
+        flags=re.IGNORECASE,
+    ):
+        return ""
+    if re.fullmatch(r"(?:nc\s*)?(?:op|ed)\s*\d*", lowered, flags=re.IGNORECASE):
+        return ""
+    if re.fullmatch(r"\d+(?:\s*[-~]\s*\d+)?", lowered):
+        return ""
+    stem_title = _clean_standalone_dir_title(
+        re.sub(r"\.[A-Za-z0-9]{2,4}$", "", filename or "")
+    )
+    if not stem_title:
+        return ""
+    return parent_title if stem_title.casefold() == parent_title.casefold() else ""
+
+
 def _extract_subwork_dir(relative_path: str, source: str = "pan115") -> str:
     """提取系列容器下的子作品目录
 
@@ -1795,6 +1842,7 @@ def recognize_media(
     subwork_dir = _extract_subwork_dir(relative_path, source)
     top_category = _extract_top_category(relative_path, source)
     local_series_container = _extract_local_series_container(relative_path, source)
+    own_title_override = _own_title_subwork_override(filename, parent_dirs, work_container)
     tmdb_hint_id, tmdb_hint_type = _extract_tmdb_hint(relative_path)
     if tmdb_hint_id is None and allow_verified_titles:
         from app.recognition.verified_titles import match_verified_tmdb_binding
@@ -1849,14 +1897,14 @@ def recognize_media(
     # 1. OP/ED
     guess = _check_op_ed(filename, parent_dirs)
     if guess:
-        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type)
+        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess
 
     # 2. 附属视频（PV/CM/Menu/Trailer/Eyecatch）不能落进 Special/S00
     guess = _check_auxiliary(filename, parent_dirs)
     if guess:
         _attach_local_collection_subwork_identity(guess, subwork_dir, local_series_container)
-        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type)
+        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess
 
     # 3. 本地合集中的独立子作品（例如 Yuru Camp 合集里的 Heya Camp）
@@ -1869,7 +1917,7 @@ def recognize_media(
         local_series_container,
     )
     if guess:
-        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type)
+        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess
 
     # 4. 已通过官方资料/TMDB 核实的系列特别篇，优先于“总集篇=电影”等通用弱规则。
@@ -1895,43 +1943,43 @@ def recognize_media(
             confidence="high",
             reasons=[verified_special.reason],
         )
-        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type)
+        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess
 
     # 5. 文件名明确 SP/OVA/OAD/Lite 时，先按 Special 处理，避免被“剧场版”目录抢先归为电影
     guess = _check_explicit_filename_special(filename, parent_dirs)
     if guess:
-        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type)
+        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess
 
     # 6. 路径上下文特殊内容（[OVA]/[SP]/总集篇/剧场版 目录标记，优先级高于集号）
     guess = _check_path_context_special(relative_path, parent_dirs, subwork_dir, work_container)
     if guess:
-        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type)
+        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess
 
     # 6. 外传 TV 系列（独立卡片，但内部仍按 Season/Special）
     guess = _check_spin_off_episode(filename, parent_dirs, subwork_dir)
     if guess:
-        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type)
+        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess
 
     # 7. 独立卡片（文件名关键词）
     guess = _check_standalone(filename, parent_dirs, work_container)
     if guess:
-        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type)
+        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess
 
     # 8. Special（文件名关键词）
     guess = _check_sps(filename, parent_dirs)
     if guess:
-        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type)
+        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess
 
     # 9. 电影兜底先于裸集数/标题尾号，避免 声之形.2016.mkv 被当成第 16 集。
     guess = _check_movie_fallback(top_category, filename, work_container, year)
     if guess:
-        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type)
+        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess
 
     # 10. Season（SxxExx）
@@ -1943,31 +1991,31 @@ def recognize_media(
             if parent_season is not None:
                 guess.season_number = parent_season
                 guess.reasons.append(f"从父目录推断季号为 {parent_season}")
-        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type)
+        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess
 
     # 11. 中文季号
     guess = _check_chinese_season_episode(filename, parent_dirs)
     if guess:
-        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type)
+        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess
 
     # 12. 方括号集数
     guess = _check_bracket_episode(filename, parent_dirs)
     if guess:
-        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type)
+        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess
 
     # 13. 裸集数（Title - 01、Title 01、Title S2 01）
     guess = _check_bare_episode(filename, parent_dirs)
     if guess:
-        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type)
+        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess
 
     # 14. 标题与集数直接相连（中文标题09）
     guess = _check_attached_episode(filename, parent_dirs)
     if guess:
-        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type)
+        _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess
 
     # 15. 无法识别分组，但可能有作品名
@@ -1983,7 +2031,7 @@ def recognize_media(
         guess.reasons.append(f"识别作品名为 {work_title}，但无法确定分组")
     else:
         guess.warnings.append("无法识别作品名")
-    _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, skip_finalize=True)
+    _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override, skip_finalize=True)
     return guess
 
 
@@ -1999,6 +2047,7 @@ def _enrich_guess(
     clean_needs_review: bool,
     tmdb_hint_id: int | None = None,
     tmdb_hint_type: str = "",
+    own_title_override: str = "",
     skip_finalize: bool = False,
 ) -> None:
     """为 guess 填充公共字段：work_title、year、original_title、series_group、清洗结果
@@ -2034,7 +2083,15 @@ def _enrich_guess(
         guess.media_type = guess.media_type or "tv"
     if not guess.original_title:
         guess.original_title = _strip_tmdb_hint(original_title)
-    guess.series_group = _strip_tmdb_hint(guess.series_group or series_group or effective_work_title)
+    family_container = _strip_tmdb_hint(series_group or effective_work_title)
+    guess.series_group = _strip_tmdb_hint(guess.series_group or family_container)
+    if own_title_override and guess.group_type in {"season", "unknown"} \
+            and (guess.work_title or "") == effective_work_title:
+        # 文件名与即时父目录同名：作品身份来自该子作品目录；外层容器保留
+        # 为系列组，外传因此与主系列保持独立 Work 并建立家族关系。
+        guess.work_title = own_title_override
+        guess.series_group = family_container
+        guess.reasons.append("文件名与即时父目录同名，作品身份来自该子作品目录")
     guess.tmdb_hint_id = guess.tmdb_hint_id or tmdb_hint_id
     guess.tmdb_hint_type = guess.tmdb_hint_type or tmdb_hint_type
 

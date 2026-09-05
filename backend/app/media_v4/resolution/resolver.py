@@ -178,13 +178,14 @@ def _resolved_entry_work_key(
     if facts.card_type == "standalone":
         return key
     media_type = _effective_media_type(facts)
+    # 结构折叠只接受作品名本身命中主系列身份。series_group 只是父系列
+    # 线索：外传/电影条目的 series_group 指向主系列，若允许它参与折叠，
+    # 外传会被主系列容器吞并（与主系列季集号冲突、共享错误 Logo），
+    # 其与主系列的关系只能以 relation 表达，不能合并身份。
     matching_series = next(
         (
             normalized
-            for normalized in (
-                _normalize_title(facts.work_title),
-                _normalize_title(facts.series_group),
-            )
+            for normalized in (_normalize_title(facts.work_title),)
             if (normalized, media_type) in structural_series_identities
         ),
         "",

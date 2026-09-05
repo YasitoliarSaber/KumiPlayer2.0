@@ -77,3 +77,56 @@ def test_parser_does_not_mistake_year_or_explicit_local_episode_for_absolute_num
     assert uncertain.absolute_episode_candidate is None
     assert bare.absolute_episode_candidate == 13
     assert bare.episode_token_raw == "- 13"
+
+
+def test_episode_range_end_requires_token_boundary_so_title_numbers_stay_in_title():
+    """集标题里的数字不得成为范围终点（真实样本：200万年/100% 安全的水）。"""
+
+    from app.media_v4.parsing.parser import V4Parser
+
+    cjk_counter = V4Parser().parse(_evidence("Show/Season 1/Show - S01E15 - 200万年的结晶.mkv"))
+    percent = V4Parser().parse(_evidence("Show/S01/Show - S01E06 - 100%安全的水.mkv"))
+    explicit_range = V4Parser().parse(_evidence("Show/Season 1/Show - S01E01-E12.mkv"))
+    plain_range = V4Parser().parse(_evidence("Show/Season 1/Show - S01E01-12.mkv"))
+    cjk_suffix_range = V4Parser().parse(_evidence("Show/Season 1/Show - S01E01-12集.mkv"))
+    jp_suffix_range = V4Parser().parse(_evidence("Show/Season 1/Show - S01E01-12話.mkv"))
+    magnitude_suffix = V4Parser().parse(_evidence("Show/Season 1/Show - S01E01-12万回.mkv"))
+    letter_suffix = V4Parser().parse(_evidence("Show/Season 1/Show - S01E01-12bit.mkv"))
+
+    assert cjk_counter.episode_candidate == 15
+    assert cjk_counter.episode_range is None
+    assert cjk_counter.episode_title == "200万年的结晶"
+    assert percent.episode_candidate == 6
+    assert percent.episode_range is None
+    assert percent.episode_title == "100%安全的水"
+    assert explicit_range.episode_range == (1, 12)
+    assert plain_range.episode_range == (1, 12)
+    # 中文量词"集/話/话"是合法的范围终点后缀；数量词与字母不是。
+    assert cjk_suffix_range.episode_range == (1, 12)
+    assert jp_suffix_range.episode_range == (1, 12)
+    assert magnitude_suffix.episode_range is None
+    assert letter_suffix.episode_range is None
+
+
+def test_sidecar_nfo_with_dtd_or_entity_declarations_is_rejected(tmp_path):
+    """sidecar NFO 只读 uniqueid 事实；DTD/实体声明一律拒绝解析。"""
+
+
+    from app.media_v4.parsing.parser import V4Parser
+
+    parser = V4Parser()
+    nfo = tmp_path / "show.nfo"
+    nfo.write_text(
+        "<?xml version='1.0'?>\n<!DOCTYPE tvshow [<!ENTITY xxe SYSTEM 'file:///C:/Windows/win.ini'>]>"
+        "\n<tvshow><uniqueid type='tmdb' default='true'>&xxe;</uniqueid></tvshow>\n",
+        encoding="utf-8",
+    )
+    evidence = _evidence(f"Show/{nfo.name}")
+    evidence = type(evidence)(
+        **{**{field: getattr(evidence, field) for field in evidence.__dataclass_fields__},
+           "source_locator": str(nfo), "playback_locator": str(nfo), "entry_kind": "metadata"},
+    )
+
+    facts = parser.parse(evidence)
+
+    assert facts.tmdb_hint_id is None

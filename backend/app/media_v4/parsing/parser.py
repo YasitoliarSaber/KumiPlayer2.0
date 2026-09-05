@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import re
+from collections import defaultdict
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 from app.media_v4.domain.models import ParsedFacts, SourceEvidence
@@ -28,7 +30,11 @@ from app.recognition.media import (
 )
 
 _SEASON_TOKEN = re.compile(r"(?i)(S\d{1,2})")
-_EPISODE_TOKEN = re.compile(r"(?i)(E\d{1,3})(?:\s*[-~]\s*E?(\d{1,3}))?")
+# E01-E12 / E01-12 / E01-12集(話) 是合集范围；范围终点后只允许词边界、
+# 普通分隔符或集数计数词，排除字母、数字、百分号与"万/千"等数量词，
+# 否则 "E15 - 200万年的结晶"、"E06 - 100%安全的水" 会展开幽灵剧集，
+# 而 "E01-12集" 这类常见合集命名会丢掉第 2 集之后的范围。
+_EPISODE_TOKEN = re.compile(r"(?i)(E\d{1,3})(?:\s*[-~]\s*E?(\d{1,3})(?:(?![\w%])|(?=[集話话])))?")
 _ABSOLUTE_TOKEN = re.compile(
     r"(?ix)(?:"
     r"(?<![a-z0-9])EP\s*(?P<ep>\d{1,3})(?!\d)"
@@ -47,6 +53,73 @@ _EDITION_TOKENS = (
     (re.compile(r"(?i)(?:theatrical(?:[ ._-]?cut)?|院线版)"), "theatrical"),
 )
 _RELEASE_GROUP = re.compile(r"-([A-Za-z0-9][A-Za-z0-9_.-]{1,40})$")
+
+
+def _batch_work_identity(facts: ParsedFacts) -> str:
+    """为确定性的批量编号归一化取得保守作品边界。"""
+
+    title = facts.series_group or facts.work_title or facts.original_title
+    return _normalized_container(title)
+
+
+def _path_has_explicit_season(relative_path: str, season: int) -> bool:
+    """仅采纳路径显式声明的 Sxx 季，避免将普通数字误当作季度。"""
+
+    path = (relative_path or "").replace("\\", "/")
+    return bool(
+        re.search(
+            rf"(?:\[S0?{season}\]|(?:^|[\s._-])S0?{season}(?:E\d+|[\s._-]|$))",
+            path,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def normalize_batch_parsed_facts(
+    entries: list[tuple[SourceEvidence, ParsedFacts]],
+) -> list[tuple[SourceEvidence, ParsedFacts]]:
+    """继承旧版的明确后续季绝对集号归一化，但不改变原始证据。
+
+    少数目录会把第二季写成 ``S02E13``、``S02E14``……；当同一作品、同一
+    显式季度目录内的编号连续且从 10 以上开始时，它们明确是跨季绝对编号，
+    因而在 ParsedFacts 首次持久化前换算为本季 E01、E02……。不连续、未显式
+    标季或作品边界不清的条目一律保持原样，交由人工确认。
+    """
+
+    groups: dict[tuple[str, str, int, str], list[int]] = defaultdict(list)
+    for index, (evidence, facts) in enumerate(entries):
+        season = int(facts.season_candidate or 0)
+        if (
+            facts.group_type != "season"
+            or season <= 1
+            or facts.episode_candidate is None
+            or not _batch_work_identity(facts)
+            or not _path_has_explicit_season(evidence.relative_path, season)
+        ):
+            continue
+        parent = str(PurePosixPath(evidence.relative_path.replace("\\", "/")).parent)
+        groups[(evidence.provider, _batch_work_identity(facts), season, parent)].append(index)
+
+    normalized = list(entries)
+    for (_provider, _work, season, _parent), indexes in groups.items():
+        numbers = sorted({int(entries[index][1].episode_candidate or 0) for index in indexes})
+        if len(numbers) < 2 or numbers[0] < 10:
+            continue
+        if numbers != list(range(numbers[0], numbers[-1] + 1)):
+            continue
+        offset = numbers[0] - 1
+        for index in indexes:
+            evidence, facts = normalized[index]
+            episode_number = int(facts.episode_candidate or 0) - offset
+            normalized[index] = (
+                evidence,
+                replace(
+                    facts,
+                    episode_candidate=episode_number,
+                    reasons=(*facts.reasons, f"明确第{season}季目录使用连续绝对集号，按季内第{episode_number}集归一化"),
+                ),
+            )
+    return normalized
 
 
 def _unique_non_empty(values: tuple[str, ...]) -> tuple[str, ...]:
@@ -170,6 +243,11 @@ def _parse_sidecar_nfo(evidence: SourceEvidence) -> tuple[int | None, str, str, 
         with open(path, "rb") as handle:
             raw = handle.read(_NFO_MAX_BYTES + 1)
         if len(raw) > _NFO_MAX_BYTES:
+            return None
+        # sidecar NFO 只需要 uniqueid 事实；拒绝任何 DTD/实体声明，
+        # 防止借实体展开（含 billion laughs）放大解析开销。
+        head = raw[:512].upper()
+        if b"<!DOCTYPE" in head or b"<!ENTITY" in head:
             return None
         try:
             root = ET.fromstring(raw)

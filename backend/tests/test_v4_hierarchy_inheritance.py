@@ -97,6 +97,50 @@ def test_single_work_root_can_supply_identity_when_path_starts_with_season():
     assert {episode.local_season_number for episode in graph.episodes} == {1, 2}
 
 
+def test_plain_series_collection_merges_regular_seasons_but_keeps_spinoff_and_movie_separate():
+    graph = _resolve(
+        [
+            "[VCB-Studio] Yuru Camp/Yuru Camp/Yuru Camp [01].mkv",
+            "[VCB-Studio] Yuru Camp/Yuru Camp Season 2/Yuru Camp Season 2 [01].mkv",
+            "[VCB-Studio] Yuru Camp/Yuru Camp Season 3/Yuru Camp Season 3 [01].mkv",
+            "[VCB-Studio] Yuru Camp/Heya Camp/Heya Camp [01].mkv",
+            "[VCB-Studio] Yuru Camp/Yuru Camp Movie (2022)/Yuru Camp Movie.mkv",
+            "[VCB-Studio] Yuru Camp/Specials/[VCB-Studio] Yuru Camp [SP08][Making Documentary][Ma10p_1080p].mkv",
+        ]
+    )
+
+    assert {work.preferred_title for work in graph.works} == {
+        "Yuru Camp",
+        "Heya Camp",
+        "Yuru Camp Movie",
+    }
+    main_work = next(work for work in graph.works if work.preferred_title == "Yuru Camp")
+    assert {
+        episode.local_season_number
+        for episode in graph.episodes
+        if episode.work_key == main_work.work_key
+    } == {0, 1, 2, 3}
+
+
+def test_plain_series_regular_seasons_do_not_require_a_specials_folder_to_merge():
+    graph = _resolve(
+        [
+            "[VCB-Studio] Yuru Camp/Yuru Camp/Yuru Camp [01].mkv",
+            "[VCB-Studio] Yuru Camp/Yuru Camp Season 2/Yuru Camp Season 2 [01].mkv",
+            "[VCB-Studio] Yuru Camp/Yuru Camp Season 3/Yuru Camp Season 3 [01].mkv",
+            "[VCB-Studio] Yuru Camp/Heya Camp/Heya Camp [01].mkv",
+        ]
+    )
+
+    assert {work.preferred_title for work in graph.works} == {"Yuru Camp", "Heya Camp"}
+    main_work = next(work for work in graph.works if work.preferred_title == "Yuru Camp")
+    assert {
+        episode.local_season_number
+        for episode in graph.episodes
+        if episode.work_key == main_work.work_key
+    } == {1, 2, 3}
+
+
 def test_category_prefix_preserves_work_container_year_and_special_membership():
     graph = _resolve(
         [
@@ -261,3 +305,29 @@ def test_v4_parser_does_not_consume_post_confirmation_verified_title_rules(monke
         for candidate in rows
         if candidate.status == "confirmed"
     } == {"92684", "566466"}
+
+
+def test_batch_parser_rebases_continuous_absolute_numbers_in_later_season():
+    from app.media_v4.parsing.parser import normalize_batch_parsed_facts
+
+    parser = V4Parser()
+    entries = [
+        (
+            _evidence(
+                index,
+                f"动画/Yuru Camp/Season 2/Yuru Camp S02E{number:02d}.mkv",
+            ),
+            parser.parse(
+                _evidence(
+                    index,
+                    f"动画/Yuru Camp/Season 2/Yuru Camp S02E{number:02d}.mkv",
+                )
+            ),
+        )
+        for index, number in enumerate(range(13, 16))
+    ]
+
+    normalized = normalize_batch_parsed_facts(entries)
+
+    assert [facts.season_candidate for _evidence, facts in normalized] == [2, 2, 2]
+    assert [facts.episode_candidate for _evidence, facts in normalized] == [1, 2, 3]
