@@ -1892,9 +1892,12 @@ class V4RevisionService:
                 (revision_id, work_id),
             ).fetchone()
             season_rows = conn.execute(
-                "SELECT season_id, local_season_number, season_kind, title FROM seasons "
-                "WHERE work_id = ? ORDER BY local_season_number, season_id",
-                (work_id,),
+                "SELECT s.season_id, s.local_season_number, s.season_kind, s.title FROM seasons s "
+                "WHERE s.work_id = ? AND EXISTS ("
+                "SELECT 1 FROM revision_bindings rb "
+                "WHERE rb.revision_id = ? AND rb.work_id = ? AND rb.season_id = s.season_id"
+                ") ORDER BY s.local_season_number, s.season_id",
+                (work_id, revision_id, work_id),
             ).fetchall()
             episode_rows = conn.execute(
                 """
@@ -1906,10 +1909,13 @@ class V4RevisionService:
                 JOIN seasons s ON s.season_id = e.season_id
                 LEFT JOIN episode_provider_mappings epm
                   ON epm.episode_id = e.episode_id AND epm.provider = ?
-                WHERE e.work_id = ?
+                WHERE e.work_id = ? AND EXISTS (
+                  SELECT 1 FROM revision_bindings rb
+                  WHERE rb.revision_id = ? AND rb.work_id = ? AND rb.episode_id = e.episode_id
+                )
                 ORDER BY s.local_season_number, e.local_episode_number, e.episode_id
                 """,
-                (str(scrape_row["provider"]) if scrape_row else "tmdb", work_id),
+                (str(scrape_row["provider"]) if scrape_row else "tmdb", work_id, revision_id, work_id),
             ).fetchall()
             asset_rows = conn.execute(
                 """

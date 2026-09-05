@@ -148,6 +148,50 @@ def test_completed_work_returns_work_level_and_episode_results(tmp_path, monkeyp
     assert body["has_detail"] is True
 
 
+def test_detail_only_returns_episodes_bound_to_requested_revision(tmp_path, monkeypatch):
+    """同一 Work 的其他导入批次不能泄漏到当前展开详情。"""
+
+    client, database = _client(tmp_path, monkeypatch)
+    work_id = _seed_confirmed_work(database)
+
+    with database.connect() as conn:
+        season_id = str(conn.execute(
+            "SELECT season_id FROM seasons WHERE work_id = ? AND local_season_number = 1",
+            (work_id,),
+        ).fetchone()[0])
+        conn.execute(
+            """
+            INSERT INTO import_revisions(
+                revision_id, root_id, scan_id, resolver_version, status, created_at
+            ) VALUES ('rev-other', 'root-rev-detail', 'scan-rev-detail', 'fixture', 'draft', 'now')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO episodes(
+                episode_id, work_id, season_id, local_episode_number, episode_kind, display_title
+            ) VALUES ('episode-from-other-revision', ?, ?, 3, 'regular', '只属于另一批次')
+            """,
+            (work_id, season_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO revision_bindings(
+                binding_id, revision_id, evidence_id, work_id, season_id, episode_id, confidence
+            ) VALUES ('binding-other-revision', 'rev-other', 'ev-1', ?, ?,
+                      'episode-from-other-revision', 'medium')
+            """,
+            (work_id, season_id),
+        )
+
+    response = client.get(f"/api/v4/revisions/rev-detail/works/{work_id}/execution-detail")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [item["episode_number"] for item in body["episodes"]] == [1, 2]
+    assert all(item["episode_id"] != "episode-from-other-revision" for item in body["episodes"])
+
+
 def test_detail_returns_404_for_missing_work(tmp_path, monkeypatch):
     client, database = _client(tmp_path, monkeypatch)
     _seed_confirmed_work(database)
