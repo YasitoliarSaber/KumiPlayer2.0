@@ -1494,7 +1494,7 @@ def test_sync_and_durable_tree_entries_share_one_root_identity(tmp_path, monkeyp
 
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
-        if get_durable_scan(database, scan_id)["status"] != "running":
+        if get_durable_scan(database, scan_id)["status"] not in {"queued", "running"}:
             break
         time.sleep(0.02)
     final_state = get_durable_scan(database, scan_id)

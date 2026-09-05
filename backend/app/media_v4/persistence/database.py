@@ -18,6 +18,7 @@ from app.media_v4.persistence.schema_v4 import (
     create_v13_structures,
     create_v15_structures,
     create_v16_structures,
+    create_v17_structures,
     migrate_schema_v4_to_v5,
     migrate_schema_v5_to_v6,
     migrate_schema_v6_to_v7,
@@ -30,6 +31,7 @@ from app.media_v4.persistence.schema_v4 import (
     migrate_schema_v13_to_v14,
     migrate_schema_v14_to_v15,
     migrate_schema_v15_to_v16,
+    migrate_schema_v16_to_v17,
 )
 
 
@@ -87,6 +89,7 @@ class V4Database:
             "source_health",
             "openlist_telemetry",
             "tree_scan_validation",
+            "source_scan_requests",
             "work_relations",
             "revision_work_candidates",
             "maintenance_operations",
@@ -138,7 +141,7 @@ class V4Database:
         使用字面量；写回后立即读回校验，版本升级时若字面量未同步会立即失败。
         """
 
-        conn.execute("PRAGMA user_version = 16")
+        conn.execute("PRAGMA user_version = 17")
         written = int(conn.execute("PRAGMA user_version").fetchone()[0])
         if written != V4_SCHEMA_VERSION:
             raise RuntimeError(
@@ -218,6 +221,23 @@ class V4Database:
                     conn.rollback()
                     raise V4ResetRequiredError(
                         "数据库声明为 V4 但任务结构不完整，需要一次性重置；" + str(exc)
+                    ) from exc
+                except Exception:
+                    conn.rollback()
+                    raise
+                version = self.CURRENT_SCHEMA_VERSION
+            if version == 16 and self._has_user_tables(conn):
+                # v16 → v17：新增 SourceScan 可序列化请求表；加法迁移，
+                # 不改写既有媒体、扫描或证据事实。
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    migrate_schema_v16_to_v17(conn)
+                    self._set_user_version(conn)
+                    conn.commit()
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    raise V4ResetRequiredError(
+                        "数据库声明为 V4 但扫描请求结构不完整，需要一次性重置；" + str(exc)
                     ) from exc
                 except Exception:
                     conn.rollback()
@@ -431,6 +451,7 @@ class V4Database:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     migrate_schema_v15_to_v16(conn)
+                    migrate_schema_v16_to_v17(conn)
                     conn.commit()
                 except sqlite3.OperationalError as exc:
                     conn.rollback()
@@ -526,6 +547,7 @@ class V4Database:
             create_v13_structures(expected)
             create_v15_structures(expected)
             create_v16_structures(expected)
+            create_v17_structures(expected)
             for table in sorted(self.REQUIRED_TABLES):
                 actual_cols = self._table_contract(conn, table)
                 expected_cols = self._table_contract(expected, table)

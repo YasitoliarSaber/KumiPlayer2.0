@@ -354,7 +354,7 @@ def test_txt_offline_scan_preview_confirm_mirror(tmp_path, monkeypatch):
     assert scan.status_code == 200, scan.text
     scan_id = scan.json()["scan_id"]
     root_id = scan.json()["root_id"]
-    assert scan.json()["status"] == "running"
+    assert scan.json()["status"] == "queued"
 
     # 2) 等待后台 finalize 完成（真实线程，必须等终态再断言）。
     deadline = time.monotonic() + 30

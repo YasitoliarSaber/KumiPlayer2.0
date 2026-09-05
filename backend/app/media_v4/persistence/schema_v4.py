@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 16
+V4_SCHEMA_VERSION = 17
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -780,6 +780,7 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
     create_v12_structures(conn)
     create_v13_structures(conn)
     create_v16_structures(conn)
+    create_v17_structures(conn)
 
 
 def create_tree_scan_validation(conn: sqlite3.Connection) -> None:
@@ -1148,6 +1149,38 @@ def create_v16_structures(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "jobs", "heartbeat_at")
     _add_column_if_missing(conn, "jobs", "started_at")
     _add_column_if_missing(conn, "jobs", "finished_at")
+
+
+def create_v17_structures(conn: sqlite3.Connection) -> None:
+    """v17：SourceScan 可序列化请求与归档事实（进程失联后可恢复）。
+
+    与 source_scans 一对一；只保存重建 adapter 所需的非敏感参数、TXT 受控
+    归档引用和恢复计数。不保存 Token、密码或完整凭据。
+    """
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS source_scan_requests (
+            scan_id TEXT PRIMARY KEY REFERENCES source_scans(scan_id) ON DELETE CASCADE,
+            scan_kind TEXT NOT NULL DEFAULT 'full',
+            source_mode TEXT NOT NULL DEFAULT '',
+            request_json TEXT NOT NULL DEFAULT '{}',
+            input_archive_path TEXT NOT NULL DEFAULT '',
+            input_sha256 TEXT NOT NULL DEFAULT '',
+            original_filename TEXT NOT NULL DEFAULT '',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            retry_of TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def migrate_schema_v16_to_v17(conn: sqlite3.Connection) -> None:
+    """v16 → v17 增量迁移：新增 SourceScan 请求表，不改写既有数据。"""
+
+    create_v17_structures(conn)
 
 
 def migrate_schema_v15_to_v16(conn: sqlite3.Connection) -> None:

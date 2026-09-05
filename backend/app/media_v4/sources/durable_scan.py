@@ -194,6 +194,7 @@ def create_durable_scan(
                 (scan_id, root_id, generation, now, now),
             )
     _cancel_flags[scan_id] = threading.Event()
+    stream_state = {"count": 0}
 
     def _run() -> None:
         cancel = _cancel_flags[scan_id]
@@ -225,6 +226,7 @@ def create_durable_scan(
             if any(item.scan_id != scan_id for item in batch):
                 normalized = [replace(item, scan_id=scan_id) for item in batch]
             V4Repository(database).save_scan_evidence_bulk(normalized)
+            stream_state["count"] += len(normalized)
             _update_scan_progress(
                 database,
                 scan_id,
@@ -250,9 +252,11 @@ def create_durable_scan(
                 evidence = [replace(item, scan_id=scan_id) for item in evidence]
             if state_fn is not None:
                 stage_scan_state(scan_id, state_fn())
-            # 兼容尚未改成回调式的旧 adapter；已流式发出的批次由 INSERT
-            # OR IGNORE 去重，最终以数据库全集作为 finalizer 输入。
-            persist_evidence_batch(evidence)
+            # 只有尚未改成回调式的旧 adapter 才需要最终兜底保存；已流式
+            # 发出的批次不再全量重放（C8 节流与去重合同），INSERT OR IGNORE
+            # 仍作为幂等兜底。
+            if stream_state["count"] == 0:
+                persist_evidence_batch(evidence)
             evidence = V4Repository(database).list_scan_evidence(scan_id)
             report_progress(
                 stage="parsing" if finalize_fn is not None else "preparing_preview",
@@ -380,6 +384,15 @@ def get_durable_scan(
     stage_label = _STAGE_LABELS.get(stage, "处理中")
     if status == "cancelling":
         stage_label = "正在取消扫描"
+    from app.media_v4.sources.scan_state import INTERRUPTED_STAGE_LABEL, scan_is_stale
+
+    heartbeat_text = str(row["heartbeat_at"] or "")
+    # 空心跳是 v15 旧行的历史产物，不据此判中断；有旧心跳才说明执行者失联。
+    interrupted = status in {"running", "cancelling"} and bool(heartbeat_text) and scan_is_stale(
+        heartbeat_text
+    )
+    if interrupted:
+        stage_label = INTERRUPTED_STAGE_LABEL
     progress = None
     if total_count > 0:
         progress = min(1.0, max(0.0, processed_count / total_count))
@@ -387,6 +400,7 @@ def get_durable_scan(
         "scan_id": scan_id,
         "root_id": str(row["root_id"]),
         "status": status,
+        "interrupted": interrupted,
         "started_at": str(row["started_at"] or ""),
         "finished_at": str(row["finished_at"] or ""),
         "heartbeat_at": str(row["heartbeat_at"] or ""),
@@ -404,7 +418,13 @@ def get_durable_scan(
 
 
 def cancel_durable_scan(scan_id: str, *, database: V4Database | None = None) -> bool:
-    """请求取消；后台线程在安全点丢弃结果。返回是否已登记。"""
+    """请求取消；后台线程在安全点丢弃结果。返回是否已登记。
+
+    queued 从未被领取，直接收口为 cancelled；running/cancelling 若心跳
+    已失联（进程退出的僵尸行），同样立即收口——失联线程不可能再执行
+    finally，继续等只会从「永久运行中」变成「永久取消中」。新鲜心跳的
+    running 才写 cancel_requested 交给执行者在安全点收口。
+    """
 
     cancel = _cancel_flags.get(scan_id)
     if cancel is not None:
@@ -412,16 +432,27 @@ def cancel_durable_scan(scan_id: str, *, database: V4Database | None = None) -> 
     if database is not None:
         with database.connect() as conn:
             row = conn.execute(
-                "SELECT status FROM source_scans WHERE scan_id = ?",
+                "SELECT status, heartbeat_at FROM source_scans WHERE scan_id = ?",
                 (scan_id,),
             ).fetchone()
             if row is None or row["status"] not in {"running", "queued", "cancelling"}:
                 return cancel is not None
-            conn.execute(
-                "UPDATE source_scans SET status = 'cancelling', cancel_requested = 1, "
-                "heartbeat_at = ? WHERE scan_id = ?",
-                (_now(), scan_id),
-            )
+            from app.media_v4.sources.scan_state import scan_is_stale
+
+            now_stamp = _now()
+            if row["status"] == "queued" or scan_is_stale(row["heartbeat_at"]):
+                conn.execute(
+                    "UPDATE source_scans SET status = 'cancelled', stage = 'cancelled', "
+                    "cancel_requested = 1, finished_at = ?, heartbeat_at = ?, "
+                    "error = '用户已取消扫描' WHERE scan_id = ?",
+                    (now_stamp, now_stamp, scan_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE source_scans SET status = 'cancelling', cancel_requested = 1, "
+                    "heartbeat_at = ? WHERE scan_id = ?",
+                    (now_stamp, scan_id),
+                )
             return True
     return cancel is not None
 

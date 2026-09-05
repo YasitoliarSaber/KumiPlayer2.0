@@ -8,6 +8,7 @@ revision_id + draft_work_key 在确认前持久化；高置信唯一身份用于
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
@@ -91,17 +92,28 @@ def supported_provider(provider: str) -> bool:
     return provider in _SUPPORTED_PROVIDERS
 
 
-def build_query_inputs(work: ResolvedWork, entries: list[tuple[SourceEvidence, ParsedFacts]]) -> list[str]:
-    """构造候选查询输入，去重并过滤通用容器标题；含 sidecar NFO 标题。"""
+def build_query_inputs(
+    work: ResolvedWork,
+    entries: list[tuple[SourceEvidence, ParsedFacts]],
+    related_facts: list[ParsedFacts] | None = None,
+) -> list[str]:
+    """构造候选查询输入，去重并过滤通用容器标题；含 sidecar NFO 标题。
+
+    ``related_facts`` 允许调用方传入预构建的 Work 关联事实，避免大库在
+    每部作品上重复遍历全部条目。
+    """
 
     from app.media_v4.generic_container import is_generic_container_title
 
     queries: list[str] = []
-    related = [
-        facts
-        for _evidence, facts in entries
-        if facts.evidence_id in work.source_evidence_ids
-    ]
+    if related_facts is None:
+        related = [
+            facts
+            for _evidence, facts in entries
+            if facts.evidence_id in work.source_evidence_ids
+        ]
+    else:
+        related = related_facts
     for facts in related:
         # series_group 只表达父系列关系，不能作为独立外传/电影子作品的
         # Provider 身份查询输入；否则 Heya Camp 会被 Yuru Camp 候选吸收。
@@ -133,12 +145,15 @@ def compute_nfo_ownership(
     """
 
     work_dirs: dict[str, set[str]] = {}
+    entries_by_id = {evidence.evidence_id: evidence for evidence, _facts in entries}
     for work in graph.works:
         dirs: set[str] = set()
-        for evidence, _facts in entries:
-            if evidence.evidence_id in work.source_evidence_ids:
-                parts = PurePosixPath(evidence.relative_path).parts
-                dirs.add(PurePosixPath(*parts[:-1]).as_posix() if len(parts) > 1 else "")
+        for evidence_id in work.source_evidence_ids:
+            evidence = entries_by_id.get(evidence_id)
+            if evidence is None:
+                continue
+            parts = PurePosixPath(evidence.relative_path).parts
+            dirs.add(PurePosixPath(*parts[:-1]).as_posix() if len(parts) > 1 else "")
         work_dirs[work.work_key] = dirs
 
     def shares_directory_scope(nfo_parent: str, video_dirs: set[str]) -> bool:
@@ -187,18 +202,27 @@ def _nfo_related_titles(
     work: ResolvedWork,
     entries: list[tuple[SourceEvidence, ParsedFacts]],
     ownership: dict[str, set[str]],
+    nfo_facts: list[tuple[SourceEvidence, ParsedFacts]] | None = None,
 ) -> tuple[list[str], bool]:
-    """关联到该 Work 的 sidecar NFO 标题，作为候选查询证据。"""
+    """关联到该 Work 的 sidecar NFO 标题，作为候选查询证据。
+
+    ``nfo_facts`` 允许传入按 owner 预分组的事实列表，避免大库逐 Work
+    重复遍历全部条目。
+    """
 
     from app.media_v4.generic_container import is_generic_container_title
 
     titles: list[str] = []
     found = False
-    for evidence, facts in entries:
-        if evidence.entry_kind != "metadata" or facts.is_importable:
-            continue
-        if ownership.get(evidence.evidence_id) != {work.work_key}:
-            continue
+    if nfo_facts is None:
+        nfo_facts = [
+            (evidence, facts)
+            for evidence, facts in entries
+            if evidence.entry_kind == "metadata"
+            and not facts.is_importable
+            and ownership.get(evidence.evidence_id) == {work.work_key}
+        ]
+    for _evidence, facts in nfo_facts:
         for value in (facts.work_title, facts.original_title, *facts.title_candidates):
             value = (value or "").strip()
             if not value or value.casefold() in {"tvshow", "movie"}:
@@ -209,22 +233,6 @@ def _nfo_related_titles(
                 titles.append(value)
             found = True
     return titles, found
-
-
-def _nfo_evidence_facts(
-    work: ResolvedWork,
-    entries: list[tuple[SourceEvidence, ParsedFacts]],
-    ownership: dict[str, set[str]],
-) -> list[tuple[SourceEvidence, ParsedFacts]]:
-    """关联到该 Work 的 sidecar NFO 证据事实（含解析出的 provider ID）。"""
-
-    result: list[tuple[SourceEvidence, ParsedFacts]] = []
-    for evidence, facts in entries:
-        if evidence.entry_kind != "metadata" or facts.is_importable:
-            continue
-        if ownership.get(evidence.evidence_id) == {work.work_key}:
-            result.append((evidence, facts))
-    return result
 
 
 def plan_work_candidates(
@@ -249,12 +257,25 @@ def plan_work_candidates(
             message="目录级 NFO 同时对应多个作品，无法确定归属，需人工确认",
         ))
 
+    # C8 性能索引：预建 evidence→entry、Work 成员与 NFO 归属映射，避免
+    # 大库在每部作品上重复遍历全部条目（Work × Evidence 退化）。
+    entries_by_id = {
+        evidence.evidence_id: (evidence, facts)
+        for evidence, facts in entries
+    }
+    nfo_facts_by_owner: dict[str, list[tuple[SourceEvidence, ParsedFacts]]] = defaultdict(list)
+    for evidence, facts in entries:
+        if evidence.entry_kind != "metadata" or facts.is_importable:
+            continue
+        owners = nfo_ownership.get(evidence.evidence_id)
+        if owners and len(owners) == 1:
+            nfo_facts_by_owner[next(iter(owners))].append((evidence, facts))
+
     for work in graph.works:
-        evidence_ids = set(work.source_evidence_ids)
         related = [
-            (evidence, facts)
-            for evidence, facts in entries
-            if evidence.evidence_id in evidence_ids
+            entries_by_id[evidence_id]
+            for evidence_id in work.source_evidence_ids
+            if evidence_id in entries_by_id
         ]
         # 1) 显式 hint：高置信候选。
         hint_ids: list[tuple[str, str, str]] = []
@@ -309,8 +330,9 @@ def plan_work_candidates(
                 ),
             )
         # 3) 在线/测试搜索候选（含 sidecar NFO 标题输入）。
-        queries = build_query_inputs(work, entries)
-        nfo_titles, has_nfo = _nfo_related_titles(work, entries, nfo_ownership)
+        nfo_facts = nfo_facts_by_owner.get(work.work_key, [])
+        queries = build_query_inputs(work, entries, related_facts=[facts for _e, facts in related])
+        nfo_titles, has_nfo = _nfo_related_titles(work, entries, nfo_ownership, nfo_facts=nfo_facts)
         for title in nfo_titles:
             if title not in queries:
                 queries.append(title)
@@ -345,7 +367,7 @@ def plan_work_candidates(
                     status="proposed",
                 )
         # sidecar NFO 内容解析出的 provider ID 是强候选证据（同目录/同 stem 关联）。
-        for _evidence, facts in _nfo_evidence_facts(work, entries, nfo_ownership):
+        for _evidence, facts in nfo_facts_by_owner.get(work.work_key, []):
             if not facts.tmdb_hint_id or not facts.tmdb_hint_type:
                 continue
             key = ("tmdb", facts.tmdb_hint_type.casefold(), str(facts.tmdb_hint_id))
@@ -385,7 +407,9 @@ def plan_work_candidates(
         elif len(unique_identities) > 1:
             issues.append(ResolutionIssue(
                 code="candidate_ambiguous",
-                evidence_id=next(iter(evidence_ids), ""),
+                evidence_id=next(
+                    (evidence.evidence_id for evidence, _facts in related), ""
+                ),
                 message="该作品存在多个互不相同的可信 Provider 候选，需人工确认后才能导入",
             ))
 

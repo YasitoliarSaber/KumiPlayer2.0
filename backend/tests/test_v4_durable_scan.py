@@ -172,7 +172,7 @@ def test_durable_scan_api_contract(tmp_path, monkeypatch):
     })
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["status"] == "running"
+    assert body["status"] == "queued"
     scan_id = body["scan_id"]
 
     _wait_until(lambda: client.get(f"/api/v4/sources/scans/{scan_id}").json()["status"] == "completed")

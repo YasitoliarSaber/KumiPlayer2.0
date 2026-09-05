@@ -32,6 +32,7 @@ from app.media_v4.runtime import initialize_runtime
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：初始化 V4 唯一媒体状态源并启动心跳监控。"""
+    from app.media_v4.sources.source_scan_runner import get_source_scan_runner
     from app.system.heartbeat import get_heartbeat_manager
 
     database = initialize_runtime()
@@ -51,6 +52,10 @@ async def lifespan(app: FastAPI):
                 continue
 
     job_worker = asyncio.create_task(run_v4_jobs())
+    # 来源扫描 worker：启动时先回收失联行，再串行领取 queued 扫描；
+    # 退出时在安全边界收口，不遗留 daemon 孤儿线程。
+    source_scan_worker = get_source_scan_runner(database)
+    source_scan_worker.start()
     manager = get_heartbeat_manager()
     manager.start_monitor()
     try:
@@ -58,6 +63,7 @@ async def lifespan(app: FastAPI):
     finally:
         stop_jobs.set()
         await job_worker
+        source_scan_worker.stop()
         await close_remote_asset_client(app)
         from app.media_v4.playback.session import get_v4_playback_manager
 

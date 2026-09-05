@@ -1125,109 +1125,49 @@ def _durable_draft_finalizer(
     root_id: str,
     scan_id: str,
 ):
-    """把识别和候选解析绑定到耐久来源任务；旧调用方未传 revision 时兼容跳过。"""
+    """把识别和候选解析绑定到耐久来源任务；旧调用方未传 revision 时兼容跳过。
 
-    revision_id = request.revision_id.strip()
-    if not revision_id:
-        return None
+    实现已抽到 sources.scan_finalize，与 worker 的恢复路径共用同一份幂等
+    语义；这里只是 SourceScanRequest 形参的兼容包装。
+    """
 
-    def finalize(evidence: list[SourceEvidence], should_cancel=None, on_progress=None) -> None:
-        with database.connect() as conn:
-            root = conn.execute(
-                """
-                SELECT provider, source_locator, playback_locator, route_id,
-                       display_name, root_container, source_mode
-                FROM source_roots WHERE root_id = ?
-                """,
-                (root_id,),
-            ).fetchone()
-        if root is None:
-            raise ValueError("来源根记录不存在，请重新扫描")
-        root_container = str(root["root_container"] or "")
-        if should_cancel is not None and should_cancel():
-            from app.media_v4.sources.scanner import SourceScanCancelled
+    from app.media_v4.sources.scan_finalize import draft_finalizer
 
-            raise SourceScanCancelled()
-        parser = V4Parser()
-        repository = V4Repository(database)
-        # 大型目录树分批解析并持续上报进度，但编号归一化必须在完整来源批次
-        # 上执行：128 条只是数据库写入边界，不能把同一季度切成两个语义批次。
-        # 解析完成后再统一归一化并分批落盘；取消仍在每个解析/写入批次检查。
-        raw_parsed = []
-        total = len(evidence)
-        if on_progress is not None:
-            on_progress(stage="parsing", processed_count=0, total_count=total)
-        progress_checkpoint_size = 16
-        for offset in range(0, total, 128):
-            if should_cancel is not None and should_cancel():
-                from app.media_v4.sources.scanner import SourceScanCancelled
+    return draft_finalizer(
+        database,
+        revision_id=request.revision_id.strip(),
+        source_display_name=request.source_display_name or "",
+        root_id=root_id,
+        scan_id=scan_id,
+    )
 
-                # 已解析的前缀属于不可变审计事实。取消时先按当前已观察批次
-                # 完成保守归一化并落盘，但绝不构建 revision；这样既不会把
-                # 半成品导入媒体库，也不会让用户等待过的识别工作完全消失。
-                if raw_parsed:
-                    partial = normalize_batch_parsed_facts(raw_parsed)
-                    repository.save_parsed_facts_bulk(
-                        [facts for _evidence, facts in partial]
-                    )
-                raise SourceScanCancelled()
-            batch = []
-            for index, item in enumerate(evidence[offset : offset + 128], start=1):
-                batch.append((item, parser.parse(item, root_container=root_container)))
-                if on_progress is not None and (
-                    index % progress_checkpoint_size == 0 or offset + index == total
-                ):
-                    on_progress(
-                        stage="parsing",
-                        processed_count=offset + index,
-                        total_count=total,
-                    )
-            raw_parsed.extend(batch)
-        if should_cancel is not None and should_cancel():
-            from app.media_v4.sources.scanner import SourceScanCancelled
 
-            raise SourceScanCancelled()
-        # 进入完整归一化前显式上报 normalizing，让界面不误以为还在读取清单。
-        if on_progress is not None:
-            on_progress(stage="normalizing", processed_count=total, total_count=total)
-        parsed = normalize_batch_parsed_facts(raw_parsed)
-        for offset in range(0, total, 128):
-            if should_cancel is not None and should_cancel():
-                from app.media_v4.sources.scanner import SourceScanCancelled
+def _openlist_scan_request(request: SourceScanRequest, provider: str, remote_root: str, config, routes) -> dict:
+    """序列化 OpenList 扫描参数；只含非敏感路由与根信息，凭据执行期解析。"""
 
-                raise SourceScanCancelled()
-            repository.save_parsed_facts_bulk(
-                [facts for _evidence, facts in parsed[offset : offset + 128]]
-            )
-        if should_cancel is not None and should_cancel():
-            from app.media_v4.sources.scanner import SourceScanCancelled
+    from app.api.openlist_v4 import _remote_root
 
-            raise SourceScanCancelled()
-        if on_progress is not None:
-            on_progress(stage="preparing_preview", processed_count=total, total_count=total)
-        V4RevisionService(database).create_draft(
-            revision_id,
-            parsed,
-            root_id=root_id,
-            scan_id=scan_id,
-            source_provider=str(root["provider"] or (evidence[0].provider if evidence else "local")),
-            source_metadata={
-                "display_name": request.source_display_name or str(root["display_name"] or ""),
-                "source_locator": str(root["source_locator"] or ""),
-                "playback_locator": str(root["playback_locator"] or ""),
-                "route_id": str(root["route_id"] or ""),
-                "root_container": root_container,
-            },
-            source_mode=str(root["source_mode"] or ""),
-            _evidence_already_persisted=True,
-            _facts_already_persisted=True,
-        )
-
-    return finalize
+    return {
+        "remote_root": remote_root,
+        "mapping_root": _remote_root(config),
+        "mount_root": config.openlist_mount_root,
+        "provider": provider,
+        "routes": [
+            {
+                "route_id": str(getattr(route, "route_id", "") or ""),
+                "remote_prefix": str(getattr(route, "remote_prefix", "") or ""),
+                "provider_id": str(getattr(route, "provider_id", "") or ""),
+                "enabled": bool(getattr(route, "enabled", True)),
+            }
+            for route in routes
+        ],
+        "revision_id": request.revision_id.strip(),
+        "source_display_name": request.source_display_name or "",
+    }
 
 
 def _start_durable_local_scan(request: SourceScanRequest) -> dict:
-    from app.media_v4.sources.durable_scan import create_durable_scan
+    from app.media_v4.sources.source_scan_runner import get_source_scan_runner, register_source_scan
 
     if not request.root_path.strip():
         raise HTTPException(status_code=400, detail="本地媒体目录不能为空")
@@ -1246,32 +1186,32 @@ def _start_durable_local_scan(request: SourceScanRequest) -> dict:
     )
     scan_id = "scan_" + uuid.uuid4().hex
     config = load_config()
-    create_durable_scan(
+    register_source_scan(
         database,
         scan_id=scan_id,
         root_id=root_id,
-        kind="full",
-        scan_fn=lambda should_cancel, on_evidence_batch=None, on_progress=None: scan_local_directory(
-            request.root_path,
-            excluded_roots=_configured_cloud_roots(config),
-            should_cancel=should_cancel,
-            on_evidence_batch=on_evidence_batch,
-            on_progress=on_progress,
-        )[1:],
-        finalize_fn=_durable_draft_finalizer(
-            database,
-            request,
-            root_id=root_id,
-            scan_id=scan_id,
-        ),
+        scan_kind="local",
+        source_mode="local",
+        request={
+            "root_path": request.root_path,
+            "excluded_roots": _configured_cloud_roots(config),
+            "revision_id": request.revision_id.strip(),
+            "source_display_name": request.source_display_name or "",
+        },
     )
-    return {"scan_id": scan_id, "root_id": root_id, "scan_mode": "local", "source_mode": "local", "status": "running"}
+    get_source_scan_runner(database).wake()
+    return {"scan_id": scan_id, "root_id": root_id, "scan_mode": "local", "source_mode": "local", "status": "queued"}
 
 
 def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
     """目录树与 TXT+OpenList 基线共享后台读取/证据持久化路径。"""
 
-    from app.media_v4.sources.durable_scan import create_durable_scan
+    from app.media_v4.sources.input_archive import archive_tree_input
+    from app.media_v4.sources.source_scan_runner import (
+        InputArchive,
+        get_source_scan_runner,
+        register_source_scan,
+    )
 
     if not request.tree_file:
         detail = "目录树 + OpenList 增量需要先选择 TXT 基线文件" if request.source == "hybrid" else "目录树 TXT 文件不能为空"
@@ -1281,10 +1221,9 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
     source_mode = "tree_openlist" if request.source == "hybrid" else "tree_snapshot"
     scan_mode = "tree_baseline" if request.source == "hybrid" else "tree_snapshot"
     route_id = ""
+    remote_root = ""
     configured_roots = _configured_tree_roots(config, content_provider)
 
-    tree_text: str | None = None
-    resolution: TreeRootResolution | None = None
     if request.source == "hybrid":
         from app.api.openlist_v4 import _configured_routes, _remote_root
 
@@ -1305,14 +1244,15 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
     else:
         if not configured_roots:
             raise HTTPException(status_code=409, detail="当前内容来源尚未配置本地挂载路径，请先在设置页完成来源映射")
-        # 身份必须在创建 root/scan 之前确定：先读取 TXT 并完成纯词法解析
-        # （只读用户选定的 TXT，不触源盘），与同步入口共享同一解析后身份根，
-        # 避免同一逻辑来源因入口不同分裂成不同 root。
-        tree_text = read_directory_tree_text(request.tree_file)
-        resolution = TreePlaybackRootResolver(
-            request.tree_file,
-            configured_roots=configured_roots,
-        ).resolve(tree_text)
+
+    # 身份与词法解析必须在创建 root/scan 之前完成：只读用户选定的 TXT，
+    # 不触源盘。解析结果随 request 持久化，恢复路径复用同一结论。
+    tree_text = read_directory_tree_text(request.tree_file)
+    resolution = TreePlaybackRootResolver(
+        request.tree_file,
+        configured_roots=configured_roots,
+    ).resolve(tree_text)
+    if request.source != "hybrid":
         root_id = tree_scan_root_id(
             provider=content_provider,
             configured_roots=configured_roots,
@@ -1321,7 +1261,7 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
         )
 
     database = get_database()
-    identity_root = (resolution.root if resolution is not None else "") or configured_roots[0]
+    identity_root = resolution.root or configured_roots[0]
     _ensure_root_container(
         database,
         root_id=root_id,
@@ -1334,78 +1274,44 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
         last_scan_mode=scan_mode,
     )
     scan_id = "scan_" + uuid.uuid4().hex
-
-    def scan_tree(should_cancel=None, on_evidence_batch=None, on_progress=None):
-        try:
-            if should_cancel is not None and should_cancel():
-                from app.media_v4.sources.scanner import SourceScanCancelled
-
-                raise SourceScanCancelled()
-            nonlocal tree_text, resolution
-            if tree_text is None or resolution is None:
-                # hybrid 分支仍在任务创建后读取 TXT；tree 分支已在身份解析时读过。
-                tree_text = read_directory_tree_text(request.tree_file)
-                resolution = TreePlaybackRootResolver(
-                    request.tree_file,
-                    configured_roots=configured_roots,
-                ).resolve(tree_text)
-            _scan_id, evidence = build_directory_tree_evidence(
-                tree_text,
-                root_id=root_id,
-                provider=content_provider,
-                source_root=resolution.root,
-                source_route_id=route_id,
-                scan_id=scan_id,
-                on_evidence_batch=on_evidence_batch,
-                on_progress=on_progress,
-                should_cancel=should_cancel,
-            )
-            _persist_tree_scan(
-                database,
-                root_id=root_id,
-                provider=content_provider,
-                scan_id=scan_id,
-                route_id=route_id,
-                effective_root=resolution.root,
-                root_container=_container_name(resolution.root or identity_root),
-                evidence=evidence,
-                resolution=resolution,
-                source_mode=source_mode,
-                last_scan_mode=scan_mode,
-                durable=True,
-                save_evidence=False,
-            )
-            if request.source == "hybrid":
-                stage_scan_state(scan_id, build_tree_baseline_state(root_id, remote_root, evidence))
-            return scan_id, evidence
-        except DirectoryTreeReadError as exc:
-            raise ValueError(_directory_tree_error_message(exc)) from exc
-
-    create_durable_scan(
+    fact = archive_tree_input(root_id, request.tree_file)
+    archive = InputArchive(
+        archive_path=str(fact["archive_path"]),
+        sha256=str(fact["sha256"]),
+        original_filename=str(fact["original_filename"]),
+    )
+    register_source_scan(
         database,
         scan_id=scan_id,
         root_id=root_id,
-        kind="full",
-        scan_fn=scan_tree,
-        finalize_fn=_durable_draft_finalizer(
-            database,
-            request,
-            root_id=root_id,
-            scan_id=scan_id,
-        ),
+        scan_kind=scan_mode,
+        source_mode=source_mode,
+        request={
+            "provider": content_provider,
+            "route_id": route_id,
+            "revision_id": request.revision_id.strip(),
+            "source_display_name": request.source_display_name or "",
+            "configured_roots": configured_roots,
+            "identity_root": identity_root,
+            "effective_root": resolution.root,
+            "resolution_ok": resolution.ok,
+            "resolution_reason": resolution.reason,
+            "resolution_candidates": list(resolution.candidates),
+            "remote_root": remote_root,
+            "scan_mode": scan_mode,
+        },
+        archive=archive,
     )
-    result = {
+    get_source_scan_runner(database).wake()
+    return {
         "scan_id": scan_id,
         "root_id": root_id,
         "scan_mode": scan_mode,
         "source_mode": source_mode,
-        "status": "running",
+        "status": "queued",
+        "effective_playback_root": resolution.root,
+        "path_validation": _tree_validation_dict(resolution),
     }
-    if resolution is not None:
-        # tree 分支的身份在请求内解析完成：与同步入口同字段返回映射结果。
-        result["effective_playback_root"] = resolution.root
-        result["path_validation"] = _tree_validation_dict(resolution)
-    return result
 
 
 @router.post("/sources/scans")
@@ -1421,8 +1327,8 @@ def start_durable_scan(request: SourceScanRequest):
     if request.source in {"tree", "hybrid"}:
         return _start_durable_tree_scan(request)
 
-    from app.api.openlist_v4 import _client, _configured_routes, _remote_root
-    from app.media_v4.sources.durable_scan import create_durable_scan
+    from app.api.openlist_v4 import _configured_routes, _remote_root
+    from app.media_v4.sources.source_scan_runner import get_source_scan_runner, register_source_scan
 
     config = load_config()
     username, _password, credential_state = resolve_openlist_credentials()
@@ -1447,9 +1353,6 @@ def start_durable_scan(request: SourceScanRequest):
                 status_code=409,
                 detail="此 OpenList 目录尚无已确认基线，请先完成并确认首次完整扫描，或使用 TXT 建立大库基线",
             )
-        state = load_active_state(root_id)
-        if not state or state.get("remote_root") != remote_root:
-            state = build_tree_baseline_state(root_id, remote_root, baseline)
         _ensure_root_container(
             database,
             root_id=root_id,
@@ -1462,33 +1365,16 @@ def start_durable_scan(request: SourceScanRequest):
             last_scan_mode="incremental",
         )
         scan_id = "scan_" + uuid.uuid4().hex
-        create_durable_scan(
+        register_source_scan(
             database,
             scan_id=scan_id,
             root_id=root_id,
-            kind="incremental",
-            scan_fn=lambda should_cancel, on_evidence_batch=None, on_progress=None: scan_openlist_incremental(
-                _client(config),
-                baseline=baseline,
-                state=state,
-                mapping_root=_remote_root(config),
-                mount_root=config.openlist_mount_root,
-                default_provider=routed_provider,
-                routes=routes,
-                should_cancel=should_cancel,
-                on_evidence_batch=on_evidence_batch,
-                on_progress=on_progress,
-            ),
-            state_fn=lambda: state,
-            finalize_fn=_durable_draft_finalizer(
-                database,
-                request,
-                root_id=root_id,
-                scan_id=scan_id,
-            ),
+            scan_kind="openlist_incremental",
+            source_mode=_source_root_mode(root_id) or "openlist_full",
+            request=_openlist_scan_request(request, routed_provider, remote_root, config, routes),
         )
-        return {"scan_id": scan_id, "root_id": root_id, "scan_mode": "incremental", "status": "running"}
-    directory_observations: dict[str, float | None] = {}
+        get_source_scan_runner(database).wake()
+        return {"scan_id": scan_id, "root_id": root_id, "scan_mode": "incremental", "status": "queued"}
     _ensure_root_container(
         database,
         root_id=root_id,
@@ -1501,33 +1387,16 @@ def start_durable_scan(request: SourceScanRequest):
         last_scan_mode="full",
     )
     scan_id = "scan_" + uuid.uuid4().hex
-    create_durable_scan(
+    register_source_scan(
         database,
         scan_id=scan_id,
         root_id=root_id,
-        kind="full",
-        scan_fn=lambda should_cancel, on_evidence_batch=None, on_progress=None: scan_openlist_directory(
-            _client(config),
-            remote_root=remote_root,
-            mapping_root=_remote_root(config),
-            mount_root=config.openlist_mount_root,
-            root_id=root_id,
-            default_provider=routed_provider,
-            routes=routes,
-            directory_observations=directory_observations,
-            should_cancel=should_cancel,
-            on_evidence_batch=on_evidence_batch,
-            on_progress=on_progress,
-        ),
-        state_fn=lambda: build_full_scan_state(root_id, remote_root, directory_observations),
-        finalize_fn=_durable_draft_finalizer(
-            database,
-            request,
-            root_id=root_id,
-            scan_id=scan_id,
-        ),
+        scan_kind="openlist_full",
+        source_mode="openlist_full",
+        request=_openlist_scan_request(request, routed_provider, remote_root, config, routes),
     )
-    return {"scan_id": scan_id, "root_id": root_id, "scan_mode": "full", "status": "running"}
+    get_source_scan_runner(database).wake()
+    return {"scan_id": scan_id, "root_id": root_id, "scan_mode": "full", "status": "queued"}
 
 
 @router.get("/sources/scans/{scan_id}")

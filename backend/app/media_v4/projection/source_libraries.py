@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.revisions.service import V4RevisionService
+from app.media_v4.sources.scan_state import scan_is_stale
 
 
 def list_source_cards(database: V4Database) -> list[dict]:
@@ -126,7 +127,14 @@ def list_source_cards(database: V4Database) -> list[dict]:
         active_revision = draft or confirmed
         revision_id = str(active_revision["revision_id"]) if active_revision is not None else ""
         scan_status = str(scan["status"]) if scan is not None else ""
-        scan_active = scan_status in {"running", "queued", "cancelling"}
+        # 失联判定：running/cancelling 但心跳已过期 = 执行进程已消失。
+        # 僵尸行不得被渲染成仍在处理，也不得永久阻止卡片操作。
+        scan_interrupted = (
+            scan is not None
+            and scan_status in {"running", "cancelling"}
+            and scan_is_stale(str(scan["heartbeat_at"] or ""))
+        )
+        scan_active = scan_status in {"running", "queued", "cancelling"} and not scan_interrupted
         scan_failed = scan_status in {"failed", "cancelled"}
         has_confirmed = confirmed is not None
         job_summary = dict(summaries.get(revision_id, {
@@ -140,6 +148,9 @@ def list_source_cards(database: V4Database) -> list[dict]:
         progress = _safe_progress(progress_service, revision_id) if confirmed is not None else {}
         if scan_active:
             overall_status = "queued" if scan_status == "queued" else "running"
+            phase = "scan"
+        elif scan_interrupted:
+            overall_status = "needs_attention"
             phase = "scan"
         elif scan_failed:
             # 用户主动取消不是故障；来源卡要保留恢复入口，但不能把它渲染成
@@ -198,6 +209,17 @@ def list_source_cards(database: V4Database) -> list[dict]:
                 "percent": None,
                 "message": "扫描已取消",
             }
+        elif scan_interrupted:
+            card_progress = {
+                "state": "needs_attention",
+                "stage": "scan",
+                "current_work_id": "",
+                "current_work_title": "",
+                "completed_work_count": 0,
+                "total_work_count": 0,
+                "percent": None,
+                "message": "上次扫描意外中断，请重新扫描",
+            }
         elif confirmed is not None:
             card_progress = {
                 "state": progress.get("overall_status") or "completed",
@@ -232,14 +254,14 @@ def list_source_cards(database: V4Database) -> list[dict]:
             if scan is not None
             else confirmed_at or draft_created_at or str(root["updated_at"] or "")
         )
-        resume_by_scan = scan_active or scan_failed
+        resume_by_scan = scan_active or scan_failed or scan_interrupted
         can_resume = resume_by_scan or _can_resume(progress) or (
             job_summary["queued"] > 0
             or job_summary["running"] > 0
             or job_summary["failed"] > 0
             or job_summary["cancelled"] > 0
         ) or draft is not None
-        active_task = _active_task(scan, active_job, revision_id, card_progress)
+        active_task = None if scan_interrupted else _active_task(scan, active_job, revision_id, card_progress)
         cards.append({
             "root_id": root_id,
             "provider": str(root["provider"] or ""),
@@ -267,7 +289,8 @@ def list_source_cards(database: V4Database) -> list[dict]:
             "work_count": work_count,
             "asset_count": asset_count,
             "evidence_count": evidence_count,
-            "attention_count": unresolved_issues.get(revision_id, 0) + (1 if scan_failed else 0),
+            "attention_count": unresolved_issues.get(revision_id, 0)
+            + (1 if scan_failed or scan_interrupted else 0),
             "last_error": last_error,
             "scan": scan_payload,
             "progress": card_progress,
@@ -298,10 +321,20 @@ def hide_source_card(database: V4Database, root_id: str) -> dict[str, object]:
         ).fetchone()
         if root is None or str(root["retired_at"] or "") or not int(root["enabled"]):
             raise KeyError("来源卡不存在或已移除")
-        active_scan = conn.execute(
-            "SELECT 1 FROM source_scans WHERE root_id = ? AND status IN ('queued', 'running', 'cancelling') LIMIT 1",
+        active_scan_rows = conn.execute(
+            "SELECT status, heartbeat_at FROM source_scans WHERE root_id = ?",
             (normalized_root_id,),
-        ).fetchone()
+        ).fetchall()
+        # queued 一定算活动（下一个 worker 会领取）；running/cancelling 只有
+        # 心跳仍新鲜才算活动，失联的僵尸行不得永久阻止卡片删除。
+        has_active_scan = any(
+            str(row["status"]) == "queued"
+            or (
+                str(row["status"]) in {"running", "cancelling"}
+                and not scan_is_stale(str(row["heartbeat_at"] or ""))
+            )
+            for row in active_scan_rows
+        )
         active_job = conn.execute(
             """
             SELECT 1
@@ -312,7 +345,7 @@ def hide_source_card(database: V4Database, root_id: str) -> dict[str, object]:
             """,
             (normalized_root_id,),
         ).fetchone()
-        if active_scan is not None or active_job is not None:
+        if has_active_scan or active_job is not None:
             raise ValueError("该来源仍有后台任务，请先终止任务并等待其结束")
         conn.execute(
             "UPDATE source_roots SET enabled = 0, updated_at = ? WHERE root_id = ?",

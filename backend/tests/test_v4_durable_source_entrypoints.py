@@ -57,18 +57,18 @@ def test_local_durable_entrypoint_returns_before_the_directory_scan_finishes(tmp
 
     assert response.status_code == 200, response.text
     scan_id = response.json()["scan_id"]
-    assert response.json()["status"] == "running"
+    assert response.json()["status"] == "queued"
     assert elapsed < 0.5
     assert started.wait(1)
     cards = client.get("/api/v4/sources/libraries").json()["cards"]
     assert len(cards) == 1
     assert cards[0]["scan"]["scan_id"] == scan_id
-    assert cards[0]["scan"]["status"] == "running"
-    assert cards[0]["overall_status"] == "running"
+    assert cards[0]["scan"]["status"] in {"queued", "running"}
+    assert cards[0]["overall_status"] in {"queued", "running"}
     release.set()
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
-        if get_durable_scan(database, scan_id)["status"] != "running":
+        if get_durable_scan(database, scan_id)["status"] not in {"queued", "running"}:
             break
         time.sleep(0.02)
     completed = get_durable_scan(database, scan_id)
@@ -151,7 +151,7 @@ def test_local_durable_entrypoint_keeps_online_candidate_search_out_of_scan_enti
     scan_id = response.json()["scan_id"]
     assert elapsed < 0.5
     deadline = time.monotonic() + 3
-    while time.monotonic() < deadline and get_durable_scan(database, scan_id)["status"] == "running":
+    while time.monotonic() < deadline and get_durable_scan(database, scan_id)["status"] in {"queued", "running"}:
         time.sleep(0.02)
     assert get_durable_scan(database, scan_id)["status"] == "completed"
 
@@ -253,7 +253,7 @@ def test_durable_scan_persists_first_evidence_batch_before_source_returns(tmp_pa
 
     release.set()
     deadline = time.monotonic() + 3
-    while time.monotonic() < deadline and get_durable_scan(database, scan_id)["status"] == "running":
+    while time.monotonic() < deadline and get_durable_scan(database, scan_id)["status"] in {"queued", "running"}:
         time.sleep(0.02)
     completed = get_durable_scan(database, scan_id)
     assert completed["status"] == "completed"
@@ -425,14 +425,14 @@ def test_tree_durable_entrypoint_resolves_identity_before_task_creation(tmp_path
     assert response.status_code == 200, response.text
     payload = response.json()
     scan_id = payload["scan_id"]
-    assert payload["status"] == "running"
+    assert payload["status"] == "queued"
     # 身份已在请求内解析完成：响应携带与同步入口一致的解析后播放根。
     assert payload["effective_playback_root"] == str(mounted_root)
     assert payload["path_validation"]["ok"] is True
     assert started.wait(1)
     release.set()
     deadline = time.monotonic() + 3
-    while time.monotonic() < deadline and get_durable_scan(database, scan_id)["status"] == "running":
+    while time.monotonic() < deadline and get_durable_scan(database, scan_id)["status"] in {"queued", "running"}:
         time.sleep(0.02)
     result = get_durable_scan(database, scan_id)
     assert result["status"] == "completed"
