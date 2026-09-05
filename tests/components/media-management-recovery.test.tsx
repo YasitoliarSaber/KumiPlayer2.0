@@ -78,7 +78,7 @@ beforeEach(() => {
   openlist.browse.mockImplementation(async (path: string) => browseResult(path || '/'))
 })
 
-test('提供商选择使用专用矢量图标，不再渲染文字占位', async () => {
+test('提供商选择使用各自的本地品牌图标，不再渲染文字占位或远程资源', async () => {
   render(<MediaManagementPage />)
   fireEvent.click(await screen.findByRole('button', { name: '导入媒体' }))
   fireEvent.click(screen.getByRole('button', { name: '目录树 TXT' }))
@@ -87,8 +87,14 @@ test('提供商选择使用专用矢量图标，不再渲染文字占位', async
   expect(screen.queryByText('115')).not.toBeInTheDocument()
   expect(screen.queryByText('百')).not.toBeInTheDocument()
   expect(screen.queryByText('夸')).not.toBeInTheDocument()
-  const icons = document.querySelectorAll('.media-provider-icon.provider-pan115, .media-provider-icon.provider-baidu, .media-provider-icon.provider-quark')
+  const icons = Array.from(document.querySelectorAll<HTMLImageElement>('.media-provider-brand-image'))
   expect(icons.length).toBe(3)
+  expect(new Set(icons.map((icon) => icon.src)).size).toBe(3)
+  expect(icons.every((icon) => {
+    const source = icon.getAttribute('src') || ''
+    return source.startsWith('data:image/') || source.includes('/src/assets/provider-icons/')
+  })).toBe(true)
+  expect(icons.every((icon) => !/^https?:\/\//.test(icon.getAttribute('src') || ''))).toBe(true)
   // 可访问名称仍来自可见文字，而不是图标文件名。
   expect(screen.getByRole('button', { name: '115 网盘' })).toBeVisible()
 })

@@ -385,6 +385,12 @@ export default function MediaManagementPage() {
 
   const hasActiveJobs = jobs.some((job) => !['succeeded', 'failed', 'cancelled'].includes(job.status))
   const executionActive = executeProgress?.overall_status === 'running' || executeProgress?.overall_status === 'queued'
+  const executionMirrorTotal = executeProgress?.stage_summary.mirror.total ?? 0
+  const executionMirrorDone = executeProgress
+    ? executeProgress.stage_summary.mirror.succeeded
+      + executeProgress.stage_summary.mirror.failed
+      + executeProgress.stage_summary.mirror.cancelled
+    : 0
   useEffect(() => {
     if (!revisionId || !hasActiveJobs) return
     let cancelled = false
@@ -1368,19 +1374,27 @@ export default function MediaManagementPage() {
       </section>}
 
       {workflowStage === 'execute' && <section className="media-stage-shell media-v4-stage-panel media-v4-jobs-card">
-        <div className="media-stage-header">
+        <div className="media-stage-header media-v4-execute-stage-header">
           <div className="media-stage-heading"><span className="media-stage-icon" aria-hidden="true"><Database24Regular /></span><div><span className="media-stage-eyebrow">第 3 步</span><h2>建立媒体库</h2><p>可以离开此页面；返回后会继续显示当前导入进度。</p></div></div>
-          {preview && <details className="media-v4-review-details"><summary>查看本次识别摘要</summary><div className="media-v4-review-details-body">
-            <V4RecognitionSummary
-              preview={preview}
-              issues={preview.issues}
-              evidenceEntries={scan?.entries ?? []}
-              overrideDrafts={overrideDrafts}
-              busy={busy !== ''}
-              onOverrideChange={(evidenceId, draft) => setOverrideDrafts((current) => ({ ...current, [evidenceId]: draft }))}
-              onApplyOverride={(evidenceId) => void applyOverride(evidenceId)}
-            />
-          </div></details>}
+          <div className="media-v4-execute-stage-header-side">
+            {executeProgress && <div className="media-v4-execution-header-summary" aria-label="建立媒体库总体进度">
+              <strong>{executeProgress.work_units.length}</strong>
+              <span>部作品</span>
+              <span aria-hidden="true">·</span>
+              <span>{executionMirrorDone}/{executionMirrorTotal} 已完成镜像</span>
+            </div>}
+            {preview && <details className="media-v4-review-details"><summary>查看本次识别摘要</summary><div className="media-v4-review-details-body">
+              <V4RecognitionSummary
+                preview={preview}
+                issues={preview.issues}
+                evidenceEntries={scan?.entries ?? []}
+                overrideDrafts={overrideDrafts}
+                busy={busy !== ''}
+                onOverrideChange={(evidenceId, draft) => setOverrideDrafts((current) => ({ ...current, [evidenceId]: draft }))}
+                onApplyOverride={(evidenceId) => void applyOverride(evidenceId)}
+              />
+            </div></details>}
+          </div>
         </div>
         {executeProgress ? (
           <V4ExecutionProgressView

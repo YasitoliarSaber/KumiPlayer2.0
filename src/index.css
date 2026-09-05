@@ -13651,10 +13651,13 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-provider-picker strong { font-size: 13px; }
 .media-v4-provider-picker small { overflow: hidden; color: var(--text-secondary); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .media-v4-provider-picker svg { width: 17px; color: var(--accent-strong); }
-.media-v4-provider-mark { display: grid; width: 36px; height: 36px; place-items: center; border-radius: 9px; color: #fff; font-size: 12px; font-weight: 750; letter-spacing: -.2px; }
-.media-v4-provider-mark.provider-pan115 { background: #1267d6; }
-.media-v4-provider-mark.provider-baidu { background: #315efb; }
-.media-v4-provider-mark.provider-quark { background: #6956e8; }
+.media-provider-brand { display: inline-flex; align-items: center; justify-content: center; overflow: hidden; flex: 0 0 auto; vertical-align: middle; }
+.media-provider-brand-image { display: block; max-width: none; }
+.media-provider-brand.provider-pan115 .media-provider-brand-image { border-radius: 5px; }
+.media-v4-provider-mark { display: grid; width: 36px; height: 36px; place-items: center; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-soft); }
+.media-v4-provider-mark .media-provider-brand.provider-quark { width: 27px !important; height: 27px !important; }
+.media-v4-provider-mark .media-provider-brand.provider-quark .media-provider-brand-image { transform: translateX(-1px); }
+.media-v4-provider-mark .media-provider-brand.provider-baidu .media-provider-brand-image { width: 25px !important; height: 25px !important; }
 .media-v4-provider-link { display: inline-flex; align-items: center; gap: 5px; width: fit-content; color: var(--accent-strong); font-size: 12px; text-decoration: none; }
 .media-v4-provider-link:hover { text-decoration: underline; }
 
@@ -13781,14 +13784,13 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-review-details { border: 1px solid color-mix(in srgb, var(--border) 76%, transparent); border-radius: 8px; }
 .media-v4-review-details summary { cursor: pointer; padding: 10px 12px; font-size: 13px; }
 .media-v4-review-details-body { padding: 10px 12px; border-top: 1px solid color-mix(in srgb, var(--border) 76%, transparent); }
-.media-v4-execution-progress { display: grid; gap: 14px; }
-.media-v4-execution-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 16px; align-items: center; }
+.media-v4-execute-stage-header { align-items: flex-start; }
+.media-v4-execute-stage-header-side { display: grid; justify-items: end; gap: 10px; min-width: min(100%, 360px); }
+/* 3.5：第三步摘要属于页面标题区，避免和任务列表重复占位。 */
+.media-v4-execution-header-summary { display: flex; align-items: baseline; justify-content: flex-end; justify-self: end; gap: 7px; min-height: 32px; color: var(--text-secondary); font-size: 14px; font-variant-numeric: tabular-nums; }
+.media-v4-execution-header-summary strong { color: var(--text); font-size: 28px; font-weight: 700; line-height: 1; }
+.media-v4-execution-head { display: flex; align-items: center; min-height: 24px; }
 .media-v4-execution-status { font-size: 16px; }
-/* 3.5：总体摘要右对齐，主数字突出、次级标签弱化。 */
-.media-v4-execution-summary { display: inline-flex; align-items: baseline; gap: 6px; justify-self: end; }
-.media-v4-execution-summary-primary { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1; }
-.media-v4-execution-summary-label { color: var(--text-secondary); font-size: 12px; }
-.media-v4-execution-summary-secondary { color: var(--text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
 .media-v4-stage-pills { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .media-v4-stage-pill { display: grid; gap: 2px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--border) 76%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--surface-soft) 62%, transparent); }
 .media-v4-stage-pill strong { font-size: 13px; }
@@ -13798,17 +13800,17 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-stage-succeeded strong { color: var(--success, #4e9e5a); }
 .media-v4-projection-error { display: flex; gap: 8px; align-items: center; padding: 10px 12px; border-radius: 8px; color: var(--warning, #c45b52); background: color-mix(in srgb, var(--warning, #c45b52) 10%, transparent); font-size: 13px; }
 .media-v4-work-progress-list { display: grid; gap: 8px; }
-.media-v4-work-progress { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--border) 76%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--surface-soft) 62%, transparent); }
+.media-v4-work-progress { display: grid; gap: 10px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--border) 76%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--surface-soft) 62%, transparent); }
 .media-v4-work-progress-head { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto auto 18px; gap: 10px; align-items: center; width: 100%; padding: 4px 6px; margin: -4px -6px; border: 0; border-radius: 6px; background: none; text-align: left; cursor: pointer; font: inherit; color: inherit; }
 .media-v4-work-progress-head:hover { background: color-mix(in srgb, var(--border) 28%, transparent); }
 .media-v4-work-progress-head:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: -2px; }
-.media-v4-work-progress-title { font-size: 14px; font-weight: 600; }
-.media-v4-work-progress-meta { color: var(--text-secondary); font-size: 12px; }
-.media-v4-work-progress-status { font-size: 12px; color: var(--text-secondary); }
+.media-v4-work-progress-title { font-size: 16px; font-weight: 650; }
+.media-v4-work-progress-meta { color: var(--text-secondary); font-size: 13px; }
+.media-v4-work-progress-status { font-size: 13px; color: var(--text-secondary); }
 .media-v4-work-progress-running_mirror .media-v4-work-progress-status,
 .media-v4-work-progress-running_metadata .media-v4-work-progress-status { color: var(--accent-strong); }
 .media-v4-work-progress-failed .media-v4-work-progress-status { color: var(--warning, #c45b52); }
-.media-v4-work-progress-body { display: grid; gap: 8px; align-items: start; }
+.media-v4-work-progress-body { display: grid; gap: 10px; align-items: start; padding-top: 12px; border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent); }
 .media-v4-work-progress-hint { color: var(--text-secondary); font-size: 12px; }
 .media-v4-metadata-search-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; margin: 12px 0; }
 /* 弹窗固定在视口中央并自持滚动：不受 .app-main 滚动位置或祖先 overflow 裁剪影响。 */
@@ -13938,33 +13940,42 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-maintenance-danger-button.fui-Button:hover:not(:disabled) { background: color-mix(in srgb, var(--danger, #c42b1c) 88%, #000); }
 
 .media-v4-completed-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-top: 4px; }
-.media-v4-completed-heading strong { font-size: 14px; }
-.media-v4-completed-heading span { color: var(--text-secondary); font-size: 12px; }
+.media-v4-completed-heading strong { font-size: 15px; }
 /* 3.1：展开后的作品执行详情（作品信息 / 镜像结果 / 剧集结果）。 */
-.media-v4-work-detail { display: grid; gap: 12px; }
-.media-v4-work-detail-section { display: grid; gap: 6px; }
-.media-v4-work-detail-section h4 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text-secondary); }
-.media-v4-work-detail-facts { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; }
+.media-v4-work-detail { display: grid; gap: 14px; }
+.media-v4-work-detail-section { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--border) 70%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--surface-raised) 42%, transparent); }
+.media-v4-work-detail-section h4 { margin: 0; font-size: 15px; font-weight: 650; color: var(--text); }
+.media-v4-work-detail-facts { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 14px; line-height: 1.45; }
 .media-v4-work-detail-loading, .media-v4-work-detail-empty { display: flex; gap: 8px; align-items: center; color: var(--text-secondary); font-size: 13px; }
-.media-v4-work-detail-artifacts { margin: 0; padding-left: 18px; color: var(--text-secondary); font-size: 12px; }
-.media-v4-work-detail-episodes { display: grid; gap: 4px; max-height: 240px; overflow: auto; padding-right: 4px; }
-.media-v4-work-detail-episode { display: grid; grid-template-columns: 64px minmax(0, 1fr) minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 3px 6px; border-radius: 4px; font-size: 12px; }
+.media-v4-work-detail-plot, .media-v4-work-detail-episode-plot { margin: 0; color: var(--text-secondary); font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.media-v4-work-detail-artifacts { display: grid; gap: 4px; margin: 0; padding-left: 18px; color: var(--text-secondary); font-size: 13px; }
+.media-v4-work-detail-seasons { display: flex; flex-wrap: wrap; gap: 8px; }
+.media-v4-work-detail-seasons span { padding: 6px 10px; border: 1px solid color-mix(in srgb, var(--border) 68%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--surface-soft) 70%, transparent); font-size: 14px; font-variant-numeric: tabular-nums; }
+.media-v4-work-detail-candidate { display: grid; gap: 8px; }
+.media-v4-work-detail-candidates { display: grid; gap: 4px; margin: 0; padding: 8px 10px 8px 26px; border-radius: 6px; background: color-mix(in srgb, var(--surface-soft) 64%, transparent); color: var(--text-secondary); font-size: 13px; }
+.media-v4-work-detail-candidates li { display: flex; justify-content: space-between; gap: 12px; }
+.media-v4-work-detail-episodes { display: grid; gap: 5px; max-height: 360px; overflow: auto; padding-right: 4px; }
+.media-v4-work-detail-episode { display: grid; grid-template-columns: 58px minmax(0, 1fr) auto auto; gap: 10px; align-items: start; padding: 8px; border-radius: 6px; font-size: 13px; }
 .media-v4-work-detail-episode:nth-child(odd) { background: color-mix(in srgb, var(--border) 18%, transparent); }
 .media-v4-work-detail-episode-code { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-.media-v4-work-detail-episode-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.media-v4-work-detail-episode-file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
+.media-v4-work-detail-episode-content { display: grid; gap: 3px; min-width: 0; }
+.media-v4-work-detail-episode-name { min-width: 0; overflow-wrap: anywhere; font-size: 14px; font-weight: 600; }
+.media-v4-work-detail-episode-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--text-secondary); font-size: 12px; line-height: 1.4; }
+.media-v4-work-detail-episode-meta span { overflow-wrap: anywhere; }
 .media-v4-work-detail-episode-state.mapped { color: var(--success, #4e9e5a); }
 .media-v4-work-detail-episode-state.unmapped { color: var(--warning, #c45b52); }
 .media-v4-work-detail-episode-playable { color: var(--text-secondary); }
 @media (max-width: 720px) {
-  .media-v4-work-detail-episode { grid-template-columns: 56px minmax(0, 1fr) auto; }
-  .media-v4-work-detail-episode-file, .media-v4-work-detail-episode-playable { display: none; }
+  .media-v4-work-detail-episode { grid-template-columns: 48px minmax(0, 1fr) auto; }
+  .media-v4-work-detail-episode-playable { display: none; }
 }
 .media-v4-completed-toggle { justify-self: start; padding: 5px 8px; border: 1px solid color-mix(in srgb, var(--border) 76%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--surface-raised) 70%, transparent); font-size: 12px; }
 .media-v4-completed-toggle:hover { border-color: color-mix(in srgb, var(--accent-strong) 42%, var(--border)); color: var(--text); }
 
 @media (max-width: 760px) {
   .media-v4-source-library-grid { grid-template-columns: minmax(0, 1fr); }
+  .media-v4-execute-stage-header-side { justify-items: start; width: 100%; }
+  .media-v4-execution-header-summary { justify-self: start; justify-content: flex-start; }
   .media-v4-library-source-card { aspect-ratio: auto; min-height: 210px; }
   .media-v4-maintenance-scope .fui-RadioGroup { grid-template-columns: minmax(0, 1fr); }
   .media-v4-maintenance-preview-heading { align-items: start; flex-direction: column; gap: 4px; }

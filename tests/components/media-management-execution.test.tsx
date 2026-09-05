@@ -391,15 +391,21 @@ test('展开已完成作品后读取并显示作品信息、镜像结果与剧�
   const fetchWorkDetail = vi.fn().mockResolvedValue({
     revision_id: 'rev-exec',
     work_id: 'w-done',
-    work: { title: '完成作品', media_type: 'tv', provider: 'tmdb', provider_id: '12345', metadata_state: 'ready', metadata_reason: '' },
-    mirror: { status: 'succeeded', error: '', artifact_count: 1, artifacts: [{ file_name: 'S01E01-abc.strm', status: 'published' }] },
-    metadata_job_status: 'succeeded',
-    seasons: [{ season_number: 1, season_kind: 'regular', title: '', episode_count: 1 }],
-    episodes: [{
-      episode_id: 'ep-1', season_number: 1, season_kind: 'regular', episode_number: 1,
-      display_title: '本地第一集', scraped_title: '远程第一集全名', mapped: true,
-      file_name: 'Show.S01E01.mkv', playback_ready: true,
-    }],
+     work: { title: '完成作品', media_type: 'tv', provider: 'tmdb', provider_id: '12345', metadata_state: 'ready', metadata_reason: '' },
+     mirror: { status: 'succeeded', error: '', artifact_count: 1, artifacts: [{ file_name: 'S01E01-abc.strm', status: 'published' }] },
+     metadata_job_status: 'succeeded',
+     seasons: [{ season_number: 1, season_kind: 'regular', title: '', episode_count: 1 }],
+     scrape: {
+       metadata_state: 'ready', title: '完成作品', original_title: 'Completed Work', year: 2024,
+       plot: '这是作品级刮削简介。', rating: 8.2, runtime: 24,
+       candidate_decision: { decision: 'auto_adopted', reason: '高分候选', selected_score: 98, ranked_candidates: [] },
+     },
+     episodes: [{
+       episode_id: 'ep-1', season_number: 1, season_kind: 'regular', episode_number: 1,
+       display_title: '本地第一集', scraped_title: '远程第一集全名', scraped_plot: '这一集的刮削简介。',
+       provider_episode_id: '9001', runtime: 24, still_url: '', mapped: true,
+       file_name: 'Show.S01E01.mkv', playback_ready: true,
+     }],
     episode_total: 1,
     episodes_truncated: false,
     has_detail: true,
@@ -421,11 +427,18 @@ test('展开已完成作品后读取并显示作品信息、镜像结果与剧�
   expect(await screen.findByText('作品信息')).toBeVisible()
   expect(screen.getByText('镜像结果')).toBeVisible()
   expect(screen.getByText(/剧集结果（1 集）/)).toBeVisible()
+  expect(screen.getByText('季度结构')).toBeVisible()
+  expect(screen.getByText('第 1 季 · 1 集')).toBeVisible()
+  expect(screen.getByText('刮削结果')).toBeVisible()
+  expect(screen.getByText('这是作品级刮削简介。')).toBeVisible()
+  expect(screen.getByText(/自动采用 · 匹配度 98/)).toBeVisible()
   expect(fetchWorkDetail).toHaveBeenCalledWith('rev-exec', 'w-done')
   // 一条完整集名 + 季集号 + 阶段结果。
   expect(screen.getByText('远程第一集全名')).toBeVisible()
   expect(screen.getByText('S01E01')).toBeVisible()
   expect(screen.getByText('S01E01-abc.strm')).toBeVisible()
+  expect(screen.getByText('这一集的刮削简介。')).toBeVisible()
+  expect(screen.getByText('TMDB 集号 9001')).toBeVisible()
   expect(screen.getByText('已映射')).toBeVisible()
 })
 

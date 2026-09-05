@@ -68,6 +68,16 @@ test('导入工作台使用全宽单列轨道，空媒体库有紧凑的引导�
   assert.match(styles, /\.media-v4-source-empty\s*\{[^}]*min-height:/s)
 })
 
+test('第三步总体摘要位于建立媒体库页头右侧，详情展开保留实际刮削结果', () => {
+  assert.match(page, /media-v4-execution-header-summary/)
+  assert.match(page, /executeProgress\.work_units\.length/)
+  assert.match(execution, /刮削结果/)
+  assert.match(execution, /季度结构/)
+  assert.match(execution, /episode\.scraped_plot/)
+  assert.match(styles, /\.media-v4-execute-stage-header\s*\{[^}]*align-items:\s*flex-start/s)
+  assert.match(styles, /\.media-v4-execution-header-summary\s*\{[^}]*justify-self:\s*end/s)
+})
+
 test('媒体库主操作与危险维护操作使用分组命令栏', () => {
   assert.match(page, /role="toolbar" aria-label="媒体库操作"/)
   assert.match(page, /media-v4-header-secondary-actions/)

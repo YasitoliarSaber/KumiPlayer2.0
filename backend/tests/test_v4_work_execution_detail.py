@@ -142,9 +142,16 @@ def test_completed_work_returns_work_level_and_episode_results(tmp_path, monkeyp
     first = next(item for item in episodes if item["episode_number"] == 1)
     assert first["season_number"] == 1
     assert first["scraped_title"] == "远程第1集全名"
+    assert first["scraped_plot"] == ""
+    assert first["runtime"] == 24
+    assert first["provider_episode_id"] == "901"
     assert first["mapped"] is True
     assert first["playback_ready"] is True
     assert first["file_name"].endswith(".mkv")
+    assert body["seasons"] == [{"season_number": 1, "season_kind": "regular", "title": "", "episode_count": 2}]
+    assert body["scrape"]["title"] == "Show"
+    assert body["scrape"]["metadata_state"] == "ready"
+    assert body["scrape"]["candidate_decision"] is None
     assert body["has_detail"] is True
 
 

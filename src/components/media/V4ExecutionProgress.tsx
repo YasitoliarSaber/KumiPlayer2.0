@@ -6,7 +6,7 @@
  * 重试命令参数，普通界面不展示 UUID 文本。
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button, ProgressBar, Spinner } from '@fluentui/react-components'
 import { CheckmarkCircle24Filled, ChevronDown24Regular, ChevronRight24Regular, DismissCircle24Regular, ErrorCircle24Regular, SpinnerIosRegular, Warning24Regular } from '@fluentui/react-icons'
 import type { V4ExecutionProgress, V4WorkExecutionDetail, V4WorkProgressUnit } from '../../api/mediaV4'
@@ -47,6 +47,22 @@ type WorkDetailState =
   | { status: 'loaded'; detail: V4WorkExecutionDetail }
   | { status: 'error'; message: string }
 
+function seasonLabel(season: V4WorkExecutionDetail['seasons'][number]): string {
+  if (season.season_kind === 'special') return '特别篇'
+  return season.season_number > 0 ? `第 ${season.season_number} 季` : (season.title || '未分季')
+}
+
+function detailRuntimeLabel(runtime: number | null | undefined): string {
+  return runtime != null && runtime > 0 ? `${runtime} 分钟` : ''
+}
+
+function candidateDecisionLabel(decision: string): string {
+  if (decision === 'auto_adopted') return '自动采用'
+  if (decision === 'trusted_binding') return '沿用已确认身份'
+  if (decision === 'waiting_review') return '等待确认'
+  return decision || '未记录候选决策'
+}
+
 function WorkUnit({ unit, getWorkDetail, requestWorkDetail, busyRetryId, onRetry, resolvingWorkId, onResolveMetadata }: {
   unit: V4WorkProgressUnit
   getWorkDetail: (workId: string, cacheKey: string) => WorkDetailState | undefined
@@ -81,9 +97,40 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, busyRetryId, onRetry
     ready: '媒体信息已就绪', waiting_review: '需要人工确认作品', waiting_metadata: '缺少在线资料配置',
     source_unavailable: '在线资料服务暂不可用', failed: '获取媒体信息失败',
   }
+  const loadedDetail = detail?.status === 'loaded' ? detail.detail : null
+  // 保持对旧后端/旧缓存响应的兼容：新增详情字段缺失时仍显示已有结果，
+  // 不能因为一条旧响应让整个作品卡片渲染崩溃。
+  const detailSeasons = loadedDetail?.seasons ?? []
+  const detailEpisodes = loadedDetail?.episodes ?? []
+  const scrape = loadedDetail?.scrape
+  const scrapeHasContent = Boolean(scrape && (
+    scrape.title
+    || scrape.original_title
+    || scrape.plot
+    || scrape.candidate_decision
+    || scrape.year != null
+    || scrape.rating != null
+    || scrape.runtime != null
+    || scrape.premiered
+    || (scrape.genres?.length ?? 0) > 0
+    || (scrape.studios?.length ?? 0) > 0
+  ))
+  const detailHasContent = Boolean(loadedDetail && (
+    loadedDetail.has_detail
+    || detailSeasons.length > 0
+    || detailEpisodes.length > 0
+    || scrapeHasContent
+  ))
+  const orderedSeasons = [...detailSeasons].sort((left, right) => {
+      const leftSpecial = left.season_kind === 'special'
+      const rightSpecial = right.season_kind === 'special'
+      if (leftSpecial !== rightSpecial) return leftSpecial ? 1 : -1
+      return left.season_number - right.season_number
+    })
+  const detailPanelId = `media-v4-work-detail-${unit.work_id.replace(/[^a-zA-Z0-9_-]/g, '-')}`
   return (
     <article className={`media-v4-work-progress media-v4-work-progress-${unit.overall_status}`}>
-      <button type="button" className="media-v4-work-progress-head" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
+      <button type="button" className="media-v4-work-progress-head" aria-expanded={expanded} aria-controls={detailPanelId} onClick={() => setExpanded((value) => !value)}>
         <span className="media-v4-work-progress-state" aria-hidden="true">
           {unit.overall_status === 'completed' ? <CheckmarkCircle24Filled />
             : unit.overall_status === 'failed' ? <ErrorCircle24Regular />
@@ -102,7 +149,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, busyRetryId, onRetry
         {expanded ? <ChevronDown24Regular aria-hidden="true" /> : <ChevronRight24Regular aria-hidden="true" />}
       </button>
       {expanded && (
-        <div className="media-v4-work-progress-body">
+        <div id={detailPanelId} className="media-v4-work-progress-body" role="region" aria-label={`${unit.title}执行详情`}>
           {failedJob?.last_error && <div className="media-v4-job-error" role="alert">{failedJob.last_error}</div>}
           {failedJob && (
             <Button size="small" appearance="secondary" disabled={busyRetryId !== ''} onClick={() => onRetry(failedJob.job_id)}>
@@ -124,10 +171,10 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, busyRetryId, onRetry
           {detail?.status === 'error' && (
             <div className="media-v4-job-error" role="alert">执行详情读取失败：{detail.message}</div>
           )}
-          {detail?.status === 'loaded' && !detail.detail.has_detail && (
+          {detail?.status === 'loaded' && !detailHasContent && (
             <div className="media-v4-work-detail-empty">本次任务未生成详细结果。</div>
           )}
-          {detail?.status === 'loaded' && detail.detail.has_detail && (
+          {detail?.status === 'loaded' && detailHasContent && (
             <div className="media-v4-work-detail">
               <div className="media-v4-work-detail-section">
                 <h4>作品信息</h4>
@@ -138,6 +185,62 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, busyRetryId, onRetry
                 </div>
                 {detail.detail.work.metadata_reason && <div className="media-v4-job-error" role="status">{detail.detail.work.metadata_reason}</div>}
               </div>
+              {scrapeHasContent && scrape && (
+                <div className="media-v4-work-detail-section">
+                  <h4>刮削结果</h4>
+                  <div className="media-v4-work-detail-facts">
+                    {scrape.title && <span>刮削标题：{scrape.title}</span>}
+                    {scrape.original_title && <span>原文标题：{scrape.original_title}</span>}
+                    {scrape.year != null && scrape.year > 0 && <span>{scrape.year} 年</span>}
+                    {scrape.rating != null && <span>评分 {scrape.rating.toFixed(1)}</span>}
+                    {detailRuntimeLabel(scrape.runtime) && <span>{detailRuntimeLabel(scrape.runtime)}</span>}
+                    {scrape.premiered && <span>首播 {scrape.premiered}</span>}
+                    {scrape.metadata_state && <span>{metadataStateLabels[scrape.metadata_state] ?? scrape.metadata_state}</span>}
+                  </div>
+                  {scrape.plot && <p className="media-v4-work-detail-plot">{scrape.plot}</p>}
+                  {(scrape.genres?.length ?? 0) > 0 || (scrape.studios?.length ?? 0) > 0 ? (
+                    <div className="media-v4-work-detail-facts">
+                      {(scrape.genres?.length ?? 0) > 0 && <span>类型：{scrape.genres.join('、')}</span>}
+                      {(scrape.studios?.length ?? 0) > 0 && <span>制作：{scrape.studios.join('、')}</span>}
+                    </div>
+                  ) : null}
+                  {scrape.candidate_decision && (
+                    <div className="media-v4-work-detail-candidate">
+                      <div className="media-v4-work-detail-facts">
+                        <span>
+                          {candidateDecisionLabel(scrape.candidate_decision.decision)}
+                          {scrape.candidate_decision.selected_score != null
+                            ? ` · 匹配度 ${Math.round(scrape.candidate_decision.selected_score)}`
+                            : ''}
+                        </span>
+                        {scrape.candidate_decision.reason && <span>{scrape.candidate_decision.reason}</span>}
+                      </div>
+                      {scrape.candidate_decision.ranked_candidates.length > 0 && (
+                        <ul className="media-v4-work-detail-candidates">
+                          {scrape.candidate_decision.ranked_candidates.slice(0, 5).map((candidate) => (
+                            <li key={`${candidate.provider}:${candidate.provider_id}`}>
+                              <span>{candidate.title || candidate.original_title || '未命名候选'}</span>
+                              {candidate.score != null && <span>匹配度 {Math.round(candidate.score)}</span>}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+              {orderedSeasons.length > 0 && (
+                <div className="media-v4-work-detail-section">
+                  <h4>季度结构</h4>
+                  <div className="media-v4-work-detail-seasons">
+                    {orderedSeasons.map((season, index) => (
+                      <span key={`${season.season_kind}:${season.season_number}:${index}`}>
+                        {seasonLabel(season)} · {season.episode_count} 集
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="media-v4-work-detail-section">
                 <h4>镜像结果</h4>
                 <div className="media-v4-work-detail-facts">
@@ -155,17 +258,25 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, busyRetryId, onRetry
               </div>
               <div className="media-v4-work-detail-section">
                 <h4>剧集结果{detail.detail.episode_total > 0 ? `（${detail.detail.episode_total} 集）` : ''}</h4>
-                {detail.detail.episodes.length === 0 ? (
+                {detailEpisodes.length === 0 ? (
                   <div className="media-v4-work-detail-empty">本次任务未生成剧集结果。</div>
                 ) : (
                   <div className="media-v4-work-detail-episodes">
-                    {detail.detail.episodes.map((episode) => (
+                    {detailEpisodes.map((episode) => (
                       <div className="media-v4-work-detail-episode" key={episode.episode_id}>
                         <span className="media-v4-work-detail-episode-code">
-                          {episode.season_kind === 'special' ? 'SP' : `S${String(episode.season_number).padStart(2, '0')}E${String(episode.episode_number ?? 0).padStart(2, '0')}`}
+                          {episode.season_kind === 'special' ? `SP${String(episode.episode_number ?? 0).padStart(2, '0')}` : `S${String(episode.season_number).padStart(2, '0')}E${String(episode.episode_number ?? 0).padStart(2, '0')}`}
                         </span>
-                        <span className="media-v4-work-detail-episode-name">{episode.scraped_title || episode.display_title || '未命名'}</span>
-                        <span className="media-v4-work-detail-episode-file">{episode.file_name}</span>
+                        <div className="media-v4-work-detail-episode-content">
+                          <strong className="media-v4-work-detail-episode-name">{episode.scraped_title || episode.display_title || '未命名'}</strong>
+                          <div className="media-v4-work-detail-episode-meta">
+                            {episode.display_title && episode.scraped_title && episode.display_title !== episode.scraped_title && <span>本地名称：{episode.display_title}</span>}
+                            {episode.file_name && <span>{episode.file_name}</span>}
+                            {episode.provider_episode_id && <span>{detail.detail.work.provider === 'tmdb' ? 'TMDB' : '在线'} 集号 {episode.provider_episode_id}</span>}
+                            {detailRuntimeLabel(episode.runtime) && <span>{detailRuntimeLabel(episode.runtime)}</span>}
+                          </div>
+                          {episode.scraped_plot && <p className="media-v4-work-detail-episode-plot">{episode.scraped_plot}</p>}
+                        </div>
                         <span className={`media-v4-work-detail-episode-state ${episode.mapped ? 'mapped' : 'unmapped'}`}>{episode.mapped ? '已映射' : '未映射'}</span>
                         {episode.playback_ready && <span className="media-v4-work-detail-episode-playable">可播放</span>}
                       </div>
@@ -241,14 +352,8 @@ export function V4ExecutionProgress({ progress, busyRetryId, onRetry, resolvingW
 
   return (
     <div className="media-v4-execution-progress">
-      {/* 3.5：总体状态居左，摘要居右，主数字与次级标签分层。 */}
       <div className="media-v4-execution-head">
         <strong className="media-v4-execution-status">{EXECUTION_STATUS_LABELS[progress.overall_status]}</strong>
-        <div className="media-v4-execution-summary">
-          <span className="media-v4-execution-summary-primary">{progress.work_units.length}</span>
-          <span className="media-v4-execution-summary-label">部作品</span>
-          <span className="media-v4-execution-summary-secondary">{mirrorDone}/{mirrorTotal} 已完成镜像</span>
-        </div>
       </div>
       <ProgressBar value={mirrorTotal > 0 ? mirrorDone / mirrorTotal : 0} max={1} aria-label="总体进度" />
       <div className="media-v4-stage-pills" role="group" aria-label="用户阶段">
@@ -265,7 +370,7 @@ export function V4ExecutionProgress({ progress, busyRetryId, onRetry, resolvingW
       </div>
       {completed.length > 0 && (
         <div className="media-v4-completed-block">
-          <div className="media-v4-completed-heading"><strong>已完成 {completed.length} 部</strong><span>展开可查看镜像与剧集结果</span></div>
+          <div className="media-v4-completed-heading"><strong>已完成 {completed.length} 部</strong></div>
           <div className="media-v4-work-progress-list">
             {visibleCompleted.map((unit) => renderWorkUnit(unit))}
           </div>

@@ -78,6 +78,73 @@ def _job_summary(job: dict | None) -> dict:
     }
 
 
+def _safe_detail_text(value: object) -> str:
+    """将刮削详情中的可展示文本归一化为稳定字符串。"""
+
+    return str(value or "").strip()
+
+
+def _positive_detail_int(value: object) -> int | None:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _safe_detail_float(value: object) -> float | None:
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed == parsed and parsed not in {float("inf"), float("-inf")} else None
+
+
+def _safe_detail_text_list(value: object) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = _safe_detail_text(item)
+        if text and text not in result:
+            result.append(text)
+    return result[:20]
+
+
+def _safe_candidate_decision(value: object) -> dict | None:
+    """只投影候选评分证据，拒绝把 metadata JSON 原样暴露给前端。"""
+
+    if not isinstance(value, dict):
+        return None
+    ranked_candidates: list[dict] = []
+    raw_candidates = value.get("ranked_candidates")
+    if isinstance(raw_candidates, list):
+        for candidate in raw_candidates[:12]:
+            if not isinstance(candidate, dict):
+                continue
+            ranked_candidates.append({
+                "provider": _safe_detail_text(candidate.get("provider")),
+                "provider_id": _safe_detail_text(candidate.get("provider_id")),
+                "media_type": _safe_detail_text(candidate.get("media_type")),
+                "title": _safe_detail_text(candidate.get("title")),
+                "original_title": _safe_detail_text(candidate.get("original_title")),
+                "year": _positive_detail_int(candidate.get("year")),
+                "score": _safe_detail_float(candidate.get("score")),
+                "reasons": _safe_detail_text_list(candidate.get("reasons")),
+                "recommended": bool(candidate.get("recommended")),
+                "identity_safe": bool(candidate.get("identity_safe")),
+                "blocked": bool(candidate.get("blocked")),
+            })
+    return {
+        "decision": _safe_detail_text(value.get("decision")),
+        "reason": _safe_detail_text(value.get("reason")),
+        "selected_provider": _safe_detail_text(value.get("selected_provider")),
+        "selected_provider_id": _safe_detail_text(value.get("selected_provider_id")),
+        "selected_score": _safe_detail_float(value.get("selected_score")),
+        "ranked_candidates": ranked_candidates,
+    }
+
+
 def _derive_work_status(mirror: dict | None, metadata: dict | None, scrape_status: str) -> str:
     """由 mirror + metadata jobs 推导作品单元的用户可见状态。
 
@@ -1896,7 +1963,7 @@ class V4RevisionService:
                 "WHERE s.work_id = ? AND EXISTS ("
                 "SELECT 1 FROM revision_bindings rb "
                 "WHERE rb.revision_id = ? AND rb.work_id = ? AND rb.season_id = s.season_id"
-                ") ORDER BY s.local_season_number, s.season_id",
+                ") ORDER BY CASE WHEN s.season_kind = 'special' THEN 1 ELSE 0 END, s.local_season_number, s.season_id",
                 (work_id, revision_id, work_id),
             ).fetchall()
             episode_rows = conn.execute(
@@ -1904,7 +1971,8 @@ class V4RevisionService:
                 SELECT e.episode_id, e.season_id, e.local_episode_number, e.special_number,
                        e.episode_kind, e.display_title,
                        s.local_season_number AS season_number, s.season_kind,
-                       epm.provider_season_number, epm.provider_episode_number
+                       epm.provider_season_number, epm.provider_episode_number,
+                       epm.provider_episode_id
                 FROM episodes e
                 JOIN seasons s ON s.season_id = e.season_id
                 LEFT JOIN episode_provider_mappings epm
@@ -1913,7 +1981,8 @@ class V4RevisionService:
                   SELECT 1 FROM revision_bindings rb
                   WHERE rb.revision_id = ? AND rb.work_id = ? AND rb.episode_id = e.episode_id
                 )
-                ORDER BY s.local_season_number, e.local_episode_number, e.episode_id
+                ORDER BY CASE WHEN s.season_kind = 'special' THEN 1 ELSE 0 END,
+                         s.local_season_number, e.local_episode_number, e.special_number, e.episode_id
                 """,
                 (str(scrape_row["provider"]) if scrape_row else "tmdb", work_id, revision_id, work_id),
             ).fetchall()
@@ -1929,7 +1998,10 @@ class V4RevisionService:
                 (revision_id, work_id),
             ).fetchall()
 
-        # 刮削集名来自最近一次 scrape_bindings.metadata_json 的 episode_mappings。
+        # 刮削详情来自最近一次 scrape_bindings.metadata_json 的白名单字段。
+        # 这里是只读投影：不能把完整 metadata_json 直接返回给前端，避免把
+        # 本地路径、产物路径或未来新增的内部诊断字段泄漏到执行页。
+        metadata: dict = {}
         mappings_by_episode: dict[str, dict] = {}
         metadata_state = ""
         metadata_reason = ""
@@ -1940,9 +2012,11 @@ class V4RevisionService:
             provider_id = str(scrape_row["provider_id"] or "")
             metadata_state = str(scrape_row["status"] or "")
             try:
-                metadata = json.loads(str(scrape_row["metadata_json"] or "{}"))
+                decoded_metadata = json.loads(str(scrape_row["metadata_json"] or "{}"))
             except (TypeError, ValueError, json.JSONDecodeError):
-                metadata = {}
+                decoded_metadata = {}
+            if isinstance(decoded_metadata, dict):
+                metadata = decoded_metadata
             if isinstance(metadata, dict):
                 # 绑定行的 status 是 confirmed 等订阅状态；面向用户的元数据
                 # 状态（ready/waiting_review/...）保存在 metadata_json 内。
@@ -1963,9 +2037,11 @@ class V4RevisionService:
                 "playback_ready": bool(str(row["playback_locator"] or "").strip()),
             }
 
+        season_episode_counts = {str(row["season_id"]): 0 for row in season_rows}
         episodes: list[dict] = []
         for row in episode_rows:
             episode_id = str(row["episode_id"])
+            season_episode_counts[str(row["season_id"])] = season_episode_counts.get(str(row["season_id"]), 0) + 1
             season_number = int(row["season_number"] or 0)
             season_kind = str(row["season_kind"] or "")
             mapping = mappings_by_episode.get(episode_id, {})
@@ -1978,6 +2054,10 @@ class V4RevisionService:
                 "episode_number": int(row["local_episode_number"] or 0) if row["local_episode_number"] is not None else special_number,
                 "display_title": str(row["display_title"] or ""),
                 "scraped_title": str(mapping.get("title") or ""),
+                "scraped_plot": str(mapping.get("plot") or ""),
+                "provider_episode_id": str(mapping.get("provider_episode_id") or row["provider_episode_id"] or ""),
+                "runtime": _positive_detail_int(mapping.get("runtime")),
+                "still_url": str(mapping.get("still_url") or ""),
                 "mapped": bool(row["provider_episode_number"] is not None or mapping),
                 "file_name": asset_fact["file_name"],
                 "playback_ready": asset_fact["playback_ready"],
@@ -1991,7 +2071,28 @@ class V4RevisionService:
             {"file_name": str(row["target_path"]).replace("\\", "/").rsplit("/", 1)[-1], "status": str(row["status"] or "")}
             for row in artifact_rows
         ]
-        has_detail = bool(episodes or artifacts or metadata_state in {"confirmed", "ready"})
+        candidate_decision = _safe_candidate_decision(metadata.get("candidate_decision"))
+        scrape_summary = {
+            "metadata_state": metadata_state,
+            "title": _safe_detail_text(metadata.get("title")),
+            "original_title": _safe_detail_text(metadata.get("original_title")),
+            "year": _positive_detail_int(metadata.get("year")),
+            "plot": _safe_detail_text(metadata.get("plot")),
+            "rating": _safe_detail_float(metadata.get("rating")),
+            "runtime": _positive_detail_int(metadata.get("runtime")),
+            "genres": _safe_detail_text_list(metadata.get("genres")),
+            "studios": _safe_detail_text_list(metadata.get("studios")),
+            "premiered": _safe_detail_text(metadata.get("premiered")),
+            "candidate_decision": candidate_decision,
+        }
+        has_detail = bool(
+            episodes
+            or artifacts
+            or season_rows
+            or metadata_state in {"confirmed", "ready"}
+            or candidate_decision is not None
+            or any(scrape_summary[key] for key in ("title", "original_title", "plot", "year", "rating", "runtime", "genres", "studios", "premiered"))
+        )
 
         return {
             "revision_id": revision_id,
@@ -2011,14 +2112,13 @@ class V4RevisionService:
                 "artifacts": artifacts,
             },
             "metadata_job_status": str(metadata_job["status"]) if metadata_job else "",
+            "scrape": scrape_summary,
             "seasons": [
                 {
                     "season_number": int(row["local_season_number"] or 0),
                     "season_kind": str(row["season_kind"] or ""),
                     "title": str(row["title"] or ""),
-                    "episode_count": sum(
-                        1 for item in episodes if item["season_number"] == int(row["local_season_number"] or 0)
-                    ),
+                    "episode_count": season_episode_counts.get(str(row["season_id"]), 0),
                 }
                 for row in season_rows
             ],

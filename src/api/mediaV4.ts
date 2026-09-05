@@ -252,6 +252,38 @@ export interface V4WorkExecutionDetail {
     artifacts: Array<{ file_name: string; status: string }>
   }
   metadata_job_status: string
+  scrape?: {
+    metadata_state: string
+    title: string
+    original_title: string
+    year: number | null
+    plot: string
+    rating: number | null
+    runtime: number | null
+    genres: string[]
+    studios: string[]
+    premiered: string
+    candidate_decision: {
+      decision: string
+      reason: string
+      selected_provider: string
+      selected_provider_id: string
+      selected_score: number | null
+      ranked_candidates: Array<{
+        provider: string
+        provider_id: string
+        media_type: string
+        title: string
+        original_title: string
+        year: number | null
+        score: number | null
+        reasons: string[]
+        recommended: boolean
+        identity_safe: boolean
+        blocked: boolean
+      }>
+    } | null
+  }
   seasons: Array<{ season_number: number; season_kind: string; title: string; episode_count: number }>
   episodes: Array<{
     episode_id: string
@@ -260,6 +292,10 @@ export interface V4WorkExecutionDetail {
     episode_number: number | null
     display_title: string
     scraped_title: string
+    scraped_plot: string
+    provider_episode_id: string
+    runtime: number | null
+    still_url?: string
     mapped: boolean
     file_name: string
     playback_ready: boolean
