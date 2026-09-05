@@ -147,6 +147,55 @@ def test_remote_assets_without_fingerprints_get_distinct_mirror_files(tmp_path):
     }
 
 
+def test_non_txt_assets_keep_bounded_sampling_without_per_row_disk_probes(tmp_path, monkeypatch):
+    """非 TXT 镜像只做头/中/尾 3 次可达性抽样；逐行只做纯语法校验。
+
+    5 个本地 Asset 的调用计数必须是 3 次可达性 + 5 次语法；逐行循环再对
+    每条 Asset 做可达性探测会放大成 N+3 次源盘 I/O，属于回归。
+    """
+
+    from app.media_v4.jobs import mirror as mirror_module
+    from app.media_v4.jobs.mirror import V4MirrorMaterializer
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "mirror-sampling.db")
+    database.initialize()
+    pairs = []
+    for index in range(5):
+        media = tmp_path / f"show.s01e{index + 1:02d}.mkv"
+        media.write_bytes(b"video")
+        pairs.append(_entry(f"ep{index}", str(media)))
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-sampling", pairs)
+    revisions.confirm("rev-sampling")
+    job = next(
+        job for job in revisions.list_jobs("rev-sampling") if job["job_type"] == "materialize_mirror"
+    )
+
+    real_validate = mirror_module.validate_playback_locator
+    real_syntax = mirror_module.validate_playback_locator_syntax
+    locator_calls: list[str] = []
+    syntax_calls: list[str] = []
+
+    def counting_validate(locator):
+        locator_calls.append(locator)
+        return real_validate(locator)
+
+    def counting_syntax(locator):
+        syntax_calls.append(locator)
+        return real_syntax(locator)
+
+    monkeypatch.setattr(mirror_module, "validate_playback_locator", counting_validate)
+    monkeypatch.setattr(mirror_module, "validate_playback_locator_syntax", counting_syntax)
+
+    result = V4MirrorMaterializer(database).process(job["job_id"], tmp_path / "mirror")
+
+    assert result.status == "succeeded"
+    assert len(locator_calls) == 3
+    assert len(syntax_calls) == 5
+
+
 def test_remote_tree_asset_with_relative_locator_fails_before_publishing(tmp_path):
     """无效/相对播放定位不能发布 STRM：mirror 必须失败且零 Artifact。"""
 

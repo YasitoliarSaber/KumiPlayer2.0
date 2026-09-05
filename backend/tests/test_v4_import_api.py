@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -1443,3 +1444,70 @@ def test_metadata_manual_confirm_requeues_scrape_and_refreshes_projection(tmp_pa
     assert len(jobs) == 1
     assert jobs[0]["status"] == "succeeded"
     assert jobs[0]["attempts"] == 2
+
+
+def test_sync_and_durable_tree_entries_share_one_root_identity(tmp_path, monkeypatch):
+    """同一 provider、配置总根与 TXT：同步与 durable 入口必须得到一致身份。
+
+    durable 入口在创建 root/scan 身份前先读取 TXT 并完成纯词法解析；
+    不允许同步入口用解析后身份、durable 入口用 configured_roots[0] 造成
+    同一逻辑来源分裂成两张来源卡。
+    """
+
+    _patch_database(tmp_path, monkeypatch)
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api import media_v4
+    from app.media_v4.sources.durable_scan import get_durable_scan
+
+    database = media_v4.get_database()
+    mount = tmp_path / "百度网盘"
+    tree = tmp_path / "01动画_文件目录.txt"
+    tree.write_text("Show/Show.S01E01.mkv\n", encoding="utf-8")
+    monkeypatch.setattr(media_v4, "load_config", lambda: SimpleNamespace(
+        pan115_root="",
+        baidu_root=str(mount),
+        openlist_server_url="",
+        openlist_mount_root="",
+        openlist_remote_root="/",
+        openlist_routes=[],
+    ))
+
+    sync_result = media_v4.scan_source(media_v4.SourceScanRequest(
+        source="tree",
+        tree_file=str(tree),
+        provider="baidu",
+    ))
+
+    application = FastAPI()
+    application.include_router(media_v4.router)
+    client = TestClient(application)
+    durable_response = client.post("/api/v4/sources/scans", json={
+        "source": "tree",
+        "tree_file": str(tree),
+        "provider": "baidu",
+    })
+    assert durable_response.status_code == 200, durable_response.text
+    durable_payload = durable_response.json()
+    scan_id = durable_payload["scan_id"]
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if get_durable_scan(database, scan_id)["status"] != "running":
+            break
+        time.sleep(0.02)
+    final_state = get_durable_scan(database, scan_id)
+    assert final_state["status"] == "completed", final_state
+
+    assert durable_payload["root_id"] == sync_result["root_id"]
+    assert durable_payload["effective_playback_root"] == sync_result["effective_playback_root"]
+    assert durable_payload["effective_playback_root"] == str(mount / "01动画")
+
+    with database.connect() as conn:
+        validation = conn.execute(
+            "SELECT root_id, effective_root FROM tree_scan_validation WHERE scan_id = ?",
+            (scan_id,),
+        ).fetchone()
+    assert validation["root_id"] == sync_result["root_id"]
+    assert validation["effective_root"] == sync_result["effective_playback_root"]

@@ -331,55 +331,14 @@ def test_txt_offline_scan_preview_confirm_mirror(tmp_path, monkeypatch):
         openlist_routes=[],
     ))
 
-    # 源盘访问哨兵：任何 Q:\ 下的 stat/open/枚举都会失败。
-    import os
+    # 源盘访问哨兵：Q:\ 下任何 stat/open/枚举/解析都会失败。与
+    # test_v4_tree_playback_root 共用同一 source-disk guard，统一覆盖
+    # Path.stat/glob/rglob、os.scandir 与 os.path 三件套，避免把未覆盖
+    # 的 API 误报为已覆盖；只拦虚构源根，不拦 TXT 输入、临时 SQLite 和
+    # 镜像输出。
+    from tests.source_disk_guard import guard_source_disk_io
 
-    original_is_file = Path.is_file
-    original_is_dir = Path.is_dir
-    original_exists = Path.exists
-    original_open = Path.open
-    original_os_exists = os.path.exists
-    original_os_isdir = os.path.isdir
-    original_os_isfile = os.path.isfile
-
-    def _on_source_disk(path) -> bool:
-        return str(path).casefold().startswith(source_root.casefold())
-
-    def guarded_is_file(self, *args, **kwargs):
-        assert not _on_source_disk(self), f"TXT 链路不得探测源盘: {self}"
-        return original_is_file(self, *args, **kwargs)
-
-    def guarded_is_dir(self, *args, **kwargs):
-        assert not _on_source_disk(self), f"TXT 链路不得探测源盘目录: {self}"
-        return original_is_dir(self, *args, **kwargs)
-
-    def guarded_exists(self, *args, **kwargs):
-        assert not _on_source_disk(self), f"TXT 链路不得探测源盘存在性: {self}"
-        return original_exists(self, *args, **kwargs)
-
-    def guarded_open(self, *args, **kwargs):
-        assert not _on_source_disk(args[0] if args else ""), f"TXT 链路不得打开源盘文件: {args[0] if args else ''}"
-        return original_open(self, *args, **kwargs)
-
-    def guarded_os_exists(path):
-        assert not _on_source_disk(path), f"TXT 链路不得探测源盘存在性(os): {path}"
-        return original_os_exists(path)
-
-    def guarded_os_isdir(path):
-        assert not _on_source_disk(path), f"TXT 链路不得探测源盘目录(os): {path}"
-        return original_os_isdir(path)
-
-    def guarded_os_isfile(path):
-        assert not _on_source_disk(path), f"TXT 链路不得探测源盘文件(os): {path}"
-        return original_os_isfile(path)
-
-    monkeypatch.setattr(Path, "is_file", guarded_is_file)
-    monkeypatch.setattr(Path, "is_dir", guarded_is_dir)
-    monkeypatch.setattr(Path, "exists", guarded_exists)
-    monkeypatch.setattr(Path, "open", guarded_open)
-    monkeypatch.setattr(os.path, "exists", guarded_os_exists)
-    monkeypatch.setattr(os.path, "isdir", guarded_os_isdir)
-    monkeypatch.setattr(os.path, "isfile", guarded_os_isfile)
+    guard_source_disk_io(monkeypatch, [source_root])
 
     application = FastAPI()
     application.include_router(media_v4.router)

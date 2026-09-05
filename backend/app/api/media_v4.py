@@ -48,9 +48,12 @@ from app.media_v4.sources.scanner import (
     read_directory_tree_text,
     scan_local_directory,
     scan_openlist_directory,
-    tree_root_id,
 )
-from app.media_v4.sources.tree_root import TreePlaybackRootResolver, TreeRootResolution
+from app.media_v4.sources.tree_root import (
+    TreePlaybackRootResolver,
+    TreeRootResolution,
+    tree_scan_root_id,
+)
 from app.media_v4.tracking.store import V4TrackingStore
 
 router = APIRouter(prefix="/api/v4", tags=["media-v4"])
@@ -593,8 +596,12 @@ def scan_source(request: SourceScanRequest):
                 configured_roots=configured_roots,
             ).resolve(tree_text)
             effective_root = resolution.root
-            identity_root = effective_root or configured_roots[0]
-            root_id = tree_root_id(content_provider, identity_root, request.tree_file)
+            root_id = tree_scan_root_id(
+                provider=content_provider,
+                configured_roots=configured_roots,
+                resolution=resolution,
+                tree_file=request.tree_file,
+            )
             scan_id, evidence = build_directory_tree_evidence(
                 tree_text,
                 root_id=root_id,
@@ -1276,6 +1283,8 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
     route_id = ""
     configured_roots = _configured_tree_roots(config, content_provider)
 
+    tree_text: str | None = None
+    resolution: TreeRootResolution | None = None
     if request.source == "hybrid":
         from app.api.openlist_v4 import _configured_routes, _remote_root
 
@@ -1296,10 +1305,23 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
     else:
         if not configured_roots:
             raise HTTPException(status_code=409, detail="当前内容来源尚未配置本地挂载路径，请先在设置页完成来源映射")
-        root_id = tree_root_id(content_provider, configured_roots[0], request.tree_file)
+        # 身份必须在创建 root/scan 之前确定：先读取 TXT 并完成纯词法解析
+        # （只读用户选定的 TXT，不触源盘），与同步入口共享同一解析后身份根，
+        # 避免同一逻辑来源因入口不同分裂成不同 root。
+        tree_text = read_directory_tree_text(request.tree_file)
+        resolution = TreePlaybackRootResolver(
+            request.tree_file,
+            configured_roots=configured_roots,
+        ).resolve(tree_text)
+        root_id = tree_scan_root_id(
+            provider=content_provider,
+            configured_roots=configured_roots,
+            resolution=resolution,
+            tree_file=request.tree_file,
+        )
 
     database = get_database()
-    identity_root = configured_roots[0]
+    identity_root = (resolution.root if resolution is not None else "") or configured_roots[0]
     _ensure_root_container(
         database,
         root_id=root_id,
@@ -1319,8 +1341,14 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
                 from app.media_v4.sources.scanner import SourceScanCancelled
 
                 raise SourceScanCancelled()
-            tree_text = read_directory_tree_text(request.tree_file)
-            resolution = TreePlaybackRootResolver(request.tree_file, configured_roots=configured_roots).resolve(tree_text)
+            nonlocal tree_text, resolution
+            if tree_text is None or resolution is None:
+                # hybrid 分支仍在任务创建后读取 TXT；tree 分支已在身份解析时读过。
+                tree_text = read_directory_tree_text(request.tree_file)
+                resolution = TreePlaybackRootResolver(
+                    request.tree_file,
+                    configured_roots=configured_roots,
+                ).resolve(tree_text)
             _scan_id, evidence = build_directory_tree_evidence(
                 tree_text,
                 root_id=root_id,
@@ -1366,7 +1394,18 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
             scan_id=scan_id,
         ),
     )
-    return {"scan_id": scan_id, "root_id": root_id, "scan_mode": scan_mode, "source_mode": source_mode, "status": "running"}
+    result = {
+        "scan_id": scan_id,
+        "root_id": root_id,
+        "scan_mode": scan_mode,
+        "source_mode": source_mode,
+        "status": "running",
+    }
+    if resolution is not None:
+        # tree 分支的身份在请求内解析完成：与同步入口同字段返回映射结果。
+        result["effective_playback_root"] = resolution.root
+        result["path_validation"] = _tree_validation_dict(resolution)
+    return result
 
 
 @router.post("/sources/scans")

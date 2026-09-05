@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from app.media_v4.sources.scanner import tree_media_relative_paths
+from app.media_v4.sources.scanner import tree_media_relative_paths, tree_root_id
 
 # 导出文件名约定：`01动画_文件目录_时间戳` / `根目录_目录树`。
 _EXPORT_SUFFIX_RE = re.compile(r"[_\s-]*(?:文件目录|目录树)(?:[_\s-]*\d{6,})?$")
@@ -68,6 +68,20 @@ def _is_ancestor(candidate: str, other: str) -> bool:
     return all(a.casefold() == b.casefold() for a, b in zip(candidate_parts, other_parts, strict=False))
 
 
+def _deepest_candidates(roots: list[str]) -> list[str]:
+    """去掉是其它候选祖先的项，保留每条祖先链最深节点。
+
+    同一祖先链必须收敛到最深层的配置根（如同时配置 `Q:\百度网盘` 与
+    `Q:\百度网盘\01动画` 时保留子根）；互不为祖先的多个最深节点交由
+    调用方报歧义。基于集合成员判断，候选顺序不影响结果。
+    """
+
+    return [
+        root for root in roots
+        if not any(_is_ancestor(root, other) for other in roots)
+    ]
+
+
 def _root_has_scope(root: str, scope: str) -> bool:
     """配置根尾段是否已含 scope（如 `Q:\\百度网盘\\01动画`）。"""
 
@@ -104,6 +118,30 @@ class TreeRootResolution:
     candidates: tuple[str, ...]
 
 
+def tree_scan_root_id(
+    *,
+    provider: str,
+    configured_roots: list[str],
+    resolution: TreeRootResolution,
+    tree_file: str | Path,
+) -> str:
+    """同步与 durable 共用的「解析后身份根」。
+
+    成功映射统一采用 `resolution.root`；解析失败时回退首个稳定配置身份，
+    用于保存失败任务。两条入口必须共享同一纯词法输入（configured_roots +
+    TXT 解析结果），同一逻辑来源不得因入口不同分裂成不同 root；调用方
+    必须在创建 root/scan 身份之前完成 TXT 读取与解析。
+    """
+
+    if resolution.ok and resolution.root:
+        identity_root = resolution.root
+    elif configured_roots:
+        identity_root = str(configured_roots[0])
+    else:
+        identity_root = ""
+    return tree_root_id(provider, identity_root, tree_file)
+
+
 class TreePlaybackRootResolver:
     """按配置根、TXT 位置与导出文件名词法推导播放根；零源盘 I/O。"""
 
@@ -132,15 +170,12 @@ class TreePlaybackRootResolver:
             return TreeRootResolution(
                 "", False, "当前内容来源尚未配置本地挂载路径", 0, 0, (),
             )
-        # 去重（忽略大小写但保留原文字），去掉被更精确候选包含的祖先候选。
+        # 去重（忽略大小写但保留原文字），再沿祖先链收敛到最深子根。
         unique: dict[str, str] = {}
         for candidate in candidates:
             unique.setdefault(_norm(candidate), candidate)
         roots = list(unique.values())
-        precise = [
-            candidate for candidate in roots
-            if not any(_is_ancestor(other, candidate) for other in roots)
-        ]
+        precise = _deepest_candidates(roots)
         if len(precise) == 1:
             return TreeRootResolution(
                 precise[0], True, "播放路径已根据目录树与来源设置生成",
@@ -165,15 +200,27 @@ class TreePlaybackRootResolver:
             if value and not any(_norm(value) == _norm(existing) for existing in candidates):
                 candidates.append(value)
 
+        def add_without_doubled_scope(value: str) -> None:
+            """条目首段已带 scope 时，尾部又是同一 scope 的候选会重复该层。
+
+            例如条目为「01动画/Show/...」而根为 `Q:\百度网盘\01动画`，直接
+            拼接会出现两段 01动画；此时以去掉该层的父目录作为候选。
+            """
+
+            if entry_has_scope and _root_has_scope(value, scope):
+                add(str(_pure(value).parent))
+            else:
+                add(value)
+
         for root in self.configured_roots:
             root_path = _pure(root)
             # 优先采用可由 TXT 位置证明的子库范围。
             if tree_parent and _is_ancestor(root_path, _pure(str(tree_parent))):
-                add(str(tree_parent))
+                add_without_doubled_scope(str(tree_parent))
             elif scope and not entry_has_scope and not _root_has_scope(root, scope):
                 add(str(root_path / scope))
             else:
-                add(str(root_path))
+                add_without_doubled_scope(str(root_path))
         for extra in self.extra_candidates:
-            add(str(_pure(extra)))
+            add_without_doubled_scope(str(_pure(extra)))
         return candidates

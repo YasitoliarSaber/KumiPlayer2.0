@@ -183,17 +183,14 @@ class V4MirrorMaterializer:
                     mark_cancelled(self.database, job_id)
                     return MaterializeResult("cancelled")
                 locator = str(row["playback_locator"] or row["source_locator"] or "")
-                # 分支合同：is_txt_asset 由服务端 revision 证据（source_evidence.ingest_method）
-                # 确定，不是 provider/扩展名/客户端标记。TXT 只做纯语法校验即可发布；
-                # 非 TXT 保留原可达性策略（本地文件必须真实存在）。
-                is_txt_asset = str(row["ingest_method"] or "") == "directory_tree"
+                # 分支合同：TXT 与非 TXT 由服务端 revision 证据
+                # （source_evidence.ingest_method）区分，不是 provider/扩展名/
+                # 客户端标记。TXT 只做纯语法校验即可发布；非 TXT 的可达性已经
+                # 在循环前的头/中/尾抽样完成，逐行循环只做语法校验，不得再次
+                # 触碰源盘（否则大库会放大成 N+3 次 I/O）。
                 ok, reason = validate_playback_locator_syntax(locator)
                 if not ok:
                     raise RuntimeError(reason)
-                if not is_txt_asset:
-                    ok, reason = validate_playback_locator(locator)
-                    if not ok:
-                        raise RuntimeError(reason)
                 work_dir = work_directory_name(str(row["work_id"]))
                 asset_identity = row["fingerprint"] or row["asset_id"]
                 asset_tag = _safe_segment(asset_identity[-10:], "asset")

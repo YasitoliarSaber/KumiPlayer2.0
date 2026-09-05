@@ -379,8 +379,13 @@ def test_durable_finalizer_normalizes_one_season_across_persistence_batches(tmp_
     assert tuple(last) == (2, 129, 140)
 
 
-def test_tree_durable_entrypoint_defers_txt_reading_until_after_task_creation(tmp_path, monkeypatch):
-    """目录树读取也不能卡在 HTTP 请求内，完成后证据必须归属该 durable scan。"""
+def test_tree_durable_entrypoint_resolves_identity_before_task_creation(tmp_path, monkeypatch):
+    """TXT 身份解析必须在任务创建前完成；大证据构建仍留在后台。
+
+    同步与 durable 入口共享同一「解析后身份根」：durable 请求内先读取 TXT
+    并完成纯词法解析（只读用户选定的 TXT），再创建 root/scan 身份并立即
+    返回；逐条证据构建与落库仍在后台线程进行，不占用 HTTP 请求。
+    """
 
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -398,14 +403,14 @@ def test_tree_durable_entrypoint_defers_txt_reading_until_after_task_creation(tm
     tree_file.write_text("Anime\n└── Show\n    └── Show.S01E01.mkv\n", encoding="utf-8")
     started = threading.Event()
     release = threading.Event()
-    real_read = media_v4.read_directory_tree_text
+    real_build = media_v4.build_directory_tree_evidence
 
-    def slow_tree_read(path):
+    def slow_evidence_build(*args, **kwargs):
         started.set()
         assert release.wait(3)
-        return real_read(path)
+        return real_build(*args, **kwargs)
 
-    monkeypatch.setattr(media_v4, "read_directory_tree_text", slow_tree_read)
+    monkeypatch.setattr(media_v4, "build_directory_tree_evidence", slow_evidence_build)
     monkeypatch.setattr(media_v4, "load_config", lambda: SimpleNamespace(
         pan115_root="", baidu_root=str(mounted_root), openlist_mount_root="", openlist_routes=[],
     ))
@@ -418,8 +423,12 @@ def test_tree_durable_entrypoint_defers_txt_reading_until_after_task_creation(tm
     })
 
     assert response.status_code == 200, response.text
-    scan_id = response.json()["scan_id"]
-    assert response.json()["status"] == "running"
+    payload = response.json()
+    scan_id = payload["scan_id"]
+    assert payload["status"] == "running"
+    # 身份已在请求内解析完成：响应携带与同步入口一致的解析后播放根。
+    assert payload["effective_playback_root"] == str(mounted_root)
+    assert payload["path_validation"]["ok"] is True
     assert started.wait(1)
     release.set()
     deadline = time.monotonic() + 3

@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path, PureWindowsPath
 
 import pytest
@@ -16,6 +15,7 @@ from app.media_v4.sources.tree_root import (
     TreePlaybackRootResolver,
     tree_scope_name,
 )
+from tests.source_disk_guard import guard_source_disk_io as _guard_source_io
 
 
 def _resolve(tree: Path, configured_roots: list, extra_candidates: list | None = None):
@@ -32,83 +32,6 @@ def _write_tree(root: Path, name: str, lines: list[str]) -> Path:
     tree.parent.mkdir(parents=True, exist_ok=True)
     tree.write_text("\n".join(lines), encoding="utf-8")
     return tree
-
-
-def _guard_source_io(monkeypatch, roots: list[str | Path]):
-    """源根路径限定的 I/O 哨兵：命中任何 stat/open/枚举/解析即失败。
-
-    只拦截源根下的调用；TXT 输入、tmp_path 与镜像输出不在拦截范围。
-    """
-    prefixes = tuple(
-        str(Path(root).expanduser()).replace("/", "\\").rstrip("\\").casefold()
-        for root in roots
-    )
-    sentinel = AssertionError("TXT 离线映射不得访问源盘")
-
-    def _hit(target) -> bool:
-        try:
-            value = str(target).replace("/", "\\").rstrip("\\").casefold()
-        except (TypeError, ValueError):
-            return False
-        return any(value == prefix or value.startswith(prefix + "\\") for prefix in prefixes)
-
-    original_is_file = Path.is_file
-    original_is_dir = Path.is_dir
-    original_exists = Path.exists
-    original_open = Path.open
-    original_stat = Path.stat
-    original_glob = Path.glob
-    original_rglob = Path.rglob
-    original_os_scandir = os.scandir
-
-    def guarded_is_file(self, *args, **kwargs):
-        if _hit(self):
-            raise sentinel
-        return original_is_file(self, *args, **kwargs)
-
-    def guarded_is_dir(self, *args, **kwargs):
-        if _hit(self):
-            raise sentinel
-        return original_is_dir(self, *args, **kwargs)
-
-    def guarded_exists(self, *args, **kwargs):
-        if _hit(self):
-            raise sentinel
-        return original_exists(self, *args, **kwargs)
-
-    def guarded_open(self, *args, **kwargs):
-        if _hit(self):
-            raise sentinel
-        return original_open(self, *args, **kwargs)
-
-    def guarded_stat(self, *args, **kwargs):
-        if _hit(self):
-            raise sentinel
-        return original_stat(self, *args, **kwargs)
-
-    def guarded_glob(self, *args, **kwargs):
-        if _hit(self):
-            raise sentinel
-        return original_glob(self, *args, **kwargs)
-
-    def guarded_rglob(self, *args, **kwargs):
-        if _hit(self):
-            raise sentinel
-        return original_rglob(self, *args, **kwargs)
-
-    def guarded_scandir(path="."):
-        if _hit(path):
-            raise sentinel
-        return original_os_scandir(path)
-
-    monkeypatch.setattr(Path, "is_file", guarded_is_file)
-    monkeypatch.setattr(Path, "is_dir", guarded_is_dir)
-    monkeypatch.setattr(Path, "exists", guarded_exists)
-    monkeypatch.setattr(Path, "open", guarded_open)
-    monkeypatch.setattr(Path, "stat", guarded_stat)
-    monkeypatch.setattr(Path, "glob", guarded_glob)
-    monkeypatch.setattr(Path, "rglob", guarded_rglob)
-    monkeypatch.setattr(os, "scandir", guarded_scandir)
 
 
 def test_tree_scope_name_extracts_the_media_sub_library():
@@ -279,3 +202,53 @@ def test_unconfigured_root_fails_with_clear_message():
     assert resolution.ok is False
     assert resolution.root == ""
     assert "配置" in resolution.reason
+
+
+# ── 11.19.8 嵌套配置根：祖先链必须收敛到最深子根 ────────────────────────────
+
+
+def test_nested_configured_roots_keep_the_deepest_child_root(monkeypatch):
+    """父根+子根同时配置：只保留最深子根，不能把内容归到更宽父根。"""
+    _guard_source_io(monkeypatch, [r"Q:\百度网盘"])
+    tree = Path(r"D:\清单") / "根目录_文件目录.txt"
+
+    resolution = TreePlaybackRootResolver(
+        tree, configured_roots=[r"Q:\百度网盘", r"Q:\百度网盘\01动画"],
+    ).resolve("Show/Show.S01E01.mkv\n")
+
+    assert resolution.ok is True
+    assert PureWindowsPath(resolution.root) == PureWindowsPath(r"Q:\百度网盘\01动画")
+
+    # 候选顺序不得影响结果：倒序输入仍收敛到同一最深子根。
+    reversed_resolution = TreePlaybackRootResolver(
+        tree, configured_roots=[r"Q:\百度网盘\01动画", r"Q:\百度网盘"],
+    ).resolve("Show/Show.S01E01.mkv\n")
+
+    assert reversed_resolution.ok is True
+    assert PureWindowsPath(reversed_resolution.root) == PureWindowsPath(r"Q:\百度网盘\01动画")
+
+
+def test_nested_roots_without_scope_evidence_stay_ambiguous(monkeypatch):
+    """两个互不相关的配置根继续歧义失败，不得假装收敛。"""
+    _guard_source_io(monkeypatch, [r"Q:\百度网盘"])
+    tree = Path(r"D:\清单") / "根目录_文件目录.txt"
+
+    resolution = TreePlaybackRootResolver(
+        tree, configured_roots=[r"Q:\百度网盘\01动画", r"Q:\百度网盘\02动画"],
+    ).resolve("Show/Show.S01E01.mkv\n")
+
+    assert resolution.ok is False
+    assert "多个" in resolution.reason
+
+
+def test_nested_roots_with_scoped_entries_do_not_double_the_scope_layer(monkeypatch):
+    """条目首段已带 scope 且根尾也是同一 scope：去掉该层，避免 01动画 重复。"""
+    _guard_source_io(monkeypatch, [r"Q:\百度网盘"])
+    tree = Path(r"D:\清单") / "01动画_文件目录.txt"
+
+    resolution = TreePlaybackRootResolver(
+        tree, configured_roots=[r"Q:\百度网盘", r"Q:\百度网盘\01动画"],
+    ).resolve("01动画/Show/Show.S01E01.mkv\n")
+
+    assert resolution.ok is True
+    assert PureWindowsPath(resolution.root) == PureWindowsPath(r"Q:\百度网盘")
