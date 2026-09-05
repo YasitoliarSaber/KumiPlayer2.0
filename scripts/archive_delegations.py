@@ -29,7 +29,17 @@ AGENT_SESSIONS_PATH = Path.home() / ".proma" / "agent-sessions.json"
 PARENT_SESSION = "a1d0a324-e961-4674-b4d5-235acac0aeac"
 
 
+def _assert_trusted_sessions_path(path: Path) -> None:
+    """读写前校验目标仍是 ~/.proma/agent-sessions.json，拒绝任何路径篡改。"""
+
+    expected = (Path.home() / ".proma" / "agent-sessions.json").resolve()
+    target = Path(path).resolve()
+    if target != expected:
+        sys.exit(f"会话文件路径异常，拒绝读写: {target}")
+
+
 def load_sessions():
+    _assert_trusted_sessions_path(AGENT_SESSIONS_PATH)
     if not AGENT_SESSIONS_PATH.is_file():
         sys.exit(f"未找到会话文件: {AGENT_SESSIONS_PATH}")
     with open(AGENT_SESSIONS_PATH, encoding="utf-8") as f:
@@ -37,12 +47,13 @@ def load_sessions():
 
 
 def save_sessions(data, backup=True):
+    _assert_trusted_sessions_path(AGENT_SESSIONS_PATH)
     if backup:
         bak = AGENT_SESSIONS_PATH.with_suffix(".json.bak")
         shutil.copy2(AGENT_SESSIONS_PATH, bak)
         print(f"[备份] 已备份原文件到: {bak}")
-    with open(AGENT_SESSIONS_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    AGENT_SESSIONS_PATH.write_text(payload, encoding="utf-8")
     print(f"[写入] 已更新: {AGENT_SESSIONS_PATH}")
 
 

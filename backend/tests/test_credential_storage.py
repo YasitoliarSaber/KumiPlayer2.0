@@ -4,6 +4,22 @@ from app.core import config as config_module
 from app.core.config import AppConfig, invalidate_config_cache, load_config, save_config
 
 
+def _fake_credential(name: str) -> str:
+    """合成测试凭据：仅存在于测试进程内的占位值，不对应任何真实密钥。"""
+
+    return "kumi-test-fixture:" + name.replace("_", "-")
+
+
+TMDB_TOKEN = _fake_credential("tmdb_bearer_token")
+BANGUMI_TOKEN = _fake_credential("bangumi_access_token")
+DEEPSEEK_KEY = _fake_credential("deepseek_api_key")
+OL_USER = _fake_credential("openlist_username")
+OL_PASS = _fake_credential("openlist_password")
+OL_USER_NEW = _fake_credential("openlist_username_new")
+OL_PASS_NEW = _fake_credential("openlist_password_new")
+LEGACY_TOKEN = _fake_credential("legacy_plaintext_token")
+
+
 class FakeCredentialStore:
     available = True
 
@@ -33,42 +49,42 @@ def enable_fake_store(monkeypatch, tmp_path):
 def test_sensitive_config_is_stored_outside_json_and_restored(monkeypatch, tmp_path):
     store, config_file = enable_fake_store(monkeypatch, tmp_path)
     save_config(AppConfig(
-        tmdb_bearer_token="tmdb-secret-value",
-        bangumi_access_token="bangumi-secret-value",
+        tmdb_bearer_token=TMDB_TOKEN,
+        bangumi_access_token=BANGUMI_TOKEN,
     ))
 
     saved = json.loads(config_file.read_text(encoding="utf-8"))
     assert saved["tmdb_bearer_token"] == ""
     assert saved["bangumi_access_token"] == ""
-    assert store.values["tmdb_bearer_token"] == "tmdb-secret-value"
+    assert store.values["tmdb_bearer_token"] == TMDB_TOKEN
 
     invalidate_config_cache()
     loaded = load_config(force_reload=True)
-    assert loaded.tmdb_bearer_token == "tmdb-secret-value"
-    assert loaded.bangumi_access_token == "bangumi-secret-value"
+    assert loaded.tmdb_bearer_token == TMDB_TOKEN
+    assert loaded.bangumi_access_token == BANGUMI_TOKEN
 
 
 def test_legacy_plaintext_credentials_are_migrated_on_read(monkeypatch, tmp_path):
     store, config_file = enable_fake_store(monkeypatch, tmp_path)
     config_file.write_text(
-        json.dumps({"setup_completed": True, "tmdb_bearer_token": "legacy-secret"}),
+        json.dumps({"setup_completed": True, "tmdb_bearer_token": LEGACY_TOKEN}),
         encoding="utf-8",
     )
 
     loaded = load_config(force_reload=True)
 
-    assert loaded.tmdb_bearer_token == "legacy-secret"
-    assert store.values["tmdb_bearer_token"] == "legacy-secret"
+    assert loaded.tmdb_bearer_token == LEGACY_TOKEN
+    assert store.values["tmdb_bearer_token"] == LEGACY_TOKEN
     assert json.loads(config_file.read_text(encoding="utf-8"))["tmdb_bearer_token"] == ""
 
 
 def test_clearing_credential_removes_secure_copy(monkeypatch, tmp_path):
     """只有显式 cleared_keys 才删除凭据（REWORK：空值默认 KEEP）。"""
     store, _ = enable_fake_store(monkeypatch, tmp_path)
-    save_config(AppConfig(bangumi_access_token="saved-token"))
+    save_config(AppConfig(bangumi_access_token=BANGUMI_TOKEN))
     # 无 cleared_keys：空值 = KEEP，不删除
     save_config(AppConfig(bangumi_access_token=""))
-    assert store.values.get("bangumi_access_token") == "saved-token"
+    assert store.values.get("bangumi_access_token") == BANGUMI_TOKEN
     # 显式 cleared_keys：才执行 DELETE
     save_config(AppConfig(bangumi_access_token=""), cleared_keys={"bangumi_access_token"})
     assert "bangumi_access_token" not in store.values
@@ -84,14 +100,14 @@ def test_credential_manager_failure_keeps_legacy_value_available(monkeypatch, tm
 
     monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", FailingStore())
     config_file.write_text(
-        json.dumps({"setup_completed": True, "tmdb_bearer_token": "legacy-secret"}),
+        json.dumps({"setup_completed": True, "tmdb_bearer_token": LEGACY_TOKEN}),
         encoding="utf-8",
     )
 
     loaded = load_config(force_reload=True)
 
-    assert loaded.tmdb_bearer_token == "legacy-secret"
-    assert json.loads(config_file.read_text(encoding="utf-8"))["tmdb_bearer_token"] == "legacy-secret"
+    assert loaded.tmdb_bearer_token == LEGACY_TOKEN
+    assert json.loads(config_file.read_text(encoding="utf-8"))["tmdb_bearer_token"] == LEGACY_TOKEN
 
 
 # ============================================================
@@ -129,7 +145,7 @@ def test_ol3_credential_read_failure_does_not_delete_on_unrelated_save(monkeypat
     不可读」当作「清除凭据」，也不得把明文凭据写进 config.json。
     """
     store, config_file = enable_fake_store(monkeypatch, tmp_path)
-    save_config(AppConfig(openlist_username="ol-user", openlist_password="ol-pass"))
+    save_config(AppConfig(openlist_username=OL_USER, openlist_password=OL_PASS))
 
     # 凭据管理器暂时不可读
     monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", FailingReadStore())
@@ -143,8 +159,8 @@ def test_ol3_credential_read_failure_does_not_delete_on_unrelated_save(monkeypat
 
     # 原 OpenList 凭据必须仍存在（不可把 read 失败解释成 delete）
     real_store = store
-    assert real_store.values.get("openlist_username") == "ol-user"
-    assert real_store.values.get("openlist_password") == "ol-pass"
+    assert real_store.values.get("openlist_username") == OL_USER
+    assert real_store.values.get("openlist_password") == OL_PASS
     # config.json 不得写入任何明文凭据（payload 未到达写盘阶段）
     saved = json.loads(config_file.read_text(encoding="utf-8"))
     assert saved.get("openlist_username", "") == ""
@@ -157,22 +173,22 @@ def test_ol3_credential_write_failure_preserves_previous_values(monkeypatch, tmp
     验证 rollback 真实生效：username 必须回滚为旧值，password 保持旧值。
     """
     store, config_file = enable_fake_store(monkeypatch, tmp_path)
-    save_config(AppConfig(openlist_username="ol-user", openlist_password="ol-pass"))
+    save_config(AppConfig(openlist_username=OL_USER, openlist_password=OL_PASS))
 
     failing = FailingWriteStore(fail_key="openlist_password", seed=dict(store.values))
     monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", failing)
     invalidate_config_cache()
     cfg = load_config(force_reload=True)
-    cfg.openlist_username = "new-user"   # 先于 password 写入 → 需要被回滚
-    cfg.openlist_password = "new-pass"   # 写入失败
+    cfg.openlist_username = OL_USER_NEW   # 先于 password 写入 → 需要被回滚
+    cfg.openlist_password = OL_PASS_NEW   # 写入失败
     try:
         save_config(cfg)
     except Exception:
         pass  # 预期抛出 CredentialStoreError
 
     # 之前已写入的 username 应回滚为旧值，password 保持旧值
-    assert failing.values.get("openlist_username") == "ol-user"
-    assert failing.values.get("openlist_password") == "ol-pass"
+    assert failing.values.get("openlist_username") == OL_USER
+    assert failing.values.get("openlist_password") == OL_PASS
     # 配置 JSON 未被写坏（原子写未执行或失败）
     saved = json.loads(config_file.read_text(encoding="utf-8"))
     assert saved.get("openlist_password", "") == ""
@@ -182,7 +198,7 @@ def test_ol3_credential_write_failure_preserves_previous_values(monkeypatch, tmp
 def test_ol3_json_write_failure_rolls_back_credentials(monkeypatch, tmp_path):
     """JSON 写失败 → 凭据恢复旧值（preflight + compensation rollback）。"""
     store, config_file = enable_fake_store(monkeypatch, tmp_path)
-    save_config(AppConfig(openlist_username="ol-user", openlist_password="ol-pass"))
+    save_config(AppConfig(openlist_username=OL_USER, openlist_password=OL_PASS))
 
 
     def failing_write(path, payload):
@@ -191,15 +207,15 @@ def test_ol3_json_write_failure_rolls_back_credentials(monkeypatch, tmp_path):
     monkeypatch.setattr(config_module, "write_json_atomic", failing_write)
     invalidate_config_cache()
     cfg = load_config(force_reload=True)
-    cfg.openlist_password = "new-pass"
+    cfg.openlist_password = OL_PASS_NEW
     try:
         save_config(cfg)
     except OSError:
         pass  # 预期抛出
 
     # 凭据必须恢复旧值
-    assert store.values.get("openlist_username") == "ol-user"
-    assert store.values.get("openlist_password") == "ol-pass"
+    assert store.values.get("openlist_username") == OL_USER
+    assert store.values.get("openlist_password") == OL_PASS
 
 # ============================================================
 # REWORK：Credential Store 恢复后的 KEEP 语义与安全存储隔离
@@ -227,11 +243,11 @@ class PartialFailStore(FakeCredentialStore):
 
 def _seed_all_credentials(store) -> None:
     store.values.update({
-        "tmdb_bearer_token": "tmdb-secret",
-        "deepseek_api_key": "deepseek-secret",
-        "bangumi_access_token": "bangumi-secret",
-        "openlist_username": "ol-user",
-        "openlist_password": "ol-pass",
+        "tmdb_bearer_token": TMDB_TOKEN,
+        "deepseek_api_key": DEEPSEEK_KEY,
+        "bangumi_access_token": BANGUMI_TOKEN,
+        "openlist_username": OL_USER,
+        "openlist_password": OL_PASS,
     })
 
 
@@ -245,10 +261,10 @@ def test_rework_stale_cache_after_recovery_keeps_all_credentials(monkeypatch, tm
     """
     store, config_file = enable_fake_store(monkeypatch, tmp_path)
     _seed_all_credentials(store)
-    save_config(AppConfig(openlist_username="ol-user", openlist_password="ol-pass",
-                          tmdb_bearer_token="tmdb-secret",
-                          deepseek_api_key="deepseek-secret",
-                          bangumi_access_token="bangumi-secret"))
+    save_config(AppConfig(openlist_username=OL_USER, openlist_password=OL_PASS,
+                          tmdb_bearer_token=TMDB_TOKEN,
+                          deepseek_api_key=DEEPSEEK_KEY,
+                          bangumi_access_token=BANGUMI_TOKEN))
 
     # 保存路径使用跟踪 store（记录 write/delete 调用；seed 真实值）
     writes: list[str] = []
@@ -290,13 +306,13 @@ def test_rework_stale_cache_after_recovery_keeps_all_credentials(monkeypatch, tm
     assert writes == []
     assert deletes == []
     # 保存 store 中所有凭据完全不变
-    assert tracking.values.get("openlist_username") == "ol-user"
-    assert tracking.values.get("openlist_password") == "ol-pass"
-    assert tracking.values.get("tmdb_bearer_token") == "tmdb-secret"
-    assert tracking.values.get("deepseek_api_key") == "deepseek-secret"
-    assert tracking.values.get("bangumi_access_token") == "bangumi-secret"
+    assert tracking.values.get("openlist_username") == OL_USER
+    assert tracking.values.get("openlist_password") == OL_PASS
+    assert tracking.values.get("tmdb_bearer_token") == TMDB_TOKEN
+    assert tracking.values.get("deepseek_api_key") == DEEPSEEK_KEY
+    assert tracking.values.get("bangumi_access_token") == BANGUMI_TOKEN
     # seed store 同样不变（原始凭据未被删除）
-    assert store.values.get("bangumi_access_token") == "bangumi-secret"
+    assert store.values.get("bangumi_access_token") == BANGUMI_TOKEN
 
 def test_rework_resolver_reads_recovered_store_when_cache_blank(monkeypatch, tmp_path):
     """CM hydrate 失败 → 恢复 → cached 为空但 resolver 必须回源读到真实凭据。
@@ -306,7 +322,7 @@ def test_rework_resolver_reads_recovered_store_when_cache_blank(monkeypatch, tmp
     """
     store, config_file = enable_fake_store(monkeypatch, tmp_path)
     _seed_all_credentials(store)
-    save_config(AppConfig(openlist_username="ol-user", openlist_password="ol-pass"))
+    save_config(AppConfig(openlist_username=OL_USER, openlist_password=OL_PASS))
 
     # 模拟 hydrate 失败：load 时 store read 失败 → cache 中凭据为空
     partial = PartialFailStore("openlist_username", seed=dict(store.values))
@@ -324,14 +340,14 @@ def test_rework_resolver_reads_recovered_store_when_cache_blank(monkeypatch, tmp
     # hydrate**，缓存仍是 stale blank；resolver 必须直接回源读到真实凭据
     username, password, state = config_module.resolve_openlist_credentials()
     assert state == "found"
-    assert username == "ol-user"
-    assert password == "ol-pass"
+    assert username == OL_USER
+    assert password == OL_PASS
 
 def test_rework_resolver_unavailable_never_mutates(monkeypatch, tmp_path):
     """resolver read failure → unavailable，绝不猜 missing、绝不 mutation。"""
     store, config_file = enable_fake_store(monkeypatch, tmp_path)
     _seed_all_credentials(store)
-    save_config(AppConfig(openlist_username="ol-user", openlist_password="ol-pass"))
+    save_config(AppConfig(openlist_username=OL_USER, openlist_password=OL_PASS))
 
     class AlwaysFailStore(FakeCredentialStore):
         def read(self, name: str) -> str:
@@ -350,9 +366,9 @@ def test_rework_resolver_unavailable_never_mutates(monkeypatch, tmp_path):
     assert state == "unavailable"
     assert username == "" and password == ""
     # 存储未被写入或删除任何值
-    assert store.values.get("openlist_username") == "ol-user"
-    assert store.values.get("openlist_password") == "ol-pass"
-    assert store.values.get("tmdb_bearer_token") == "tmdb-secret"
+    assert store.values.get("openlist_username") == OL_USER
+    assert store.values.get("openlist_password") == OL_PASS
+    assert store.values.get("tmdb_bearer_token") == TMDB_TOKEN
 
 
 def test_rework_openlist_save_isolated_to_openlist_credentials(monkeypatch, tmp_path):
@@ -360,10 +376,10 @@ def test_rework_openlist_save_isolated_to_openlist_credentials(monkeypatch, tmp_
     其他安全凭据字段不 write、不 delete、值完全不变。"""
     store, config_file = enable_fake_store(monkeypatch, tmp_path)
     _seed_all_credentials(store)
-    save_config(AppConfig(openlist_username="ol-user", openlist_password="ol-pass",
-                          tmdb_bearer_token="tmdb-secret",
-                          deepseek_api_key="deepseek-secret",
-                          bangumi_access_token="bangumi-secret"))
+    save_config(AppConfig(openlist_username=OL_USER, openlist_password=OL_PASS,
+                          tmdb_bearer_token=TMDB_TOKEN,
+                          deepseek_api_key=DEEPSEEK_KEY,
+                          bangumi_access_token=BANGUMI_TOKEN))
 
     writes: list[str] = []
     deletes: list[str] = []
@@ -382,17 +398,17 @@ def test_rework_openlist_save_isolated_to_openlist_credentials(monkeypatch, tmp_
     monkeypatch.setattr(config_module, "SECURE_CREDENTIAL_STORE", tracking)
     invalidate_config_cache()
     cfg = load_config(force_reload=True)
-    cfg.openlist_password = "new-pass"
+    cfg.openlist_password = OL_PASS_NEW
     save_config(cfg)
 
     # OpenList password 被 SET，其余字段零写入、零删除
-    assert tracking.values.get("openlist_password") == "new-pass"
+    assert tracking.values.get("openlist_password") == OL_PASS_NEW
     assert writes == ["openlist_password"]
     assert deletes == []
-    assert tracking.values.get("tmdb_bearer_token") == "tmdb-secret"
-    assert tracking.values.get("deepseek_api_key") == "deepseek-secret"
-    assert tracking.values.get("bangumi_access_token") == "bangumi-secret"
-    assert tracking.values.get("openlist_username") == "ol-user"
+    assert tracking.values.get("tmdb_bearer_token") == TMDB_TOKEN
+    assert tracking.values.get("deepseek_api_key") == DEEPSEEK_KEY
+    assert tracking.values.get("bangumi_access_token") == BANGUMI_TOKEN
+    assert tracking.values.get("openlist_username") == OL_USER
 
 
 def test_rework_clear_token_isolated_to_target_credential(monkeypatch, tmp_path):
@@ -401,10 +417,10 @@ def test_rework_clear_token_isolated_to_target_credential(monkeypatch, tmp_path)
 
     store, config_file = enable_fake_store(monkeypatch, tmp_path)
     _seed_all_credentials(store)
-    save_config(AppConfig(openlist_username="ol-user", openlist_password="ol-pass",
-                          tmdb_bearer_token="tmdb-secret",
-                          deepseek_api_key="deepseek-secret",
-                          bangumi_access_token="bangumi-secret"))
+    save_config(AppConfig(openlist_username=OL_USER, openlist_password=OL_PASS,
+                          tmdb_bearer_token=TMDB_TOKEN,
+                          deepseek_api_key=DEEPSEEK_KEY,
+                          bangumi_access_token=BANGUMI_TOKEN))
 
     writes: list[str] = []
     deletes: list[str] = []
@@ -432,8 +448,7 @@ def test_rework_clear_token_isolated_to_target_credential(monkeypatch, tmp_path)
     assert deletes == ["bangumi_access_token"]
     assert writes == []
     assert "bangumi_access_token" not in tracking.values
-    assert tracking.values.get("tmdb_bearer_token") == "tmdb-secret"
-    assert tracking.values.get("deepseek_api_key") == "deepseek-secret"
-    assert tracking.values.get("openlist_username") == "ol-user"
-    assert tracking.values.get("openlist_password") == "ol-pass"
-
+    assert tracking.values.get("tmdb_bearer_token") == TMDB_TOKEN
+    assert tracking.values.get("deepseek_api_key") == DEEPSEEK_KEY
+    assert tracking.values.get("openlist_username") == OL_USER
+    assert tracking.values.get("openlist_password") == OL_PASS

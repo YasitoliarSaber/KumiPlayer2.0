@@ -74,24 +74,32 @@ def test_config_mask_short_value():
     assert public["tmdb_bearer_token"] != "short"
 
 
+def _fake_credential(name: str) -> str:
+    """合成测试凭据：仅存在于测试进程内的占位值，不对应任何真实密钥。"""
+
+    return "kumi-test-fixture:" + name.replace("_", "-")
+
+
 def test_config_mask_deepseek_key():
     """测试 deepseek_api_key 脱敏"""
     from app.core.config import AppConfig
 
-    config = AppConfig(deepseek_api_key="sk-1234567890abcdef")
+    key = _fake_credential("deepseek_api_key")
+    config = AppConfig(deepseek_api_key=key)
     public = config.to_public_dict()
-    assert public["deepseek_api_key"] == "sk-12345..."
-    assert "567890" not in public["deepseek_api_key"]
+    assert public["deepseek_api_key"] == key[:8] + "..."
+    assert key[8:] not in public["deepseek_api_key"]
 
 
 def test_config_mask_bangumi_token():
     """测试 bangumi_access_token 脱敏"""
     from app.core.config import AppConfig
 
-    config = AppConfig(bangumi_access_token="bgm-token-abcdef")
+    token = _fake_credential("bangumi_access_token")
+    config = AppConfig(bangumi_access_token=token)
     public = config.to_public_dict()
-    assert public["bangumi_access_token"] == "bgm-toke..."
-    assert "abcdef" not in public["bangumi_access_token"]
+    assert public["bangumi_access_token"] == token[:8] + "..."
+    assert token[8:] not in public["bangumi_access_token"]
 
 
 def test_config_series_card_image_mode_public():

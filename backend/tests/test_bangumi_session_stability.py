@@ -30,6 +30,12 @@ from app.integrations.bangumi import (
 SESSION_URL = "/api/integrations/bangumi/session"
 
 
+def _fake_token(name: str) -> str:
+    """合成测试凭据：仅存在于测试进程内的占位值，不对应任何真实密钥。"""
+
+    return "kumi-test-fixture:" + name.replace("_", "-")
+
+
 class _FakeCredentialStore:
     """替代 SECURE_CREDENTIAL_STORE：绝不让测试触碰真实 Windows Credential Manager。"""
 
@@ -457,14 +463,14 @@ class TestRequestDiagnostics:
 
         self._fake_httpx(monkeypatch, [401])
         client = bg.BangumiClient(
-            access_token="SECRET-TOKEN-12345", base_url="https://api.bgm.tv"
+            access_token=_fake_token("bangumi_access_token"), base_url="https://api.bgm.tv"
         )
         with pytest.raises(bg.BangumiError) as exc:
             client.get_me(purpose="session_verify")
         assert exc.value.error_code == bg.AUTH_INVALID
 
         content = self._log_text()
-        assert "SECRET-TOKEN-12345" not in content, "日志不得包含 Token"
+        assert _fake_token("bangumi_access_token") not in content, "日志不得包含 Token"
         assert "Authorization" not in content, "日志不得包含 Authorization 头"
         assert "Bearer" not in content
         assert "GET /v0/me purpose=session_verify" in content
@@ -480,7 +486,7 @@ class TestRequestDiagnostics:
 
         self._fake_httpx(monkeypatch, [200, 429])
         client = bg.BangumiClient(
-            access_token="SECRET-TOKEN-12345", base_url="https://api.bgm.tv"
+            access_token=_fake_token("bangumi_access_token"), base_url="https://api.bgm.tv"
         )
         client.get_me(purpose="session_verify")  # 200
         try:
@@ -489,7 +495,7 @@ class TestRequestDiagnostics:
             pass
 
         content = self._log_text()
-        assert "SECRET-TOKEN-12345" not in content
+        assert _fake_token("bangumi_access_token") not in content
         assert "Bearer" not in content
         assert "GET /v0/me purpose=session_verify status=200 error=ok" in content
         assert "status=429" in content
@@ -576,7 +582,7 @@ class TestCredentialRecoveryAndSafety:
             available = True
 
             def __init__(self):
-                self.values = {"bangumi_access_token": "real-token"}
+                self.values = {"bangumi_access_token": _fake_token("bangumi_access_token")}
                 self.deleted: list[str] = []
 
             def read(self, name: str) -> str:
@@ -607,7 +613,7 @@ class TestCredentialRecoveryAndSafety:
         config.series_card_image_mode = "fanart"
         save_config(config)
         assert store.deleted == [], "保存无关配置不得触发凭据删除"
-        assert store.values.get("bangumi_access_token") == "real-token", "凭据必须保留"
+        assert store.values.get("bangumi_access_token") == _fake_token("bangumi_access_token"), "凭据必须保留"
 
         # 显式清除（用户退出）仍然工作
         save_config(config, cleared_keys={"bangumi_access_token"})
@@ -763,8 +769,8 @@ class TestRuntimeCredentialResolver:
 
             def __init__(self):
                 self.values = {
-                    "bangumi_access_token": "bangumi-tok",
-                    "tmdb_bearer_token": "tmdb-key",
+                    "bangumi_access_token": _fake_token("bangumi_access_token"),
+                    "tmdb_bearer_token": _fake_token("tmdb_bearer_token"),
                 }
                 self.deleted: list[str] = []
 
@@ -789,4 +795,4 @@ class TestRuntimeCredentialResolver:
         save_config(config, cleared_keys={"bangumi_access_token"})
         assert store.deleted == ["bangumi_access_token"], "只允许删除被显式指定的凭据"
         assert "bangumi_access_token" not in store.values
-        assert store.values["tmdb_bearer_token"] == "tmdb-key", "其他 secure credential 必须保持不变"
+        assert store.values["tmdb_bearer_token"] == _fake_token("tmdb_bearer_token"), "其他 secure credential 必须保持不变"

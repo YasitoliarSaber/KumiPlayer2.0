@@ -31,6 +31,12 @@ from app.integrations.openlist.connection import probe_openlist_connection
 from app.integrations.openlist.governor import OpenListRequestGovernor
 
 
+def _fake_credential(name: str) -> str:
+    """合成测试凭据：仅存在于测试进程内的占位值，不对应任何真实密钥。"""
+
+    return "kumi-test-fixture:" + name.replace("_", "-")
+
+
 def _json_response(status: int = 200, payload: dict | None = None) -> httpx.Response:
     return httpx.Response(status, json=payload or {}, request=httpx.Request("POST", "http://test"))
 
@@ -193,7 +199,7 @@ class TestMatrixK:
                 server_url="https://ol.example.com",
                 remote_root="/",
                 username="user",
-                password="secret-pass",
+                password=_fake_credential("openlist_password"),
                 allow_insecure_http=False,
             )
         finally:
@@ -226,7 +232,7 @@ class TestProbePoolIsolation:
                 server_url="https://ol.example.com",
                 remote_root="/",
                 username="user",
-                password="secret-pass",
+                password=_fake_credential("openlist_password"),
                 allow_insecure_http=False,
             )
         finally:

@@ -10,6 +10,17 @@ from app.core.config import AppConfig, invalidate_config_cache, load_config, sav
 from app.main import app
 
 
+def _fake_credential(name: str) -> str:
+    """合成测试凭据：仅存在于测试进程内的占位值，不对应任何真实密钥。"""
+
+    return "kumi-test-fixture:" + name.replace("_", "-")
+
+
+BANGUMI_TOKEN = _fake_credential("bangumi_access_token")
+DEEPSEEK_KEY = _fake_credential("deepseek_api_key")
+DEEPSEEK_KEY_NEW = _fake_credential("deepseek_api_key_new")
+
+
 @pytest.fixture
 def client():
     """创建测试客户端"""
@@ -52,7 +63,7 @@ class TestGetConfig:
         # 写入带 token 的配置
         config = AppConfig(
             tmdb_bearer_token="sk-1234567890abcdef",
-            deepseek_api_key="dk-abcdef1234567890",
+            deepseek_api_key=DEEPSEEK_KEY,
         )
         save_config(config)
 
@@ -63,7 +74,7 @@ class TestGetConfig:
         assert data["tmdb_bearer_token"] != "sk-1234567890abcdef"
         assert "..." in data["tmdb_bearer_token"]
 
-        assert data["deepseek_api_key"] != "dk-abcdef1234567890"
+        assert data["deepseek_api_key"] != DEEPSEEK_KEY
         assert "..." in data["deepseek_api_key"]
 
     def test_empty_sensitive_fields_not_masked(self, client, temp_config):
@@ -245,13 +256,13 @@ class TestFirstRunSetup:
                 "mpv_path": str(mpv_path),
                 "mirror_dir": str(mirror_dir),
                 "local_root": str(media_root),
-                "bangumi_access_token": "bangumi-personal-token",
+                "bangumi_access_token": BANGUMI_TOKEN,
             })
 
         assert response.status_code == 200
-        bangumi_client.assert_called_once_with(access_token="bangumi-personal-token", timeout=12.0)
+        bangumi_client.assert_called_once_with(access_token=BANGUMI_TOKEN, timeout=12.0)
         saved = json.loads(temp_config.read_text(encoding="utf-8"))
-        assert saved["bangumi_access_token"] == "bangumi-personal-token"
+        assert saved["bangumi_access_token"] == BANGUMI_TOKEN
 
     @patch("app.api.config.check_mpv_runtime")
     def test_setup_complete_explains_when_tmdb_v3_api_key_is_pasted(self, mock_run, client, temp_config, tmp_path):
@@ -337,7 +348,7 @@ class TestPatchConfig:
         """账号与新密码一起提交可通过"""
         resp = client.patch("/api/config", json={
             "openlist_username": "new_user",
-            "openlist_password": "new_password",
+            "openlist_password": _fake_credential("openlist_password_new"),
         })
         assert resp.status_code == 200
 
@@ -613,7 +624,7 @@ class TestTestDeepseek:
         mock_resp.status_code = 200
         mock_get.return_value = mock_resp
 
-        config = AppConfig(deepseek_api_key="valid-key")
+        config = AppConfig(deepseek_api_key=DEEPSEEK_KEY_NEW)
         save_config(config)
 
         resp = client.post("/api/config/test/deepseek")

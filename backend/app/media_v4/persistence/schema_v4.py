@@ -12,15 +12,21 @@ V4_SCHEMA_VERSION = 16
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
-    """在调用方事务中创建完整 V4 表结构。"""
+    """在调用方事务中创建完整 V4 表结构。
 
-    statements = (
+    所有 DDL 都是字面量并按固定顺序逐条执行；调用方负责事务边界，
+    任何一条失败都可整体回滚，不会留下半套结构。
+    """
+
+    conn.execute(
         """
         CREATE TABLE v4_meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE source_health (
             source_id TEXT PRIMARY KEY,
@@ -32,8 +38,10 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             last_success_at REAL NOT NULL DEFAULT 0,
             updated_at REAL NOT NULL DEFAULT 0
         )
-        """,
-        "CREATE INDEX idx_v4_source_health_state ON source_health(state)",
+        """
+    )
+    conn.execute("CREATE INDEX idx_v4_source_health_state ON source_health(state)")
+    conn.execute(
         """
         CREATE TABLE openlist_telemetry (
             conn_hash TEXT NOT NULL,
@@ -42,7 +50,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             count INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (conn_hash, day, operation)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE source_roots (
             root_id TEXT PRIMARY KEY,
@@ -60,7 +70,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE source_scans (
             scan_id TEXT PRIMARY KEY,
@@ -77,7 +89,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             error TEXT NOT NULL DEFAULT '',
             UNIQUE(root_id, generation)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE source_evidence (
             evidence_id TEXT PRIMARY KEY,
@@ -103,7 +117,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             presence_state TEXT NOT NULL DEFAULT 'present',
             UNIQUE(scan_id, source_key)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE parsed_facts (
             parsed_fact_id TEXT PRIMARY KEY,
@@ -141,7 +157,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             reasons_json TEXT NOT NULL DEFAULT '[]',
             warnings_json TEXT NOT NULL DEFAULT '[]'
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE works (
             work_id TEXT PRIMARY KEY,
@@ -154,7 +172,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE work_overrides (
             work_id TEXT PRIMARY KEY,
@@ -162,7 +182,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE work_aliases (
             work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE CASCADE,
@@ -171,7 +193,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             alias_type TEXT NOT NULL DEFAULT 'alternate',
             PRIMARY KEY(work_id, normalized_title, language)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE work_source_bindings (
             work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE CASCADE,
@@ -181,7 +205,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             binding_source TEXT NOT NULL DEFAULT 'resolver',
             PRIMARY KEY(work_id, root_id, structural_key)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE provider_bindings (
             work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE CASCADE,
@@ -191,7 +217,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             PRIMARY KEY(provider, media_type, provider_id),
             UNIQUE(work_id, provider, media_type)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE seasons (
             season_id TEXT PRIMARY KEY,
@@ -201,7 +229,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             title TEXT NOT NULL DEFAULT '',
             UNIQUE(work_id, local_season_number, season_kind)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE season_provider_mappings (
             season_id TEXT NOT NULL REFERENCES seasons(season_id) ON DELETE CASCADE,
@@ -210,7 +240,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             provider_season_id TEXT NOT NULL DEFAULT '',
             PRIMARY KEY(season_id, provider)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE episodes (
             episode_id TEXT PRIMARY KEY,
@@ -222,7 +254,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             episode_kind TEXT NOT NULL DEFAULT 'regular',
             display_title TEXT NOT NULL DEFAULT ''
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE episode_provider_mappings (
             episode_id TEXT NOT NULL REFERENCES episodes(episode_id) ON DELETE CASCADE,
@@ -232,7 +266,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             provider_episode_id TEXT NOT NULL DEFAULT '',
             PRIMARY KEY(episode_id, provider)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE editions (
             edition_id TEXT PRIMARY KEY,
@@ -246,7 +282,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             UNIQUE(episode_id, edition_key),
             UNIQUE(work_id, edition_key)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE assets (
             asset_id TEXT PRIMARY KEY,
@@ -265,7 +303,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             availability_state TEXT NOT NULL DEFAULT 'available',
             UNIQUE(evidence_id)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE episode_assets (
             episode_id TEXT NOT NULL REFERENCES episodes(episode_id) ON DELETE CASCADE,
@@ -275,7 +315,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             preference_rank INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(episode_id, asset_id)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE work_assets (
             work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE CASCADE,
@@ -285,7 +327,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             preference_rank INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(work_id, asset_id)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE import_revisions (
             revision_id TEXT PRIMARY KEY,
@@ -298,7 +342,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             confirmed_at TEXT NOT NULL DEFAULT ''
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE revision_evidence (
             revision_id TEXT NOT NULL REFERENCES import_revisions(revision_id) ON DELETE CASCADE,
@@ -306,7 +352,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             parsed_fact_id TEXT NOT NULL REFERENCES parsed_facts(parsed_fact_id) ON DELETE RESTRICT,
             PRIMARY KEY(revision_id, evidence_id)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE revision_bindings (
             binding_id TEXT PRIMARY KEY,
@@ -323,7 +371,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             override_json TEXT NOT NULL DEFAULT '{}',
             UNIQUE(revision_id, evidence_id, episode_id, edition_id, asset_id)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE revision_issues (
             revision_id TEXT NOT NULL REFERENCES import_revisions(revision_id) ON DELETE CASCADE,
@@ -334,7 +384,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             resolved INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(revision_id, issue_id)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE revision_overrides (
             revision_id TEXT NOT NULL REFERENCES import_revisions(revision_id) ON DELETE CASCADE,
@@ -343,7 +395,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             PRIMARY KEY(revision_id, evidence_id)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE scrape_bindings (
             binding_id TEXT PRIMARY KEY,
@@ -357,7 +411,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL,
             UNIQUE(revision_id, work_id, provider)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE jobs (
             job_id TEXT PRIMARY KEY,
@@ -376,7 +432,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE artifacts (
             artifact_id TEXT PRIMARY KEY,
@@ -390,7 +448,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL,
             UNIQUE(revision_id, artifact_type, target_path)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE library_generations (
             generation_id TEXT PRIMARY KEY,
@@ -399,7 +459,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             published_at TEXT NOT NULL DEFAULT ''
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE library_cards (
             generation_id TEXT NOT NULL REFERENCES library_generations(generation_id) ON DELETE CASCADE,
@@ -412,7 +474,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             metadata_json TEXT NOT NULL DEFAULT '{}',
             PRIMARY KEY(generation_id, work_id)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE playback_progress (
             episode_id TEXT NOT NULL,
@@ -424,7 +488,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL,
             PRIMARY KEY(episode_id, asset_id)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE playback_history (
             event_id TEXT PRIMARY KEY,
@@ -437,7 +503,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             episode_snapshot TEXT NOT NULL DEFAULT '',
             source_provider TEXT NOT NULL DEFAULT ''
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE tracking_states (
             work_id TEXT NOT NULL,
@@ -448,35 +516,45 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL,
             PRIMARY KEY(work_id, provider)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TRIGGER v4_source_evidence_immutable_update
         BEFORE UPDATE ON source_evidence
         BEGIN
             SELECT RAISE(ABORT, 'source_evidence is immutable');
         END
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TRIGGER v4_source_evidence_immutable_delete
         BEFORE DELETE ON source_evidence
         BEGIN
             SELECT RAISE(ABORT, 'source_evidence is immutable');
         END
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TRIGGER v4_parsed_facts_immutable_update
         BEFORE UPDATE ON parsed_facts
         BEGIN
             SELECT RAISE(ABORT, 'parsed_facts is immutable');
         END
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TRIGGER v4_parsed_facts_immutable_delete
         BEFORE DELETE ON parsed_facts
         BEGIN
             SELECT RAISE(ABORT, 'parsed_facts is immutable');
         END
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TRIGGER v4_confirmed_binding_update_guard
         BEFORE UPDATE ON revision_bindings
@@ -487,7 +565,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         BEGIN
             SELECT RAISE(ABORT, 'confirmed revision bindings are immutable');
         END
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TRIGGER v4_confirmed_binding_delete_guard
         BEFORE DELETE ON revision_bindings
@@ -498,7 +578,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         BEGIN
             SELECT RAISE(ABORT, 'confirmed revision bindings are immutable');
         END
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TRIGGER v4_confirmed_evidence_update_guard
         BEFORE UPDATE ON revision_evidence
@@ -509,7 +591,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         BEGIN
             SELECT RAISE(ABORT, 'confirmed revision evidence is immutable');
         END
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TRIGGER v4_confirmed_evidence_delete_guard
         BEFORE DELETE ON revision_evidence
@@ -520,7 +604,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         BEGIN
             SELECT RAISE(ABORT, 'confirmed revision evidence is immutable');
         END
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TRIGGER v4_confirmed_override_write_guard
         BEFORE INSERT ON revision_overrides
@@ -531,7 +617,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         BEGIN
             SELECT RAISE(ABORT, 'only draft revision accepts overrides');
         END
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TRIGGER v4_confirmed_override_update_guard
         BEFORE UPDATE ON revision_overrides
@@ -542,7 +630,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         BEGIN
             SELECT RAISE(ABORT, 'only draft revision accepts overrides');
         END
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TRIGGER v4_confirmed_override_delete_guard
         BEFORE DELETE ON revision_overrides
@@ -553,7 +643,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         BEGIN
             SELECT RAISE(ABORT, 'only draft revision accepts overrides');
         END
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TRIGGER v4_confirmed_revision_snapshot_guard
         BEFORE UPDATE ON import_revisions
@@ -567,7 +659,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         BEGIN
             SELECT RAISE(ABORT, 'confirmed revision snapshot is immutable');
         END
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TRIGGER v4_confirmed_revision_delete_guard
         BEFORE DELETE ON import_revisions
@@ -575,8 +669,10 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         BEGIN
             SELECT RAISE(ABORT, 'confirmed revision snapshot is immutable');
         END
-        """,
-        "CREATE INDEX idx_v4_evidence_root_scan ON source_evidence(root_id, scan_id)",
+        """
+    )
+    conn.execute("CREATE INDEX idx_v4_evidence_root_scan ON source_evidence(root_id, scan_id)")
+    conn.execute(
         """
         CREATE TABLE tree_scan_validation (
             scan_id TEXT PRIMARY KEY REFERENCES source_scans(scan_id) ON DELETE CASCADE,
@@ -590,7 +686,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             candidates_json TEXT NOT NULL DEFAULT '[]',
             validated_at TEXT NOT NULL
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE work_relations (
             relation_id TEXT PRIMARY KEY,
@@ -599,7 +697,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             relation_type TEXT NOT NULL DEFAULT 'related',
             UNIQUE(parent_work_id, child_work_id, relation_type)
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE revision_work_candidates (
             candidate_id TEXT PRIMARY KEY,
@@ -619,7 +719,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE maintenance_operations (
             operation_id TEXT PRIMARY KEY,
@@ -634,7 +736,9 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
-        """,
+        """
+    )
+    conn.execute(
         """
         CREATE TABLE maintenance_operation_items (
             item_id TEXT PRIMARY KEY,
@@ -648,27 +752,29 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             result_error TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL
         )
-        """,
-        "ALTER TABLE source_roots ADD COLUMN root_container TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE works ADD COLUMN show_type TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE works ADD COLUMN card_type TEXT NOT NULL DEFAULT ''",
+        """
+    )
+    conn.execute("ALTER TABLE source_roots ADD COLUMN root_container TEXT NOT NULL DEFAULT ''")
+    conn.execute("ALTER TABLE works ADD COLUMN show_type TEXT NOT NULL DEFAULT ''")
+    conn.execute("ALTER TABLE works ADD COLUMN card_type TEXT NOT NULL DEFAULT ''")
+    conn.execute(
         "CREATE UNIQUE INDEX uq_v4_active_revision_per_root "
-        "ON import_revisions(root_id) WHERE status = 'confirmed'",
-        "CREATE INDEX idx_v4_facts_evidence ON parsed_facts(evidence_id)",
-        "CREATE INDEX idx_v4_seasons_work ON seasons(work_id)",
-        "CREATE INDEX idx_v4_source_bindings_lookup ON work_source_bindings(root_id, structural_key)",
-        "CREATE INDEX idx_v4_episodes_season ON episodes(season_id)",
+        "ON import_revisions(root_id) WHERE status = 'confirmed'"
+    )
+    conn.execute("CREATE INDEX idx_v4_facts_evidence ON parsed_facts(evidence_id)")
+    conn.execute("CREATE INDEX idx_v4_seasons_work ON seasons(work_id)")
+    conn.execute("CREATE INDEX idx_v4_source_bindings_lookup ON work_source_bindings(root_id, structural_key)")
+    conn.execute("CREATE INDEX idx_v4_episodes_season ON episodes(season_id)")
+    conn.execute(
         """
         CREATE UNIQUE INDEX uq_v4_episode_local_identity ON episodes(
             work_id, season_id, COALESCE(local_episode_number, -1),
             COALESCE(special_number, -1), episode_kind
         )
-        """,
-        "CREATE INDEX idx_v4_bindings_revision ON revision_bindings(revision_id)",
-        "CREATE INDEX idx_v4_jobs_status ON jobs(status, updated_at)",
+        """
     )
-    for statement in statements:
-        conn.execute(statement)
+    conn.execute("CREATE INDEX idx_v4_bindings_revision ON revision_bindings(revision_id)")
+    conn.execute("CREATE INDEX idx_v4_jobs_status ON jobs(status, updated_at)")
     conn.execute("INSERT INTO v4_meta(key, value) VALUES ('schema', 'v4')")
     conn.execute("INSERT INTO v4_meta(key, value) VALUES ('backend_data_epoch', '4')")
     create_v12_structures(conn)
@@ -734,18 +840,73 @@ def create_v6_structures(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    _add_column_if_missing(conn, "source_roots", "root_container", "TEXT NOT NULL DEFAULT ''")
-    _add_column_if_missing(conn, "works", "show_type", "TEXT NOT NULL DEFAULT ''")
-    _add_column_if_missing(conn, "works", "card_type", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "source_roots", "root_container")
+    _add_column_if_missing(conn, "works", "show_type")
+    _add_column_if_missing(conn, "works", "card_type")
 
 
-def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str) -> None:
+    """按字面量 DDL 增量补列，已存在时跳过。
+
+    ALTER TABLE 的表名/列名位置不接受绑定参数，因此每条增量列语句都以
+    字面量形式登记在下方分派中；运行时不拼接任何 SQL，新增增量列必须
+    先在这里登记对应字面量。
+    """
+
     columns = {
-        str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
-        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[0])
+        for row in conn.execute("SELECT name FROM pragma_table_info(?)", (table,)).fetchall()
     }
-    if column not in columns:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    if column in columns:
+        return
+    if (table, column) == ("source_roots", "root_container"):
+        conn.execute("ALTER TABLE source_roots ADD COLUMN root_container TEXT NOT NULL DEFAULT ''")
+    elif (table, column) == ("works", "show_type"):
+        conn.execute("ALTER TABLE works ADD COLUMN show_type TEXT NOT NULL DEFAULT ''")
+    elif (table, column) == ("works", "card_type"):
+        conn.execute("ALTER TABLE works ADD COLUMN card_type TEXT NOT NULL DEFAULT ''")
+    elif (table, column) == ("revision_work_candidates", "original_title"):
+        conn.execute("ALTER TABLE revision_work_candidates ADD COLUMN original_title TEXT NOT NULL DEFAULT ''")
+    elif (table, column) == ("revision_work_candidates", "aliases_json"):
+        conn.execute("ALTER TABLE revision_work_candidates ADD COLUMN aliases_json TEXT NOT NULL DEFAULT '[]'")
+    elif (table, column) == ("source_roots", "source_mode"):
+        conn.execute("ALTER TABLE source_roots ADD COLUMN source_mode TEXT NOT NULL DEFAULT ''")
+    elif (table, column) == ("source_roots", "last_scan_mode"):
+        conn.execute("ALTER TABLE source_roots ADD COLUMN last_scan_mode TEXT NOT NULL DEFAULT ''")
+    elif (table, column) == ("source_roots", "retired_at"):
+        conn.execute("ALTER TABLE source_roots ADD COLUMN retired_at TEXT NOT NULL DEFAULT ''")
+    elif (table, column) == ("source_roots", "retired_reason"):
+        conn.execute("ALTER TABLE source_roots ADD COLUMN retired_reason TEXT NOT NULL DEFAULT ''")
+    elif (table, column) == ("maintenance_operations", "digest"):
+        conn.execute("ALTER TABLE maintenance_operations ADD COLUMN digest TEXT NOT NULL DEFAULT ''")
+    elif (table, column) == ("maintenance_operations", "root_ids_json"):
+        conn.execute("ALTER TABLE maintenance_operations ADD COLUMN root_ids_json TEXT NOT NULL DEFAULT '[]'")
+    elif (table, column) == ("maintenance_operations", "mirror_root_identity"):
+        conn.execute("ALTER TABLE maintenance_operations ADD COLUMN mirror_root_identity TEXT NOT NULL DEFAULT ''")
+    elif (table, column) == ("maintenance_operations", "expires_at"):
+        conn.execute("ALTER TABLE maintenance_operations ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''")
+    elif (table, column) == ("parsed_facts", "episode_title"):
+        conn.execute("ALTER TABLE parsed_facts ADD COLUMN episode_title TEXT NOT NULL DEFAULT ''")
+    elif (table, column) == ("source_scans", "stage"):
+        conn.execute("ALTER TABLE source_scans ADD COLUMN stage TEXT NOT NULL DEFAULT 'queued'")
+    elif (table, column) == ("source_scans", "processed_count"):
+        conn.execute("ALTER TABLE source_scans ADD COLUMN processed_count INTEGER NOT NULL DEFAULT 0")
+    elif (table, column) == ("source_scans", "total_count"):
+        conn.execute("ALTER TABLE source_scans ADD COLUMN total_count INTEGER NOT NULL DEFAULT 0")
+    elif (table, column) == ("source_scans", "heartbeat_at"):
+        conn.execute("ALTER TABLE source_scans ADD COLUMN heartbeat_at TEXT NOT NULL DEFAULT ''")
+    elif (table, column) == ("source_scans", "cancel_requested"):
+        conn.execute("ALTER TABLE source_scans ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0")
+    elif (table, column) == ("jobs", "cancel_requested"):
+        conn.execute("ALTER TABLE jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0")
+    elif (table, column) == ("jobs", "heartbeat_at"):
+        conn.execute("ALTER TABLE jobs ADD COLUMN heartbeat_at TEXT NOT NULL DEFAULT ''")
+    elif (table, column) == ("jobs", "started_at"):
+        conn.execute("ALTER TABLE jobs ADD COLUMN started_at TEXT NOT NULL DEFAULT ''")
+    elif (table, column) == ("jobs", "finished_at"):
+        conn.execute("ALTER TABLE jobs ADD COLUMN finished_at TEXT NOT NULL DEFAULT ''")
+    else:
+        raise KeyError(f"未登记的增量列: {table}/{column}，请先在 _add_column_if_missing 登记字面量 DDL")
 
 
 def migrate_schema_v5_to_v6(conn: sqlite3.Connection) -> None:
@@ -757,8 +918,8 @@ def migrate_schema_v5_to_v6(conn: sqlite3.Connection) -> None:
 def migrate_schema_v6_to_v7(conn: sqlite3.Connection) -> None:
     """v6 → v7 增量迁移：revision_work_candidates 增加 original_title / aliases_json。"""
 
-    _add_column_if_missing(conn, "revision_work_candidates", "original_title", "TEXT NOT NULL DEFAULT ''")
-    _add_column_if_missing(conn, "revision_work_candidates", "aliases_json", "TEXT NOT NULL DEFAULT '[]'")
+    _add_column_if_missing(conn, "revision_work_candidates", "original_title")
+    _add_column_if_missing(conn, "revision_work_candidates", "aliases_json")
 
 
 def create_v8_structures(conn: sqlite3.Connection) -> None:
@@ -770,8 +931,8 @@ def create_v8_structures(conn: sqlite3.Connection) -> None:
     第一条证据反推来源卡模式。
     """
 
-    _add_column_if_missing(conn, "source_roots", "source_mode", "TEXT NOT NULL DEFAULT ''")
-    _add_column_if_missing(conn, "source_roots", "last_scan_mode", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "source_roots", "source_mode")
+    _add_column_if_missing(conn, "source_roots", "last_scan_mode")
 
 
 def create_v9_structures(conn: sqlite3.Connection) -> None:
@@ -782,8 +943,8 @@ def create_v9_structures(conn: sqlite3.Connection) -> None:
     maintenance_operations 记录按来源清理的预览/确认结果，支持幂等重入。
     """
 
-    _add_column_if_missing(conn, "source_roots", "retired_at", "TEXT NOT NULL DEFAULT ''")
-    _add_column_if_missing(conn, "source_roots", "retired_reason", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "source_roots", "retired_at")
+    _add_column_if_missing(conn, "source_roots", "retired_reason")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS maintenance_operations (
@@ -837,10 +998,10 @@ def create_v11_structures(conn: sqlite3.Connection) -> None:
     执行结果，服务端执行不再依赖前端回传路径或截断数组。
     """
 
-    _add_column_if_missing(conn, "maintenance_operations", "digest", "TEXT NOT NULL DEFAULT ''")
-    _add_column_if_missing(conn, "maintenance_operations", "root_ids_json", "TEXT NOT NULL DEFAULT '[]'")
-    _add_column_if_missing(conn, "maintenance_operations", "mirror_root_identity", "TEXT NOT NULL DEFAULT ''")
-    _add_column_if_missing(conn, "maintenance_operations", "expires_at", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "maintenance_operations", "digest")
+    _add_column_if_missing(conn, "maintenance_operations", "root_ids_json")
+    _add_column_if_missing(conn, "maintenance_operations", "mirror_root_identity")
+    _add_column_if_missing(conn, "maintenance_operations", "expires_at")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS maintenance_operation_items (
@@ -928,17 +1089,17 @@ def migrate_schema_v12_to_v13(conn: sqlite3.Connection) -> None:
 def migrate_schema_v13_to_v14(conn: sqlite3.Connection) -> None:
     """v13 → v14：ParsedFacts 保存不可变本地剧集标题。"""
 
-    _add_column_if_missing(conn, "parsed_facts", "episode_title", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "parsed_facts", "episode_title")
 
 
 def create_v15_structures(conn: sqlite3.Connection) -> None:
     """v15：SourceScan 持久化阶段、进度、心跳和取消请求。"""
 
-    _add_column_if_missing(conn, "source_scans", "stage", "TEXT NOT NULL DEFAULT 'queued'")
-    _add_column_if_missing(conn, "source_scans", "processed_count", "INTEGER NOT NULL DEFAULT 0")
-    _add_column_if_missing(conn, "source_scans", "total_count", "INTEGER NOT NULL DEFAULT 0")
-    _add_column_if_missing(conn, "source_scans", "heartbeat_at", "TEXT NOT NULL DEFAULT ''")
-    _add_column_if_missing(conn, "source_scans", "cancel_requested", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "source_scans", "stage")
+    _add_column_if_missing(conn, "source_scans", "processed_count")
+    _add_column_if_missing(conn, "source_scans", "total_count")
+    _add_column_if_missing(conn, "source_scans", "heartbeat_at")
+    _add_column_if_missing(conn, "source_scans", "cancel_requested")
 
 
 def migrate_schema_v14_to_v15(conn: sqlite3.Connection) -> None:
@@ -983,10 +1144,10 @@ def migrate_schema_v14_to_v15(conn: sqlite3.Connection) -> None:
 def create_v16_structures(conn: sqlite3.Connection) -> None:
     """v16：V4 outbox 的可终止执行与可恢复心跳字段。"""
 
-    _add_column_if_missing(conn, "jobs", "cancel_requested", "INTEGER NOT NULL DEFAULT 0")
-    _add_column_if_missing(conn, "jobs", "heartbeat_at", "TEXT NOT NULL DEFAULT ''")
-    _add_column_if_missing(conn, "jobs", "started_at", "TEXT NOT NULL DEFAULT ''")
-    _add_column_if_missing(conn, "jobs", "finished_at", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "jobs", "cancel_requested")
+    _add_column_if_missing(conn, "jobs", "heartbeat_at")
+    _add_column_if_missing(conn, "jobs", "started_at")
+    _add_column_if_missing(conn, "jobs", "finished_at")
 
 
 def migrate_schema_v15_to_v16(conn: sqlite3.Connection) -> None:

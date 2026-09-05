@@ -286,11 +286,13 @@ def get_cached_subject_image(url: str):
 
 def _cached_remote_image(url: str, cache_name: str, label: str):
     raw_url = unquote(url).strip()
-    # SSRF 防护：仅放行 Bangumi 官方图片域（lain.bgm.tv），拒绝其他任意 URL。
-    from app.core.url_guard import validate_bangumi_image_url
+    # SSRF 防护：仅放行 Bangumi 官方图片域（lain.bgm.tv），并解析主机拒绝
+    # 私网/环回/链路本地等非公网地址。
+    from app.core.url_guard import assert_public_dns_resolution, validate_bangumi_image_url
 
     try:
-        validate_bangumi_image_url(raw_url)
+        parsed = validate_bangumi_image_url(raw_url)
+        assert_public_dns_resolution(parsed.hostname or "")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"{label}地址不在受信任域名范围内") from exc
     cache_dir = get_cache_dir() / cache_name
@@ -302,8 +304,18 @@ def _cached_remote_image(url: str, cache_name: str, label: str):
     path = cache_dir / f"{digest}{suffix}"
     if not path.exists():
         try:
-            # 拒绝跟随重定向：白名单域内的地址不应跳转到其他主机
-            response = httpx.get(raw_url, timeout=10, follow_redirects=False)
+            # 用白名单校验后的组件重建请求地址：scheme 固定 https、host 取校验
+            # 过的主机名，原始字符串中的解析歧义（反斜杠、@、控制字符）不会
+            # 进入请求；拒绝跟随重定向，白名单域不得跳转到其他主机。
+            components = {
+                "scheme": "https",
+                "host": parsed.hostname,
+                "path": parsed.path or "/",
+            }
+            if parsed.query:
+                components["query"] = parsed.query
+            with httpx.Client(timeout=10, follow_redirects=False) as client:
+                response = client.get(httpx.URL(**components))
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"{label}下载失败: {exc}") from exc

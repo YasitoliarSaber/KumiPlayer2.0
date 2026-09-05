@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -49,6 +50,9 @@ class V4Database:
     """轻量 V4 数据库句柄；每次 connect 返回独立连接。"""
 
     CURRENT_SCHEMA_VERSION = V4_SCHEMA_VERSION
+    # PRAGMA user_version 的值位置不接受绑定参数（SQLite 语法限制），只能在
+    # _set_user_version 内写字面量；文件末尾的模块级校验保证它与
+    # CURRENT_SCHEMA_VERSION 不漂移。
     REQUIRED_TABLES = frozenset(
         {
             "v4_meta",
@@ -126,6 +130,21 @@ class V4Database:
         conn.execute("PRAGMA busy_timeout = 5000")
         return conn
 
+    @staticmethod
+    def _set_user_version(conn: sqlite3.Connection) -> None:
+        """写入当前 schema 版本号。
+
+        PRAGMA user_version 的值位置不接受绑定参数（SQLite 语法限制），只能
+        使用字面量；写回后立即读回校验，版本升级时若字面量未同步会立即失败。
+        """
+
+        conn.execute("PRAGMA user_version = 16")
+        written = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if written != V4_SCHEMA_VERSION:
+            raise RuntimeError(
+                f"PRAGMA user_version 写入值 {written} 与 CURRENT_SCHEMA_VERSION 不一致，请同步更新字面量"
+            )
+
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
         """打开一个短生命周期连接，并在离开作用域时真正关闭它。"""
@@ -133,13 +152,9 @@ class V4Database:
         conn = self.open_connection()
         try:
             yield conn
-        except Exception:
-            conn.rollback()
-            raise
-        else:
-            # 保持 sqlite3.Connection 上下文管理器的直觉语义：调用方只
-            # 需要 ``with database.connect()`` 就能提交普通写入；显式事务
-            # 仍可在块内自行 BEGIN/COMMIT。
+            # 保持 sqlite3.Connection 上下文管理器的直觉语义：调用方只需要
+            # ``with database.connect()`` 就能提交普通写入；显式事务仍可在
+            # 块内自行 BEGIN/COMMIT。
             conn.commit()
         finally:
             conn.close()
@@ -165,7 +180,7 @@ class V4Database:
                 try:
                     migrate_schema_v13_to_v14(conn)
                     migrate_schema_v14_to_v15(conn)
-                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    self._set_user_version(conn)
                     conn.commit()
                 except sqlite3.OperationalError as exc:
                     conn.rollback()
@@ -180,7 +195,7 @@ class V4Database:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     migrate_schema_v14_to_v15(conn)
-                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    self._set_user_version(conn)
                     conn.commit()
                 except sqlite3.OperationalError as exc:
                     conn.rollback()
@@ -197,7 +212,7 @@ class V4Database:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     migrate_schema_v15_to_v16(conn)
-                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    self._set_user_version(conn)
                     conn.commit()
                 except sqlite3.OperationalError as exc:
                     conn.rollback()
@@ -214,7 +229,7 @@ class V4Database:
                     migrate_schema_v12_to_v13(conn)
                     migrate_schema_v13_to_v14(conn)
                     migrate_schema_v14_to_v15(conn)
-                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    self._set_user_version(conn)
                     conn.commit()
                 except sqlite3.OperationalError as exc:
                     conn.rollback()
@@ -233,7 +248,7 @@ class V4Database:
                     migrate_schema_v12_to_v13(conn)
                     migrate_schema_v13_to_v14(conn)
                     migrate_schema_v14_to_v15(conn)
-                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    self._set_user_version(conn)
                     conn.commit()
                 except sqlite3.OperationalError as exc:
                     conn.rollback()
@@ -253,7 +268,7 @@ class V4Database:
                     migrate_schema_v12_to_v13(conn)
                     migrate_schema_v13_to_v14(conn)
                     migrate_schema_v14_to_v15(conn)
-                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    self._set_user_version(conn)
                     conn.commit()
                 except sqlite3.OperationalError as exc:
                     conn.rollback()
@@ -274,7 +289,7 @@ class V4Database:
                     migrate_schema_v12_to_v13(conn)
                     migrate_schema_v13_to_v14(conn)
                     migrate_schema_v14_to_v15(conn)
-                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    self._set_user_version(conn)
                     conn.commit()
                 except sqlite3.OperationalError as exc:
                     conn.rollback()
@@ -296,7 +311,7 @@ class V4Database:
                     migrate_schema_v12_to_v13(conn)
                     migrate_schema_v13_to_v14(conn)
                     migrate_schema_v14_to_v15(conn)
-                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    self._set_user_version(conn)
                     conn.commit()
                 except sqlite3.OperationalError as exc:
                     conn.rollback()
@@ -319,7 +334,7 @@ class V4Database:
                     migrate_schema_v12_to_v13(conn)
                     migrate_schema_v13_to_v14(conn)
                     migrate_schema_v14_to_v15(conn)
-                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    self._set_user_version(conn)
                     conn.commit()
                 except sqlite3.OperationalError as exc:
                     conn.rollback()
@@ -343,7 +358,7 @@ class V4Database:
                     migrate_schema_v12_to_v13(conn)
                     migrate_schema_v13_to_v14(conn)
                     migrate_schema_v14_to_v15(conn)
-                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    self._set_user_version(conn)
                     conn.commit()
                 except sqlite3.OperationalError as exc:
                     conn.rollback()
@@ -368,7 +383,7 @@ class V4Database:
                     migrate_schema_v12_to_v13(conn)
                     migrate_schema_v13_to_v14(conn)
                     migrate_schema_v14_to_v15(conn)
-                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    self._set_user_version(conn)
                     conn.commit()
                 except sqlite3.OperationalError as exc:
                     conn.rollback()
@@ -394,7 +409,7 @@ class V4Database:
                     migrate_schema_v12_to_v13(conn)
                     migrate_schema_v13_to_v14(conn)
                     migrate_schema_v14_to_v15(conn)
-                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    self._set_user_version(conn)
                     conn.commit()
                 except sqlite3.OperationalError as exc:
                     conn.rollback()
@@ -432,7 +447,7 @@ class V4Database:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 create_schema_v4(conn)
-                conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                self._set_user_version(conn)
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -542,7 +557,7 @@ class V4Database:
     def _table_contract(database: sqlite3.Connection, table: str) -> frozenset[tuple]:
         """表逻辑合同：列名/声明类型/NOT NULL/默认值/主键位序，忽略物理列顺序（cid）。"""
 
-        rows = database.execute(f"PRAGMA table_info({table})").fetchall()
+        rows = database.execute("SELECT * FROM pragma_table_info(?)", (table,)).fetchall()
         return frozenset(
             (
                 str(row["name"]),
@@ -558,7 +573,7 @@ class V4Database:
     def _foreign_key_contract(database: sqlite3.Connection, table: str) -> frozenset[tuple[str, str, str, str, str]]:
         """外键逻辑合同：关联表、列与删除/更新动作，忽略内部编号顺序。"""
 
-        rows = database.execute(f"PRAGMA foreign_key_list({table})").fetchall()
+        rows = database.execute("SELECT * FROM pragma_foreign_key_list(?)", (table,)).fetchall()
         return frozenset(
             (
                 str(row["table"]),
@@ -578,13 +593,13 @@ class V4Database:
 
         contracts: list[tuple[str, int, tuple[str, ...]]] = []
         for table in sorted(tables):
-            for index in database.execute(f"PRAGMA index_list({table})").fetchall():
+            for index in database.execute("SELECT * FROM pragma_index_list(?)", (table,)).fetchall():
                 name = str(index["name"])
                 if name.startswith("sqlite_autoindex_"):
                     continue
                 columns = tuple(
                     str(row["name"])
-                    for row in database.execute(f"PRAGMA index_info({name})").fetchall()
+                    for row in database.execute("SELECT * FROM pragma_index_info(?)", (name,)).fetchall()
                 )
                 contracts.append((name, int(index["unique"] or 0), columns))
         return tuple(sorted(contracts))
@@ -597,10 +612,13 @@ class V4Database:
 
         if not trigger_names:
             return frozenset()
-        placeholders = ", ".join("?" for _ in trigger_names)
         rows = database.execute(
-            f"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL AND name IN ({placeholders})",
-            tuple(sorted(trigger_names)),
+            """
+            SELECT name, sql FROM sqlite_master
+            WHERE type = 'trigger' AND sql IS NOT NULL
+              AND name IN (SELECT value FROM json_each(?))
+            """,
+            (json.dumps(sorted(trigger_names)),),
         ).fetchall()
         return frozenset(
             (str(row["name"]), " ".join(str(row["sql"]).split()))
