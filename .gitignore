@@ -108,5 +108,12 @@ reasonix.toml
 skills-lock.json
 generated-images/
 
+# 本地审计、浏览器验证、测试数据库与渲染产物（保留在磁盘，不提交）
+.mimosa/
+.playwright-cli/
+.pytest_tmp/
+output/
+tmp/
+
 # 本地施工文档（不提交）
 施工文档0812/
