@@ -21,6 +21,12 @@ REMOTE_ROOT = "/大媒体库"
 PER_PAGE = 100
 
 
+def _fake_credential(name: str) -> str:
+    """合成测试凭据：仅存在于测试进程内的占位值，不对应任何真实密钥。"""
+
+    return "kumi-test-fixture:" + name.replace("_", "-")
+
+
 def _make_big_tree(count: int) -> dict:
     return {
         REMOTE_ROOT: [
@@ -84,7 +90,7 @@ def _save_config(client: TestClient, tmp_path: Path) -> None:
             "remote_root": REMOTE_ROOT,
             "mount_root": str(tmp_path / "quark"),
             "username": "quark-user",
-            "password": "p@ssw0rd",
+            "password": _fake_credential("openlist_password"),
         },
     )
     assert resp.status_code == 200, resp.text

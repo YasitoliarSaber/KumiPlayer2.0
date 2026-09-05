@@ -182,8 +182,12 @@ def test_draft_does_not_publish_authoritative_media_graph(tmp_path):
 
     with database.connect() as conn:
         counts = {
-            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            for table in ("works", "seasons", "episodes", "editions", "assets", "revision_bindings")
+            "works": conn.execute("SELECT COUNT(*) FROM works").fetchone()[0],
+            "seasons": conn.execute("SELECT COUNT(*) FROM seasons").fetchone()[0],
+            "episodes": conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0],
+            "editions": conn.execute("SELECT COUNT(*) FROM editions").fetchone()[0],
+            "assets": conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0],
+            "revision_bindings": conn.execute("SELECT COUNT(*) FROM revision_bindings").fetchone()[0],
         }
 
     assert counts == {table: 0 for table in counts}

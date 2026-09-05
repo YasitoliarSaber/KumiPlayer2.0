@@ -150,8 +150,11 @@ def test_hiding_a_source_card_preserves_confirmed_media_and_reimport_restores_it
     with database.connect() as conn:
         conn.execute("UPDATE jobs SET status = 'succeeded' WHERE revision_id = ?", ("rev-card",))
         before = {
-            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            for table in ("works", "episodes", "assets", "import_revisions", "revision_bindings")
+            "works": conn.execute("SELECT COUNT(*) FROM works").fetchone()[0],
+            "episodes": conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0],
+            "assets": conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0],
+            "import_revisions": conn.execute("SELECT COUNT(*) FROM import_revisions").fetchone()[0],
+            "revision_bindings": conn.execute("SELECT COUNT(*) FROM revision_bindings").fetchone()[0],
         }
 
     assert len(list_source_cards(database)) == 1
@@ -163,8 +166,11 @@ def test_hiding_a_source_card_preserves_confirmed_media_and_reimport_restores_it
             "SELECT enabled, retired_at FROM source_roots WHERE root_id = ?", ("root-reactivated",)
         ).fetchone()
         after = {
-            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            for table in ("works", "episodes", "assets", "import_revisions", "revision_bindings")
+            "works": conn.execute("SELECT COUNT(*) FROM works").fetchone()[0],
+            "episodes": conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0],
+            "assets": conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0],
+            "import_revisions": conn.execute("SELECT COUNT(*) FROM import_revisions").fetchone()[0],
+            "revision_bindings": conn.execute("SELECT COUNT(*) FROM revision_bindings").fetchone()[0],
         }
     assert root["enabled"] == 0
     assert root["retired_at"] == ""

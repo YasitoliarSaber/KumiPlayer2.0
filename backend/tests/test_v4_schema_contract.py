@@ -76,9 +76,12 @@ def test_existing_old_database_requires_reset_instead_of_implicit_migration(tmp_
 def test_future_database_version_is_rejected(tmp_path):
     from app.media_v4.persistence.database import V4Database
 
+    # PRAGMA user_version 值位置不接受绑定参数，这里用字面量写「未来版本」；
+    # schema 升级时同步更新断言与字面量，防止测试悄悄失去未来语义。
+    assert V4_SCHEMA_VERSION == 16
     path = tmp_path / "future.db"
     with sqlite3.connect(path) as conn:
-        conn.execute(f"PRAGMA user_version = {V4_SCHEMA_VERSION + 1}")
+        conn.execute("PRAGMA user_version = 17")
 
     with pytest.raises(RuntimeError, match="高于当前程序支持"):
         V4Database(path).initialize()

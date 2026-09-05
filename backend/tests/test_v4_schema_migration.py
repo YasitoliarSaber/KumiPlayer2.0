@@ -24,8 +24,8 @@ def _build_v7_database(path) -> None:
         conn.execute("BEGIN IMMEDIATE")
         create_schema_v4(conn)
         create_v6_structures(conn)
-        _add_column_if_missing(conn, "revision_work_candidates", "original_title", "TEXT NOT NULL DEFAULT ''")
-        _add_column_if_missing(conn, "revision_work_candidates", "aliases_json", "TEXT NOT NULL DEFAULT '[]'")
+        _add_column_if_missing(conn, "revision_work_candidates", "original_title")
+        _add_column_if_missing(conn, "revision_work_candidates", "aliases_json")
         conn.execute("PRAGMA user_version = 7")
         conn.commit()
     finally:
@@ -159,8 +159,11 @@ def test_v14_scan_rows_gain_progress_columns_and_backfill(tmp_path):
             "INSERT INTO parsed_facts(parsed_fact_id, evidence_id, parser_version) "
             "VALUES ('facts-v14', 'evidence-v14', 'v14')"
         )
-        for column in ("cancel_requested", "heartbeat_at", "total_count", "processed_count", "stage"):
-            conn.execute(f"ALTER TABLE source_scans DROP COLUMN {column}")
+        conn.execute("ALTER TABLE source_scans DROP COLUMN cancel_requested")
+        conn.execute("ALTER TABLE source_scans DROP COLUMN heartbeat_at")
+        conn.execute("ALTER TABLE source_scans DROP COLUMN total_count")
+        conn.execute("ALTER TABLE source_scans DROP COLUMN processed_count")
+        conn.execute("ALTER TABLE source_scans DROP COLUMN stage")
         conn.execute("PRAGMA user_version = 14")
 
     database.initialize()
