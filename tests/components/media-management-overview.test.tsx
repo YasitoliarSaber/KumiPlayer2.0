@@ -242,3 +242,59 @@ test('维护页的预览和返回操作使用带边框的标准按钮', async ()
   expect(await screen.findByRole('button', { name: '返回媒体管理' })).toHaveClass('media-v4-header-back-button')
   expect(screen.getByRole('button', { name: '生成删除预览' })).toHaveClass('media-v4-maintenance-preview-button')
 })
+
+test('失联扫描任务显示中断文案且不渲染转圈，仍可重新扫描', async () => {
+  api.sourceLibraries.mockResolvedValue({
+    cards: [cardFixture({
+      overall_status: 'needs_attention',
+      phase: 'scan',
+      scan: {
+        scan_id: 'scan-zombie', status: 'running', stage: 'reading_source',
+        stage_label: '上次扫描意外中断，请重新扫描', processed_count: 0, total_count: 0,
+        progress: null, heartbeat_at: '2026-09-04T00:00:00Z', cancel_requested: 0,
+      },
+      active_task: null,
+      progress: {
+        state: 'needs_attention', stage: 'scan', current_work_id: '', current_work_title: '',
+        completed_work_count: 0, total_work_count: 0, percent: null,
+        message: '上次扫描意外中断，请重新扫描',
+      },
+      attention_count: 1,
+      available_actions: ['inspect', 'resume'],
+      can_resume: true,
+    })],
+  })
+  render(<MediaManagementPage />)
+
+  await screen.findByText('115 动画')
+  expect(screen.getByText('上次扫描意外中断，请重新扫描')).toBeVisible()
+  expect(screen.getByText('需要处理')).toBeVisible()
+  expect(screen.queryByRole('button', { name: '终止任务' })).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '重新扫描' })).toBeVisible()
+  expect(screen.getByRole('button', { name: '删除来源卡：115 动画' })).toBeVisible()
+})
+
+test('排队中的扫描任务提供可用的终止按钮', async () => {
+  api.sourceLibraries.mockResolvedValue({
+    cards: [cardFixture({
+      overall_status: 'queued',
+      phase: 'scan',
+      scan: {
+        scan_id: 'scan-queued', status: 'queued', stage: 'queued',
+        stage_label: '准备读取媒体来源', processed_count: 0, total_count: 0,
+        progress: null, heartbeat_at: new Date().toISOString(), cancel_requested: 0,
+      },
+      active_task: {
+        kind: 'scan', revision_id: '', status: 'queued', stage: 'queued',
+        label: '准备读取媒体来源', percent: null, can_cancel: true, cancel_requested: false,
+      },
+      available_actions: ['inspect', 'resume'],
+      can_resume: true,
+    })],
+  })
+  render(<MediaManagementPage />)
+
+  await screen.findByText('115 动画')
+  const terminate = screen.getByRole('button', { name: '终止任务' })
+  expect(terminate).toBeEnabled()
+})

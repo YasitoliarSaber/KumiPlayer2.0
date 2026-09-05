@@ -56,6 +56,7 @@ type DurableScanState = {
   scan_id: string
   root_id: string
   status: string
+  interrupted?: boolean
   error?: string
   evidence_count?: number
   stage?: string
@@ -624,6 +625,11 @@ export default function MediaManagementPage() {
             result = { root_id: state.root_id || task.root_id, scan_id: task.scan_id, entries: [], evidence_count: state.evidence_count ?? (state.entries || []).length, scan_mode: task.scan_mode as 'local' | 'tree_snapshot' | 'tree_baseline' | 'incremental' | 'full', source_mode: task.source_mode || (task.scan_mode === 'incremental' ? openlistBaseline?.source_mode || 'openlist_full' : 'openlist_full') }
             break
           }
+          if (state.interrupted) {
+            // 执行进程已失联：任务即将被恢复器收口，页面必须显示中断
+            // 而不是无限转圈；文案直接采用后端的人类可读阶段描述。
+            throw new Error(state.error || state.stage_label || '上次扫描意外中断，请重新扫描')
+          }
           if (state.status === 'failed' || state.status === 'cancelled') {
             throw new Error(state.error || (state.status === 'cancelled' ? '扫描已取消' : '来源扫描失败'))
           }
@@ -1106,11 +1112,12 @@ export default function MediaManagementPage() {
               ? `${activeTask.label}${activeTask.percent == null ? '' : ` · ${activeTask.percent}%`}`
               : card.overall_status === 'cancelled' ? cancelledLabel
                 : card.phase === 'review' ? '识别结果待确认'
-                  // 详细错误已在卡片的 alert 中单独显示；这里保持一句状态，
-                  // 避免同一错误在小卡片里重复占两行。
-                  : card.overall_status === 'needs_attention' ? '有任务需要处理'
-                    : '上次导入已处理完毕'
-            const resumeLabel = activeTask ? '查看进度' : card.overall_status === 'cancelled' ? (executionTerminated ? '查看执行结果' : '重新扫描') : card.phase === 'review' ? '查看识别结果' : card.can_resume ? '查看进度' : '查看上次导入'
+                  // 失联/失败的扫描任务显示后端的中断与失败文案，不冒充仍在处理。
+                  : card.overall_status === 'needs_attention' && card.phase === 'scan' && card.progress?.message
+                    ? card.progress.message
+                      : card.overall_status === 'needs_attention' ? '有任务需要处理'
+                        : '上次导入已处理完毕'
+            const resumeLabel = activeTask ? '查看进度' : card.overall_status === 'cancelled' ? (executionTerminated ? '查看执行结果' : '重新扫描') : card.overall_status === 'needs_attention' && card.phase === 'scan' ? '重新扫描' : card.phase === 'review' ? '查看识别结果' : card.can_resume ? '查看进度' : '查看上次导入'
             const resumeIcon = activeTask?.kind === 'scan' || card.phase === 'review' ? <DocumentText24Regular /> : <Database24Regular />
             return <article className={`media-v4-library-source-card ${active ? 'active' : 'settled'}`} key={card.root_id}>
               <div className="media-v4-source-card-identity">
