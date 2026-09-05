@@ -432,7 +432,7 @@ def cancel_durable_scan(scan_id: str, *, database: V4Database | None = None) -> 
     if database is not None:
         with database.connect() as conn:
             row = conn.execute(
-                "SELECT status, heartbeat_at FROM source_scans WHERE scan_id = ?",
+                "SELECT status, heartbeat_at, started_at FROM source_scans WHERE scan_id = ?",
                 (scan_id,),
             ).fetchone()
             if row is None or row["status"] not in {"running", "queued", "cancelling"}:
@@ -440,7 +440,7 @@ def cancel_durable_scan(scan_id: str, *, database: V4Database | None = None) -> 
             from app.media_v4.sources.scan_state import scan_is_stale
 
             now_stamp = _now()
-            if row["status"] == "queued" or scan_is_stale(row["heartbeat_at"]):
+            if row["status"] == "queued" or scan_is_stale(row["heartbeat_at"] or row["started_at"]):
                 conn.execute(
                     "UPDATE source_scans SET status = 'cancelled', stage = 'cancelled', "
                     "cancel_requested = 1, finished_at = ?, heartbeat_at = ?, "

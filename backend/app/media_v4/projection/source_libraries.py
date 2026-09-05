@@ -128,11 +128,14 @@ def list_source_cards(database: V4Database) -> list[dict]:
         revision_id = str(active_revision["revision_id"]) if active_revision is not None else ""
         scan_status = str(scan["status"]) if scan is not None else ""
         # 失联判定：running/cancelling 但心跳已过期 = 执行进程已消失。
+        # 旧版本可能没有 heartbeat_at，此时用同一行的 started_at 作为
+        # 保守回退：刚启动的任务仍显示活动，真正陈旧的旧行仍可被回收。
         # 僵尸行不得被渲染成仍在处理，也不得永久阻止卡片操作。
+        scan_heartbeat = str(scan["heartbeat_at"] or scan["started_at"] or "") if scan is not None else ""
         scan_interrupted = (
             scan is not None
             and scan_status in {"running", "cancelling"}
-            and scan_is_stale(str(scan["heartbeat_at"] or ""))
+            and scan_is_stale(scan_heartbeat)
         )
         scan_active = scan_status in {"running", "queued", "cancelling"} and not scan_interrupted
         scan_failed = scan_status in {"failed", "cancelled"}
@@ -322,7 +325,7 @@ def hide_source_card(database: V4Database, root_id: str) -> dict[str, object]:
         if root is None or str(root["retired_at"] or "") or not int(root["enabled"]):
             raise KeyError("来源卡不存在或已移除")
         active_scan_rows = conn.execute(
-            "SELECT status, heartbeat_at FROM source_scans WHERE root_id = ?",
+            "SELECT status, heartbeat_at, started_at FROM source_scans WHERE root_id = ?",
             (normalized_root_id,),
         ).fetchall()
         # queued 一定算活动（下一个 worker 会领取）；running/cancelling 只有
@@ -331,7 +334,7 @@ def hide_source_card(database: V4Database, root_id: str) -> dict[str, object]:
             str(row["status"]) == "queued"
             or (
                 str(row["status"]) in {"running", "cancelling"}
-                and not scan_is_stale(str(row["heartbeat_at"] or ""))
+                and not scan_is_stale(str(row["heartbeat_at"] or row["started_at"] or ""))
             )
             for row in active_scan_rows
         )

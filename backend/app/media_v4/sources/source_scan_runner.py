@@ -15,10 +15,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.persistence.repositories import V4Repository
@@ -35,6 +36,8 @@ from app.media_v4.sources.scan_state import (
     scan_is_stale,
 )
 from app.media_v4.sources.scanner import SourceScanCancelled
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _now() -> str:
@@ -164,10 +167,11 @@ def _finish_scan(
         )
 
 
-def _complete_scan(database: V4Database, scan_id: str) -> None:
+def _complete_scan(database: V4Database, scan_id: str) -> bool:
     """把已领取的扫描落成 completed 终态；processed 以参数绑定写入。
 
-    只允许覆盖运行态：与取消接口的竞态不会把 cancelled 改写成 completed。
+    只允许覆盖运行态：与取消接口的竞态不会把 cancelling/cancelled 改写成
+    completed。返回值用于让调用方在取消刚好并发到达时补做终态收口。
     """
 
     stamp = _now()
@@ -176,15 +180,16 @@ def _complete_scan(database: V4Database, scan_id: str) -> None:
             "SELECT total_count FROM source_scans WHERE scan_id = ?", (scan_id,)
         ).fetchone()
         total = int(row["total_count"] or 0) if row else 0
-        conn.execute(
+        updated = conn.execute(
             """
             UPDATE source_scans
             SET status = 'completed', stage = 'ready', processed_count = ?,
                 finished_at = ?, heartbeat_at = ?, cancel_requested = 0, error = ''
-            WHERE scan_id = ? AND status IN (?, ?)
+            WHERE scan_id = ? AND status = 'running'
             """,
-            (total, stamp, stamp, scan_id, "running", "cancelling"),
+            (total, stamp, stamp, scan_id),
         )
+    return updated.rowcount == 1
 
 
 def get_handler(scan_kind: str):
@@ -198,11 +203,10 @@ def get_handler(scan_kind: str):
 class _ExecutionRuntime:
     """handler 的执行上下文：取消、节流进度与流式证据持久化。"""
 
-    def __init__(self, database: V4Database, scan_id: str, stop_event: threading.Event | None):
+    def __init__(self, database: V4Database, scan_id: str, cancel_event: threading.Event | None):
         self.database = database
         self.scan_id = scan_id
-        self._stop_event = stop_event
-        self._cancel_event = threading.Event()
+        self._cancel_event = cancel_event or threading.Event()
         self.streamed_items = 0
         self._last_progress_ts = 0.0
         self._items_since_write = 0
@@ -210,7 +214,7 @@ class _ExecutionRuntime:
     def cancellation_requested(self) -> bool:
         """内存 Event 是本进程的快速路径，持久化标记是取消的权威。"""
 
-        if self._cancel_event.is_set() or (self._stop_event is not None and self._stop_event.is_set()):
+        if self._cancel_event.is_set():
             return True
         with self.database.connect() as conn:
             row = conn.execute(
@@ -299,7 +303,7 @@ class _ExecutionRuntime:
 
 
 class SourceScanRunner:
-    """轮询领取 queued 扫描并在工作线程内串行执行；停止前完成安全收口。"""
+    """轮询领取 queued 扫描并在工作线程内串行执行。"""
 
     def __init__(
         self,
@@ -315,13 +319,18 @@ class SourceScanRunner:
         self._wake_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._start_lock = threading.Lock()
+        self._active_scan_id: str | None = None
 
     def start(self) -> None:
         with self._start_lock:
             if self._thread is not None and self._thread.is_alive():
                 return
             self._stop_event.clear()
-            self._thread = threading.Thread(target=self._run, name="source-scan-runner")
+            self._thread = threading.Thread(
+                target=self._run,
+                name="source-scan-runner",
+                daemon=True,
+            )
             self._thread.start()
 
     def stop(self, timeout: float = 15.0) -> None:
@@ -330,7 +339,13 @@ class SourceScanRunner:
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=timeout)
-        self._thread = None
+            if thread.is_alive():
+                # 超时意味着进程即将退出但 handler 仍未返回。保留 running
+                # 及其全部检查点，只把心跳推进到 stale 窗口之外，让下一
+                # 个进程可以立即按既有恢复分支接管，而不伪造用户取消。
+                self._mark_active_scan_interrupted()
+        if thread is None or not thread.is_alive():
+            self._thread = None
 
     def wake(self) -> None:
         """API 登记新任务后唤醒 worker；worker 未启动时惰性自启（幂等）。"""
@@ -347,9 +362,26 @@ class SourceScanRunner:
                     self.run_scan(task)
                     continue
             except Exception:  # noqa: BLE001 - worker 绝不允许死亡
-                pass
+                _LOGGER.exception("source scan worker loop failed")
+                self._wake_event.wait(timeout=max(self.poll_interval, 1.0))
             self._wake_event.wait(timeout=self.poll_interval)
             self._wake_event.clear()
+
+    def _mark_active_scan_interrupted(self) -> None:
+        """停机超时后让当前扫描可被下一进程立即识别为失联。"""
+
+        scan_id = self._active_scan_id
+        if not scan_id:
+            return
+        stale_stamp = (
+            datetime.now(UTC) - timedelta(seconds=max(1, self.stale_after) + 1)
+        ).isoformat()
+        with self.database.connect() as conn:
+            conn.execute(
+                "UPDATE source_scans SET heartbeat_at = ? "
+                "WHERE scan_id = ? AND status IN ('running', 'cancelling')",
+                (stale_stamp, scan_id),
+            )
 
     def claim_next_scan(self) -> ScanTask | None:
         """在写事务内 SELECT + 条件 UPDATE 原子领取；失败表示已有执行者。"""
@@ -394,7 +426,10 @@ class SourceScanRunner:
     def run_scan(self, task: ScanTask) -> None:
         """执行一个已领取的扫描；终态写入与异常收口都集中在这里。"""
 
-        runtime = _ExecutionRuntime(self.database, task.scan_id, self._stop_event)
+        # runner.stop() 只表示应用生命周期结束，不是用户取消。真正的取消
+        # 信号来自 source_scans.cancel_requested，避免正常关窗伪造 cancelled。
+        self._active_scan_id = task.scan_id
+        runtime = _ExecutionRuntime(self.database, task.scan_id, None)
         try:
             _update_scan_progress(self.database, task.scan_id, stage="reading_source")
             handler = get_handler(task.scan_kind)
@@ -408,13 +443,16 @@ class SourceScanRunner:
             if runtime.cancellation_requested():
                 raise _CancelledScan()
             self._run_finalizer(task, runtime, evidence)
-            _complete_scan(self.database, task.scan_id)
+            if not _complete_scan(self.database, task.scan_id):
+                _finish_scan(self.database, task.scan_id, status="cancelled", error="用户已取消扫描")
         except (SourceScanCancelled, _CancelledScan):
             _finish_scan(self.database, task.scan_id, status="cancelled", error="用户已取消扫描")
         except Exception as exc:  # noqa: BLE001 - 执行器必须写明确终态
             _finish_scan(self.database, task.scan_id, status="failed", error=str(exc)[:400])
         finally:
             runtime.close()
+            if self._active_scan_id == task.scan_id:
+                self._active_scan_id = None
 
     def _settled_evidence(self, task: ScanTask, runtime: _ExecutionRuntime, returned) -> list:
         """扫描阶段结束后的证据全集：优先读数据库，必要时兜底保存。
@@ -542,11 +580,13 @@ class SourceScanRunner:
                 """,
                 ("running", stamp, scan_id, "running", "cancelling"),
             )
-        runtime = _ExecutionRuntime(self.database, scan_id, self._stop_event)
+        self._active_scan_id = scan_id
+        runtime = _ExecutionRuntime(self.database, scan_id, None)
         try:
             evidence = V4Repository(self.database).list_scan_evidence(scan_id)
             self._run_finalizer(task, runtime, evidence)
-            _complete_scan(self.database, scan_id)
+            if not _complete_scan(self.database, scan_id):
+                _finish_scan(self.database, scan_id, status="cancelled", error="用户已取消扫描")
             return True
         except (SourceScanCancelled, _CancelledScan):
             _finish_scan(self.database, scan_id, status="cancelled", error="用户已取消扫描")
@@ -556,6 +596,8 @@ class SourceScanRunner:
             return True
         finally:
             runtime.close()
+            if self._active_scan_id == scan_id:
+                self._active_scan_id = None
 
     def _requeue_from_archive(self, scan_id: str) -> bool:
         """分支 C：归档存在且哈希一致时，把同一 scan_id 重新排队。"""

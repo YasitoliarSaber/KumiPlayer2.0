@@ -9,8 +9,14 @@ daemon 线程消失，数据库中的 running 行必须能被新进程的 Source
 from __future__ import annotations
 
 import json
+import logging
+import os
+import subprocess
+import sys
+import threading
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 from app.media_v4.persistence.schema_v4 import create_schema_v4
@@ -236,6 +242,210 @@ def test_queued_scan_is_claimed_exactly_once(tmp_path):
             "SELECT status FROM source_scans WHERE scan_id = 'scan-recover'"
         ).fetchone()
     assert row["status"] == "running"
+
+
+def test_runner_shutdown_does_not_turn_active_scan_into_user_cancel(tmp_path, monkeypatch):
+    """应用关闭只停止领取新任务，不得伪造用户取消当前扫描。"""
+
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.sources import source_scan_runner
+    from app.media_v4.sources.scan_state import scan_is_stale
+    from app.media_v4.sources.source_scan_runner import SourceScanRunner, _CancelledScan
+
+    database = V4Database(tmp_path / "runner-shutdown.db")
+    database.initialize()
+    _seed_scan(
+        database,
+        status="queued",
+        stage="queued",
+        heartbeat_at=_fresh_heartbeat(),
+        request={"revision_id": ""},
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_handler(_database, _task, runtime):
+        started.set()
+        release.wait(timeout=2)
+        if runtime.cancellation_requested():
+            raise _CancelledScan()
+        return []
+
+    monkeypatch.setattr(source_scan_runner, "get_handler", lambda _kind: blocking_handler)
+    runner = SourceScanRunner(database, poll_interval=0.01, stale_after=1)
+    runner.start()
+    assert started.wait(timeout=2)
+    worker_thread = runner._thread
+
+    runner.stop(timeout=0.05)
+    with database.connect() as conn:
+        heartbeat = str(conn.execute(
+            "SELECT heartbeat_at FROM source_scans WHERE scan_id = 'scan-recover'"
+        ).fetchone()[0])
+    assert scan_is_stale(heartbeat, max_age_seconds=1)
+    release.set()
+
+    deadline = time.monotonic() + 2
+    status = "running"
+    while time.monotonic() < deadline:
+        with database.connect() as conn:
+            status = str(conn.execute(
+                "SELECT status FROM source_scans WHERE scan_id = 'scan-recover'"
+            ).fetchone()[0])
+        if status == "completed":
+            break
+        time.sleep(0.01)
+
+    assert status == "completed"
+    assert worker_thread is not None and worker_thread.daemon is True
+
+
+def test_scan_recovers_after_worker_process_is_terminated(tmp_path, monkeypatch):
+    """独立进程中断后，新的 runner 能从归档重新排队并收口。"""
+
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.sources.input_archive import archive_tree_input
+
+    data_dir = tmp_path / "data"
+    monkeypatch.setenv("KUMIPLAYER_DATA_DIR", str(data_dir))
+    tree = tmp_path / "subprocess-tree.txt"
+    tree.write_text("Show/Show.S01E01.mkv\n", encoding="utf-8")
+    archive = archive_tree_input("root-recover", tree)
+
+    database = V4Database(tmp_path / "subprocess-recovery.db")
+    database.initialize()
+    _seed_scan(
+        database,
+        status="queued",
+        stage="queued",
+        heartbeat_at=_fresh_heartbeat(),
+        request={"revision_id": ""},
+        archive=archive,
+    )
+
+    db_path = str(tmp_path / "subprocess-recovery.db").replace("\\", "/")
+    marker_path = str(tmp_path / "worker-started.txt").replace("\\", "/")
+    project_root = Path(__file__).resolve().parents[2]
+    worker_code = f"""
+import time
+from pathlib import Path
+
+from app.media_v4.sources import source_scan_runner
+from app.media_v4.sources.source_scan_runner import SourceScanRunner
+from app.media_v4.persistence.database import V4Database
+
+def handler(_database, _task, runtime):
+    Path(r"{marker_path}").write_text("started", encoding="utf-8")
+    while True:
+        runtime.heartbeat()
+        time.sleep(0.02)
+
+source_scan_runner.get_handler = lambda _kind: handler
+runner = SourceScanRunner(V4Database(r"{db_path}"), poll_interval=0.02, stale_after=1)
+runner.start()
+while not Path(r"{marker_path}").is_file():
+    time.sleep(0.01)
+while True:
+    time.sleep(1)
+"""
+    environment = os.environ.copy()
+    backend_path = str(project_root / "backend")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        item for item in (backend_path, environment.get("PYTHONPATH", "")) if item
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", worker_code],
+        cwd=project_root,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 3
+        status = "queued"
+        while time.monotonic() < deadline:
+            with database.connect() as conn:
+                status = str(conn.execute(
+                    "SELECT status FROM source_scans WHERE scan_id = 'scan-recover'"
+                ).fetchone()[0])
+            if status == "running" and os.path.isfile(marker_path):
+                break
+            time.sleep(0.02)
+        assert status == "running"
+        assert os.path.isfile(marker_path)
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
+
+    time.sleep(1.2)
+    recovery_code = f"""
+import time
+from app.media_v4.sources import source_scan_runner
+from app.media_v4.sources.source_scan_runner import SourceScanRunner
+from app.media_v4.persistence.database import V4Database
+
+def handler(_database, _task, _runtime):
+    return []
+
+source_scan_runner.get_handler = lambda _kind: handler
+database = V4Database(r"{db_path}")
+runner = SourceScanRunner(database, poll_interval=0.02, stale_after=1)
+runner.start()
+deadline = time.monotonic() + 5
+status = "running"
+while time.monotonic() < deadline:
+    with database.connect() as conn:
+        status = str(conn.execute(
+            "SELECT status FROM source_scans WHERE scan_id = 'scan-recover'"
+        ).fetchone()[0])
+    if status == "completed":
+        break
+    time.sleep(0.02)
+runner.stop()
+if status != "completed":
+    raise SystemExit("unexpected final status: " + status)
+"""
+    recovery = subprocess.run(
+        [sys.executable, "-c", recovery_code],
+        cwd=project_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=8,
+    )
+    assert recovery.returncode == 0, recovery.stderr or recovery.stdout
+    with database.connect() as conn:
+        status = str(conn.execute(
+            "SELECT status FROM source_scans WHERE scan_id = 'scan-recover'"
+        ).fetchone()[0])
+    assert status == "completed"
+
+
+def test_runner_loop_logs_unattributed_failures_and_keeps_running(tmp_path, caplog, monkeypatch):
+    """runner 自身故障必须留下诊断，不得静默退出。"""
+
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.sources.source_scan_runner import SourceScanRunner
+
+    database = V4Database(tmp_path / "runner-log.db")
+    database.initialize()
+
+    def broken_recovery():
+        raise RuntimeError("synthetic runner failure")
+
+    runner = SourceScanRunner(database, poll_interval=0.01)
+    monkeypatch.setattr(runner, "recover_stale_scans", broken_recovery)
+    with caplog.at_level(logging.ERROR, logger="app.media_v4.sources.source_scan_runner"):
+        runner.start()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not any(
+            record.getMessage() == "source scan worker loop failed" for record in caplog.records
+        ):
+            time.sleep(0.01)
+        runner.stop()
+
+    assert any(record.getMessage() == "source scan worker loop failed" for record in caplog.records)
 
 
 def test_cancel_on_stale_running_scan_is_finalized_immediately(tmp_path):

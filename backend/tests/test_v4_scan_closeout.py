@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 
 import pytest
 
@@ -595,8 +596,9 @@ def test_newer_running_scan_never_pairs_with_an_older_draft_on_source_card(tmp_p
             "VALUES ('scan-old', 'root-generation', 1, 'completed', 'now')"
         )
         conn.execute(
-            "INSERT INTO source_scans(scan_id, root_id, generation, status, started_at, stage) "
-            "VALUES ('scan-new', 'root-generation', 2, 'running', 'now', 'reading_source')"
+            "INSERT INTO source_scans(scan_id, root_id, generation, status, started_at, stage, heartbeat_at) "
+            "VALUES ('scan-new', 'root-generation', 2, 'running', 'now', 'reading_source', ?)",
+            (datetime.now(UTC).isoformat(),),
         )
         conn.execute(
             "INSERT INTO import_revisions(revision_id, root_id, scan_id, resolver_version, status, graph_digest, created_at) "
