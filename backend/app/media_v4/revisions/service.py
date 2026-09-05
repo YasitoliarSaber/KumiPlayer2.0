@@ -9,7 +9,6 @@ import unicodedata
 import uuid
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
 
 from app.media_v4.domain.models import (
     ParsedFacts,
@@ -200,6 +199,27 @@ def _normalize_title(value: str) -> str:
     return normalized.strip(" ._-·:：/\\()（）【】[]{}<>《》「」『』\"'")
 
 
+_SEASON_SPECIFIC_TITLE = re.compile(
+    r"(?ix)(?:\bS\d{1,2}(?:\s*E\d{1,3})?\b|\bSeason\s*\d+\b|"
+    r"\b\d+(?:st|nd|rd|th)\s+Season\b|第\s*\d+\s*季)"
+)
+
+
+def _is_season_specific_title(value: str) -> bool:
+    return _SEASON_SPECIFIC_TITLE.search(value or "") is not None
+
+
+def _should_preserve_existing_title(existing_title: str, draft_title: str) -> bool:
+    """防止季度目录名覆盖已有的规范作品名。"""
+
+    return bool(
+        existing_title.strip()
+        and draft_title.strip()
+        and not _is_season_specific_title(existing_title)
+        and _is_season_specific_title(draft_title)
+    )
+
+
 def _merge_map_from_candidates(candidates_by_key: dict[str, list]) -> dict[str, str]:
     """从已确认候选重建合并映射（同一 provider identity 的 draft Work 合并）。"""
 
@@ -330,17 +350,70 @@ def _freeze_candidate_bindings(
         )
 
 
-def _structural_key(relative_path: str) -> str:
-    from app.media_v4.generic_container import is_generic_container_name
+def _structural_key(
+    relative_path: str,
+    *,
+    facts: ParsedFacts | None = None,
+    work_key: str = "",
+) -> str:
+    """返回来源根内可复用的稳定作品边界。
 
-    parts = PurePosixPath(relative_path.replace("\\", "/")).parts
-    directories = parts[:-1]
-    for part in reversed(directories):
-        normalized = _normalize_title(part)
-        if not normalized or is_generic_container_name(normalized):
-            continue
-        return normalized
+    作品边界由解析事实决定：主系列使用 ``series_group``，独立作品使用
+    自己的 ``work_title``。不能再把最近的 SPs、季度或发行版本目录当作
+    Work binding；缺少明确边界时宁可不创建结构绑定，交给身份/候选规则处理。
+    """
+
+    if facts is None:
+        return ""
+    hinted_type = facts.tmdb_hint_type.casefold()
+    media_type = (
+        hinted_type
+        if facts.tmdb_hint_id and hinted_type in {"movie", "tv"}
+        else (facts.media_type or ("movie" if facts.group_type == "movie" else "tv"))
+    ).casefold()
+
+    if facts.card_type == "standalone":
+        title = _normalize_title(facts.work_title)
+        if title:
+            return f"work:{title}:{media_type}"
+        return ""
+    if facts.card_type == "main_series" and facts.series_group:
+        series = _normalize_title(facts.series_group)
+        if series:
+            return f"series:{series}:{media_type}"
+    if work_key.startswith("series:") and facts.series_group:
+        series = _normalize_title(facts.series_group)
+        if series:
+            return f"series:{series}:{media_type}"
     return ""
+
+
+def _snapshot_structural_bindings(conn, root_id: str) -> dict[str, list[dict]]:
+    """在确认事务写入新 Work 前冻结既有来源结构绑定。
+
+    确认同一批图时不能读取本事务刚插入的 binding，否则先处理的错误
+    特别篇会把季度目录绑定到主系列，再反向吞并后续季度 Work。
+    """
+
+    rows = conn.execute(
+        """
+        SELECT b.structural_key, w.work_id, w.work_type, w.year
+        FROM work_source_bindings b
+        JOIN works w ON w.work_id = b.work_id
+        WHERE b.root_id = ?
+        """,
+        (root_id,),
+    ).fetchall()
+    snapshot: dict[str, list[dict]] = {}
+    for row in rows:
+        snapshot.setdefault(str(row["structural_key"]), []).append(
+            {
+                "work_id": str(row["work_id"]),
+                "work_type": str(row["work_type"]),
+                "year": row["year"],
+            }
+        )
+    return snapshot
 
 
 def _lookup_work_by_key(conn, work_key: str, *, exclude_work_id: str = "") -> str:
@@ -470,6 +543,7 @@ class V4RevisionService:
 
         issues: list[ResolutionIssue] = []
         evidence_by_id = {evidence.evidence_id: evidence for evidence, _facts in entries}
+        facts_by_evidence_id = {evidence.evidence_id: facts for evidence, facts in entries}
         with self.database.connect() as conn:
             for work in graph.works:
                 existing_work_ids: set[str] = set()
@@ -486,7 +560,11 @@ class V4RevisionService:
                     evidence = evidence_by_id.get(evidence_id)
                     if evidence is None:
                         continue
-                    structural_key = _structural_key(evidence.relative_path)
+                    structural_key = _structural_key(
+                        evidence.relative_path,
+                        facts=facts_by_evidence_id.get(evidence.evidence_id),
+                        work_key=work.work_key,
+                    )
                     if not structural_key:
                         continue
                     rows = conn.execute(
@@ -528,6 +606,65 @@ class V4RevisionService:
                         ),
                     ))
                     break
+        return issues
+
+    def _structural_identity_conflicts(
+        self,
+        graph: ResolvedMediaGraph,
+        entries: list[tuple[SourceEvidence, ParsedFacts]],
+    ) -> list[ResolutionIssue]:
+        """阻止一个稳定来源边界静默对应多个既有 Work。"""
+
+        evidence_by_id = {evidence.evidence_id: evidence for evidence, _facts in entries}
+        facts_by_evidence_id = {evidence.evidence_id: facts for evidence, facts in entries}
+        issues: list[ResolutionIssue] = []
+        with self.database.connect() as conn:
+            for work in graph.works:
+                work_entries = [
+                    (evidence_by_id[evidence_id], facts_by_evidence_id.get(evidence_id))
+                    for evidence_id in work.source_evidence_ids
+                    if evidence_id in evidence_by_id
+                ]
+                root_ids = {evidence.root_id for evidence, _facts in work_entries}
+                if len(root_ids) != 1:
+                    continue
+                structural_keys = {
+                    _structural_key(
+                        evidence.relative_path,
+                        facts=facts,
+                        work_key=work.work_key,
+                    )
+                    for evidence, facts in work_entries
+                }
+                structural_keys.discard("")
+                if not structural_keys:
+                    continue
+                owner_ids: set[str] = set()
+                for structural_key in structural_keys:
+                    rows = conn.execute(
+                        """
+                        SELECT DISTINCT b.work_id
+                        FROM work_source_bindings b
+                        WHERE b.root_id = ? AND b.structural_key = ?
+                        """,
+                        (next(iter(root_ids)), structural_key),
+                    ).fetchall()
+                    owner_ids.update(str(row["work_id"]) for row in rows)
+                identity_row = conn.execute(
+                    "SELECT work_id FROM works WHERE identity_key = ?",
+                    (work.work_key,),
+                ).fetchone()
+                identity_id = str(identity_row["work_id"]) if identity_row is not None else ""
+                if len(owner_ids) <= 1 and (not identity_id or not owner_ids or identity_id in owner_ids):
+                    continue
+                evidence_id = next(iter(work.source_evidence_ids), "")
+                issues.append(
+                    ResolutionIssue(
+                        code="structural_identity_ambiguous",
+                        evidence_id=evidence_id,
+                        message="同一来源作品边界已对应多部作品，无法安全复用，请检查识别结果后重试",
+                    )
+                )
         return issues
 
     def create_draft(
@@ -595,6 +732,7 @@ class V4RevisionService:
                 existing_bindings=existing_bindings,
             )
             candidate_issues.extend(self._candidate_identity_conflicts(graph, candidates_by_key, entries))
+            candidate_issues.extend(self._structural_identity_conflicts(graph, entries))
             graph = candidate_service.merge_graph(graph, merge_map)
             if candidate_issues:
                 graph = replace(graph, issues=(*graph.issues, *candidate_issues))
@@ -771,6 +909,9 @@ class V4RevisionService:
                     conn.commit()
                     return graph
 
+                # 来源结构绑定只用于跨 revision 复用。冻结快照后再处理本图，
+                # 避免当前事务刚写入的目录绑定参与后续 Work 匹配。
+                structural_binding_snapshot = _snapshot_structural_bindings(conn, root_id)
                 work_ids: dict[str, str] = {}
                 for work in graph.works:
                     related_entries = [
@@ -843,23 +984,25 @@ class V4RevisionService:
 
                     if existing_work is None:
                         source_work_ids: set[str] = set()
-                        for evidence, _facts in related_entries:
-                            structural_key = _structural_key(evidence.relative_path)
+                        for evidence, facts in related_entries:
+                            structural_key = _structural_key(
+                                evidence.relative_path,
+                                facts=facts,
+                                work_key=work.work_key,
+                            )
                             if not structural_key:
                                 continue
-                            row = conn.execute(
-                                """
-                                SELECT w.work_id
-                                FROM work_source_bindings b
-                                JOIN works w ON w.work_id = b.work_id
-                                WHERE b.root_id = ? AND b.structural_key = ?
-                                  AND w.work_type = ?
-                                  AND (w.year IS NULL OR w.year = ? OR ? IS NULL)
-                                """,
-                                (root_id, structural_key, work_type, work.year, work.year),
-                            ).fetchone()
-                            if row is not None:
-                                source_work_ids.add(str(row["work_id"]))
+                            for binding in structural_binding_snapshot.get(structural_key, []):
+                                if binding["work_type"] != work_type:
+                                    continue
+                                binding_year = binding["year"]
+                                if (
+                                    binding_year is not None
+                                    and work.year is not None
+                                    and int(binding_year) != int(work.year)
+                                ):
+                                    continue
+                                source_work_ids.add(binding["work_id"])
                         if len(source_work_ids) == 1:
                             existing_work = conn.execute(
                                 "SELECT * FROM works WHERE work_id = ?",
@@ -922,10 +1065,16 @@ class V4RevisionService:
                         )
                     else:
                         work_id = str(existing_work["work_id"])
-                        preserve_preferred_title = _reuses_confirmed_provider_identity(
-                            conn,
-                            work_id,
-                            candidates_by_key.get(work.work_key, []),
+                        preserve_preferred_title = (
+                            _reuses_confirmed_provider_identity(
+                                conn,
+                                work_id,
+                                candidates_by_key.get(work.work_key, []),
+                            )
+                            or _should_preserve_existing_title(
+                                str(existing_work["preferred_title"] or ""),
+                                work.preferred_title,
+                            )
                         )
                         if existing_work["preferred_title"]:
                             conn.execute(
@@ -973,7 +1122,11 @@ class V4RevisionService:
 
                     work_ids[work.work_key] = work_id
                     for evidence, facts in related_entries:
-                        structural_key = _structural_key(evidence.relative_path)
+                        structural_key = _structural_key(
+                            evidence.relative_path,
+                            facts=facts,
+                            work_key=work.work_key,
+                        )
                         if structural_key:
                             conn.execute(
                                 """

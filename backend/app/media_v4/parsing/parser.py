@@ -294,36 +294,45 @@ def _is_root_internal_structure(value: str) -> bool:
 def _structural_series_group(relative_path: str, source: str) -> str:
     """从完整路径恢复旧版 MediaUnit 的显式系列合集身份。"""
 
-    container = _extract_work_container(relative_path, source)
-    explicit_collection = bool(
-        re.search(r"(?i)(?:系列|合集|\bseries\b|\bcollection\b)\s*$", container)
-    )
     parts = [part for part in PurePosixPath(relative_path).parts if part]
     directories = parts[:-1]
-    try:
-        container_index = directories.index(container)
-    except ValueError:
-        child = ""
-    else:
+
+    def _explicit_season_child(container_index: int) -> bool:
         child = directories[container_index + 1] if container_index + 1 < len(directories) else ""
-    explicit_season_child = bool(
-        child
-        and (
-            _is_root_internal_structure(child)
-            or re.search(
-                r"(?i)(?:\[S\d{1,2}(?:\.\d+)?\]|S\d{1,2}\s*$|Season\s*\d+|第\s*\d+\s*季)",
-                child,
+        return bool(
+            child
+            and (
+                _is_root_internal_structure(child)
+                or re.search(
+                    r"(?i)(?:\[S\d{1,2}(?:\.\d+)?\]|S\d{1,2}\s*$|Season\s*\d+|第\s*\d+\s*季)",
+                    child,
+                )
             )
         )
-    )
-    if (
-        not container
-        or _is_bracket_heavy(container)
-        or not (_is_series_container(container) or explicit_collection or explicit_season_child)
-    ):
-        return ""
-    title, _ = _parse_work_title_and_year(container)
-    return title.strip()
+
+    def _structural_from(container: str) -> str:
+        if not container or _is_bracket_heavy(container):
+            return ""
+        explicit_collection = bool(
+            re.search(r"(?i)(?:系列|合集|\bseries\b|\bcollection\b)\s*$", container)
+        )
+        if container not in directories:
+            return ""
+        if not (_is_series_container(container) or explicit_collection or _explicit_season_child(directories.index(container))):
+            return ""
+        title, _ = _parse_work_title_and_year(container)
+        return title.strip()
+
+    container = _extract_work_container(relative_path, source)
+    primary = _structural_from(container)
+    if primary:
+        return primary
+    # 3.2：真实发布目录常把字幕组与质量标签带进季目录名（bracket-heavy），
+    # 使作品容器被拒。此时回退到顶层系列合集目录，且仅当其子目录带明确
+    # 季号标记才吸收；外传/电影目录没有季号标记，不会被该回退吞并。
+    if directories and directories[0] != container and not _is_bracket_heavy(directories[0]):
+        return _structural_from(directories[0])
+    return ""
 
 
 _NFO_MAX_BYTES = 256 * 1024

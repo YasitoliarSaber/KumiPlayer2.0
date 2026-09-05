@@ -105,6 +105,162 @@ def test_reused_provider_identity_keeps_existing_preferred_title_and_records_new
     assert "yuru camp movie" in aliases
 
 
+def test_confirmation_does_not_reuse_bindings_created_earlier_in_same_revision(tmp_path):
+    """同一批内新写入的季度目录绑定不能反向吞并另一个 Work。"""
+
+    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    def pair(
+        evidence_id: str,
+        relative_path: str,
+        work_title: str,
+        *,
+        group_type: str,
+        series_group: str = "",
+        special: bool = False,
+        season: int | None = None,
+    ):
+        evidence = SourceEvidence(
+            evidence_id=evidence_id,
+            scan_id="scan-binding-order",
+            root_id="root-binding-order",
+            source_key=relative_path,
+            relative_path=relative_path,
+            entry_kind="video",
+            provider="baidu",
+            ingest_method="directory_tree",
+        )
+        facts = ParsedFacts(
+            parsed_fact_id=f"facts-{evidence_id}",
+            evidence_id=evidence_id,
+            parser_version="fixture",
+            media_type="tv",
+            group_type=group_type,
+            work_title=work_title,
+            series_group=series_group,
+            card_type="main_series",
+            title_candidates=(work_title,),
+            season_candidate=season,
+            episode_candidate=None if special else 1,
+            special_candidate=special,
+            special_number=1 if special else None,
+        )
+        return evidence, facts
+
+    entries = {
+        "main-special": pair(
+            "ev-binding-main-special",
+            "动画/Yuru Camp Season 2/SPs/Yuru Camp SP01.mkv",
+            "Yuru Camp",
+            group_type="special",
+            series_group="Yuru Camp",
+            special=True,
+        ),
+        # 该事实已经由 Parser 归入主系列，但它仍使用第二季目录，正是会
+        # 被旧版“最近目录 binding”误写成主系列边界的场景。
+        "season-two-special": pair(
+            "ev-binding-season-special",
+            "动画/Yuru Camp Season 2/SPs/Yuru Camp Season 2 SP01.mkv",
+            "Yuru Camp",
+            group_type="special",
+            series_group="Yuru Camp",
+            special=True,
+        ),
+        "season-two-episode": pair(
+            "ev-binding-season",
+            "动画/Yuru Camp Season 2/Yuru Camp Season 2 - 01.mkv",
+            "Yuru Camp Season 2",
+            group_type="season",
+            season=2,
+        ),
+    }
+
+    for order_index, order in enumerate(
+        (
+            ("main-special", "season-two-special", "season-two-episode"),
+            ("season-two-special", "season-two-episode", "main-special"),
+            ("season-two-episode", "main-special", "season-two-special"),
+        )
+    ):
+        database = V4Database(tmp_path / f"binding-order-{order_index}.db")
+        database.initialize()
+        service = V4RevisionService(database)
+        service.create_draft(
+            f"rev-binding-order-{order_index}",
+            [entries[label] for label in order],
+            candidate_search=lambda *_args: [],
+        )
+        service.confirm(f"rev-binding-order-{order_index}")
+
+        with database.connect() as conn:
+            works = conn.execute(
+                "SELECT preferred_title FROM works ORDER BY preferred_title"
+            ).fetchall()
+
+        assert [str(row["preferred_title"]) for row in works] == [
+            "Yuru Camp",
+            "Yuru Camp Season 2",
+        ]
+
+
+def test_ambiguous_existing_structural_bindings_block_confirmation(tmp_path):
+    """同一稳定边界已属于多个旧 Work 时必须显式阻断确认。"""
+
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import RevisionBlockedError, V4RevisionService
+
+    database = V4Database(tmp_path / "ambiguous-structural-binding.db")
+    database.initialize()
+    with database.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO source_roots(
+                root_id, provider, ingest_method, created_at, updated_at
+            ) VALUES ('root-revision', 'local', 'local_scan', 'now', 'now')
+            """
+        )
+        for work_id, identity_key in (
+            ("old-work-a", "series:old-a:tv"),
+            ("old-work-b", "series:old-b:tv"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO works(
+                    work_id, identity_key, work_type, preferred_title, created_at, updated_at
+                ) VALUES (?, ?, 'series', ?, 'now', 'now')
+                """,
+                (work_id, identity_key, identity_key),
+            )
+            conn.execute(
+                """
+                INSERT INTO work_source_bindings(
+                    work_id, root_id, structural_key, confidence, binding_source
+                ) VALUES (?, 'root-revision', 'series:show:tv', 'medium', 'resolver')
+                """,
+                (work_id,),
+            )
+
+    evidence, facts = _entry("Show", "ev-ambiguous-structure")
+    facts = replace(
+        facts,
+        card_type="main_series",
+        relation_type="main",
+        series_group="Show",
+    )
+    service = V4RevisionService(database)
+    graph = service.create_draft(
+        "rev-ambiguous-structure",
+        [(evidence, facts)],
+        candidate_search=lambda *_args: [],
+    )
+
+    assert any(issue.code == "structural_identity_ambiguous" for issue in graph.issues)
+    with pytest.raises(RevisionBlockedError):
+        service.confirm("rev-ambiguous-structure")
+
+
 def test_preview_blocks_provider_rebinding_before_confirm_can_hit_unique_constraint(tmp_path):
     """同一结构 Work 改指向已属于另一 Work 的 Provider 身份必须留在第 2 步。"""
 

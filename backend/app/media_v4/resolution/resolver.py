@@ -63,6 +63,8 @@ def _main_series_identity_title(facts: ParsedFacts) -> str:
 
     if facts.card_type == "standalone":
         return ""
+    if facts.relation_type in {"spin_off", "movie", "recap", "related"}:
+        return ""
     series = (facts.series_group or "").strip()
     if not series or is_generic_container_title(series):
         return ""
@@ -213,6 +215,16 @@ def _resolved_entry_work_key(
         "",
     )
     return f"series:{matching_series}:{media_type}" if matching_series else key
+
+
+def _preferred_work_title(facts: ParsedFacts, work_key: str) -> str:
+    """为同一 Work 选择与输入顺序无关的规范显示名。"""
+
+    if work_key.startswith("series:") and facts.relation_type in {"", "main"}:
+        series_title = (facts.series_group or "").strip()
+        if series_title and not is_generic_container_title(series_title):
+            return series_title
+    return (facts.work_title or (facts.title_candidates or ("",))[0]).strip()
 
 
 _LOCAL_SPECIAL_TOKEN = re.compile(
@@ -382,7 +394,7 @@ class MediaResolver:
             work = work_rows.setdefault(
                 key,
                 {
-                    "title": identity_title,
+                    "title": _preferred_work_title(facts, key),
                     "year": facts.year_candidate,
                     "media_type": _effective_media_type(facts),
                     "relation_media_type": (facts.media_type or facts.group_type or "unknown").casefold(),

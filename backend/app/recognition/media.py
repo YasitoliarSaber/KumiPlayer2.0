@@ -1150,6 +1150,51 @@ def _looks_like_release_file(filename: str) -> bool:
     return any(re.search(p, filename, re.IGNORECASE) for p in patterns)
 
 
+def _is_movie_boundary_dir(value: str) -> bool:
+    """判断目录是否是明确的电影边界，而不是系列容器的范围说明。"""
+
+    directory = (value or "").strip()
+    if not directory or _is_series_container(directory):
+        return False
+    return re.search(
+        r"(?i)(?:^|[\s._\-:：/\\()（）【】\[\]+])"
+        r"(?:剧场版|映画|电影|movies?)"
+        r"(?:$|[\s._\-:：/\\()（）【】\[\]+])",
+        directory,
+    ) is not None
+
+
+def _deeper_dirs_contain_movie(deeper_dirs: list[str]) -> bool:
+    """判断 SP 所在路径上下文是否位于明确的电影目录之下。"""
+
+    return any(_is_movie_boundary_dir(directory) for directory in deeper_dirs)
+
+
+def _movie_context_title(deeper_dirs: list[str]) -> str:
+    """从最近的明确电影目录提取电影 Work 标题。"""
+
+    for directory in reversed(deeper_dirs):
+        if not _is_movie_boundary_dir(directory):
+            continue
+        title, _ = _parse_work_title_and_year(directory)
+        if title and not _is_generic_movie_directory_title(title):
+            return title
+    return ""
+
+
+def _apply_movie_special_context(guess: MediaGuess, context_dirs: list[str]) -> None:
+    """把电影边界内的 SP 收口到电影 Work，而不是生成 TV S00。"""
+
+    if guess.group_type != "special" or not _deeper_dirs_contain_movie(context_dirs):
+        return
+    guess.card_type = "standalone"
+    guess.media_type = "movie"
+    guess.relation_type = "movie"
+    movie_title = _movie_context_title(context_dirs)
+    if movie_title:
+        guess.work_title = movie_title
+
+
 def _check_path_context_special(
     relative_path: str,
     parent_dirs: list[str],
@@ -1187,6 +1232,7 @@ def _check_path_context_special(
             season = _infer_season_from_context(deeper_dirs)
             if season:
                 guess.season_number = season
+            _apply_movie_special_context(guess, [*deeper_dirs, work_container])
             return guess
         for kw in _SPS_DIR_KEYWORDS:
             if (
@@ -1204,6 +1250,7 @@ def _check_path_context_special(
                 season = _infer_season_from_context(deeper_dirs)
                 if season:
                     guess.season_number = season
+                _apply_movie_special_context(guess, [*deeper_dirs, work_container])
                 return guess
 
     # 总集篇 / 剧场版 目录标记
@@ -1999,6 +2046,7 @@ def recognize_media(
     # 5. 文件名明确 SP/OVA/OAD/Lite 时，先按 Special 处理，避免被“剧场版”目录抢先归为电影
     guess = _check_explicit_filename_special(filename, parent_dirs)
     if guess:
+        _apply_movie_special_context(guess, [*parent_dirs, work_container])
         _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess
 
@@ -2023,6 +2071,7 @@ def recognize_media(
     # 8. Special（文件名关键词）
     guess = _check_sps(filename, parent_dirs)
     if guess:
+        _apply_movie_special_context(guess, [*parent_dirs, work_container])
         _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess
 
