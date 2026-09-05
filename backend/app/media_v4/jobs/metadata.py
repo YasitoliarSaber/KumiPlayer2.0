@@ -7,7 +7,7 @@ import unicodedata
 from typing import Any
 
 from app.core.config import load_config
-from app.media_v4.resolution.ranker import rank_candidates
+from app.media_v4.resolution.ranker import CandidateRanker
 from app.scrape.tmdb_client import TMDBClient, TMDBClientError
 
 _METADATA_STATES = frozenset({"ready", "waiting_metadata", "waiting_review", "source_unavailable", "failed"})
@@ -17,7 +17,15 @@ def _names(items: list[dict[str, Any]] | None) -> list[str]:
     return [str(item.get("name") or "").strip() for item in (items or []) if item.get("name")]
 
 
-def _local_state(state: str, reason: str, *, attempted_queries: list | None = None, candidates: list | None = None) -> dict:
+def _local_state(
+    state: str,
+    reason: str,
+    *,
+    attempted_queries: list | None = None,
+    candidates: list | None = None,
+    reason_code: str | None = None,
+    candidate_decision: dict | None = None,
+) -> dict:
     """等待/失败类结果：不再把本地 Work ID 伪装成外部 provider identity。"""
 
     result: dict = {
@@ -29,6 +37,10 @@ def _local_state(state: str, reason: str, *, attempted_queries: list | None = No
     }
     if candidates:
         result["candidates"] = candidates
+    if reason_code:
+        result["reason_code"] = reason_code
+    if candidate_decision is not None:
+        result["candidate_decision"] = candidate_decision
     return result
 
 
@@ -45,7 +57,111 @@ def _candidate_summary(item: dict) -> dict:
         "original_title": item.get("original_name") or item.get("original_title") or "",
         "year": int(str(item.get("first_air_date") or item.get("release_date") or "")[:4] or 0) or None,
         "media_type": "tv" if "first_air_date" in item or "name" in item else "movie",
+        "popularity": _safe_float(item.get("popularity")),
     }
+
+
+def _safe_float(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _merge_search_result(results_by_id: dict[str, dict], item: dict) -> None:
+    """按 Provider ID 合并多次标题查询的摘要，保留最完整的字段。"""
+
+    provider_id = str(item.get("id") or "").strip()
+    if not provider_id:
+        return
+    existing = results_by_id.get(provider_id)
+    if existing is None:
+        results_by_id[provider_id] = dict(item)
+        return
+
+    merged = dict(existing)
+    for key, value in item.items():
+        if key == "popularity":
+            merged[key] = max(_safe_float(merged.get(key)), _safe_float(value))
+        elif not merged.get(key) and value:
+            merged[key] = value
+    results_by_id[provider_id] = merged
+
+
+def _ranked_candidate_payload(ranked: list) -> list[dict]:
+    return [
+        {
+            "provider": item.provider,
+            "provider_id": item.provider_id,
+            "media_type": item.media_type,
+            "title": item.title,
+            "original_title": item.original_title,
+            "aliases": list(item.aliases),
+            "year": item.year,
+            "popularity": item.popularity,
+            "score": item.score,
+            "reasons": list(item.reasons),
+            "recommended": item.recommended,
+            "identity_safe": item.identity_safe,
+            "blocked": item.blocked,
+        }
+        for item in ranked
+    ]
+
+
+def _candidate_decision_payload(ranked: list, adopted, reason: str) -> dict:
+    return {
+        "decision": "auto_adopted" if adopted is not None else "waiting_review",
+        "reason": reason,
+        "selected_provider": adopted.provider if adopted is not None else "",
+        "selected_provider_id": adopted.provider_id if adopted is not None else "",
+        "selected_score": adopted.score if adopted is not None else None,
+        "ranked_candidates": _ranked_candidate_payload(ranked),
+    }
+
+
+def _search_with_year_fallback(
+    client: TMDBClient,
+    query: str,
+    media_type: str,
+    year: int | None,
+) -> list[dict]:
+    """先按年份检索，空结果时回退到纯标题检索。"""
+
+    search = client.search_tv if media_type == "tv" else client.search_movie
+    results = search(query, year)
+    if not results and year is not None:
+        results = search(query, None)
+    return results
+
+
+def _rank_metadata_candidates(
+    target: dict,
+    media_type: str,
+    titles: list[str],
+    results_by_id: dict[str, dict],
+    client: TMDBClient,
+) -> tuple[list, object | None, str]:
+    """把多次搜索结果统一交给 CandidateRanker 决策。"""
+
+    candidates = enrich_candidate_aliases(
+        [_candidate_summary(item) for item in results_by_id.values()],
+        titles,
+        max_details=8,
+        client=client,
+    )
+    ranker = CandidateRanker()
+    ranked = ranker.rank(
+        {
+            "preferred_title": target.get("preferred_title") or "",
+            "queries": titles,
+            "media_type": media_type,
+            "year": target.get("year"),
+        },
+        candidates,
+    )
+    adopted, reason = ranker.auto_adopt(ranked)
+    return ranked, adopted, reason
 
 
 def _target_titles(target: dict) -> list[str]:
@@ -132,11 +248,10 @@ def search_tmdb_candidates(query: str, media_type: str, year: int | None = None)
         return None
     media_type = "tv" if media_type in {"tv", "series"} else "movie"
     with TMDBClient(bearer_token=config.tmdb_bearer_token) as client:
-        results = (
-            client.search_tv(query, year)
-            if media_type == "tv"
-            else client.search_movie(query, year)
-        )
+        # 本地年份可能来自压制目录、季度目录或发行年份，并不一定等于
+        # Provider 的首播/上映年份。年份过滤无结果时必须回退到纯标题搜索，
+        # 这是旧版候选链的关键兜底，否则正确作品会被误报为“搜索不到”。
+        results = _search_with_year_fallback(client, query, media_type, year)
     return [_candidate_summary(item) for item in results[:8]]
 
 
@@ -246,76 +361,78 @@ def default_metadata_provider(target: dict) -> dict:
         with TMDBClient(bearer_token=config.tmdb_bearer_token) as client:
             if tmdb_binding:
                 provider_id = int(tmdb_binding["provider_id"])
+                candidate_decision = {
+                    "decision": "trusted_binding",
+                    "reason": "复用已确认的 TMDB 作品身份",
+                    "selected_provider": "tmdb",
+                    "selected_provider_id": str(provider_id),
+                    "selected_score": None,
+                    "ranked_candidates": [],
+                }
             else:
                 titles = _target_titles(target)
                 attempted_queries: list[dict] = []
                 results_by_id: dict[str, dict] = {}
-                selected = None
+                search_errors: list[TMDBClientError] = []
+                successful_queries = 0
                 for title in titles:
-                    results = (
-                        client.search_tv(title, target.get("year"))
-                        if media_type == "tv"
-                        else client.search_movie(title, target.get("year"))
-                    )
-                    attempted_queries.append({"query": title, "year": target.get("year")})
-                    for item in results:
-                        provider_key = str(item.get("id") or "")
-                        if provider_key:
-                            results_by_id.setdefault(provider_key, item)
-                    selected = _select_search_result(results, target, media_type)
-                    if selected is not None:
-                        break
-                if selected is None:
-                    # 主标题/原文不等值时，补全有限数量的可信别名再判定。该工作
-                    # 位于第三步的单 Work metadata job，不会阻塞来源扫描或把网络
-                    # 请求按文件数放大；真正歧义仍返回候选给人工兜底。
-                    candidates = enrich_candidate_aliases(
-                        [_candidate_summary(item) for item in list(results_by_id.values())[:8]],
-                        titles,
-                        max_details=8,
-                        client=client,
-                    )
-                    # 共享 CandidateRanker：数值排序 + 身份门禁自动采用，替代
-                    # 旧的等值门槛独判（D3/D4）。
-                    ranked = rank_candidates(
-                        {
-                            "preferred_title": target.get("preferred_title") or "",
-                            "queries": titles,
-                            "media_type": media_type,
-                            "year": target.get("year"),
-                        },
-                        candidates,
-                    )
-                    from app.media_v4.resolution.ranker import CandidateRanker
-
-                    adopted, _reason = CandidateRanker().auto_adopt(ranked)
-                    if adopted is not None:
-                        provider_id = int(adopted.provider_id)
-                    else:
-                        ranked_payload = [
-                            {
-                                "provider": item.provider,
-                                "provider_id": item.provider_id,
-                                "media_type": item.media_type,
-                                "title": item.title,
-                                "original_title": item.original_title,
-                                "aliases": list(item.aliases),
-                                "year": item.year,
-                                "popularity": item.popularity,
-                                "score": item.score,
-                                "reasons": list(item.reasons),
-                                "recommended": item.recommended,
-                            }
-                            for item in ranked
-                        ]
-                        return _local_state(
-                            "waiting_review",
-                            "没有唯一匹配的在线作品，需要人工确认后再继续",
-                            attempted_queries=attempted_queries,
-                            candidates=ranked_payload,
+                    query_record = {"query": title, "year": target.get("year")}
+                    try:
+                        results = _search_with_year_fallback(
+                            client,
+                            title,
+                            media_type,
+                            target.get("year"),
                         )
-                else:
-                    provider_id = int(selected["id"])
+                    except TMDBClientError as exc:
+                        search_errors.append(exc)
+                        query_record.update({
+                            "status": "source_unavailable",
+                            "error": type(exc).__name__,
+                        })
+                        attempted_queries.append(query_record)
+                        continue
+                    successful_queries += 1
+                    query_record.update({"status": "completed", "result_count": len(results)})
+                    attempted_queries.append(query_record)
+                    for item in results:
+                        _merge_search_result(results_by_id, item)
+
+                if search_errors and successful_queries == 0 and titles:
+                    return _local_state(
+                        "source_unavailable",
+                        f"在线资料服务暂不可用，请稍后重试（{type(search_errors[-1]).__name__}）",
+                        attempted_queries=attempted_queries,
+                        reason_code="source_unavailable",
+                    )
+
+                # 主标题、原文标题及别名查询的所有摘要统一进入评分器。即使
+                # 首个查询已经出现完整标题，也不能提前采用，否则会丢失后续
+                # 查询的更可信候选及热度排序信号。
+                ranked, adopted, adopt_reason = _rank_metadata_candidates(
+                    target,
+                    media_type,
+                    titles,
+                    results_by_id,
+                    client,
+                )
+                candidate_decision = _candidate_decision_payload(ranked, adopted, adopt_reason)
+                if adopted is None:
+                    ranked_payload = _ranked_candidate_payload(ranked)
+                    review_reason = (
+                        "在线资料中没有找到候选作品，请检查作品标题后重试"
+                        if not ranked
+                        else "在线作品候选不足以自动确认，需要人工确认后再继续"
+                    )
+                    return _local_state(
+                        "waiting_review",
+                        review_reason,
+                        attempted_queries=attempted_queries,
+                        candidates=ranked_payload,
+                        reason_code="no_candidates" if not ranked else "ambiguous_candidates",
+                        candidate_decision=candidate_decision,
+                    )
+                provider_id = int(adopted.provider_id)
             detail = client.get_tv_detail(provider_id) if media_type == "tv" else client.get_movie_detail(provider_id)
             images = detail.get("images") or {}
             poster = client.select_best_poster(images) or detail.get("poster_path") or ""
@@ -343,6 +460,7 @@ def default_metadata_provider(target: dict) -> dict:
                 "clearlogo_url": client.build_image_url(clearlogo, "original") if clearlogo else "",
                 "clearlogo_file_path": clearlogo,
                 "metadata_state": "ready",
+                "candidate_decision": candidate_decision,
             }
             if media_type == "tv":
                 result["episode_mappings"] = _build_tv_episode_mappings(client, provider_id, target)

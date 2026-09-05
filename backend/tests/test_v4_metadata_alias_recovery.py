@@ -158,3 +158,195 @@ def test_metadata_retries_the_saved_original_title_before_requesting_manual_revi
     assert result["metadata_state"] == "ready"
     assert result["provider_id"] == "91234"
     assert queries == ["本地化名称", "原文作品名"]
+
+
+def test_metadata_ranks_all_title_queries_instead_of_adopting_first_exact_hit(monkeypatch):
+    """多个标题查询必须汇总后统一评分，不能被首个精确命中提前截断。"""
+
+    from app.media_v4.jobs import metadata as metadata_module
+
+    queries: list[str] = []
+
+    class FakeTMDBClient:
+        def __init__(self, bearer_token):
+            assert bearer_token == "token"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def search_tv(self, query, year):
+            assert year == 2020
+            queries.append(query)
+            if query == "本地化名称":
+                return [{
+                    "id": 100,
+                    "name": "本地化名称",
+                    "original_name": "Less Trusted Result",
+                    "first_air_date": "2020-01-01",
+                    "popularity": 1,
+                }]
+            assert query == "原文作品名"
+            return [{
+                "id": 200,
+                "name": "Correct Work",
+                "original_name": "原文作品名",
+                "first_air_date": "2020-01-01",
+                "popularity": 99,
+            }]
+
+        def get_tv_detail(self, provider_id):
+            assert provider_id == 200
+            return {
+                "name": "Correct Work",
+                "original_name": "原文作品名",
+                "overview": "正确候选",
+                "first_air_date": "2020-01-01",
+                "images": {},
+                "episode_run_time": [24],
+            }
+
+        @staticmethod
+        def select_best_poster(_images):
+            return ""
+
+        @staticmethod
+        def select_best_backdrop(_images):
+            return ""
+
+        @staticmethod
+        def select_best_logo(_images):
+            return ""
+
+        @staticmethod
+        def build_image_url(path, size):
+            return f"https://image.tmdb.org/t/p/{size}{path}"
+
+    monkeypatch.setattr(metadata_module, "TMDBClient", FakeTMDBClient)
+    monkeypatch.setattr(
+        metadata_module,
+        "load_config",
+        lambda: SimpleNamespace(tmdb_bearer_token="token"),
+    )
+
+    result = metadata_module.default_metadata_provider({
+        "work_type": "series",
+        "preferred_title": "本地化名称",
+        "original_title": "原文作品名",
+        "year": 2020,
+        "provider_bindings": [],
+        "episodes": [],
+    })
+
+    assert queries == ["本地化名称", "原文作品名"]
+    assert result["metadata_state"] == "ready"
+    assert result["provider_id"] == "200"
+    assert result["candidate_decision"]["decision"] == "auto_adopted"
+    assert result["candidate_decision"]["selected_score"] >= 55
+    assert result["candidate_decision"]["ranked_candidates"][0]["provider_id"] == "200"
+
+
+def test_search_retries_without_year_when_year_filtered_query_is_empty(monkeypatch):
+    """年份来自目录时，TMDB 年份过滤无结果必须回退到纯标题搜索。"""
+
+    from app.media_v4.jobs import metadata as metadata_module
+
+    calls: list[tuple[str, int | None]] = []
+
+    class FakeTMDBClient:
+        def __init__(self, bearer_token):
+            assert bearer_token == "token"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def search_tv(self, query, year):
+            calls.append((query, year))
+            if year is not None:
+                return []
+            return [{
+                "id": 300,
+                "name": "Correct Work",
+                "original_name": "Correct Work Original",
+                "first_air_date": "2020-01-01",
+            }]
+
+    monkeypatch.setattr(metadata_module, "TMDBClient", FakeTMDBClient)
+    monkeypatch.setattr(
+        metadata_module,
+        "load_config",
+        lambda: SimpleNamespace(tmdb_bearer_token="token"),
+    )
+
+    candidates = metadata_module.search_tmdb_candidates("Correct Work", "tv", 2024)
+
+    assert calls == [("Correct Work", 2024), ("Correct Work", None)]
+    assert candidates == [{
+        "provider": "tmdb",
+        "provider_id": "300",
+        "title": "Correct Work",
+        "original_title": "Correct Work Original",
+        "year": 2020,
+        "media_type": "tv",
+        "popularity": 0.0,
+    }]
+
+
+def test_metadata_distinguishes_zero_results_from_provider_unavailable(monkeypatch):
+    """零结果和服务不可用必须保留不同的状态码，便于界面给出正确动作。"""
+
+    from app.media_v4.jobs import metadata as metadata_module
+    from app.scrape.tmdb_client import TMDBClientError
+
+    class EmptyTMDBClient:
+        def __init__(self, bearer_token):
+            assert bearer_token == "token"
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def search_tv(self, _query, _year):
+            return []
+
+    monkeypatch.setattr(metadata_module, "TMDBClient", EmptyTMDBClient)
+    monkeypatch.setattr(
+        metadata_module,
+        "load_config",
+        lambda: SimpleNamespace(tmdb_bearer_token="token"),
+    )
+
+    zero_result = metadata_module.default_metadata_provider({
+        "work_type": "series",
+        "preferred_title": "完全不存在的作品",
+        "provider_bindings": [],
+        "episodes": [],
+    })
+
+    assert zero_result["metadata_state"] == "waiting_review"
+    assert zero_result["reason_code"] == "no_candidates"
+    assert zero_result["candidate_decision"]["decision"] == "waiting_review"
+
+    class UnavailableTMDBClient(EmptyTMDBClient):
+        def search_tv(self, _query, _year):
+            raise TMDBClientError("service unavailable")
+
+    monkeypatch.setattr(metadata_module, "TMDBClient", UnavailableTMDBClient)
+
+    unavailable = metadata_module.default_metadata_provider({
+        "work_type": "series",
+        "preferred_title": "服务不可用作品",
+        "provider_bindings": [],
+        "episodes": [],
+    })
+
+    assert unavailable["metadata_state"] == "source_unavailable"
+    assert unavailable["reason_code"] == "source_unavailable"
