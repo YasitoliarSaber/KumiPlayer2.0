@@ -29,6 +29,16 @@ export function cleanDisplayTitle(value: string, fallback = '') {
   return text || fallback;
 }
 
+const LEADING_SPECIAL_CODE = /^(?:S00\s*E\s*\d+|SP\s*\d+)\s*[-–—·:：]?\s*/i;
+
+/**
+ * 特别篇的 SP/S00E 结构码由独立字段展示；历史数据标题里残留的
+ * 前缀编号在这里剥离，避免 "SP08 SP08 · …" 式重复。
+ */
+export function stripSpecialEpisodeCode(value: string) {
+  return String(value || '').replace(LEADING_SPECIAL_CODE, '').trim();
+}
+
 function decodeTitleEntities(value: string) {
   return value
     .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))

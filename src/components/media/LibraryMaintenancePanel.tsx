@@ -9,7 +9,6 @@
 import { useState } from 'react'
 import {
   Button,
-  Checkbox,
   MessageBar,
   MessageBarBody,
   Radio,
@@ -27,11 +26,11 @@ export interface LibraryMaintenancePanelProps {
 }
 
 const SCOPES = [
-  { value: 'all', label: '全部来源', description: '清理所有已导入的媒体库来源' },
-  { value: 'local', label: '本地', description: '只清理本机物理磁盘的媒体库记录' },
-  { value: 'pan115', label: '115 网盘', description: '只清理来自 115 网盘的媒体库记录' },
-  { value: 'baidu', label: '百度网盘', description: '只清理来自百度网盘的媒体库记录' },
-  { value: 'quark', label: '夸克网盘', description: '只清理来自夸克网盘的媒体库记录' },
+  { value: 'all', label: '全部来源' },
+  { value: 'local', label: '本地' },
+  { value: 'pan115', label: '115 网盘' },
+  { value: 'baidu', label: '百度网盘' },
+  { value: 'quark', label: '夸克网盘' },
 ]
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -39,6 +38,12 @@ const PROVIDER_LABELS: Record<string, string> = {
   pan115: '115 网盘',
   baidu: '百度网盘',
   quark: '夸克网盘',
+}
+
+const JOB_TYPE_LABELS: Record<string, string> = {
+  materialize_mirror: '生成镜像',
+  scrape_work: '获取媒体信息',
+  refresh_projection: '更新媒体库',
 }
 
 function sourceGroups(roots: V4MaintenancePreview['root_names']): string[] {
@@ -61,7 +66,19 @@ function maintenanceError(cause: unknown, fallback: string): string {
   if (/没有已确认 revision|来源根\s+root_/u.test(message)) {
     return '所选范围包含尚未完成导入的来源；请先完成导入，或重新生成删除预览。'
   }
-  return message.replace(/\broot_[A-Za-z0-9_-]+\b/g, '所选来源')
+  if (/删除预览已过期|重新生成删除预览|来源、revision、任务或生成物已变化/u.test(message)) {
+    return '清理条件已变化，请重新生成删除预览。'
+  }
+  if (/正在运行的后台任务/u.test(message)) {
+    return '当前仍有后台任务在运行，请等待完成后重新检查。'
+  }
+  return `${fallback}，请重新检查后重试`
+}
+
+function blockedJobSummary(preview: V4MaintenancePreview): string {
+  return preview.blocked_job_types
+    .map((jobType) => JOB_TYPE_LABELS[jobType] ?? '后台处理')
+    .join('、')
 }
 
 export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }: LibraryMaintenancePanelProps) {
@@ -72,7 +89,6 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
   const [previewing, setPreviewing] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [resuming, setResuming] = useState(false)
-  const [confirmationChecked, setConfirmationChecked] = useState(false)
 
   const generatePreview = async () => {
     setError('')
@@ -81,7 +97,6 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
     try {
       const next = await onPreview(scope)
       setPreview(next)
-      setConfirmationChecked(false)
     } catch (cause) {
       setError(maintenanceError(cause, '生成删除预览失败'))
     } finally {
@@ -105,13 +120,16 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
 
   const confirmDelete = async () => {
     if (!preview) return
+    if (preview.blocked) {
+      setError('当前仍有后台任务在运行，请重新检查清理条件后再继续。')
+      return
+    }
     setError('')
     setConfirming(true)
     try {
       const next = await onConfirm(preview)
       setResult(next)
       setPreview(null)
-      setConfirmationChecked(false)
     } catch (cause) {
       setError(maintenanceError(cause, '删除失败'))
     } finally {
@@ -123,28 +141,28 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
     <section className="media-v4-maintenance" aria-label="媒体库维护">
       <div className="media-stage-heading">
         <span className="media-stage-icon" aria-hidden="true"><ShieldCheckmark24Regular /></span>
-        <div><span className="media-stage-eyebrow">媒体库维护</span><h2>按来源清理</h2><p>删除 KumiPlayer 媒体库数据与受控生成物；源视频、外部 TXT、网盘对象、设置与凭据始终保留。</p></div>
+        <div><span className="media-stage-eyebrow">媒体库维护</span><h2>按来源清理</h2><p>清理媒体库记录和受控生成物，不会删除源文件、外部清单、设置或凭据。</p></div>
       </div>
 
       <div className="media-v4-maintenance-scope">
         <div className="media-v4-maintenance-section-heading">
-          <div><strong>清理范围</strong><span>只选择内容来源；OpenList 是导入方式，不作为清理范围。</span></div>
+          <strong>清理范围</strong>
         </div>
-        <RadioGroup value={scope} onChange={(_, data) => { setScope(data.value); setPreview(null); setResult(null); setError(''); setConfirmationChecked(false) }} aria-label="清理来源范围">
+        <RadioGroup value={scope} onChange={(_, data) => { setScope(data.value); setPreview(null); setResult(null); setError('') }} aria-label="清理来源范围">
           {SCOPES.map((option) => (
             <Radio
               key={option.value}
               className="media-v4-maintenance-scope-option"
               value={option.value}
-              label={<span className="media-v4-maintenance-scope-copy"><strong>{option.label}</strong><span>{option.description}</span></span>}
+              label={<span className="media-v4-maintenance-scope-copy"><strong>{option.label}</strong></span>}
             />
           ))}
         </RadioGroup>
       </div>
 
       <div className="media-v4-command-row media-v4-maintenance-actions">
-        <div><strong>先生成预览</strong><span>预览只计算影响范围，不会删除任何内容。</span></div>
-        <Button appearance="secondary" icon={<Delete24Regular />} disabled={busy || previewing} onClick={() => void generatePreview()}>
+        <div><strong>删除预览</strong><span>先查看影响范围，再执行清理。</span></div>
+        <Button className="media-v4-maintenance-preview-button" appearance="outline" icon={<Delete24Regular />} disabled={busy || previewing} onClick={() => void generatePreview()}>
           {previewing ? <Spinner size="tiny" /> : '生成删除预览'}
         </Button>
       </div>
@@ -158,7 +176,7 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
             <span>{preview.work_count} 部作品 · {preview.artifact_count} 项受控生成物</span>
           </div>
           {preview.blocked && (
-            <MessageBar intent="warning"><MessageBarBody>该来源仍有 {preview.blocked_job_count} 个正在运行的后台任务（{preview.blocked_job_types.join('、')}），清理已阻止；请等待任务完成后再生成预览。</MessageBarBody></MessageBar>
+            <MessageBar intent="warning"><MessageBarBody>还有 {preview.blocked_job_count} 个后台任务正在{blockedJobSummary(preview)}。任务完成前不能清理，请稍后重新检查。</MessageBarBody></MessageBar>
           )}
           {skippedSourceSummary(preview) && (
             <MessageBar intent="info"><MessageBarBody>{skippedSourceSummary(preview)}</MessageBarBody></MessageBar>
@@ -175,23 +193,32 @@ export function LibraryMaintenancePanel({ busy, onPreview, onConfirm, onResume }
             <div><strong>{preview.mixed_work_count}</strong><span>部混合来源将保留</span></div>
           </div>
           <div className="media-v4-maintenance-groups">
-            <div><strong>将删除</strong><span>{preview.orphan_work_count} 部作品的媒体库记录与受控镜像/NFO/图片</span></div>
-            <div><strong>个人状态影响</strong><span>孤儿作品将同步退出播放历史 {preview.history_count ?? 0} 条、播放进度 {preview.progress_count ?? 0} 条、追更状态 {preview.tracking_count ?? 0} 条；混合来源作品的个人状态完整保留。</span></div>
-            <div><strong>将保留</strong><span>{preview.mixed_work_count} 部混合来源作品完整保留（含个人状态）</span></div>
-            <div><strong>始终保留</strong>
-              <ul>{preview.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
+            <div className="media-v4-maintenance-delete-group">
+              <strong>将退出媒体库</strong>
+              <span>{preview.orphan_work_count} 部作品的媒体库记录、受控镜像、NFO 和图片</span>
+              <small>同时移除播放历史 {preview.history_count ?? 0} 条、播放进度 {preview.progress_count ?? 0} 条、追更状态 {preview.tracking_count ?? 0} 条。</small>
+            </div>
+            <div className="media-v4-maintenance-keep-group">
+              <strong>保留内容</strong>
+              <span>{preview.mixed_work_count} 部混合来源作品及其个人状态完整保留。</span>
+              {preview.warnings.length > 0 && <ul>{preview.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}
             </div>
           </div>
           <div className="media-v4-maintenance-confirm">
-            <Checkbox
-              checked={confirmationChecked}
-              disabled={busy || confirming || preview.blocked}
-              label="我已确认清理范围；源视频、外部 TXT 和设置不会被删除"
-              onChange={(_, data) => setConfirmationChecked(Boolean(data.checked))}
-            />
-            <Button className="media-v4-maintenance-danger-button" appearance="primary" icon={<Delete24Regular />} disabled={!confirmationChecked || busy || confirming || preview.blocked} onClick={() => void confirmDelete()}>
-              {confirming ? <><Spinner size="tiny" />正在清理</> : '确认清理'}
-            </Button>
+            <div className={`media-v4-maintenance-confirm-status${preview.blocked ? ' blocked' : ''}`}>
+              <strong>{preview.blocked ? '清理暂不可用' : '可以开始清理'}</strong>
+              <span>{preview.blocked ? '后台任务完成后重新检查，确认按钮会恢复。' : '确认后立即清理上述媒体库数据。'}</span>
+            </div>
+            <div className="media-v4-maintenance-confirm-actions">
+              {preview.blocked && (
+                <Button appearance="outline" disabled={busy || previewing} onClick={() => void generatePreview()} aria-label="重新检查清理条件">
+                  {previewing ? <Spinner size="tiny" /> : '重新检查'}
+                </Button>
+              )}
+              <Button className="media-v4-maintenance-danger-button" appearance="primary" icon={<Delete24Regular />} disabled={busy || confirming || preview.blocked} onClick={() => void confirmDelete()}>
+                {confirming ? <><Spinner size="tiny" />正在清理</> : preview.blocked ? '暂不可清理' : '确认清理'}
+              </Button>
+            </div>
           </div>
         </div>
       )}

@@ -40,7 +40,7 @@ def _insert_v7_root(conn: sqlite3.Connection, *, root_id: str, provider: str, in
     )
 
 
-def test_v7_database_is_migrated_to_v14_with_source_mode_backfill(tmp_path):
+def test_v7_database_is_migrated_to_current_schema_with_source_mode_backfill(tmp_path):
     db_path = tmp_path / "legacy-v7.db"
     _build_v7_database(db_path)
     with sqlite3.connect(db_path) as conn:
@@ -68,7 +68,7 @@ def test_v7_database_is_migrated_to_v14_with_source_mode_backfill(tmp_path):
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == V4_SCHEMA_VERSION
         rows = {
             str(row["root_id"]): str(row["source_mode"])
             for row in conn.execute("SELECT root_id, source_mode FROM source_roots").fetchall()
@@ -111,7 +111,7 @@ def test_v4_database_is_migrated_to_v5_without_data_loss(tmp_path):
 
     with sqlite3.connect(db_path) as conn:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 14
+        assert version == V4_SCHEMA_VERSION
         table = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tree_scan_validation'"
         ).fetchone()
@@ -129,11 +129,55 @@ def test_fresh_database_is_v5_and_has_validation_table(tmp_path):
 
     with sqlite3.connect(tmp_path / "fresh.db") as conn:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == V4_SCHEMA_VERSION == 14
+        assert version == V4_SCHEMA_VERSION
         table = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tree_scan_validation'"
         ).fetchone()
         assert table is not None
+
+
+def test_v14_scan_rows_gain_progress_columns_and_backfill(tmp_path):
+    """真实 v14 扫描行升级后可读出阶段、计数和心跳，不丢失已发现事实。"""
+
+    db_path = tmp_path / "legacy-v14-scan.db"
+    database = V4Database(db_path)
+    database.initialize()
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO source_roots(root_id, provider, ingest_method, created_at, updated_at) "
+            "VALUES ('root-v14-scan', 'local', 'local_scan', '2026-08-30T00:00:00+00:00', '2026-08-30T00:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO source_scans(scan_id, root_id, generation, status, started_at) "
+            "VALUES ('scan-v14', 'root-v14-scan', 1, 'running', '2026-08-30T00:00:01+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO source_evidence(evidence_id, scan_id, root_id, source_key, relative_path, entry_kind) "
+            "VALUES ('evidence-v14', 'scan-v14', 'root-v14-scan', 'Show/E01.mkv', 'Show/E01.mkv', 'video')"
+        )
+        conn.execute(
+            "INSERT INTO parsed_facts(parsed_fact_id, evidence_id, parser_version) "
+            "VALUES ('facts-v14', 'evidence-v14', 'v14')"
+        )
+        for column in ("cancel_requested", "heartbeat_at", "total_count", "processed_count", "stage"):
+            conn.execute(f"ALTER TABLE source_scans DROP COLUMN {column}")
+        conn.execute("PRAGMA user_version = 14")
+
+    database.initialize()
+
+    with database.connect() as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == V4_SCHEMA_VERSION
+        row = conn.execute(
+            "SELECT stage, processed_count, total_count, heartbeat_at, cancel_requested "
+            "FROM source_scans WHERE scan_id = 'scan-v14'"
+        ).fetchone()
+    assert dict(row) == {
+        "stage": "recognizing",
+        "processed_count": 1,
+        "total_count": 1,
+        "heartbeat_at": "2026-08-30T00:00:01+00:00",
+        "cancel_requested": 0,
+    }
 
 
 def test_legacy_v3_database_still_requires_reset(tmp_path):

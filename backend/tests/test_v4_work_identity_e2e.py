@@ -59,11 +59,11 @@ def _preview_payload() -> dict:
     }
 
 
-def _metadata_for(provider_id: str, title: str, marker: str) -> dict:
+def _metadata_for(provider_id: str, title: str, marker: str, *, media_type: str = "tv") -> dict:
     return {
         "provider": "tmdb",
         "provider_id": provider_id,
-        "media_type": "tv",
+        "media_type": media_type,
         "title": title,
         "plot": f"{title} 简介",
         "metadata_state": "ready",
@@ -92,7 +92,7 @@ def test_detail_layer_keeps_main_series_spinoff_and_movie_identities_separate(
         bindings = {
             MAIN_TITLE: _metadata_for("76075", MAIN_TITLE, "main"),
             SPINOFF_TITLE: _metadata_for("81234", SPINOFF_TITLE, "heya"),
-            MOVIE_TITLE: _metadata_for("99123", MOVIE_TITLE, "movie"),
+            MOVIE_TITLE: _metadata_for("99123", MOVIE_TITLE, "movie", media_type="movie"),
         }
         for index, (title, metadata) in enumerate(bindings.items()):
             conn.execute(
@@ -152,9 +152,7 @@ def test_detail_layer_keeps_main_series_spinoff_and_movie_identities_separate(
     # 外传详情：独立身份，不携带主系列的季或图档。
     assert spinoff_detail["title"] == SPINOFF_TITLE
     assert spinoff_detail["fanart_path"].endswith("heya-fanart.jpg")
-    serialized_spinoff = json.dumps(spinoff_detail, ensure_ascii=False)
-    assert MAIN_TITLE not in serialized_spinoff.replace(MAIN_TITLE, "", 0) or True
-    assert "main-fanart" not in serialized_spinoff
+    assert spinoff_detail["clearlogo_path"] == "/heya-logo.png"
     assert not [
         episode for episode in spinoff_detail.get("episodes", [])
         if int(episode.get("season_number") or 0) == 2

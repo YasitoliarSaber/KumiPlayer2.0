@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 
 def _evidence(relative_path: str, *, provider: str = "local"):
     from app.media_v4.sources.adapters import SourceEntry, to_source_evidence
@@ -43,6 +45,45 @@ def test_parser_keeps_special_and_auxiliary_as_facts_without_destroying_episode_
     assert special.special_candidate is True
     assert auxiliary.group_type in {"auxiliary", "ignored"}
     assert auxiliary.is_importable is False
+
+
+@pytest.mark.parametrize(
+    "filename",
+    (
+        "Show [OPED Recording 01].mkv",
+        "Show [BGM Recording 04].mkv",
+        "Show [Location Hunting 12].mkv",
+        "Show [Event02].mkv",
+        "Show [24(NC Ver.)].mkv",
+        "Show [Preview].mkv",
+        "Show [Preview Collection].mkv",
+        "Show [Digest].mkv",
+        "Show [S3 Announcement].mkv",
+        "Show [Program].mkv",
+        "Show [Movie manner].mkv",
+    ),
+)
+def test_parser_keeps_production_and_credit_extras_out_of_specials(filename: str):
+    """SPs 目录不能把更具体的制作素材、预告或无字幕版升级成特别篇。"""
+
+    from app.media_v4.parsing.parser import V4Parser
+
+    facts = V4Parser().parse(_evidence(f"Show/SPs/{filename}"))
+
+    assert facts.group_type in {"auxiliary", "ignored"}
+    assert facts.is_importable is False
+
+
+def test_parser_preserves_full_compound_special_token():
+    from app.media_v4.parsing.parser import V4Parser
+
+    facts = V4Parser().parse(
+        _evidence("Show/Season 1/SPs/Show [SP01_13][Ma10p_2160p].mkv")
+    )
+
+    assert facts.group_type == "special"
+    assert facts.special_number == 1
+    assert facts.episode_token_raw == "SP01_13"
 
 
 def test_parser_never_emits_or_changes_a_work_identity():

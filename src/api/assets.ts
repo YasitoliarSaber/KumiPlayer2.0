@@ -29,11 +29,16 @@ export function buildAssetUrl(
     return ''
   }
   // 本地镜像图片：分类页等小卡片场景走派生缩略图端点，降低解码与内存开销。
-  // 远程图片已在前端归一到合适尺寸档，无需缩略图。
+  // 详情背景也走 1280 派生图，不再整张传输 TMDB original 原图。
   const { thumbnailWidth } = options
-  if (typeof thumbnailWidth === 'number' && thumbnailWidth > 0) {
+  const width = typeof thumbnailWidth === 'number' && thumbnailWidth > 0
+    ? thumbnailWidth
+    : options.kind === 'detailBackdrop'
+      ? 1280
+      : 0
+  if (width > 0) {
     return withApiSessionToken(
-      API_BASE + '/api/assets/thumbnail?path=' + encodeURIComponent(path) + '&width=' + thumbnailWidth,
+      API_BASE + '/api/assets/thumbnail?path=' + encodeURIComponent(path) + '&width=' + width,
     )
   }
   return withApiSessionToken(API_BASE + '/api/assets?path=' + encodeURIComponent(path))
@@ -48,7 +53,7 @@ function normalizeRemoteImageUrl(url: string, kind: AssetKind = 'poster'): strin
     : kind === 'episode'
       ? 'w500'
     : kind === 'detailBackdrop'
-      ? 'original'
+      ? 'w1280'
       : kind === 'backdrop'
         ? 'w1280'
         : kind === 'logo'

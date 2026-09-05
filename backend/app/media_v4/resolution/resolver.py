@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections import OrderedDict, defaultdict
+from pathlib import PurePosixPath
 
 from app.media_v4.domain.models import (
     ParsedFacts,
@@ -119,7 +120,15 @@ def _boundary_work_key(evidence: SourceEvidence, facts: ParsedFacts) -> str:
 
 
 def _work_key(facts: ParsedFacts, evidence: SourceEvidence | None = None) -> str:
-    if facts.tmdb_hint_id and facts.tmdb_hint_type:
+    # 高置信 Provider 身份可以把不同语言、不同目录的同一正片合并；但它
+    # 不能跨越已显式标出的独立作品/外传边界。后者仍由本地结构键保持隔离，
+    # 并在 revision 预览阶段校验是否与既有绑定冲突。
+    if (
+        facts.tmdb_hint_id
+        and facts.tmdb_hint_type
+        and facts.confidence == "high"
+        and facts.card_type != "standalone"
+    ):
         return f"provider:{facts.tmdb_hint_type.casefold()}:{facts.tmdb_hint_id}"
     if evidence is not None:
         boundary_key = _boundary_work_key(evidence, facts)
@@ -138,6 +147,11 @@ def _work_key(facts: ParsedFacts, evidence: SourceEvidence | None = None) -> str
                 break
     title = _normalize_title(identity_title)
     if _is_placeholder_title(title):
+        # Provider hint 只在本地事实无法形成 Work 身份时兜底。它是外部
+        # 映射，不得优先于目录结构、作品标题或主系列关系；否则错误 hint
+        # 会把主系列、外传和电影直接改写成同一个 provider Work。
+        if facts.tmdb_hint_id and facts.tmdb_hint_type:
+            return f"provider:{facts.tmdb_hint_type.casefold()}:{facts.tmdb_hint_id}"
         return ""
     media_type = _effective_media_type(facts)
     year = str(facts.year_candidate or "")
@@ -178,10 +192,18 @@ def _resolved_entry_work_key(
     if facts.card_type == "standalone":
         return key
     media_type = _effective_media_type(facts)
-    # 结构折叠只接受作品名本身命中主系列身份。series_group 只是父系列
-    # 线索：外传/电影条目的 series_group 指向主系列，若允许它参与折叠，
-    # 外传会被主系列容器吞并（与主系列季集号冲突、共享错误 Logo），
-    # 其与主系列的关系只能以 relation 表达，不能合并身份。
+    # 后续正片季会把完整目录名（例如 "Yuru Camp Season 2"）保留在
+    # work_title，但同时给出主系列 series_group 与 relation_type=main。
+    # 这是结构化的同作品证据，应归入同一个 TV Work。外传和电影的
+    # series_group 同样可能指向父系列，却只能用于 relation；它们已经由
+    # standalone/card type 在上方隔离，不能被这一规则吞并。
+    normalized_group = _normalize_title(facts.series_group)
+    if (
+        facts.relation_type == "main"
+        and normalized_group
+        and (normalized_group, media_type) in structural_series_identities
+    ):
+        return f"series:{normalized_group}:{media_type}"
     matching_series = next(
         (
             normalized
@@ -191,6 +213,43 @@ def _resolved_entry_work_key(
         "",
     )
     return f"series:{matching_series}:{media_type}" if matching_series else key
+
+
+_LOCAL_SPECIAL_TOKEN = re.compile(
+    r"(?i)^(SP|OVA|OAD|OAV)0*(\d+)(?:[_-]0*(\d+))?$"
+)
+_AUTHORITATIVE_SPECIAL_TOKEN = re.compile(r"(?i)^S00E0*(\d+)$")
+
+
+def _special_context(evidence: SourceEvidence) -> str:
+    """取得发布内特别篇编号的最小稳定上下文。
+
+    `SP01` 通常会在每一季重新编号，不能作为整部 Work 的全局键。去掉
+    尾部 SPs/Specials 结构目录后，保留季度/子作品目录；这样同季度同 token
+    的 1080p/2160p 会合并，不同季度或复合 token 不会互相覆盖。
+    """
+
+    directories = list(PurePosixPath(evidence.relative_path.replace("\\", "/")).parts[:-1])
+    while directories and re.fullmatch(
+        r"(?i)(?:SPs?|Specials?|S00|Extras?|Bonus)",
+        directories[-1].strip(),
+    ):
+        directories.pop()
+    return _normalize_title(directories[-1] if directories else "")
+
+
+def _local_special_identity(
+    evidence: SourceEvidence,
+    facts: ParsedFacts,
+) -> tuple[str, int, int | None] | None:
+    match = _LOCAL_SPECIAL_TOKEN.fullmatch((facts.episode_token_raw or "").strip())
+    if not match:
+        return None
+    return (
+        _special_context(evidence),
+        int(match.group(2)),
+        int(match.group(3)) if match.group(3) is not None else None,
+    )
 
 
 class MediaResolver:
@@ -213,13 +272,55 @@ class MediaResolver:
             and not is_generic_container_title(facts.series_group)
         }
         explicit_special_numbers: dict[str, set[int]] = defaultdict(set)
+        local_special_identities: dict[str, set[tuple[str, int, int | None]]] = defaultdict(set)
         for evidence, facts in entries:
             if facts.group_type != "special" and not facts.special_candidate:
                 continue
             key = _resolved_entry_work_key(evidence, facts, structural_series_identities)
+            local_identity = _local_special_identity(evidence, facts)
+            if key and local_identity is not None:
+                local_special_identities[key].add(local_identity)
+                continue
+            authoritative = _AUTHORITATIVE_SPECIAL_TOKEN.fullmatch(
+                (facts.episode_token_raw or "").strip()
+            )
+            if key and authoritative:
+                explicit_special_numbers[key].add(int(authoritative.group(1)))
+                continue
             number = facts.special_number or facts.episode_candidate
             if key and number is not None and number > 0:
                 explicit_special_numbers[key].add(number)
+
+        allocated_local_specials: dict[
+            tuple[str, tuple[str, int, int | None]], int
+        ] = {}
+        for key, identities in local_special_identities.items():
+            claimed = set(explicit_special_numbers.get(key, set()))
+            ordered = sorted(
+                identities,
+                key=lambda value: (value[0], value[1], -1 if value[2] is None else value[2]),
+            )
+            number_frequency = defaultdict(int)
+            for _context, number, _subnumber in ordered:
+                number_frequency[number] += 1
+            # 单一、非复合 SP08 等保留原编号，便于后续 Provider 映射；
+            # 跨季度重号或 SP01_13 复合编号必须重新分配全局 S00 身份。
+            for identity in ordered:
+                _context, number, subnumber = identity
+                if subnumber is None and number_frequency[number] == 1 and number not in claimed:
+                    allocated_local_specials[(key, identity)] = number
+                    claimed.add(number)
+            next_number = 1
+            for identity in ordered:
+                allocation_key = (key, identity)
+                if allocation_key in allocated_local_specials:
+                    continue
+                while next_number in claimed:
+                    next_number += 1
+                allocated_local_specials[allocation_key] = next_number
+                claimed.add(next_number)
+                next_number += 1
+            explicit_special_numbers[key].update(claimed)
         next_special_number = {
             key: max(numbers, default=0) + 1
             for key, numbers in explicit_special_numbers.items()
@@ -308,7 +409,13 @@ class MediaResolver:
             if facts.group_type == "special" or facts.special_candidate:
                 local_season = 0
                 local_episodes = (None,)
-                resolved_special_number = facts.special_number or facts.episode_candidate
+                local_special_identity = _local_special_identity(evidence, facts)
+                if local_special_identity is not None:
+                    resolved_special_number = allocated_local_specials[
+                        (key, local_special_identity)
+                    ]
+                else:
+                    resolved_special_number = facts.special_number or facts.episode_candidate
                 if resolved_special_number is None or resolved_special_number <= 0:
                     title_identity = _normalize_title(facts.episode_title) or _normalize_title(
                         evidence.relative_path

@@ -2,6 +2,7 @@
 
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, expect, test, vi } from 'vitest'
+import { V4ExecutionProgress } from '../../src/components/media/V4ExecutionProgress'
 import MediaManagementPage from '../../src/pages/MediaManagementPage'
 import { useUiStore } from '../../src/stores/ui'
 
@@ -314,4 +315,59 @@ test('媒体信息需要人工处理的作品不显示为已完成', async () =>
   await waitFor(() => expect(screen.getByText('待人工确认')).toBeVisible())
   expect(screen.getByText('需要处理')).toBeVisible()
   expect(screen.queryByText('已完成')).not.toBeInTheDocument()
+  expect(screen.queryByText('任务进行中，完成后自动折叠到“已完成”。')).not.toBeInTheDocument()
+})
+
+test('作品运行中转为等待确认时自动展开恢复入口', () => {
+  const props = {
+    busyRetryId: '',
+    onRetry: vi.fn(),
+    resolvingWorkId: '',
+    onResolveMetadata: vi.fn(),
+  }
+  const unit = workUnit('w-review', '待人工确认', 'running_metadata')
+  const { rerender } = render(
+    <V4ExecutionProgress progress={makeProgress([unit])} {...props} />,
+  )
+
+  expect(screen.queryByRole('button', { name: '选择正确作品' })).not.toBeInTheDocument()
+
+  rerender(
+    <V4ExecutionProgress
+      progress={makeProgress([
+        {
+          ...unit,
+          overall_status: 'needs_attention',
+          metadata_state: 'waiting_review',
+          metadata_reason: '在线媒体信息没有唯一匹配，需要确认正确作品后继续。',
+          metadata: { job_id: 'meta-w-review', status: 'succeeded', attempts: 1, last_error: '' },
+        },
+      ], { overall_status: 'needs_attention' })}
+      {...props}
+    />,
+  )
+
+  expect(screen.getByRole('button', { name: '选择正确作品' })).toBeVisible()
+})
+
+test('已终止的第三步执行显示终态而不是准备中', () => {
+  render(
+    <V4ExecutionProgress
+      progress={makeProgress([workUnit('w-cancelled', '用户已终止', 'cancelled')], {
+        overall_status: 'cancelled',
+        stage_summary: {
+          mirror: { status: 'succeeded', total: 1, queued: 0, running: 0, succeeded: 1, failed: 0, cancelled: 0 },
+          metadata: { status: 'cancelled', total: 1, queued: 0, running: 0, succeeded: 0, failed: 0, cancelled: 1 },
+          projection: { status: 'cancelled', total: 1, queued: 0, running: 0, succeeded: 0, failed: 0, cancelled: 1 },
+        },
+      })}
+      busyRetryId=""
+      onRetry={vi.fn()}
+      resolvingWorkId=""
+      onResolveMetadata={vi.fn()}
+    />,
+  )
+
+  expect(screen.getByText('任务已终止')).toBeVisible()
+  expect(screen.queryByText('正在准备任务')).not.toBeInTheDocument()
 })

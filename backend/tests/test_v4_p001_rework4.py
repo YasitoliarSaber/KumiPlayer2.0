@@ -128,7 +128,16 @@ def test_real_search_has_no_aliases_until_detail_enrichment_makes_local_alias_hi
         tmdb_bearer_token="token", artwork_storage_mode="remote", tmdb_timeout=5, proxy_url=None,
     ))
     service = V4RevisionService(database)
-    service.create_draft("rev-alias", [_entry("alias-en", work_title="摇曳露营")])
+
+    # 首次草稿默认完全离线；普通标题在线搜索只能由确认后的 metadata job
+    # 通过显式 candidate_search 钩子执行。这里用同一条生产钩子验证别名富化。
+    from app.media_v4.resolution import candidates as candidates_module
+
+    service.create_draft(
+        "rev-alias",
+        [_entry("alias-en", work_title="摇曳露营")],
+        candidate_search=candidates_module.default_candidate_search,
+    )
 
     with database.connect() as conn:
         rows = conn.execute(

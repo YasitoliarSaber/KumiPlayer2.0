@@ -8,12 +8,39 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from app.media_v4.jobs.completeness import assess_metadata_completeness
+from app.media_v4.jobs.control import cancel_requested, claim_running, heartbeat, mark_cancelled
 from app.media_v4.jobs.metadata_artifacts import publish_metadata_artifacts
 from app.media_v4.persistence.database import V4Database
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _provider_binding_conflict(
+    conn,
+    *,
+    work_id: str,
+    work_type: str,
+    provider: str,
+    provider_id: str,
+) -> str:
+    """在写入前把 Provider 全局唯一约束转为可恢复的领域状态。"""
+
+    media_type = "tv" if work_type == "series" else "movie"
+    owner = conn.execute(
+        "SELECT work_id FROM provider_bindings WHERE provider = ? AND media_type = ? AND provider_id = ?",
+        (provider, media_type, provider_id),
+    ).fetchone()
+    if owner is not None and str(owner["work_id"]) != work_id:
+        return "该在线作品已关联到另一部作品，请返回检查识别结果或选择正确候选"
+    existing = conn.execute(
+        "SELECT provider_id FROM provider_bindings WHERE work_id = ? AND provider = ? AND media_type = ?",
+        (work_id, provider, media_type),
+    ).fetchone()
+    if existing is not None and str(existing["provider_id"]) != provider_id:
+        return "当前作品已有不一致的在线身份，请返回检查识别结果后重新确认"
+    return ""
 
 
 class V4ScrapeService:
@@ -54,6 +81,45 @@ class V4ScrapeService:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def requeue_work(self, revision_id: str, work_id: str) -> dict:
+        """仅重置一个已确认作品的刮削任务，供人工确认候选后继续执行。"""
+
+        with self.database.connect() as conn:
+            revision = conn.execute(
+                "SELECT status FROM import_revisions WHERE revision_id = ?",
+                (revision_id,),
+            ).fetchone()
+            if revision is None or revision["status"] != "confirmed":
+                raise RuntimeError("只有 confirmed revision 才能重试刮削")
+            bound = conn.execute(
+                "SELECT 1 FROM revision_bindings WHERE revision_id = ? AND work_id = ? LIMIT 1",
+                (revision_id, work_id),
+            ).fetchone()
+            if bound is None:
+                raise KeyError((revision_id, work_id))
+            job = conn.execute(
+                "SELECT * FROM jobs WHERE revision_id = ? AND work_id = ? AND job_type = 'scrape_work'",
+                (revision_id, work_id),
+            ).fetchone()
+            if job is None:
+                raise RuntimeError("该作品缺少可重试的刮削任务")
+            if job["status"] == "running":
+                raise RuntimeError("该作品正在获取媒体信息")
+            now = _now()
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'queued', cancel_requested = 0, last_error = '',
+                    heartbeat_at = '', started_at = '', finished_at = '', updated_at = ?
+                WHERE job_id = ?
+                """,
+                (now, job["job_id"]),
+            )
+            refreshed = conn.execute(
+                "SELECT * FROM jobs WHERE job_id = ?", (job["job_id"],)
+            ).fetchone()
+        return dict(refreshed)
+
     def process(
         self,
         job_id: str,
@@ -78,15 +144,15 @@ class V4ScrapeService:
                 raise RuntimeError("刮削任务对应的 Work 不存在")
             if job["status"] == "succeeded":
                 return
-            cursor = conn.execute(
-                """
-                UPDATE jobs SET status = 'running', attempts = attempts + 1, updated_at = ?
-                WHERE job_id = ? AND status = 'queued'
-                """,
-                (_now(), job_id),
-            )
-            if cursor.rowcount != 1:
-                raise RuntimeError("刮削任务已由其他执行器领取")
+        if not claim_running(self.database, job_id):
+            if cancel_requested(self.database, job_id):
+                mark_cancelled(self.database, job_id)
+                return
+            raise RuntimeError("刮削任务已由其他执行器领取")
+        with self.database.connect() as conn:
+            job = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+            if job is None:
+                raise KeyError(job_id)
             target = dict(work) if work is not None else {"work_id": job["work_id"]}
             target["revision_id"] = job["revision_id"]
             target["provider_bindings"] = [
@@ -122,13 +188,36 @@ class V4ScrapeService:
             ]
 
         try:
+            if cancel_requested(self.database, job_id):
+                mark_cancelled(self.database, job_id)
+                return
             result = provider(target)
+            heartbeat(self.database, job_id)
+            if cancel_requested(self.database, job_id):
+                mark_cancelled(self.database, job_id)
+                return
             provider_name = str(result.get("provider") or "").strip()
             provider_id = str(result.get("provider_id") or "").strip()
             metadata_state = str(result.get("metadata_state") or "").strip()
             if not metadata_state:
                 metadata_state = "ready" if provider_name != "local" else "waiting_metadata"
             ready = metadata_state == "ready" and provider_name not in {"", "local"} and bool(provider_id)
+            if ready:
+                with self.database.connect() as conn:
+                    binding_conflict = _provider_binding_conflict(
+                        conn,
+                        work_id=str(job["work_id"]),
+                        work_type=str(target.get("work_type") or ""),
+                        provider=provider_name,
+                        provider_id=provider_id,
+                    )
+                if binding_conflict:
+                    ready = False
+                    result = {
+                        **result,
+                        "metadata_state": "waiting_review",
+                        "reason": binding_conflict,
+                    }
             if ready and mirror_root is None:
                 # 完整性门控必经：镜像根从配置解析，不能由调用方是否传参决定。
                 from app.core.paths import get_mirror_root
@@ -190,6 +279,9 @@ class V4ScrapeService:
             }
             binding_provider = provider_name if ready else "local"
             binding_provider_id = provider_id if ready else ""
+            if cancel_requested(self.database, job_id):
+                mark_cancelled(self.database, job_id)
+                return
             with self.database.connect() as conn:
                 conn.execute(
                     """
@@ -266,8 +358,8 @@ class V4ScrapeService:
                         ),
                     )
                 conn.execute(
-                    "UPDATE jobs SET status = 'succeeded', updated_at = ?, last_error = '' WHERE job_id = ?",
-                    (now, job_id),
+                    "UPDATE jobs SET status = 'succeeded', updated_at = ?, heartbeat_at = ?, finished_at = ?, last_error = '' WHERE job_id = ?",
+                    (now, now, now, job_id),
                 )
                 # 每个 Work 刮削结果落库后都使投影失效。前端轮询会按需合并重建，
                 # 因而已成功的作品无需等待整批任务结束即可进入对应作品页。
@@ -281,8 +373,8 @@ class V4ScrapeService:
         except Exception as exc:
             with self.database.connect() as conn:
                 conn.execute(
-                    "UPDATE jobs SET status = 'failed', last_error = ?, updated_at = ? WHERE job_id = ?",
-                    (str(exc), _now(), job_id),
+                    "UPDATE jobs SET status = 'failed', last_error = ?, updated_at = ?, heartbeat_at = ?, finished_at = ? WHERE job_id = ?",
+                    (str(exc), _now(), _now(), _now(), job_id),
                 )
             raise
 

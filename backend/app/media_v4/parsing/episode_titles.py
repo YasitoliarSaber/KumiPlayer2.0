@@ -7,13 +7,18 @@ from pathlib import PurePosixPath
 
 from app.recognition.episode_title import is_release_metadata_title
 
+_SPECIAL_TOKEN_PREFIX = r"(?<![A-Za-z0-9])"
+_SPECIAL_TOKEN_SUFFIX = r"(?![A-Za-z0-9])"
 _SPECIAL_CODE = re.compile(
-    r"(?i)(?:S00\s*E\s*0*(\d+)|(?:SP|OVA|OAD|OAV)\s*0*(\d+))"
+    rf"(?i){_SPECIAL_TOKEN_PREFIX}(?:S00\s*E\s*0*(\d+)|(?:SP|OVA|OAD|OAV)\s*0*(\d+)){_SPECIAL_TOKEN_SUFFIX}"
+)
+_DISPLAY_SPECIAL_CODE = re.compile(
+    rf"(?i){_SPECIAL_TOKEN_PREFIX}(?:S00\s*E|SP)\s*0*\d+{_SPECIAL_TOKEN_SUFFIX}"
 )
 _SPECIAL_NUMBER_PATTERNS = (
-    re.compile(r"(?i)S00\s*E\s*0*(\d+)"),
-    re.compile(r"(?i)SP\s*0*(\d+)"),
-    re.compile(r"(?i)(?:OVA|OAD|OAV)\s*0*(\d+)"),
+    re.compile(rf"(?i){_SPECIAL_TOKEN_PREFIX}S00\s*E\s*0*(\d+){_SPECIAL_TOKEN_SUFFIX}"),
+    re.compile(rf"(?i){_SPECIAL_TOKEN_PREFIX}SP\s*0*(\d+){_SPECIAL_TOKEN_SUFFIX}"),
+    re.compile(rf"(?i){_SPECIAL_TOKEN_PREFIX}(?:OVA|OAD|OAV)\s*0*(\d+){_SPECIAL_TOKEN_SUFFIX}"),
 )
 _TECHNICAL_BRACKET = re.compile(
     r"(?i)(?:\d{3,4}p|\d{3,4}x\d{3,4}|x26[45]|h\.?26[45]|hevc|avc|"
@@ -35,10 +40,11 @@ def clean_special_episode_title(
     series_group: str = "",
     special_number: int | None = None,
 ) -> str:
-    """轻量清理特别篇文件名，保留可区分标题与 SP/OVA 编号。
+    """轻量清理特别篇文件名，保留可区分的语义标题。
 
     这里只删除扩展名、开头发布组、作品名前缀和纯技术参数。不会把未知
-    词语、半集编号、OVA/SP 标记或用户整理的副标题当噪音删除。
+    词语或用户整理的副标题当噪音删除。SP/OVA 编号由 Episode 的
+    ``special_number`` 单独保存，不能再混进展示标题。
     """
 
     normalized_path = (relative_path or "").replace("\\", "/")
@@ -58,6 +64,7 @@ def clean_special_episode_title(
     title = _strip_work_prefix(title, (work_title, original_title, series_group))
     title = _strip_trailing_technical_blocks(title)
     title = _strip_trailing_technical_suffixes(title)
+    title = _strip_special_markers(title)
     title = title.replace("_", " ")
     title = re.sub(r"\s+", " ", title).strip(" ._-:：·")
 
@@ -77,19 +84,11 @@ def extract_special_episode_number(title: str) -> int | None:
 
 
 def ensure_special_title_number(title: str, special_number: int | None) -> str:
-    """给没有显式编号的特别篇标题补稳定编号，避免不同条目显示同名。"""
+    """返回特别篇的语义标题；编号由调用方的结构化字段展示。"""
 
     cleaned = " ".join((title or "").split()).strip(" ._-:：·")
-    if special_number is None or special_number <= 0:
-        return cleaned or "特别篇"
-    fallback = f"SP{special_number:02d}"
-    marker = _SPECIAL_CODE.search(cleaned)
-    if marker:
-        marker_number = next((int(value) for value in marker.groups() if value), 0)
-        if marker_number > 0:
-            return cleaned
-        return f"{cleaned[:marker.start()]}{fallback}{cleaned[marker.end():]}".strip()
-    return f"{fallback} · {cleaned}" if cleaned and cleaned != "特别篇" else fallback
+    del special_number
+    return _strip_special_markers(cleaned) or "特别篇"
 
 
 def is_special_marker_only(title: str) -> bool:
@@ -105,7 +104,20 @@ def is_generic_special_title(title: str) -> bool:
 
 
 def _special_fallback(special_number: int | None) -> str:
-    return f"SP{special_number:02d}" if special_number and special_number > 0 else "特别篇"
+    del special_number
+    return "特别篇"
+
+
+def _strip_special_markers(title: str) -> str:
+    """移除只承担编号职责的 SP/S00E 标记，不删除紧随其后的语义标题。"""
+
+    # OVA/OAD 常是用户可读的副标题组成部分（如 OVA1：通向天堂），只移除
+    # 纯定位用途的 S00E/SP 编号。
+    current = _DISPLAY_SPECIAL_CODE.sub(" ", title or "")
+    # 移除编号后，剩余的成对方括号只可能是此前包住编号/标题的发布格式。
+    current = current.replace("[", " ").replace("]", " ").replace("【", " ").replace("】", " ")
+    current = re.sub(r"\s*(?:[-–—_·]+)\s*", " ", current)
+    return re.sub(r"\s+", " ", current).strip(" ._-:：·")
 
 
 def _strip_work_prefix(title: str, candidates: tuple[str, ...]) -> str:

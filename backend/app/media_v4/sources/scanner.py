@@ -8,7 +8,8 @@ import hashlib
 import os
 import re
 import uuid
-from collections.abc import Iterable
+from collections import deque
+from collections.abc import Callable, Iterable
 from pathlib import Path, PurePosixPath
 
 from app.integrations.openlist.client import normalize_remote_path
@@ -19,6 +20,10 @@ from app.integrations.openlist.providers import (
     provider_for_remote,
 )
 from app.media_v4.sources.adapters import SourceEntry, to_source_evidence
+
+
+class SourceScanCancelled(Exception):
+    """用户在扫描读取过程中取消；后台任务应落为 cancelled 终态。"""
 
 _UNICODE_TREE_LINE = re.compile(
     r"^(?P<prefix>(?:(?:│ {2,3})|(?: {3,4}))*)"
@@ -133,6 +138,21 @@ METADATA_SUFFIXES = frozenset({".nfo"})
 
 # 目录树文件上限，与旧版 media_presets 64 MB 边界一致。
 MAX_TREE_FILE_BYTES = 64 * 1024 * 1024
+
+
+def _emit_evidence_batch(callback: Callable | None, batch: list) -> None:
+    if callback is not None and batch:
+        callback(batch)
+
+
+def _emit_scan_progress(
+    callback: Callable | None,
+    *,
+    processed_count: int,
+    total_count: int = 0,
+) -> None:
+    if callback is not None:
+        callback(processed_count=processed_count, total_count=total_count)
 
 
 class DirectoryTreeReadError(Exception):
@@ -255,7 +275,11 @@ def tree_media_relative_paths(text: str) -> list[str]:
 
 
 def _tree_relative_paths(text: str) -> list[tuple[str, str]]:
-    """提取视频与 NFO metadata 相对路径；NFO 仅作只读身份证据。"""
+    """提取视频相对路径；NFO 等 metadata 在 TXT 链路整体忽略。
+
+    TXT 只是目录结构证据：先更新目录栈保持缩进层级，再按资源类型过滤，
+    保证过滤不会破坏后续条目的层级。NFO 不读取、不入身份候选，也不把
+    文件名 tvshow 变成作品。"""
 
     results: list[tuple[str, str]] = []
     stack: list[str] = []
@@ -274,24 +298,20 @@ def _tree_relative_paths(text: str) -> list[tuple[str, str]]:
             else:
                 stack[depth] = name
             suffix = Path(name).suffix.casefold()
-            if suffix not in VIDEO_SUFFIXES and suffix not in METADATA_SUFFIXES:
+            if suffix not in VIDEO_SUFFIXES:
                 continue
             parts = [part for part in stack[: depth + 1] if part]
             if skip_tree_root and parts:
                 parts = parts[1:]
             relative = "/".join(parts)
-            kind = "video" if suffix in VIDEO_SUFFIXES else "metadata"
         else:
             value = line.strip().replace("\\", "/")
             suffix = Path(value).suffix.casefold()
-            if not value or value.startswith("#") or (
-                suffix not in VIDEO_SUFFIXES and suffix not in METADATA_SUFFIXES
-            ):
+            if not value or value.startswith("#") or suffix not in VIDEO_SUFFIXES:
                 continue
             relative = value.lstrip("/")
-            kind = "video" if suffix in VIDEO_SUFFIXES else "metadata"
         if relative:
-            results.append((relative, kind))
+            results.append((relative, "video"))
     return results
 
 
@@ -303,33 +323,57 @@ def build_directory_tree_evidence(
     source_root: str = "",
     source_route_id: str = "",
     scan_id: str | None = None,
+    on_evidence_batch: Callable | None = None,
+    on_progress: Callable | None = None,
+    batch_size: int = 128,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> tuple[str, list]:
     """由已解码文本构建 SourceEvidence；避免为验证根再读一次文件。"""
 
     actual_scan_id = scan_id or ("scan_" + uuid.uuid4().hex)
     evidence = []
-    for relative, kind in _tree_relative_paths(text):
+    pending: list = []
+    entries = _tree_relative_paths(text)
+    effective_batch_size = max(1, int(batch_size))
+    for index, (relative, kind) in enumerate(entries, start=1):
+        if should_cancel is not None and should_cancel():
+            raise SourceScanCancelled()
         locator = relative
         if source_root:
             locator_path = Path(source_root).expanduser()
             for part in PurePosixPath(relative).parts:
                 locator_path /= part
             locator = str(locator_path)
-        evidence.append(
-            to_source_evidence(
-                SourceEntry(
-                    root_id=root_id,
-                    scan_id=actual_scan_id,
-                    provider=provider,
-                    ingest_method="directory_tree",
-                    relative_path=relative,
-                    source_key=relative,
-                    source_locator=locator,
-                    playback_locator=locator,
-                    source_route_id=source_route_id,
-                    entry_kind=kind,
-                )
+        item = to_source_evidence(
+            SourceEntry(
+                root_id=root_id,
+                scan_id=actual_scan_id,
+                provider=provider,
+                ingest_method="directory_tree",
+                relative_path=relative,
+                source_key=relative,
+                source_locator=locator,
+                playback_locator=locator,
+                source_route_id=source_route_id,
+                entry_kind=kind,
             )
+        )
+        evidence.append(item)
+        pending.append(item)
+        if len(pending) >= effective_batch_size:
+            _emit_evidence_batch(on_evidence_batch, pending)
+            pending = []
+            _emit_scan_progress(
+                on_progress,
+                processed_count=index,
+                total_count=len(entries),
+            )
+    _emit_evidence_batch(on_evidence_batch, pending)
+    if pending:
+        _emit_scan_progress(
+            on_progress,
+            processed_count=len(entries),
+            total_count=len(entries),
         )
     return actual_scan_id, evidence
 
@@ -359,6 +403,10 @@ def scan_local_directory(
     root_path: str | Path,
     *,
     excluded_roots: Iterable[str | Path] = (),
+    should_cancel=None,
+    on_evidence_batch: Callable | None = None,
+    on_progress: Callable | None = None,
+    batch_size: int = 128,
 ) -> tuple[str, str, list]:
     candidate = Path(root_path).expanduser()
     excluded = tuple(excluded_roots)
@@ -370,29 +418,63 @@ def scan_local_directory(
     root_id = _root_id(root)
     scan_id = "scan_" + uuid.uuid4().hex
     evidence = []
-    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix().casefold()):
+    pending: list = []
+    effective_batch_size = max(1, int(batch_size))
+    visited = 0
+    for path in root.rglob("*"):
+        visited += 1
+        if should_cancel is not None and should_cancel():
+            raise SourceScanCancelled()
         if not path.is_file() or path.suffix.casefold() not in VIDEO_SUFFIXES:
+            if visited % effective_batch_size == 0:
+                _emit_scan_progress(
+                    on_progress,
+                    processed_count=len(evidence),
+                    total_count=0,
+                )
             continue
         relative = path.relative_to(root).as_posix()
         stat = path.stat()
         locator = str(path)
-        evidence.append(
-            to_source_evidence(
-                SourceEntry(
-                    root_id=root_id,
-                    scan_id=scan_id,
-                    provider="local",
-                    ingest_method="local_scan",
-                    relative_path=relative,
-                    source_key=relative,
-                    source_locator=locator,
-                    playback_locator=locator,
-                    size=stat.st_size,
-                    mtime=stat.st_mtime,
-                    fingerprint=f"stat:{stat.st_size}:{stat.st_mtime_ns}",
-                )
+        item = to_source_evidence(
+            SourceEntry(
+                root_id=root_id,
+                scan_id=scan_id,
+                provider="local",
+                ingest_method="local_scan",
+                relative_path=relative,
+                source_key=relative,
+                source_locator=locator,
+                playback_locator=locator,
+                size=stat.st_size,
+                mtime=stat.st_mtime,
+                fingerprint=f"stat:{stat.st_size}:{stat.st_mtime_ns}",
             )
         )
+        evidence.append(item)
+        pending.append(item)
+        if len(pending) >= effective_batch_size:
+            _emit_evidence_batch(on_evidence_batch, pending)
+            pending = []
+            _emit_scan_progress(
+                on_progress,
+                processed_count=len(evidence),
+                total_count=0,
+            )
+        elif visited % effective_batch_size == 0:
+            _emit_scan_progress(
+                on_progress,
+                processed_count=len(evidence),
+                total_count=0,
+            )
+    _emit_evidence_batch(on_evidence_batch, pending)
+    if pending or visited:
+        _emit_scan_progress(
+            on_progress,
+            processed_count=len(evidence),
+            total_count=len(evidence),
+        )
+    evidence.sort(key=lambda item: item.source_key.casefold())
     return root_id, scan_id, evidence
 
 
@@ -429,6 +511,10 @@ def scan_openlist_directory(
     max_entries: int = 20_000,
     max_depth: int = 32,
     directory_observations: dict[str, float | None] | None = None,
+    should_cancel=None,
+    on_evidence_batch: Callable | None = None,
+    on_progress: Callable | None = None,
+    batch_size: int = 128,
 ) -> tuple[str, list]:
     """递归枚举 OpenList，并只输出统一的不可变 SourceEvidence。"""
 
@@ -436,15 +522,19 @@ def scan_openlist_directory(
     mapping_root = normalize_remote_path(mapping_root)
     scan_id = "scan_" + uuid.uuid4().hex
     evidence = []
-    queue: list[tuple[str, int]] = [(selected_root, 0)]
+    queue: deque[tuple[str, int]] = deque([(selected_root, 0)])
     seen_directories: set[str] = set()
     observed_entries = 0
     route_configs = routes or []
+    pending: list = []
+    effective_batch_size = max(1, int(batch_size))
     if directory_observations is not None:
         directory_observations[""] = None
 
     while queue:
-        directory, depth = queue.pop(0)
+        if should_cancel is not None and should_cancel():
+            raise SourceScanCancelled()
+        directory, depth = queue.popleft()
         if directory in seen_directories:
             continue
         if depth > max_depth:
@@ -452,6 +542,8 @@ def scan_openlist_directory(
         seen_directories.add(directory)
         page = 1
         while True:
+            if should_cancel is not None and should_cancel():
+                raise SourceScanCancelled()
             result = client.list_dir(directory, page=page, per_page=100, refresh=False)
             for item in result.entries:
                 observed_entries += 1
@@ -473,26 +565,47 @@ def scan_openlist_directory(
                 playback_locator = ""
                 if mount_root:
                     playback_locator = derive_local_path(mount_root, mapping_root, remote_path)
-                evidence.append(
-                    to_source_evidence(
-                        SourceEntry(
-                            root_id=root_id,
-                            scan_id=scan_id,
-                            provider=provider,
-                            ingest_method="openlist_api",
-                            relative_path=relative,
-                            source_key=remote_path,
-                            source_locator=remote_path,
-                            playback_locator=playback_locator,
-                            source_route_id=route_id,
-                            size=item.size,
-                            mtime=item.modified,
-                        )
+                item_evidence = to_source_evidence(
+                    SourceEntry(
+                        root_id=root_id,
+                        scan_id=scan_id,
+                        provider=provider,
+                        ingest_method="openlist_api",
+                        relative_path=relative,
+                        source_key=remote_path,
+                        source_locator=remote_path,
+                        playback_locator=playback_locator,
+                        source_route_id=route_id,
+                        size=item.size,
+                        mtime=item.modified,
                     )
                 )
+                evidence.append(item_evidence)
+                pending.append(item_evidence)
+                if len(pending) >= effective_batch_size:
+                    _emit_evidence_batch(on_evidence_batch, pending)
+                    pending = []
+                    _emit_scan_progress(
+                        on_progress,
+                        processed_count=len(evidence),
+                        total_count=0,
+                    )
             total = int(result.total or 0)
+            _emit_scan_progress(
+                on_progress,
+                processed_count=len(evidence),
+                total_count=0,
+            )
             if len(result.entries) < 100 or (total and page * 100 >= total):
                 break
             page += 1
 
+    _emit_evidence_batch(on_evidence_batch, pending)
+    if pending:
+        _emit_scan_progress(
+            on_progress,
+            processed_count=len(evidence),
+            total_count=len(evidence),
+        )
+    evidence.sort(key=lambda item: item.source_key.casefold())
     return scan_id, evidence

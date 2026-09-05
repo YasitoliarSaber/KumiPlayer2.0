@@ -6,7 +6,7 @@
  * 重试命令参数，普通界面不展示 UUID 文本。
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button, ProgressBar } from '@fluentui/react-components'
 import { CheckmarkCircle24Filled, ChevronDown24Regular, ChevronRight24Regular, DismissCircle24Regular, ErrorCircle24Regular, SpinnerIosRegular } from '@fluentui/react-icons'
 import type { V4ExecutionProgress, V4WorkProgressUnit } from '../../api/mediaV4'
@@ -16,10 +16,19 @@ export interface V4ExecutionProgressProps {
   progress: V4ExecutionProgress
   busyRetryId: string
   onRetry: (jobId: string) => void
+  resolvingWorkId: string
+  onResolveMetadata: (workId: string) => void
 }
 
 const STAGE_KEYS = ['mirror', 'metadata', 'projection'] as const
 const COMPLETED_PREVIEW_COUNT = 4
+const EXECUTION_STATUS_LABELS: Record<V4ExecutionProgress['overall_status'], string> = {
+  queued: '正在准备任务',
+  running: '正在建立媒体库',
+  needs_attention: '有任务需要处理',
+  completed: '媒体库已建立',
+  cancelled: '任务已终止',
+}
 
 function StageSummary({ stageKey, progress }: { stageKey: (typeof STAGE_KEYS)[number]; progress: V4ExecutionProgress }) {
   const summary = progress.stage_summary[stageKey]
@@ -32,11 +41,23 @@ function StageSummary({ stageKey, progress }: { stageKey: (typeof STAGE_KEYS)[nu
   )
 }
 
-function WorkUnit({ unit, busyRetryId, onRetry }: { unit: V4WorkProgressUnit; busyRetryId: string; onRetry: (jobId: string) => void }) {
-  const [expanded, setExpanded] = useState(false)
+function WorkUnit({ unit, busyRetryId, onRetry, resolvingWorkId, onResolveMetadata }: {
+  unit: V4WorkProgressUnit
+  busyRetryId: string
+  onRetry: (jobId: string) => void
+  resolvingWorkId: string
+  onResolveMetadata: (workId: string) => void
+}) {
+  // 失败项保留简洁的摘要，避免错误堆满长列表；真正需要用户确认身份的
+  // needs_attention 则直接展开，确保“选择正确作品”的恢复入口不会被藏住。
+  const [expanded, setExpanded] = useState(unit.overall_status === 'needs_attention')
+  useEffect(() => {
+    if (unit.overall_status === 'needs_attention') setExpanded(true)
+  }, [unit.overall_status])
   const failedJob = unit.overall_status === 'failed'
     ? (unit.mirror.status === 'failed' ? unit.mirror : unit.metadata.status === 'failed' ? unit.metadata : null)
     : null
+  const workIsPending = ['waiting_mirror', 'running_mirror', 'waiting_metadata', 'running_metadata'].includes(unit.overall_status)
   return (
     <article className={`media-v4-work-progress media-v4-work-progress-${unit.overall_status}`}>
       <button type="button" className="media-v4-work-progress-head" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
@@ -58,15 +79,24 @@ function WorkUnit({ unit, busyRetryId, onRetry }: { unit: V4WorkProgressUnit; bu
               {busyRetryId === failedJob.job_id ? '正在重试…' : '重试'}
             </Button>
           )}
-          {unit.overall_status === 'needs_attention' && <span className="media-v4-anomaly-tag">需要人工检查媒体信息</span>}
-          {!failedJob && unit.overall_status !== 'completed' && <span className="media-v4-work-progress-hint">任务进行中，完成后自动折叠到“已完成”。</span>}
+          {unit.overall_status === 'needs_attention' && <>
+            <div className="media-v4-job-error" role="status">
+              {unit.metadata_reason || '在线媒体信息没有唯一匹配，需要确认正确作品后继续。'}
+            </div>
+            {unit.metadata_state === 'waiting_review' && (
+              <Button size="small" appearance="secondary" disabled={resolvingWorkId !== ''} onClick={() => onResolveMetadata(unit.work_id)}>
+                {resolvingWorkId === unit.work_id ? '正在查找候选…' : '选择正确作品'}
+              </Button>
+            )}
+          </>}
+          {!failedJob && workIsPending && <span className="media-v4-work-progress-hint">任务进行中，完成后自动折叠到“已完成”。</span>}
         </div>
       )}
     </article>
   )
 }
 
-export function V4ExecutionProgress({ progress, busyRetryId, onRetry }: V4ExecutionProgressProps) {
+export function V4ExecutionProgress({ progress, busyRetryId, onRetry, resolvingWorkId, onResolveMetadata }: V4ExecutionProgressProps) {
   const [completedOpen, setCompletedOpen] = useState(false)
   const sorted = sortWorkUnits(progress.work_units)
   const active = sorted.filter((unit) => unit.overall_status !== 'completed')
@@ -74,7 +104,6 @@ export function V4ExecutionProgress({ progress, busyRetryId, onRetry }: V4Execut
   const visibleCompleted = completedOpen ? completed : completed.slice(0, COMPLETED_PREVIEW_COUNT)
   const mirrorTotal = progress.stage_summary.mirror.total
   const mirrorDone = progress.stage_summary.mirror.succeeded + progress.stage_summary.mirror.failed + progress.stage_summary.mirror.cancelled
-  const percent = mirrorTotal > 0 ? Math.round((mirrorDone / mirrorTotal) * 100) : 0
   const projectionFailed = progress.stage_summary.projection.status === 'failed' || progress.stage_summary.projection.status === 'cancelled'
   const projectionJob = projectionFailed ? progress.work_units[0] : null
   void projectionJob
@@ -83,7 +112,7 @@ export function V4ExecutionProgress({ progress, busyRetryId, onRetry }: V4Execut
     <div className="media-v4-execution-progress">
       <div className="media-v4-execution-head">
         <div>
-          <strong>{progress.overall_status === 'completed' ? '媒体库已建立' : progress.overall_status === 'running' ? '正在建立媒体库' : progress.overall_status === 'needs_attention' ? '有任务需要处理' : '正在准备任务'}</strong>
+          <strong>{EXECUTION_STATUS_LABELS[progress.overall_status]}</strong>
           <span className="media-v4-execution-overall">{progress.work_units.length} 部作品 · {mirrorDone}/{mirrorTotal} 已完成镜像</span>
         </div>
         <ProgressBar value={mirrorTotal > 0 ? mirrorDone / mirrorTotal : 0} max={1} aria-label="总体进度" />
@@ -98,13 +127,13 @@ export function V4ExecutionProgress({ progress, busyRetryId, onRetry }: V4Execut
         </div>
       )}
       <div className="media-v4-work-progress-list" aria-label="作品进度">
-        {active.map((unit) => <WorkUnit key={unit.work_id} unit={unit} busyRetryId={busyRetryId} onRetry={onRetry} />)}
+        {active.map((unit) => <WorkUnit key={unit.work_id} unit={unit} busyRetryId={busyRetryId} onRetry={onRetry} resolvingWorkId={resolvingWorkId} onResolveMetadata={onResolveMetadata} />)}
       </div>
       {completed.length > 0 && (
         <div className="media-v4-completed-block">
           <div className="media-v4-completed-heading"><strong>已完成 {completed.length} 部</strong><span>可展开查看每部作品的执行结果</span></div>
           <div className="media-v4-work-progress-list">
-            {visibleCompleted.map((unit) => <WorkUnit key={unit.work_id} unit={unit} busyRetryId={busyRetryId} onRetry={onRetry} />)}
+            {visibleCompleted.map((unit) => <WorkUnit key={unit.work_id} unit={unit} busyRetryId={busyRetryId} onRetry={onRetry} resolvingWorkId={resolvingWorkId} onResolveMetadata={onResolveMetadata} />)}
           </div>
           {completed.length > COMPLETED_PREVIEW_COUNT && (
             <button type="button" className="media-v4-completed-toggle" aria-expanded={completedOpen} onClick={() => setCompletedOpen((value) => !value)}>

@@ -47,14 +47,33 @@ def _candidate_summary(item: dict) -> dict:
     }
 
 
+def _target_titles(target: dict) -> list[str]:
+    """返回已经由本地解析确认、可用于精确匹配的标题事实。
+
+    这里不能从目录名重新猜测，也不接纳父系列名；只使用 Work 已持久化的
+    首选标题和原文标题。这样本地化标题没有被 TMDB 搜到时，仍可用同一 Work
+    的原文标题安全回退，而不会把外传吸收到父系列。
+    """
+
+    titles: list[str] = []
+    seen: set[str] = set()
+    for raw in (target.get("preferred_title"), target.get("original_title")):
+        value = str(raw or "").strip()
+        normalized = _normalize_title(value)
+        if value and normalized and normalized not in seen:
+            titles.append(value)
+            seen.add(normalized)
+    return titles
+
+
 def _select_search_result(results: list[dict], target: dict, media_type: str) -> dict | None:
-    target_title = _normalize_title(target.get("preferred_title"))
+    target_titles = {_normalize_title(value) for value in _target_titles(target)}
+    target_titles.discard("")
     exact = [
         item
         for item in results
-        if target_title
-        and target_title
-        in {
+        if target_titles
+        and target_titles & {
             _normalize_title(item.get("name") or item.get("title")),
             _normalize_title(item.get("original_name") or item.get("original_title")),
         }
@@ -69,6 +88,39 @@ def _select_search_result(results: list[dict], target: dict, media_type: str) ->
         ]
     unique_ids = {str(item.get("id") or "") for item in exact if item.get("id")}
     return exact[0] if len(unique_ids) == 1 else None
+
+
+def _select_enriched_candidate(candidates: list[dict], target: dict, media_type: str) -> dict | None:
+    """从补全别名后的候选中只接受唯一等值匹配。
+
+    首轮搜索摘要通常只带主标题和原文标题。对于目录名使用了可信中文、日文或
+    发行别名的作品，只有补充详情中的 alternative_titles / translations 后才能
+    安全判定。这里仍坚持“唯一 + 等值 + 年份不冲突”，绝不把近似标题静默绑定。
+    """
+
+    target_titles = {_normalize_title(value) for value in _target_titles(target)}
+    target_titles.discard("")
+    if not target_titles:
+        return None
+    target_year = int(target["year"]) if target.get("year") else None
+    matched: list[dict] = []
+    for item in candidates:
+        names = [
+            item.get("title"),
+            item.get("original_title"),
+            *(item.get("aliases") or []),
+        ]
+        if not target_titles & {_normalize_title(name) for name in names}:
+            continue
+        item_year = item.get("year")
+        if target_year is not None and item_year is not None and int(item_year) != target_year:
+            continue
+        if str(item.get("media_type") or media_type) != media_type:
+            continue
+        if str(item.get("provider_id") or ""):
+            matched.append(item)
+    unique_ids = {str(item["provider_id"]) for item in matched}
+    return matched[0] if len(unique_ids) == 1 else None
 
 
 def search_tmdb_candidates(query: str, media_type: str, year: int | None = None) -> list[dict] | None:
@@ -117,6 +169,7 @@ def enrich_candidate_aliases(
     max_details: int = 8,
     detail_cache: dict | None = None,
     detail_budget: list[int] | None = None,
+    client: TMDBClient | None = None,
 ) -> list[dict]:
     """为候选补全可信别名：primary/original 已精确匹配的候选不请求详情；
     其余在预算内调用详情接口，失败/超预算保持无别名（不猜测 high）。"""
@@ -125,7 +178,7 @@ def enrich_candidate_aliases(
     budget = detail_budget if detail_budget is not None else [0]
     local_norms = {_normalize_title(q) for q in local_queries}
     local_norms.discard("")
-    config = load_config()
+    config = load_config() if client is None else None
     enriched: list[dict] = []
     for item in results:
         primary = _normalize_title(item.get("title") or item.get("name"))
@@ -142,12 +195,19 @@ def enrich_candidate_aliases(
         if cache_key not in cache and budget[0] < max_details:
             budget[0] += 1
             try:
-                with TMDBClient(bearer_token=config.tmdb_bearer_token) as client:
+                if client is not None:
                     detail = (
                         client.get_tv_detail(int(provider_id))
                         if media_type == "tv"
                         else client.get_movie_detail(int(provider_id))
                     )
+                else:
+                    with TMDBClient(bearer_token=config.tmdb_bearer_token) as detail_client:
+                        detail = (
+                            detail_client.get_tv_detail(int(provider_id))
+                            if media_type == "tv"
+                            else detail_client.get_movie_detail(int(provider_id))
+                        )
             except Exception:
                 detail = None
             cache[cache_key] = detail
@@ -186,21 +246,46 @@ def default_metadata_provider(target: dict) -> dict:
             if tmdb_binding:
                 provider_id = int(tmdb_binding["provider_id"])
             else:
-                title = str(target.get("preferred_title") or "").strip()
-                results = (
-                    client.search_tv(title, target.get("year"))
-                    if media_type == "tv"
-                    else client.search_movie(title, target.get("year"))
-                )
-                selected = _select_search_result(results, target, media_type)
-                if selected is None:
-                    return _local_state(
-                        "waiting_review",
-                        "没有唯一匹配的在线作品，需要人工确认后再继续",
-                        attempted_queries=[{"query": title, "year": target.get("year")}],
-                        candidates=[_candidate_summary(item) for item in results[:8]],
+                titles = _target_titles(target)
+                attempted_queries: list[dict] = []
+                results_by_id: dict[str, dict] = {}
+                selected = None
+                for title in titles:
+                    results = (
+                        client.search_tv(title, target.get("year"))
+                        if media_type == "tv"
+                        else client.search_movie(title, target.get("year"))
                     )
-                provider_id = int(selected["id"])
+                    attempted_queries.append({"query": title, "year": target.get("year")})
+                    for item in results:
+                        provider_key = str(item.get("id") or "")
+                        if provider_key:
+                            results_by_id.setdefault(provider_key, item)
+                    selected = _select_search_result(results, target, media_type)
+                    if selected is not None:
+                        break
+                if selected is None:
+                    # 主标题/原文不等值时，补全有限数量的可信别名再判定。该工作
+                    # 位于第三步的单 Work metadata job，不会阻塞来源扫描或把网络
+                    # 请求按文件数放大；真正歧义仍返回候选给人工兜底。
+                    candidates = enrich_candidate_aliases(
+                        [_candidate_summary(item) for item in list(results_by_id.values())[:8]],
+                        titles,
+                        max_details=8,
+                        client=client,
+                    )
+                    alias_selected = _select_enriched_candidate(candidates, target, media_type)
+                    if alias_selected is not None:
+                        provider_id = int(alias_selected["provider_id"])
+                    else:
+                        return _local_state(
+                            "waiting_review",
+                            "没有唯一匹配的在线作品，需要人工确认后再继续",
+                            attempted_queries=attempted_queries,
+                            candidates=candidates,
+                        )
+                else:
+                    provider_id = int(selected["id"])
             detail = client.get_tv_detail(provider_id) if media_type == "tv" else client.get_movie_detail(provider_id)
             images = detail.get("images") or {}
             poster = client.select_best_poster(images) or detail.get("poster_path") or ""
@@ -245,8 +330,8 @@ def _build_tv_episode_mappings(client: TMDBClient, provider_id: int, target: dic
     """把已确认的本地 Episode 映射到 TMDB 的标题与剧照。
 
     本地季度和集号永远不在这里改写；这里只保存 provider 的映射和可展示
-    的远端字段。单个季度的网络错误会降级为没有缩略图，不能把整部作品的
-    已确认元数据判成失败。
+    的远端字段。特别篇没有远端映射时可保留本地标题；但常规季请求失败时
+    不能伪装成完整刮削成功，否则详情页会永久缺失标题与剧照。
     """
 
     local_episodes = [
@@ -272,6 +357,8 @@ def _build_tv_episode_mappings(client: TMDBClient, provider_id: int, target: dic
                 if _positive_int(item.get("episode_number")) is not None
             }
         except TMDBClientError:
+            if any(str(item.get("season_kind") or "") != "special" for item in episodes):
+                raise
             remote_by_number = {}
 
         for episode in episodes:

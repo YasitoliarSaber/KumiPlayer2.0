@@ -217,6 +217,22 @@ _VERIFIED_TMDB_BINDINGS = (
     VerifiedTmdbBinding(("剧场总集篇", "孤独摇滚", "re-"), 1129610, "movie", "孤独摇滚 (上)"),
     VerifiedTmdbBinding(("飞跃巅峰 内封中字",), 66931, "tv", "飞跃巅峰!"),
     VerifiedTmdbBinding(("top o nerae",), 66931, "tv", "飞跃巅峰!"),
+    # 同一动画的中英文发布包必须在候选阶段汇合；电影规则必须排在 TV
+    # 规则前，避免外层系列目录让电影误命中 TV 身份。
+    VerifiedTmdbBinding(("jujutsu_kaisen_0", "movie"), 810693, "movie", "剧场版 咒术回战 0"),
+    VerifiedTmdbBinding(("剧场版", "咒术回战0"), 810693, "movie", "剧场版 咒术回战 0"),
+    VerifiedTmdbBinding(("jujutsu_kaisen",), 95479, "tv", "咒术回战"),
+    VerifiedTmdbBinding(("咒术回战",), 95479, "tv", "咒术回战"),
+    VerifiedTmdbBinding(("dandadan",), 240411, "tv", "胆大党"),
+    # 官方将 Friends are thieves of time. 定义为《莉可丽丝》回归的六篇
+    # 原创短动画；主系列包与短篇包使用同一 Provider 身份，短篇仍按本地
+    # S00E05-E10 保留六个独立可播放边界。
+    VerifiedTmdbBinding(("莉可丽丝：友谊是时间的窃贼",), 154494, "tv", "莉可丽丝"),
+    VerifiedTmdbBinding(("lycoris recoil",), 154494, "tv", "莉可丽丝"),
+    VerifiedTmdbBinding(("辉夜大小姐想让我告白.s1-s4",), 83121, "tv", "辉夜大小姐想让我告白"),
+    VerifiedTmdbBinding(("kaguya-sama wa kokurasetai - otona e no kaidan",), 83121, "tv", "辉夜大小姐想让我告白"),
+    VerifiedTmdbBinding(("无职转生.s1-s2",), 94664, "tv", "无职转生～到了异世界就拿出真本事～"),
+    VerifiedTmdbBinding(("mushoku tensei",), 94664, "tv", "无职转生～到了异世界就拿出真本事～"),
     # 「无限列车 + 剧场版」是电影（TMDB 635302），必须放在「鬼灭之刃系列」tv 绑定之前，
     # 否则会先命中 tv 85937 把剧场版错误绑到 TV 系列。
     VerifiedTmdbBinding(("无限列车", "剧场版"), 635302, "movie", "鬼灭之刃 无限列车篇 剧场版"),
@@ -238,6 +254,9 @@ _VERIFIED_TMDB_BINDINGS = (
     VerifiedTmdbBinding(("paprika",), 4977, "movie", "红辣椒"),
     VerifiedTmdbBinding(("路人女主", "fine"), 608826, "movie", "路人女主的养成方法 Fine"),
     VerifiedTmdbBinding(("yuru camp movie",), 566466, "movie", "摇曳露营△ 剧场版"),
+    # Heya Camp 是《摇曳露营》的独立短篇外传，不能依赖在线搜索唯一性：
+    # 否则扫描阶段已正确拆分的外传会在第三步再次落入人工确认。
+    VerifiedTmdbBinding(("heya camp",), 95213, "tv", "Heya Camp△"),
     VerifiedTmdbBinding(("clannad", "剧场版"), 16516, "movie", "CLANNAD 剧场版"),
     VerifiedTmdbBinding(("代号白",), 1062807, "movie", "间谍过家家 剧场版 代号白"),
     VerifiedTmdbBinding(("福音战士新剧场版", "序"), 15137, "movie", "福音战士新剧场版：序"),
@@ -282,10 +301,26 @@ def match_verified_tmdb_episode_placement(
     游郭篇从 34 开始。识别阶段必须先归位，否则镜像会把它们写进上一季。
     已经是季内编号的文件保持原值。
     """
+    episode = int(episode_number)
+    normalized_path = unicodedata.normalize("NFKC", source_path or "").casefold()
+    if tmdb_id == 83121:
+        # 《初吻不会结束》既有剧场版，也有官方四段流媒体版本。样本保存的是
+        # 四个独立视频，因此作为主系列的本地特别篇保留可播放边界；使用 101+
+        # 避开 TMDB S00 已有的 1-4，明确表示这些是本地编号、不可伪造远端映射。
+        if "初吻不会结束" in normalized_path or "first kiss wa owaranai" in normalized_path:
+            return (0, 100 + episode)
+        # “通往大人的阶梯”样本同时存在显式 S04 中文包和无季号英文包，二者
+        # 是同一批内容，必须先归到相同本地季度才能合并为多 Asset Episode。
+        if "通往大人的阶梯" in normalized_path or "otona e no kaidan" in normalized_path:
+            return (4, episode)
+    if tmdb_id == 95479 and 1 <= episode <= 47:
+        return (1, episode) if episode <= 24 else (2, episode - 24)
+    if tmdb_id == 240411 and 1 <= episode <= 24:
+        return (1, episode) if episode <= 12 else (2, episode - 12)
+
     season = match_verified_tmdb_season(tmdb_id, source_path)
     if season is None:
         return None
-    episode = int(episode_number)
     if tmdb_id == 85937:
         offsets = {2: (7, 26), 3: (11, 33)}
         max_episode, offset = offsets.get(season, (0, 0))

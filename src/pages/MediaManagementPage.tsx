@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Button, Checkbox, Input, MessageBar, MessageBarBody, Select, Spinner } from '@fluentui/react-components'
+import { Button, Checkbox, Dialog, DialogActions, DialogBody, DialogContent, DialogSurface, DialogTitle, Input, MessageBar, MessageBarBody, ProgressBar, Select, Spinner } from '@fluentui/react-components'
 import {
   Add24Regular,
   ArrowLeft24Regular,
@@ -8,6 +8,7 @@ import {
   CheckmarkCircle24Filled,
   CheckmarkCircle24Regular,
   Cloud24Regular,
+  Delete24Regular,
   Dismiss24Regular,
   ShieldCheckmark24Regular,
   Database24Regular,
@@ -41,6 +42,34 @@ type SourceCardMetadata = {
   source_route_id: string
 }
 
+type MetadataRecoveryCandidate = {
+  candidate_id: string
+  provider_id: string
+  media_type: string
+  title: string
+  original_title: string
+  year: number | null
+  aliases: string[]
+}
+
+type DurableScanState = {
+  scan_id: string
+  root_id: string
+  status: string
+  error?: string
+  evidence_count?: number
+  stage?: string
+  stage_label?: string
+  processed_count?: number
+  total_count?: number
+  progress?: number | null
+  heartbeat_at?: string
+  cancel_requested?: boolean
+  entries?: V4SourceEvidence[]
+}
+
+type DurableScanTask = Pick<DurableScanState, 'scan_id' | 'status' | 'stage' | 'stage_label' | 'processed_count' | 'total_count' | 'progress' | 'heartbeat_at' | 'cancel_requested'>
+
 const ACTIVE_REVISION_KEY = 'kumiplayer.media-v4.active-revision'
 const TRANSIENT_BACKEND_RETRY_DELAY_MS = 300
 
@@ -52,16 +81,26 @@ function isTransientBackendMessage(message: string) {
   return message.startsWith('无法连接 KumiPlayer 后端') || message.startsWith('请求超时')
 }
 
+function userFacingPageError(cause: unknown, fallback: string) {
+  const message = typeof cause === 'object' && cause !== null && 'message' in cause && typeof cause.message === 'string'
+    ? cause.message.trim()
+    : ''
+  if (!message || message.length > 240 || !/[\u4e00-\u9fff]/u.test(message)) return fallback
+  if (/sqlite|sql|traceback|exception|constraint|requests|httpx|aiohttp|connectionerror|operationalerror|integrityerror|enoent|eacces|timeouterror|root_[A-Za-z0-9_-]+|revision_id|job_id|provider_bindings|database/iu.test(message)) {
+    return fallback
+  }
+  return message
+}
+
 const SOURCE_OPTIONS: Array<{
   kind: ImportKind
   label: string
-  description: string
   icon: typeof Folder24Regular
 }> = [
-  { kind: 'local', label: '本地目录', description: '仅扫描本机物理磁盘中的媒体文件', icon: Folder24Regular },
-  { kind: 'tree', label: '目录树 TXT', description: '导入 115、百度或 OpenList 导出的目录清单', icon: DocumentText24Regular },
-  { kind: 'openlist', label: 'OpenList', description: '直接扫描已配置的远端目录', icon: Cloud24Regular },
-  { kind: 'hybrid', label: '目录树 + OpenList 增量', description: 'TXT 建立大库基线，OpenList 分批核对变化', icon: ArrowSync24Regular },
+  { kind: 'local', label: '本地目录', icon: Folder24Regular },
+  { kind: 'tree', label: '目录树 TXT', icon: DocumentText24Regular },
+  { kind: 'openlist', label: 'OpenList', icon: Cloud24Regular },
+  { kind: 'hybrid', label: '目录树 + OpenList 增量', icon: ArrowSync24Regular },
 ]
 
 const PROVIDER_OPTIONS: Array<{
@@ -101,23 +140,58 @@ function createRevisionId() {
   return `rev-${crypto.randomUUID()}`
 }
 
+function normalizeRemotePath(path: string) {
+  const normalized = (path || '/').replace(/\\/g, '/').replace(/\/+/g, '/')
+  return normalized === '/' ? '/' : `/${normalized.replace(/^\/+|\/+$/g, '')}`
+}
+
+function pathSegments(path: string) {
+  return normalizeRemotePath(path).split('/').filter(Boolean)
+}
+
 function routeForPath(routes: OpenListRoute[], remotePath: string) {
-  const normalized = (remotePath || '/').replace(/\\/g, '/').replace(/\/+$/, '') || '/'
+  const normalized = normalizeRemotePath(remotePath)
   return routes
-    .filter((route) => route.enabled && (normalized === route.remote_prefix || normalized.startsWith(`${route.remote_prefix}/`)))
-    .sort((left, right) => right.remote_prefix.length - left.remote_prefix.length)[0]
+    .filter((route) => {
+      if (!route.enabled) return false
+      const prefix = normalizeRemotePath(route.remote_prefix)
+      return prefix === '/' || normalized === prefix || normalized.startsWith(`${prefix}/`)
+    })
+    .sort((left, right) => pathSegments(right.remote_prefix).length - pathSegments(left.remote_prefix).length)[0]
 }
 
 function playbackRootForRoute(route: OpenListRoute | undefined, remotePath: string) {
   if (!route?.local_path) return ''
-  const normalizedPath = (remotePath || '/').replace(/\\/g, '/').replace(/\/+$/, '') || '/'
-  const normalizedPrefix = (route.remote_prefix || '/').replace(/\\/g, '/').replace(/\/+$/, '') || '/'
-  const relative = normalizedPath === normalizedPrefix
-    ? ''
-    : normalizedPath.slice(normalizedPrefix.length).replace(/^\/+/, '')
-  if (!relative) return route.local_path
+  const remoteParts = pathSegments(remotePath)
+  const routeParts = pathSegments(route.remote_prefix)
+  // 内容路由是明确的 remote_prefix ↔ local_path 映射：local_path 已经是
+  // remote_prefix 的本地落点。扫描的子目录只追加该前缀之后的部分，不能
+  // 把 `/115` 等远端路由名又拼进 `K:\115网盘`。
+  const routeMatches = routeParts.length === 0 || routeParts.every(
+    (part, index) => remoteParts[index]?.toLocaleLowerCase() === part.toLocaleLowerCase(),
+  )
+  const relativeParts = routeMatches ? remoteParts.slice(routeParts.length) : remoteParts
+  if (relativeParts.length === 0) return route.local_path
   const separator = route.local_path.includes('\\') ? '\\' : '/'
-  return `${route.local_path.replace(/[\\/]+$/, '')}${separator}${relative.replace(/\//g, separator)}`
+  return `${route.local_path.replace(/[\\/]+$/, '')}${separator}${relativeParts.join(separator)}`
+}
+
+function scanTaskFromState(state: DurableScanState): DurableScanTask {
+  return {
+    scan_id: state.scan_id,
+    status: state.status,
+    stage: state.stage,
+    stage_label: state.stage_label,
+    processed_count: state.processed_count,
+    total_count: state.total_count,
+    progress: state.progress,
+    heartbeat_at: state.heartbeat_at,
+    cancel_requested: state.cancel_requested,
+  }
+}
+
+function isActiveScanStatus(status: string | undefined) {
+  return status === 'queued' || status === 'running' || status === 'cancelling'
 }
 
 function finalPathSegment(path: string) {
@@ -141,7 +215,7 @@ function ProviderPicker({ value, onChange }: {
           key={option.value}
         >
           <span className={`media-v4-provider-mark provider-${option.value}`} aria-hidden="true"><MediaProviderIcon provider={option.value} /></span>
-          <span><strong>{option.label}</strong><small>目录树中的实际内容来源</small></span>
+          <span><strong>{option.label}</strong></span>
           {value === option.value && <CheckmarkCircle24Filled aria-hidden="true" />}
         </button>
       ))}
@@ -173,6 +247,8 @@ export default function MediaManagementPage() {
   const [openlistBaseline, setOpenlistBaseline] = useState<V4OpenlistBaselineStatus | null>(null)
   const [sourceCards, setSourceCards] = useState<V4SourceLibraryCard[]>([])
   const [sourceCardsLoading, setSourceCardsLoading] = useState(true)
+  const [sourceCardPendingDelete, setSourceCardPendingDelete] = useState<V4SourceLibraryCard | null>(null)
+  const [sourceCardDeleting, setSourceCardDeleting] = useState(false)
   const [revisionId, setRevisionId] = useState('')
   const [workflowStage, setWorkflowStage] = useState<WorkflowStage>('source')
   const [executeProgress, setExecuteProgress] = useState<V4ExecutionProgress | null>(null)
@@ -190,11 +266,16 @@ export default function MediaManagementPage() {
   const [jobs, setJobs] = useState<V4Job[]>([])
   const [busy, setBusy] = useState<'scan' | 'preview' | 'override' | 'confirm' | ''>('')
   const [retryingJobId, setRetryingJobId] = useState('')
-  const [scanTask, setScanTask] = useState<{ scan_id: string; status: string } | null>(null)
+  const [metadataRecovery, setMetadataRecovery] = useState<{ workId: string; workTitle: string; candidates: MetadataRecoveryCandidate[] } | null>(null)
+  const [metadataRecoveryQuery, setMetadataRecoveryQuery] = useState('')
+  const [metadataRecoveryBusy, setMetadataRecoveryBusy] = useState('')
+  const [scanTask, setScanTask] = useState<DurableScanTask | null>(null)
   const [error, setError] = useState('')
   const [allowEmpty, setAllowEmpty] = useState(false)
   const [overrideDrafts, setOverrideDrafts] = useState<Record<string, OverrideDraft>>({})
   const sourceCardsRefreshInFlight = useRef(false)
+  // 每次开始、取消或切换来源都会递增；旧请求即使晚返回，也不得覆盖新流程。
+  const scanRunRef = useRef(0)
 
   useEffect(() => {
     let alive = true
@@ -208,7 +289,7 @@ export default function MediaManagementPage() {
       setPath((current) => current || nextConfig.local_root || '')
       setRemoteRoot((current) => current || nextConfig.openlist_remote_root || '/')
     }).catch((cause) => {
-      if (alive) setError(cause instanceof Error ? cause.message : '无法读取媒体来源设置')
+      if (alive) setError(userFacingPageError(cause, '无法读取媒体来源设置'))
     })
     return () => { alive = false }
   }, [])
@@ -232,7 +313,7 @@ export default function MediaManagementPage() {
       setSourceCards(result.cards)
       setError((current) => isTransientBackendMessage(current) ? '' : current)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '无法读取已导入媒体库')
+      setError(userFacingPageError(cause, '无法读取已导入媒体库'))
     } finally {
       sourceCardsRefreshInFlight.current = false
       setSourceCardsLoading(false)
@@ -258,7 +339,9 @@ export default function MediaManagementPage() {
     void refreshSourceCards()
   }, [refreshSourceCards])
 
-  const hasActiveSourceJobs = sourceCards.some((card) => card.job_summary.queued > 0 || card.job_summary.running > 0)
+  // `active_task` 是来源卡唯一的当前任务投影。job_summary 是诊断/历史汇总，
+  // 在任务收口和卡片刷新之间可能短暂滞后，不能再反向驱动轮询或禁用操作。
+  const hasActiveSourceJobs = sourceCards.some((card) => Boolean(card.active_task))
   useEffect(() => {
     if (!hasActiveSourceJobs) return
     let cancelled = false
@@ -310,7 +393,7 @@ export default function MediaManagementPage() {
           if (result.progress) setExecuteProgress(result.progress)
         }
       } catch (cause) {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : '后台任务状态读取失败')
+        if (!cancelled) setError(userFacingPageError(cause, '后台任务状态读取失败'))
       } finally {
         if (!cancelled) timer = window.setTimeout(() => { void poll() }, 1000)
       }
@@ -334,7 +417,7 @@ export default function MediaManagementPage() {
           if (result.progress) setExecuteProgress(result.progress)
         }
       } catch (cause) {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : '后台任务状态读取失败')
+        if (!cancelled) setError(userFacingPageError(cause, '后台任务状态读取失败'))
       } finally {
         if (!cancelled) timer = window.setTimeout(() => { void poll() }, 1200)
       }
@@ -355,7 +438,7 @@ export default function MediaManagementPage() {
       : kind === 'tree'
         ? Boolean(path.trim() && providerRoot(provider))
         : Boolean(path.trim())
-  const showReset = workflowStage !== 'source' || kind !== 'local' || Boolean(error)
+  const showReset = workflowStage !== 'source' || kind !== 'local' || Boolean(error) || busy === 'scan' || Boolean(scanTask)
 
   function providerRoot(providerId: ProviderId, remotePath = '') {
     const matchedRoute = routeForPath(routes, remotePath)
@@ -367,26 +450,24 @@ export default function MediaManagementPage() {
   const providerOption = PROVIDER_OPTIONS.find((option) => option.value === provider) || PROVIDER_OPTIONS[0]
   const sourceCardMetadata = (
     sourceKind: ImportKind,
-    selectedProvider: ProviderId,
     selectedSourceRoot: string,
   ): SourceCardMetadata => {
     const route = routeForPath(routes, remoteRoot)
-    const providerLabel = selectedProvider === 'other'
-      ? '其他远程来源'
-      : PROVIDER_OPTIONS.find((option) => option.value === selectedProvider)?.label || '本地媒体'
     if (sourceKind === 'local') {
       const name = finalPathSegment(path) || '本地媒体库'
       return {
-        source_display_name: `${name} 媒体库`,
+        source_display_name: name,
         source_locator: path,
         playback_locator: path,
         source_route_id: '',
       }
     }
     if (sourceKind === 'tree') {
-      const name = finalPathSegment(path).replace(/\.[^.]+$/, '') || `${providerLabel} 媒体库`
+      const name = finalPathSegment(selectedSourceRoot)
+        || finalPathSegment(path).replace(/\.[^.]+$/, '')
+        || '目录树导入'
       return {
-        source_display_name: `${providerLabel} · ${name}`,
+        source_display_name: name,
         source_locator: path,
         playback_locator: selectedSourceRoot,
         source_route_id: '',
@@ -394,7 +475,7 @@ export default function MediaManagementPage() {
     }
     const directory = finalPathSegment(remoteRoot) || '根目录'
     return {
-      source_display_name: route?.label || `${providerLabel} · ${directory}`,
+      source_display_name: directory,
       source_locator: remoteRoot,
       playback_locator: selectedSourceRoot,
       source_route_id: route?.route_id || '',
@@ -422,8 +503,20 @@ export default function MediaManagementPage() {
     localStorage.removeItem(ACTIVE_REVISION_KEY)
   }
 
+  const abandonActiveScan = () => {
+    scanRunRef.current += 1
+    const activeScanId = scanTask?.scan_id
+    setScanTask(null)
+    setBusy('')
+    if (activeScanId) {
+      void mediaV4Api.cancelDurableScan(activeScanId).catch(() => undefined)
+      void refreshSourceCards()
+    }
+  }
+
   const selectSourceKind = (nextKind: ImportKind) => {
     if (nextKind === kind) return
+    abandonActiveScan()
     setKind(nextKind)
     setPath(nextKind === 'local' ? config?.local_root || '' : '')
     setRemoteRoot(config?.openlist_remote_root || '/')
@@ -457,6 +550,8 @@ export default function MediaManagementPage() {
       setError('此 OpenList 目录尚无已确认基线，请先完成并确认首次完整扫描')
       return
     }
+    const runId = ++scanRunRef.current
+    const isCurrentRun = () => scanRunRef.current === runId
     setBusy('scan')
     setError('')
     setPreview(null)
@@ -475,7 +570,7 @@ export default function MediaManagementPage() {
       const selectedSourceRoot = requestSource === 'tree' || requestSource === 'hybrid'
         ? providerRoot(selectedProvider, remoteRoot)
         : requestSource === 'local' ? path : routeForPath(routes, remoteRoot)?.local_path || ''
-      const metadata = sourceCardMetadata(kind, selectedProvider, selectedSourceRoot)
+      const metadata = sourceCardMetadata(kind, selectedSourceRoot)
       let scanMode: 'auto' | 'full' | 'incremental' = 'auto'
       if (action === 'incremental') scanMode = 'incremental'
       else if (action === 'full') scanMode = 'full'
@@ -501,21 +596,40 @@ export default function MediaManagementPage() {
           revision_id: nextRevisionId,
           source_display_name: metadata.source_display_name,
         })
-        setScanTask({ scan_id: task.scan_id, status: 'running' })
+        // 用户可能在创建请求返回前点击“重新开始”；此时要取消迟到的任务，
+        // 不能让旧扫描在后台无主运行，也不能把它的结果写回新流程。
+        if (!isCurrentRun()) {
+          await mediaV4Api.cancelDurableScan(task.scan_id).catch(() => undefined)
+          return
+        }
+        setScanTask({
+          scan_id: task.scan_id,
+          status: task.status || 'running',
+          stage: task.status === 'queued' ? 'queued' : 'reading_source',
+          stage_label: task.status === 'queued' ? '准备读取媒体来源' : '正在读取媒体来源',
+          processed_count: 0,
+          total_count: 0,
+          progress: null,
+          heartbeat_at: '',
+        })
+        // 来源卡在扫描开始时就出现；用户离开导入页后仍可从卡片恢复。
+        void refreshSourceCards()
         while (true) {
           await new Promise((resolve) => window.setTimeout(resolve, 900))
-          const state = await mediaV4Api.durableScan(task.scan_id)
-          setScanTask({ scan_id: task.scan_id, status: state.status })
+          if (!isCurrentRun()) return
+          const state = await mediaV4Api.durableScan(task.scan_id) as DurableScanState
+          if (!isCurrentRun()) return
+          setScanTask(scanTaskFromState(state))
           if (state.status === 'completed') {
-            result = { root_id: state.root_id || task.root_id, scan_id: task.scan_id, entries: [], evidence_count: state.evidence_count ?? state.entries.length, scan_mode: task.scan_mode as 'local' | 'tree_snapshot' | 'tree_baseline' | 'incremental' | 'full', source_mode: task.source_mode || (task.scan_mode === 'incremental' ? openlistBaseline?.source_mode || 'openlist_full' : 'openlist_full') }
+            result = { root_id: state.root_id || task.root_id, scan_id: task.scan_id, entries: [], evidence_count: state.evidence_count ?? (state.entries || []).length, scan_mode: task.scan_mode as 'local' | 'tree_snapshot' | 'tree_baseline' | 'incremental' | 'full', source_mode: task.source_mode || (task.scan_mode === 'incremental' ? openlistBaseline?.source_mode || 'openlist_full' : 'openlist_full') }
             break
           }
           if (state.status === 'failed' || state.status === 'cancelled') {
             throw new Error(state.error || (state.status === 'cancelled' ? '扫描已取消' : '来源扫描失败'))
           }
         }
-        setScanTask(null)
       }
+      if (!isCurrentRun()) return
       const nextScan = { ...result, source_metadata: metadata }
       setScan(nextScan)
       setAllowEmpty(false)
@@ -529,22 +643,29 @@ export default function MediaManagementPage() {
           source_mode: result.source_mode || '',
           ...metadata,
         })
+        if (!isCurrentRun()) return
         setPreview(previewResult)
-        setWorkflowStage('review')
-        goManageView('import')
       }
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '来源扫描失败')
-    } finally {
+      if (!isCurrentRun()) return
       setScanTask(null)
-      setBusy('')
+      setWorkflowStage('review')
+      goManageView('import')
+    } catch (cause) {
+      if (isCurrentRun()) setError(userFacingPageError(cause, '来源扫描失败'))
+    } finally {
+      if (isCurrentRun()) {
+        setScanTask(null)
+        setBusy('')
+      }
     }
   }
 
   const cancelScanTask = async () => {
     if (!scanTask) return
+    const currentScanId = scanTask.scan_id
+    setScanTask((current) => current?.scan_id === currentScanId ? { ...current, status: 'cancelling', cancel_requested: true, stage_label: '正在取消扫描' } : current)
     try {
-      await mediaV4Api.cancelDurableScan(scanTask.scan_id)
+      await mediaV4Api.cancelDurableScan(currentScanId)
     } catch {
       // 取消请求失败不阻塞；轮询会看到终态。
     }
@@ -574,7 +695,7 @@ export default function MediaManagementPage() {
       setWorkflowStage('review')
       goManageView('import')
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '识别预览失败')
+      setError(userFacingPageError(cause, '识别预览失败'))
     } finally {
       setBusy('')
     }
@@ -597,7 +718,7 @@ export default function MediaManagementPage() {
       void refreshSourceCards()
       if (kind === 'openlist' || kind === 'hybrid') void refreshOpenlistBaseline(remoteRoot)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '确认导入失败')
+      setError(userFacingPageError(cause, '确认导入失败'))
     } finally {
       setBusy('')
     }
@@ -628,13 +749,14 @@ export default function MediaManagementPage() {
       })
       setPreview(result)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '人工修正失败')
+      setError(userFacingPageError(cause, '人工修正失败'))
     } finally {
       setBusy('')
     }
   }
 
   const startNewImport = () => {
+    abandonActiveScan()
     goManageView('import')
     setKind('local')
     setPath(config?.local_root || '')
@@ -643,10 +765,171 @@ export default function MediaManagementPage() {
     clearResultState()
   }
 
+  const setSourceInputsFromCard = (card: V4SourceLibraryCard) => {
+    setBrowserSession((current) => current + 1)
+    const nextProvider = card.provider === 'baidu' || card.provider === 'quark' ? card.provider : 'pan115'
+    setProvider(nextProvider)
+    if (card.provider === 'local') {
+      setKind('local')
+      setPath(card.source_locator || card.playback_locator)
+      return
+    }
+    if (card.source_mode === 'tree_snapshot' || (card.source_mode === '' && !card.route_id)) {
+      setKind('tree')
+      setPath(card.source_locator)
+      return
+    }
+    if (card.source_mode === 'tree_openlist' || (card.source_mode === '' && card.route_id)) {
+      setKind('hybrid')
+      setPath('')
+      setRemoteRoot(card.source_locator || config?.openlist_remote_root || '/')
+      return
+    }
+    setKind('openlist')
+    setPath('')
+    setRemoteRoot(card.source_locator || config?.openlist_remote_root || '/')
+  }
+
+  const sourceMetadataFromCard = (card: V4SourceLibraryCard): SourceCardMetadata => ({
+    source_display_name: card.display_name,
+    source_locator: card.source_locator,
+    playback_locator: card.playback_locator,
+    source_route_id: card.route_id,
+  })
+
   const resumeSourceCard = async (card: V4SourceLibraryCard) => {
+    abandonActiveScan()
+    clearResultState()
+    setSourceInputsFromCard(card)
+    goManageView('import')
     setError('')
+
+    if (card.scan?.status === 'cancelled') {
+      // 已取消的 scan 没有可恢复的后台任务；保留其来源配置，回到来源步骤由
+      // 用户显式重新扫描，避免点击卡片后又被旧 scan 的终态错误打断。
+      setScanTask(null)
+      return
+    }
+
+    if (card.scan && (card.phase === 'scan' || isActiveScanStatus(card.scan.status))) {
+      const runId = ++scanRunRef.current
+      const isCurrentRun = () => scanRunRef.current === runId
+      const sourceMetadata = sourceMetadataFromCard(card)
+      setBusy('scan')
+      setScanTask({ ...card.scan })
+      try {
+        let completedState: DurableScanState | null = null
+        while (true) {
+          await new Promise((resolve) => window.setTimeout(resolve, 900))
+          if (!isCurrentRun()) return
+          const state = await mediaV4Api.durableScan(card.scan.scan_id) as DurableScanState
+          if (!isCurrentRun()) return
+          setScanTask(scanTaskFromState(state))
+          if (state.status === 'completed') {
+            completedState = state
+            break
+          }
+          if (state.status === 'failed' || state.status === 'cancelled') {
+            throw new Error(state.error || (state.status === 'cancelled' ? '扫描已取消' : '来源扫描失败'))
+          }
+        }
+        if (!completedState || !isCurrentRun()) return
+
+        // 扫描完成与 draft 落盘是两个后台边界；短暂重试一次，避免把正常竞态
+        // 错误地显示成“扫描完成但没有结果”。
+        let draft: Awaited<ReturnType<typeof mediaV4Api.drafts>>['drafts'][number] | undefined
+        for (let attempt = 0; attempt < 5 && !draft; attempt += 1) {
+          const drafts = await mediaV4Api.drafts()
+          if (!isCurrentRun()) return
+          draft = drafts.drafts.find((item) => item.scan_id === card.scan?.scan_id && item.root_id === (completedState?.root_id || card.root_id))
+          if (!draft && attempt < 4) await new Promise((resolve) => window.setTimeout(resolve, 200))
+        }
+        if (!draft) throw new Error('扫描已完成，但识别结果仍在整理，请稍后从来源卡重试')
+
+        const evidenceResult = await mediaV4Api.revisionEvidence(draft.revision_id)
+        if (!isCurrentRun()) return
+        const evidenceCount = completedState.evidence_count ?? draft.evidence_count ?? evidenceResult.entries.length
+        const scanMode = card.last_scan_mode as 'local' | 'tree_snapshot' | 'tree_baseline' | 'incremental' | 'full'
+        setRevisionId(draft.revision_id)
+        setScan({
+          root_id: completedState.root_id || card.root_id,
+          scan_id: card.scan.scan_id,
+          entries: evidenceResult.entries,
+          evidence_count: evidenceCount,
+          scan_mode: scanMode,
+          source_mode: card.source_mode,
+          source_metadata: sourceMetadata,
+        })
+        const previewResult = await mediaV4Api.preview({
+          revision_id: draft.revision_id,
+          root_id: completedState.root_id || card.root_id,
+          scan_id: card.scan.scan_id,
+          entries: [],
+          allow_empty: false,
+          source_mode: card.source_mode,
+          ...sourceMetadata,
+        })
+        if (!isCurrentRun()) return
+        setPreview(previewResult)
+        setScanTask(null)
+        setWorkflowStage('review')
+      } catch (cause) {
+        if (isCurrentRun()) setError(userFacingPageError(cause, '无法恢复该来源的扫描进度'))
+      } finally {
+        if (isCurrentRun()) {
+          setScanTask(null)
+          setBusy('')
+        }
+      }
+      return
+    }
+
+    const resumeRunId = scanRunRef.current
+    const isCurrentResume = () => scanRunRef.current === resumeRunId
+    if (card.revision_id && (card.phase === 'review' || card.revision_state === 'draft')) {
+      setBusy('preview')
+      try {
+        const evidenceResult = await mediaV4Api.revisionEvidence(card.revision_id)
+        if (!isCurrentResume()) return
+        const scanId = card.scan?.scan_id || evidenceResult.entries[0]?.scan_id || ''
+        const sourceMetadata = sourceMetadataFromCard(card)
+        const previewResult = await mediaV4Api.preview({
+          revision_id: card.revision_id,
+          root_id: card.root_id,
+          scan_id: scanId,
+          entries: [],
+          allow_empty: false,
+          source_mode: card.source_mode,
+          ...sourceMetadata,
+        })
+        if (!isCurrentResume()) return
+        setRevisionId(card.revision_id)
+        setScan({
+          root_id: card.root_id,
+          scan_id: scanId,
+          entries: evidenceResult.entries,
+          evidence_count: evidenceResult.entries.length || card.evidence_count,
+          scan_mode: card.last_scan_mode as 'local' | 'tree_snapshot' | 'tree_baseline' | 'incremental' | 'full',
+          source_mode: card.source_mode,
+          source_metadata: sourceMetadata,
+        })
+        setPreview(previewResult)
+        setWorkflowStage('review')
+      } catch (cause) {
+        if (isCurrentResume()) setError(userFacingPageError(cause, '无法读取该来源的识别结果'))
+      } finally {
+        if (isCurrentResume()) setBusy('')
+      }
+      return
+    }
+
+    if (!card.revision_id) {
+      setError('该来源尚未生成可恢复的识别结果，请重新扫描')
+      return
+    }
     try {
       const result = await mediaV4Api.status(card.revision_id)
+      if (!isCurrentResume()) return
       setRevisionId(card.revision_id)
       setJobs(result.jobs)
       if (result.progress) setExecuteProgress(result.progress)
@@ -654,9 +937,8 @@ export default function MediaManagementPage() {
       setPreview(null)
       localStorage.setItem(ACTIVE_REVISION_KEY, card.revision_id)
       setWorkflowStage('execute')
-      goManageView('import')
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '无法读取该媒体库的导入进度')
+      if (isCurrentResume()) setError(userFacingPageError(cause, '无法读取该媒体库的导入进度'))
     }
   }
 
@@ -670,20 +952,46 @@ export default function MediaManagementPage() {
       if (result.progress) setExecuteProgress(result.progress)
       void refreshSourceCards()
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '任务重试失败')
+      setError(userFacingPageError(cause, '任务重试失败'))
     } finally {
       setRetryingJobId('')
     }
   }
 
-  const formatDate = (value: string) => {
-    if (!value) return '未知'
-    const date = new Date(value)
-    if (Number.isNaN(date.getTime())) return '未知'
-    const year = date.getFullYear()
-    const month = String(date.getMonth() + 1).padStart(2, '0')
-    const day = String(date.getDate()).padStart(2, '0')
-    return `${year}-${month}-${day}`
+  const searchMetadataRecovery = async (workId: string, query = '') => {
+    const workTitle = executeProgress?.work_units.find((unit) => unit.work_id === workId)?.title || '该作品'
+    setMetadataRecoveryBusy(workId)
+    setError('')
+    try {
+      const result = await mediaV4Api.metadataSearch({ work_id: workId, query })
+      setMetadataRecovery({ workId, workTitle, candidates: result.candidates })
+      setMetadataRecoveryQuery(query || workTitle)
+    } catch (cause) {
+      setError(userFacingPageError(cause, '无法搜索在线作品候选'))
+    } finally {
+      setMetadataRecoveryBusy('')
+    }
+  }
+
+  const confirmMetadataRecovery = async (candidate: MetadataRecoveryCandidate) => {
+    if (!metadataRecovery) return
+    setMetadataRecoveryBusy(candidate.candidate_id)
+    setError('')
+    try {
+      await mediaV4Api.metadataConfirm({
+        work_id: metadataRecovery.workId,
+        candidate_id: candidate.candidate_id,
+      })
+      const result = await mediaV4Api.status(revisionId)
+      setJobs(result.jobs)
+      if (result.progress) setExecuteProgress(result.progress)
+      setMetadataRecovery(null)
+      void refreshSourceCards()
+    } catch (cause) {
+      setError(userFacingPageError(cause, '确认在线作品失败'))
+    } finally {
+      setMetadataRecoveryBusy('')
+    }
   }
 
   const providerLabel = (provider: string) => {
@@ -706,31 +1014,46 @@ export default function MediaManagementPage() {
   }
 
   const prepareSourceUpdate = (card: V4SourceLibraryCard) => {
+    abandonActiveScan()
     clearResultState()
     goManageView('import')
-    setBrowserSession((current) => current + 1)
-    const nextProvider = card.provider === 'baidu' || card.provider === 'quark' ? card.provider : 'pan115'
-    setProvider(nextProvider)
-    if (card.provider === 'local') {
-      setKind('local')
-      setPath(card.source_locator || card.playback_locator)
-      return
+    setSourceInputsFromCard(card)
+  }
+
+  const terminateSourceTask = async (card: V4SourceLibraryCard) => {
+    const task = card.active_task
+    if (!task || !task.can_cancel) return
+    setError('')
+    setSourceCards((cards) => cards.map((item) => item.root_id === card.root_id && item.active_task
+      ? { ...item, active_task: { ...item.active_task, status: 'cancelling', label: item.active_task.kind === 'scan' ? '正在终止扫描' : '正在终止任务', cancel_requested: true, can_cancel: false } }
+      : item))
+    try {
+      if (task.kind === 'scan' && card.scan?.scan_id) {
+        await mediaV4Api.cancelDurableScan(card.scan.scan_id)
+      } else if (task.revision_id) {
+        await mediaV4Api.cancelImport(task.revision_id)
+      }
+      await refreshSourceCards()
+    } catch {
+      setError('终止任务失败，请稍后重试')
+      await refreshSourceCards()
     }
-    if (card.source_mode === 'tree_snapshot' || (card.source_mode === '' && !card.route_id)) {
-      setKind('tree')
-      setPath(card.source_locator)
-      return
+  }
+
+  const hideSourceCard = async () => {
+    if (!sourceCardPendingDelete || sourceCardDeleting) return
+    const card = sourceCardPendingDelete
+    setSourceCardDeleting(true)
+    setError('')
+    try {
+      await mediaV4Api.hideSourceLibraryCard(card.root_id)
+      setSourceCards((cards) => cards.filter((item) => item.root_id !== card.root_id))
+      setSourceCardPendingDelete(null)
+    } catch (cause) {
+      setError(userFacingPageError(cause, '删除来源卡失败，请稍后重试'))
+    } finally {
+      setSourceCardDeleting(false)
     }
-    if (card.source_mode === 'tree_openlist' || (card.source_mode === '' && card.route_id)) {
-      setKind('hybrid')
-      setPath('')
-      setRemoteRoot(card.source_locator || config?.openlist_remote_root || '/')
-      return
-    }
-    // openlist_full（或旧卡的 openlist_api）：回到同一 OpenList 远端根。
-    setKind('openlist')
-    setPath('')
-    setRemoteRoot(card.source_locator || config?.openlist_remote_root || '/')
   }
 
   return (
@@ -739,25 +1062,23 @@ export default function MediaManagementPage() {
         <div className="media-flow-title">
           <span>媒体管理</span>
           <h1>{pageMode === 'overview' ? '媒体库' : pageMode === 'maintenance' ? '媒体库维护' : '导入媒体'}</h1>
-          <p>{pageMode === 'overview'
-            ? '查看已导入的媒体来源、更新状态或添加新的媒体库。'
-            : pageMode === 'maintenance'
-              ? '按来源清理 KumiPlayer 媒体库数据与受控生成物。'
-              : '选择一个媒体来源，检查识别结果，然后建立可播放的媒体库。'}</p>
+          {pageMode !== 'import' && <p>{pageMode === 'overview'
+            ? '查看已导入的来源或添加新的媒体库。'
+            : '按来源清理媒体库数据与受控生成物。'}</p>}
         </div>
         <div className="media-v4-header-actions" role="toolbar" aria-label="媒体库操作">
           {pageMode === 'overview' ? (
             <>
               <div className="media-v4-header-secondary-actions">
-                <Button appearance="subtle" icon={<ShieldCheckmark24Regular />} onClick={() => goManageView('maintenance')}>媒体库维护</Button>
+                <Button className="media-v4-header-secondary-button media-v4-header-command" appearance="outline" icon={<ShieldCheckmark24Regular />} onClick={() => goManageView('maintenance')}>媒体库维护</Button>
               </div>
               <div className="media-v4-header-primary-actions">
-                <Button className="media-primary-command" appearance="primary" icon={<Add24Regular />} onClick={startNewImport}>导入媒体</Button>
+                <Button className="media-primary-command media-v4-header-command" appearance="primary" icon={<Add24Regular />} onClick={startNewImport}>导入媒体</Button>
               </div>
             </>
           ) : (
             <div className="media-v4-header-secondary-actions">
-              <Button appearance="subtle" icon={<ArrowLeft24Regular />} onClick={() => goManageView('overview')}>返回媒体管理</Button>
+              <Button className="media-v4-header-back-button media-v4-header-secondary-button" appearance="outline" icon={<ArrowLeft24Regular />} onClick={() => goManageView('overview')}>返回媒体管理</Button>
             </div>
           )}
           {pageMode === 'import' && showReset && <div className="media-v4-header-primary-actions"><Button className="media-v4-new-import" appearance="subtle" icon={<ArrowReset24Regular />} onClick={startNewImport}>重新开始</Button></div>}
@@ -767,32 +1088,48 @@ export default function MediaManagementPage() {
       {pageMode === 'overview' && <>
       {(sourceCardsLoading || sourceCards.length > 0) && <section className="media-v4-source-libraries" aria-label="已导入媒体库">
         <div className="media-v4-source-libraries-heading">
-          <div><span>已导入媒体库</span><h2>来源卡</h2><p>每张卡代表一个已确认的媒体来源，可随时回到该次导入的真实任务进度。</p></div>
+          <h2>已导入来源</h2>
           <Button appearance="subtle" icon={<ArrowSync24Regular />} disabled={sourceCardsLoading} onClick={() => void refreshSourceCards()}>刷新状态</Button>
         </div>
         {sourceCardsLoading && sourceCards.length === 0 ? <div className="media-v4-source-card-loading"><Spinner size="small" />正在读取媒体库…</div> : <div className="media-v4-source-library-grid">
           {sourceCards.map((card) => {
-            const pending = card.job_summary.queued + card.job_summary.running
-            const active = pending > 0
-            const progress = card.job_summary.total === 0 ? 100 : Math.round(((card.job_summary.succeeded + card.job_summary.failed + card.job_summary.cancelled) / card.job_summary.total) * 100)
-            const progressLabel = pending > 0
-              ? '正在处理'
-              : card.job_summary.failed > 0 ? '有失败任务' : card.job_summary.cancelled > 0 ? '有已取消任务' : '上次导入已处理完毕'
-            return <article className={`media-v4-library-source-card ${card.can_resume ? 'active' : 'settled'}`} key={card.root_id}>
+            const activeTask = card.active_task
+            const active = Boolean(activeTask)
+            const executionTerminated = card.overall_status === 'cancelled' && card.phase === 'execute'
+            const cancelledLabel = executionTerminated ? '任务已终止' : '扫描已取消'
+            const stateLabel = activeTask?.status === 'cancelling' ? '正在终止…'
+              : activeTask?.status === 'queued' ? '等待中'
+              : activeTask ? '进行中'
+                : card.overall_status === 'needs_attention' ? '需要处理'
+                  : card.overall_status === 'cancelled' ? cancelledLabel : '已完成'
+            const progressLabel = activeTask
+              ? `${activeTask.label}${activeTask.percent == null ? '' : ` · ${activeTask.percent}%`}`
+              : card.overall_status === 'cancelled' ? cancelledLabel
+                : card.phase === 'review' ? '识别结果待确认'
+                  // 详细错误已在卡片的 alert 中单独显示；这里保持一句状态，
+                  // 避免同一错误在小卡片里重复占两行。
+                  : card.overall_status === 'needs_attention' ? '有任务需要处理'
+                    : '上次导入已处理完毕'
+            const resumeLabel = activeTask ? '查看进度' : card.overall_status === 'cancelled' ? (executionTerminated ? '查看执行结果' : '重新扫描') : card.phase === 'review' ? '查看识别结果' : card.can_resume ? '查看进度' : '查看上次导入'
+            const resumeIcon = activeTask?.kind === 'scan' || card.phase === 'review' ? <DocumentText24Regular /> : <Database24Regular />
+            return <article className={`media-v4-library-source-card ${active ? 'active' : 'settled'}`} key={card.root_id}>
               <div className="media-v4-source-card-identity">
                 <div className="media-v4-library-source-card-top"><MediaProviderIcon provider={providerVisualFor(card.provider)} size={20} /><span className="media-v4-source-card-provider-label">{providerLabel(card.provider)}</span><span className="media-v4-source-card-method-label">{sourceMethodLabel(card)}</span></div>
-                <span className={`media-v4-source-card-state media-v4-source-card-state-${card.overall_status ?? 'completed'}`}>{card.overall_status === 'running' ? '进行中' : card.overall_status === 'needs_attention' ? '需要处理' : card.overall_status === 'queued' ? '等待中' : '已完成'}</span>
+                <span className={`media-v4-source-card-state media-v4-source-card-state-${card.overall_status ?? 'completed'}`}>{stateLabel}</span>
                 <strong title={card.display_name}>{card.display_name}</strong>
-                <span className="media-v4-source-card-times">添加于 {formatDate(card.added_at)} · 最近更新 {formatDate(card.updated_at)}</span>
-                {card.last_error && <span className="media-v4-source-card-error" role="alert">{card.last_error}</span>}
-                {card.attention_count > 0 && <span className="media-v4-source-card-attention">有 {card.attention_count} 部作品需要处理</span>}
+                {card.display_path && card.display_path !== card.display_name && <span className="media-v4-source-card-locator" title={card.source_locator}>{card.display_path}</span>}
+                {card.last_error && card.overall_status === 'needs_attention' && <span className="media-v4-source-card-error" role="alert">{card.last_error}</span>}
+                {card.attention_count > 0 && <span className="media-v4-source-card-attention">有 {card.attention_count} 个待处理事项</span>}
               </div>
               <div className="media-v4-source-card-scale">
                 <div className="media-v4-source-card-stats"><span>{card.work_count} 部作品</span><span>{card.asset_count} 个文件</span></div>
-                <div className="media-v4-source-card-progress"><div><span>{card.progress?.message || progressLabel}</span><span>{card.progress?.state === 'running' ? `${card.progress.completed_work_count}/${card.progress.total_work_count} 部` : ''}</span></div>{card.progress?.state === 'running' && card.progress.percent != null ? <i aria-hidden="true"><b style={{ width: `${card.progress.percent}%` }} /></i> : card.progress?.state === 'queued' ? <i className="media-v4-source-card-indeterminate" aria-hidden="true" /> : null}</div>
+                <div className="media-v4-source-card-progress" role="status"><span>{progressLabel}</span></div>
                 <div className="media-v4-source-card-actions">
-                  <Button className={`media-v4-source-card-action ${card.can_resume ? 'primary' : 'secondary'}`} appearance={card.can_resume ? 'primary' : 'secondary'} icon={<Database24Regular />} onClick={() => void resumeSourceCard(card)}>{card.can_resume ? '查看进度' : '查看上次导入'}</Button>
-                  <Button className={`media-v4-source-card-action ${card.can_resume ? 'secondary' : 'primary'}`} appearance={card.can_resume ? 'secondary' : 'primary'} icon={<ArrowSync24Regular />} disabled={active} onClick={() => prepareSourceUpdate(card)}>检查更新</Button>
+                  <Button className={`media-v4-source-card-action ${card.can_resume ? 'primary' : 'secondary'}`} appearance={card.can_resume ? 'primary' : 'secondary'} icon={resumeIcon} onClick={() => void resumeSourceCard(card)}>{resumeLabel}</Button>
+                  {activeTask?.can_cancel || activeTask?.status === 'cancelling'
+                    ? <Button className="media-v4-source-card-action secondary" appearance="secondary" icon={<Dismiss24Regular />} disabled={activeTask?.status === 'cancelling'} onClick={() => void terminateSourceTask(card)}>{activeTask?.status === 'cancelling' ? '正在终止…' : '终止任务'}</Button>
+                    : <Button className={`media-v4-source-card-action ${card.can_resume ? 'secondary' : 'primary'}`} appearance={card.can_resume ? 'secondary' : 'primary'} icon={<ArrowSync24Regular />} disabled={active} onClick={() => prepareSourceUpdate(card)}>检查更新</Button>}
+                  {!active && <Button className="media-v4-source-card-action secondary" appearance="secondary" icon={<Delete24Regular />} aria-label={`删除来源卡：${card.display_name}`} onClick={() => setSourceCardPendingDelete(card)}>删除来源卡</Button>}
                 </div>
               </div>
             </article>
@@ -848,7 +1185,6 @@ export default function MediaManagementPage() {
             <div>
               <span className="media-stage-eyebrow">第 1 步</span>
               <h2>选择媒体来源</h2>
-              <p>四种入口使用同一套识别规则，不会移动或改名你的原始媒体文件。</p>
             </div>
           </div>
         </div>
@@ -860,7 +1196,7 @@ export default function MediaManagementPage() {
             return (
               <button type="button" className={selected ? 'selected' : ''} aria-label={option.label} aria-pressed={selected} onClick={() => selectSourceKind(option.kind)} key={option.kind}>
                 <span className="media-v4-source-icon" aria-hidden="true"><Icon /></span>
-                <span><strong>{option.label}</strong><small>{option.description}</small></span>
+                <span><strong>{option.label}</strong></span>
                 <span className="media-v4-source-check" aria-hidden="true">{selected && <CheckmarkCircle24Filled />}</span>
               </button>
             )
@@ -870,13 +1206,11 @@ export default function MediaManagementPage() {
         <div className={`media-v4-config-panel media-v4-workspace workspace-${kind}`}>
           <div className="media-v4-config-heading">
             <strong>{kind === 'local' ? '选择本机文件夹' : kind === 'tree' ? '导入目录树清单' : kind === 'hybrid' ? '建立基线并检查后续变化' : '浏览 OpenList 目录'}</strong>
-            <span>{kind === 'local'
-              ? '只扫描本机物理磁盘。网盘挂载请使用目录树或 OpenList。'
-              : kind === 'tree'
-                ? '选择内容来源和 TXT 文件；播放路径自动使用设置中的挂载映射。'
-                : kind === 'hybrid'
-                  ? '先用 TXT 快速建立大库基线，确认后再通过 OpenList 对同一目录执行增量检查。'
-                  : '像文件管理器一样进入目标文件夹，然后完整扫描当前目录。'}</span>
+            {kind !== 'tree' && <span>{kind === 'local'
+              ? '扫描本机文件；网盘挂载请使用目录树或 OpenList。'
+              : kind === 'hybrid'
+                ? '先导入 TXT 基线，再用 OpenList 检查变化。'
+                : '进入目标文件夹后扫描当前目录。'}</span>}
           </div>
 
           {kind === 'local' && (
@@ -898,12 +1232,12 @@ export default function MediaManagementPage() {
           {kind === 'tree' && (
             <div className="media-v4-workspace-body">
               <div className="media-v4-field-block">
-                <div className="media-v4-field-copy"><strong>内容来源</strong><span>选择 TXT 清单中的媒体实际属于哪个网盘。</span></div>
+                <div className="media-v4-field-copy"><strong>内容来源</strong></div>
                 <ProviderPicker value={provider} onChange={setProvider} />
                 <a className="media-v4-provider-link" href={providerOption.website} target="_blank" rel="noreferrer">{providerOption.websiteLabel}<span aria-hidden="true">↗</span></a>
               </div>
               <div className="media-v4-field-block">
-                <div className="media-v4-field-copy"><strong>目录树 TXT 文件</strong><span>支持 115、百度、夸克和 OpenList 导出的目录清单，文件可位于网盘挂载盘。</span></div>
+                <div className="media-v4-field-copy"><strong>目录树 TXT 文件</strong><span>支持 115、百度、夸克和 OpenList 导出的清单。</span></div>
                 <div className="media-v4-path-row media-v4-path-row-wide">
                   <Input aria-label="目录树 TXT 文件" name="tree_file" autoComplete="off" spellCheck={false} value={path} onChange={(_, data) => setPath(data.value)} placeholder="例如 K:\\媒体清单\\动画目录树.txt" />
                   <Button appearance="secondary" icon={<DocumentText24Regular />} onClick={() => void choosePath()}>选择文件</Button>
@@ -926,7 +1260,7 @@ export default function MediaManagementPage() {
               <OpenListFolderBrowser key={`openlist-${browserSession}`} configured={Boolean(config?.openlist_configured)} initialPath={remoteRoot || config?.openlist_remote_root || '/'} onLoadingChange={setRemoteBrowsing} onPathChange={handleRemotePathChange} onGoSettings={goSettings} />
               <div className="media-v4-mapping-note">
                 <Cloud24Regular aria-hidden="true" />
-                <div><strong>{selectedRemoteRoute ? selectedRemoteRoute.label : '当前目录尚未匹配内容路由'}</strong><span>{selectedRemoteRoute ? `内容来源：${PROVIDER_OPTIONS.find((item) => item.value === selectedRemoteRoute.provider_id)?.label || '其他远程来源'}；播放位置由已保存路由推导。` : '请先进入一个已配置内容来源的目录，才能开始扫描。'}</span></div>
+                <div><strong>{selectedRemoteRoute ? '已匹配播放路径' : '当前目录尚未匹配播放路径'}</strong><span>{selectedRemoteRoute ? '播放位置由已保存的 OpenList 路由推导。' : '请先进入一个已配置内容来源的目录，才能开始扫描。'}</span></div>
                 {!selectedRemoteRoute && <Button appearance="subtle" onClick={goSettings}>配置来源路由</Button>}
               </div>
               <div className="media-v4-command-row">
@@ -970,7 +1304,7 @@ export default function MediaManagementPage() {
               </div>
               <div className="media-v4-mapping-note">
                 <Cloud24Regular aria-hidden="true" />
-                <div><strong>{selectedRemoteRoute ? selectedRemoteRoute.label : '当前目录尚未匹配内容路由'}</strong><span>{selectedRemoteRoute ? 'TXT 的内容来源与播放位置将使用这条已保存路由，不需要重复选择。' : '请先进入一个已配置内容来源的目录。'}</span></div>
+                <div><strong>{selectedRemoteRoute ? '已匹配播放路径' : '当前目录尚未匹配播放路径'}</strong><span>{selectedRemoteRoute ? '播放位置由已保存的 OpenList 路由推导。' : '请先进入一个已配置内容来源的目录。'}</span></div>
                 {!selectedRemoteRoute && <Button appearance="subtle" onClick={goSettings}>配置来源路由</Button>}
               </div>
               <div className="media-v4-command-row media-v4-hybrid-actions">
@@ -983,11 +1317,26 @@ export default function MediaManagementPage() {
             </div>
           )}
         </div>
+        {busy === 'scan' && scanTask && (
+          <MessageBar className="media-v4-message media-v4-inline-scan-status" intent="info">
+            <MessageBarBody>
+              <div className="media-v4-scan-progress">
+                <span><Spinner size="tiny" />{scanTask.stage_label || '正在扫描媒体来源'}</span>
+                <span>{scanTask.progress == null ? '正在建立来源清单…' : `已完成 ${scanTask.progress}%`}</span>
+                <ProgressBar
+                  value={scanTask.total_count ? Math.min(1, (scanTask.processed_count || 0) / scanTask.total_count) : undefined}
+                  max={1}
+                  aria-label="来源扫描进度"
+                />
+              </div>
+            </MessageBarBody>
+          </MessageBar>
+        )}
       </section>}
 
       {workflowStage === 'review' && scan && <section className="media-stage-shell media-v4-stage-panel media-v4-review-card">
         <div className="media-stage-header">
-          <div className="media-stage-heading"><span className="media-stage-icon" aria-hidden="true"><CheckmarkCircle24Regular /></span><div><span className="media-stage-eyebrow">第 2 步</span><h2>检查识别结果</h2><p>已扫描 {scan.evidence_count} 个媒体条目。默认按作品摘要检查，需要处理的条目会置顶。</p></div></div>
+          <div className="media-stage-heading"><span className="media-stage-icon" aria-hidden="true"><DocumentText24Regular /></span><div><span className="media-stage-eyebrow">第 2 步</span><h2>检查识别结果</h2><p>已扫描 {scan.evidence_count} 个媒体条目。默认按作品摘要检查，需要处理的条目会置顶。</p></div></div>
           {!preview && <Button appearance="secondary" disabled={busy !== '' || (scan.evidence_count === 0 && !allowEmpty)} onClick={() => void buildPreview()}>{busy === 'preview' ? <Spinner size="tiny" /> : '生成识别预览'}</Button>}
         </div>
         {scan.scan_mode === 'incremental' && <MessageBar intent="info"><MessageBarBody>本次使用 OpenList 增量核对：请求 {scan.scan_stats?.requested_directories || 0} 个目录，其中滚动抽查 {scan.scan_stats?.rolling_verified || 0} 个、变化优先核对 {scan.scan_stats?.changed_directories || 0} 个。</MessageBarBody></MessageBar>}
@@ -1028,12 +1377,60 @@ export default function MediaManagementPage() {
             progress={executeProgress}
             busyRetryId={retryingJobId}
             onRetry={(jobId: string) => { const job = jobs.find((item) => item.job_id === jobId); if (job) void retryJob(job) }}
+            resolvingWorkId={metadataRecoveryBusy}
+            onResolveMetadata={(workId: string) => { void searchMetadataRecovery(workId) }}
           />
         ) : (
           <div className="media-v4-empty">正在读取执行进度…</div>
         )}
       </section>}
+      {metadataRecovery && (
+        <Dialog open onOpenChange={(_, data) => { if (!data.open && metadataRecoveryBusy === '') setMetadataRecovery(null) }}>
+          <DialogSurface>
+            <DialogBody>
+              <DialogTitle>确认“{metadataRecovery.workTitle}”的在线作品</DialogTitle>
+              <DialogContent>
+                <p>系统没有得到唯一匹配。请从候选中选择正确作品；确认后会立即继续获取媒体信息。</p>
+                <div className="media-v4-metadata-search-row">
+                  <Input aria-label="搜索作品名称" value={metadataRecoveryQuery} onChange={(_, data) => setMetadataRecoveryQuery(data.value)} />
+                  <Button appearance="secondary" disabled={metadataRecoveryBusy !== '' || !metadataRecoveryQuery.trim()} onClick={() => { void searchMetadataRecovery(metadataRecovery.workId, metadataRecoveryQuery.trim()) }}>
+                    搜索
+                  </Button>
+                </div>
+                <div className="media-v4-metadata-candidate-list">
+                  {metadataRecovery.candidates.length > 0 ? metadataRecovery.candidates.map((candidate) => (
+                    <Button key={candidate.candidate_id} appearance="secondary" className="media-v4-metadata-candidate" disabled={metadataRecoveryBusy !== ''} onClick={() => { void confirmMetadataRecovery(candidate) }}>
+                      <strong>{candidate.title || candidate.original_title || '未命名候选'}</strong>
+                      <span>{[candidate.original_title, candidate.year ? String(candidate.year) : '', candidate.media_type === 'movie' ? '电影' : '剧集'].filter(Boolean).join(' · ')}</span>
+                    </Button>
+                  )) : <div className="media-v4-empty">没有找到候选。请调整名称后重新搜索，或检查 TMDB 配置。</div>}
+                </div>
+              </DialogContent>
+              <DialogActions>
+                <Button appearance="secondary" disabled={metadataRecoveryBusy !== ''} onClick={() => setMetadataRecovery(null)}>暂不处理</Button>
+              </DialogActions>
+            </DialogBody>
+          </DialogSurface>
+        </Dialog>
+      )}
       </>}
+      {sourceCardPendingDelete && (
+        <Dialog open onOpenChange={(_, data) => { if (!data.open && !sourceCardDeleting) setSourceCardPendingDelete(null) }}>
+          <DialogSurface>
+            <DialogBody>
+              <DialogTitle>删除来源卡</DialogTitle>
+              <DialogContent>
+                <p>从“已导入来源”中移除“{sourceCardPendingDelete.display_name}”吗？</p>
+                <p>这不会删除媒体库、镜像、资料或观看状态；以后重新扫描同一来源时，卡片会再次出现。</p>
+              </DialogContent>
+              <DialogActions>
+                <Button appearance="secondary" disabled={sourceCardDeleting} onClick={() => setSourceCardPendingDelete(null)}>取消</Button>
+                <Button appearance="primary" icon={sourceCardDeleting ? <Spinner size="tiny" /> : <Delete24Regular />} disabled={sourceCardDeleting} onClick={() => void hideSourceCard()}>{sourceCardDeleting ? '正在删除…' : '删除来源卡'}</Button>
+              </DialogActions>
+            </DialogBody>
+          </DialogSurface>
+        </Dialog>
+      )}
     </div>
   )
 }

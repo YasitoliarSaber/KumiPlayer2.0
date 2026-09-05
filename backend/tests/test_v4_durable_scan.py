@@ -228,3 +228,90 @@ def test_durable_incremental_without_baseline_is_rejected(tmp_path, monkeypatch)
 class SimpleNamespaceType:
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)
+
+
+def _progress_database(tmp_path):
+    from app.media_v4.persistence.database import V4Database
+
+    database = V4Database(tmp_path / "progress.db")
+    database.initialize()
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO source_roots(root_id, provider, ingest_method, source_locator, playback_locator, created_at, updated_at) "
+            "VALUES ('root-progress', 'baidu', 'directory_tree', 'Q:\\百度网盘', 'Q:\\百度网盘', 'now', 'now')"
+        )
+        conn.execute(
+            "INSERT INTO source_scans(scan_id, root_id, generation, status, started_at) "
+            "VALUES ('scan-progress', 'root-progress', 1, 'running', 'now')"
+        )
+    return database
+
+
+def _scan_row(database, scan_id: str = "scan-progress"):
+    with database.connect() as conn:
+        row = conn.execute(
+            "SELECT stage, processed_count, total_count, status FROM source_scans WHERE scan_id = ?",
+            (scan_id,),
+        ).fetchone()
+    return dict(row)
+
+
+def test_progress_stage_switch_resets_counts_to_new_stage(tmp_path):
+    """reading_source 4313/4313 → parsing 0/908：阶段前进必须重置计数。"""
+
+    from app.media_v4.sources.durable_scan import _update_scan_progress
+
+    database = _progress_database(tmp_path)
+    _update_scan_progress(database, "scan-progress", stage="reading_source", processed_count=4313, total_count=4313)
+    _update_scan_progress(database, "scan-progress", stage="parsing", processed_count=0, total_count=908)
+
+    assert _scan_row(database) == {"stage": "parsing", "processed_count": 0, "total_count": 908, "status": "running"}
+
+
+def test_progress_same_stage_late_callback_never_moves_backwards(tmp_path):
+    """同阶段 16 → 8 的迟到回调不得后退。"""
+
+    from app.media_v4.sources.durable_scan import _update_scan_progress
+
+    database = _progress_database(tmp_path)
+    _update_scan_progress(database, "scan-progress", stage="parsing", processed_count=16, total_count=908)
+    _update_scan_progress(database, "scan-progress", stage="parsing", processed_count=8, total_count=908)
+
+    row = _scan_row(database)
+    assert row["stage"] == "parsing"
+    assert row["processed_count"] == 16
+    assert row["total_count"] == 908
+
+
+def test_progress_old_stage_callback_does_not_pollute_new_stage(tmp_path):
+    """收到旧阶段 reading_source 回调不得污染 parsing 计数或阶段。"""
+
+    from app.media_v4.sources.durable_scan import _update_scan_progress
+
+    database = _progress_database(tmp_path)
+    _update_scan_progress(database, "scan-progress", stage="parsing", processed_count=200, total_count=908)
+    _update_scan_progress(database, "scan-progress", stage="reading_source", processed_count=4313, total_count=4313)
+
+    row = _scan_row(database)
+    assert row["stage"] == "parsing"
+    assert row["processed_count"] == 200
+    assert row["total_count"] == 908
+
+
+def test_progress_terminal_state_ignores_late_running_callbacks(tmp_path):
+    """终态（ready）不得再被旧回调改成运行中。"""
+
+    from app.media_v4.sources.durable_scan import _update_scan_progress
+
+    database = _progress_database(tmp_path)
+    with database.connect() as conn:
+        conn.execute(
+            "UPDATE source_scans SET stage = 'ready', status = 'completed', processed_count = 908, total_count = 908 "
+            "WHERE scan_id = 'scan-progress'"
+        )
+    _update_scan_progress(database, "scan-progress", stage="parsing", processed_count=600, total_count=908)
+
+    row = _scan_row(database)
+    assert row["stage"] == "ready"
+    assert row["status"] == "completed"
+    assert row["processed_count"] == 908

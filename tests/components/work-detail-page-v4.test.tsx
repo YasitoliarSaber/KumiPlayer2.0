@@ -87,7 +87,113 @@ test('按旧版沉浸式结构展示 V4 季度和剧集信息', async () => {
   expect(screen.getByText('启程')).toBeVisible();
 });
 
-test('特别篇使用 SP 编号并显示彼此可区分的本地标题', async () => {
+test('季度缺少剧照时仍使用统一的横向剧集组件', async () => {
+  const withoutThumbs = {
+    ...work,
+    seasons: [{ season_id: 'season-2', season_number: 2, group_type: 'season', label: '第 2 季', episode_count: 1 }],
+    episodes: [{ ...work.episodes[0], episode_id: 'episode-2', season_number: 2, thumb_path: '' }],
+  };
+  useUiStore.setState({ selectedSeasonNumber: 2 });
+  useLibraryStore.setState({
+    works: [withoutThumbs as never],
+    getWorkDetail: vi.fn().mockResolvedValue(withoutThumbs),
+  });
+
+  const { container } = render(<WorkDetailPage />);
+
+  expect(await screen.findByText('启程')).toBeVisible();
+  expect(container.querySelector('.detail-episode-grid.thumbnail-strip')).not.toBeNull();
+  expect(screen.getByRole('button', { name: '上一组剧集' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: '列表视图' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '网格视图' })).not.toBeInTheDocument();
+});
+
+test('首次进入优先显示正片季度并把特别篇排在最后', async () => {
+  const mixedSeasons = {
+    ...work,
+    seasons: [
+      { season_id: 'season-special', season_number: 0, group_type: 'special', label: '特别篇', episode_count: 1 },
+      { season_id: 'season-2', season_number: 2, group_type: 'season', label: '第 2 季', episode_count: 1 },
+      { season_id: 'season-1', season_number: 1, group_type: 'season', label: '第 1 季', episode_count: 1 },
+    ],
+    episodes: [
+      { ...work.episodes[0], episode_id: 'special-1', season_number: 0, episode_number: null, special_number: 1, title: '露营小剧场', group_type: 'special', kind: 'special' },
+      { ...work.episodes[0], episode_id: 'episode-s2', season_number: 2, title: '第二季启程' },
+      { ...work.episodes[0], episode_id: 'episode-s1', season_number: 1, title: '第一季启程' },
+    ],
+  };
+  useUiStore.setState({ selectedSeasonNumber: null, selectedSeasonByWork: {} });
+  useLibraryStore.setState({
+    works: [mixedSeasons as never],
+    getWorkDetail: vi.fn().mockResolvedValue(mixedSeasons),
+  });
+
+  render(<WorkDetailPage />);
+
+  expect(await screen.findByText('第一季启程')).toBeVisible();
+  expect(screen.queryByText('露营小剧场')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('combobox', { name: '选择季度' }));
+  const options = screen.getAllByRole('option').map((option) => option.textContent);
+  expect(options).toEqual(['第1季', '第2季', '特别篇']);
+});
+
+test('用户切换季度后重新进入同一作品仍恢复该季度', async () => {
+  const multiSeasonWork = {
+    ...work,
+    seasons: [
+      { season_id: 'season-1', season_number: 1, group_type: 'season', label: '第 1 季', episode_count: 1 },
+      { season_id: 'season-2', season_number: 2, group_type: 'season', label: '第 2 季', episode_count: 1 },
+    ],
+    episodes: [
+      { ...work.episodes[0], episode_id: 'episode-s1', season_number: 1, title: '第一季启程' },
+      { ...work.episodes[0], episode_id: 'episode-s2', season_number: 2, title: '第二季启程' },
+    ],
+  };
+  useUiStore.setState({ selectedSeasonNumber: null, selectedSeasonByWork: {} });
+  useLibraryStore.setState({
+    works: [multiSeasonWork as never],
+    getWorkDetail: vi.fn().mockResolvedValue(multiSeasonWork),
+  });
+
+  const firstVisit = render(<WorkDetailPage />);
+  expect(await screen.findByText('第一季启程')).toBeVisible();
+  fireEvent.click(screen.getByRole('combobox', { name: '选择季度' }));
+  fireEvent.click(screen.getByRole('option', { name: '第 2 季' }));
+  expect(await screen.findByText('第二季启程')).toBeVisible();
+  expect(useUiStore.getState().selectedSeasonByWork[work.work_id]).toEqual({
+    seasonNumber: 2,
+    seasonKey: 'season:2',
+  });
+
+  firstVisit.unmount();
+  render(<WorkDetailPage />);
+
+  expect(await screen.findByText('第二季启程')).toBeVisible();
+  expect(screen.queryByText('第一季启程')).not.toBeInTheDocument();
+});
+
+test('缺图剧集卡显示占位，不把背景大图复制为每集缩略图', async () => {
+  const withoutThumbs = {
+    ...work,
+    episodes: [{ ...work.episodes[0], episode_id: 'episode-no-thumb', thumb_path: '' }],
+  };
+  useLibraryStore.setState({
+    works: [withoutThumbs as never],
+    getWorkDetail: vi.fn().mockResolvedValue(withoutThumbs),
+  });
+
+  const { container } = render(<WorkDetailPage />);
+
+  expect(await screen.findByText('启程')).toBeVisible();
+  const episodeThumb = container.querySelector('.episode-thumb');
+  expect(episodeThumb).not.toBeNull();
+  // 缺图时不得回退到整页背景图（fanart），否则几十张卡片会并发请求同一张原图。
+  expect(episodeThumb?.querySelector('img')).toBeNull();
+  expect(episodeThumb?.querySelector('.episode-thumb-placeholder')).not.toBeNull();
+  expect(screen.getByRole('button', { name: /播放第 1 集：启程/ })).toBeVisible();
+});
+
+test('特别篇不展示内部 SP 编号，并显示彼此可区分的本地标题', async () => {
   const specialWork = {
     ...work,
     seasons: [
@@ -124,10 +230,44 @@ test('特别篇使用 SP 编号并显示彼此可区分的本地标题', async (
 
   render(<WorkDetailPage />);
 
-  expect(await screen.findByText('SP01 - 露营小剧场')).toBeVisible();
-  expect(screen.getByText('SP02 - 温泉小剧场')).toBeVisible();
-  expect(screen.getAllByText('SP01').length).toBeGreaterThan(0);
-  expect(screen.getAllByText('SP02').length).toBeGreaterThan(0);
+  // SP 编号仅用于后端排序/定位，用户界面只显示可区分的语义标题。
+  expect(await screen.findByText('露营小剧场')).toBeVisible();
+  expect(screen.getByText('温泉小剧场')).toBeVisible();
+  expect(screen.queryByText('SP01')).not.toBeInTheDocument();
+  expect(screen.queryByText('SP02')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: '播放特别篇 1：露营小剧场' })).toBeVisible();
+});
+
+test('历史数据标题残留的 SP 前缀不会暴露在特别篇界面', async () => {
+  const legacySpecialWork = {
+    ...work,
+    seasons: [
+      { season_id: 'season-legacy-special', season_number: 0, group_type: 'special', label: '特别篇', episode_count: 1 },
+    ],
+    episodes: [
+      {
+        ...work.episodes[0],
+        episode_id: 'special-legacy',
+        season_number: 0,
+        episode_number: null,
+        special_number: 8,
+        title: 'SP08 - Making Documentary',
+        group_type: 'special',
+        kind: 'special',
+      },
+    ],
+  };
+  useUiStore.setState({ selectedSeasonNumber: 0 });
+  useLibraryStore.setState({
+    works: [legacySpecialWork as never],
+    getWorkDetail: vi.fn().mockResolvedValue(legacySpecialWork),
+  });
+
+  render(<WorkDetailPage />);
+
+  expect(await screen.findByText('Making Documentary')).toBeVisible();
+  expect(screen.queryByText('SP08')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: '播放特别篇 8：Making Documentary' })).toBeVisible();
 });
 
 test('详情首屏优先复用本地图片，不重复请求同一张背景图', async () => {

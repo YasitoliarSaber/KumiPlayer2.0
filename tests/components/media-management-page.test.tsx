@@ -98,13 +98,13 @@ async function enterImport() {
   fireEvent.click(await screen.findByRole('button', { name: '导入媒体' }))
 }
 
-test('本地目录读取设置中的默认路径并只表达本机物理磁盘', async () => {
+test('本地目录读取设置中的默认路径，并以简洁文案表达扫描范围', async () => {
   render(<MediaManagementPage />)
   await enterImport()
 
   expect(screen.getByRole('navigation', { name: '导入步骤' })).toBeVisible()
   expect(screen.getByRole('button', { name: '本地目录' })).toHaveAttribute('aria-pressed', 'true')
-  expect(screen.getByText('仅扫描本机物理磁盘中的媒体文件')).toBeVisible()
+  expect(screen.queryByText('扫描本地媒体文件')).not.toBeInTheDocument()
   expect(await screen.findByRole('textbox', { name: '本机媒体文件夹' })).toHaveValue('D:\\Media')
   expect(screen.queryByText('还需要选择媒体目录')).not.toBeInTheDocument()
   expect(screen.queryByText(/已挂载网盘中的媒体文件/)).not.toBeInTheDocument()
@@ -134,6 +134,7 @@ test('目录树使用真实网盘提供商、官网入口和设置中的播放�
     source: 'tree',
     provider: 'quark',
     source_root: 'K:\\夸克网盘\\动画',
+    source_display_name: '动画',
   })))
 })
 
@@ -161,7 +162,7 @@ test('OpenList 首次完整扫描建立基线，确认前增量被禁用', async
   await waitFor(() => expect(api.durableScan).toHaveBeenCalledWith('scan-durable'))
 })
 
-test('已确认基线的 OpenList 默认增量扫描并保留完整校验', async () => {
+test('已确认基线的 OpenList 默认增量扫描，并在完成后进入识别复核', async () => {
   api.openlistStatus.mockResolvedValue({
     root_id: 'root-115-anime',
     remote_root: '/115/Anime',
@@ -187,17 +188,8 @@ test('已确认基线的 OpenList 默认增量扫描并保留完整校验', asyn
   await waitFor(() => expect(api.durableScan).toHaveBeenCalledWith('scan-durable'))
 
   api.startDurableScan.mockClear()
-  await waitFor(
-    () => expect(screen.getByRole('button', { name: '完整校验' })).toBeEnabled(),
-    { timeout: 3000 },
-  )
-  fireEvent.click(screen.getByRole('button', { name: '完整校验' }))
-  await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({
-    source: 'openlist',
-    root_path: '/115/Anime',
-    provider: 'pan115',
-    scan_mode: 'full',
-  })))
+  expect(await screen.findByRole('heading', { name: '检查识别结果' })).toBeVisible()
+  expect(api.startDurableScan).not.toHaveBeenCalled()
 })
 
 test('OpenList 未进入内容来源路由时不会猜测默认网盘提供商', async () => {
@@ -205,7 +197,7 @@ test('OpenList 未进入内容来源路由时不会猜测默认网盘提供商',
   await enterImport()
   fireEvent.click(screen.getByRole('button', { name: 'OpenList' }))
 
-  expect(await screen.findByText('当前目录尚未匹配内容路由')).toBeVisible()
+  expect(await screen.findByText('当前目录尚未匹配播放路径')).toBeVisible()
   expect(screen.getByText('请先进入一个已配置内容来源的目录，才能开始扫描。')).toBeVisible()
   expect(screen.getByRole('button', { name: '完整扫描并建立基线' })).toBeDisabled()
 })
@@ -293,6 +285,29 @@ test('来源卡展示持久化进度并可恢复查看任务', async () => {
   expect(screen.getByText('30 部作品')).toBeVisible()
   fireEvent.click(screen.getByRole('button', { name: '查看进度' }))
   await waitFor(() => expect(api.status).toHaveBeenCalledWith('rev-existing'))
+})
+
+test('已终止的执行任务不被误写为扫描取消，并可查看本次执行结果', async () => {
+  api.sourceLibraries.mockResolvedValue({
+    cards: [{
+      root_id: 'root-terminated', provider: 'baidu', ingest_method: 'directory_tree', source_mode: 'tree',
+      last_scan_mode: 'full', has_confirmed_baseline: true, overall_status: 'cancelled', phase: 'execute',
+      attention_count: 0, last_error: '', source_locator: 'K:\\百度网盘\\动画', playback_locator: 'K:\\百度网盘\\动画', route_id: '',
+      display_name: '已终止导入', enabled: 1, added_at: '2026-08-25T00:00:00Z', updated_at: '2026-08-25T00:00:00Z',
+      revision_id: 'rev-terminated', latest_revision_id: 'rev-terminated', revision_state: 'confirmed',
+      evidence_count: 10, work_count: 1, asset_count: 1, work_previews: [],
+      progress: { state: 'cancelled', stage: 'metadata', current_work_id: '', current_work_title: '', completed_work_count: 0, total_work_count: 1, percent: null, message: '任务已终止' },
+      active_task: null, available_actions: ['inspect', 'resume'], can_resume: true,
+      job_summary: { total: 2, queued: 0, running: 0, succeeded: 1, failed: 0, cancelled: 1 },
+    }],
+  })
+  render(<MediaManagementPage />)
+
+  expect(await screen.findByRole('region', { name: '已导入媒体库' })).toBeVisible()
+  expect(screen.getAllByText('任务已终止')).toHaveLength(2)
+  expect(screen.queryByText('扫描已取消')).not.toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: '查看执行结果' }))
+  await waitFor(() => expect(api.status).toHaveBeenCalledWith('rev-terminated'))
 })
 
 test('来源卡可以回到同一 OpenList 来源执行更新', async () => {
@@ -458,7 +473,35 @@ test('只有排队或运行中的来源卡才启动实时轮询', async () => {
   })
 
   render(<MediaManagementPage />)
-  expect(await screen.findByText('失败的导入')).toBeVisible()
+  const card = (await screen.findByText('失败的导入')).closest('article')!
+  expect(card).toHaveClass('settled')
+  expect(card).not.toHaveClass('active')
+  expect(timeoutSpy.mock.calls.some((call) => call[1] === 1500)).toBe(false)
+  timeoutSpy.mockRestore()
+})
+
+test('来源卡只以 active_task 判断当前任务，忽略过期任务摘要', async () => {
+  const timeoutSpy = vi.spyOn(window, 'setTimeout')
+  api.sourceLibraries.mockResolvedValue({
+    cards: [{
+      root_id: 'root-stale-summary', provider: 'baidu', ingest_method: 'directory_tree',
+      source_locator: 'K:\\tree.txt', playback_locator: 'K:\\百度网盘', route_id: '',
+      display_name: '已完成的目录树', revision_id: 'rev-stale', revision_status: 'confirmed',
+      revision_created_at: '2026-08-24T00:00:00Z', confirmed_at: '2026-08-24T00:00:00Z',
+      overall_status: 'completed', phase: 'execute', attention_count: 0, last_error: '',
+      evidence_count: 1, work_count: 1, asset_count: 1, can_resume: false,
+      progress: { state: 'completed', stage: 'idle', current_work_id: '', current_work_title: '', completed_work_count: 1, total_work_count: 1, percent: 100, message: '上次导入已处理完毕' },
+      active_task: null,
+      // 旧摘要可能在任务已结束后延迟刷新，不能据此让卡片持续显示处理中。
+      job_summary: { total: 3, queued: 1, running: 1, succeeded: 1, failed: 0, cancelled: 0 },
+    }],
+  })
+
+  render(<MediaManagementPage />)
+
+  expect(await screen.findByText('已完成的目录树')).toBeVisible()
+  expect(screen.getByText('上次导入已处理完毕')).toBeVisible()
+  expect(screen.getByRole('button', { name: '检查更新' })).toBeEnabled()
   expect(timeoutSpy.mock.calls.some((call) => call[1] === 1500)).toBe(false)
   timeoutSpy.mockRestore()
 })

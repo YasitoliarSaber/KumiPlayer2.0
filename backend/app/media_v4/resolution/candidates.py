@@ -15,8 +15,10 @@ from pathlib import PurePosixPath
 from app.media_v4.domain.models import (
     ParsedFacts,
     ResolutionIssue,
+    ResolvedEpisode,
     ResolvedMediaGraph,
     ResolvedWork,
+    ResolvedWorkAsset,
     SourceEvidence,
 )
 from app.media_v4.parsing.parser import _normalize_filename_stem
@@ -282,6 +284,30 @@ def plan_work_candidates(
                 status="confirmed",
             )
             confirmed[(provider, media_type, provider_id)] = candidate
+        # 重构前已经核验的路径身份属于只读事实库。它不参与纯文件名解析，
+        # 但应在草稿候选层恢复为高置信 Provider 身份，从而把同一作品的
+        # 中英文发布包合并，并保持电影/外传边界。
+        from app.recognition.verified_titles import match_verified_tmdb_binding
+
+        for evidence, _facts in related:
+            binding = match_verified_tmdb_binding(evidence.relative_path)
+            if binding is None or binding.tmdb_type != work.media_type:
+                continue
+            key = ("tmdb", binding.tmdb_type, str(binding.tmdb_id))
+            confirmed.setdefault(
+                key,
+                WorkCandidate(
+                    work_key=work.work_key,
+                    provider="tmdb",
+                    provider_id=str(binding.tmdb_id),
+                    media_type=binding.tmdb_type,
+                    title=binding.canonical_title,
+                    year=work.year,
+                    evidence="verified_path_binding",
+                    confidence="high",
+                    status="confirmed",
+                ),
+            )
         # 3) 在线/测试搜索候选（含 sidecar NFO 标题输入）。
         queries = build_query_inputs(work, entries)
         nfo_titles, has_nfo = _nfo_related_titles(work, entries, nfo_ownership)
@@ -363,16 +389,36 @@ def plan_work_candidates(
                 message="该作品存在多个互不相同的可信 Provider 候选，需人工确认后才能导入",
             ))
 
-    # 合并映射：同一 provider identity 的多个 draft Work → 首个 work_key。
-    identity_owner: dict[tuple[str, str, str], str] = {}
-    for work_key in graph.works:
-        for item in candidates_by_key.get(work_key.work_key, []):
+    # 合并映射：同一 provider identity 的多个 draft Work → 最接近权威候选标题
+    # 的 work_key。不能简单采用遍历到的第一个，否则“主系列 + 特别篇发布包”
+    # 恰好先扫到特别篇时，会让短篇包标题反向覆盖主系列卡片标题。
+    works_by_key = {work.work_key: work for work in graph.works}
+    identity_members: dict[tuple[str, str, str], list[tuple[str, WorkCandidate]]] = {}
+    for work in graph.works:
+        for item in candidates_by_key.get(work.work_key, []):
             if item.status != "confirmed":
                 continue
             identity = (item.provider, item.media_type, item.provider_id)
-            owner = identity_owner.setdefault(identity, work_key.work_key)
-            if owner != work_key.work_key:
-                merge_map[work_key.work_key] = owner
+            identity_members.setdefault(identity, []).append((work.work_key, item))
+    for members in identity_members.values():
+        if len(members) < 2:
+            continue
+
+        def owner_rank(member: tuple[str, WorkCandidate]) -> tuple[int, int, str]:
+            work_key, candidate = member
+            work = works_by_key[work_key]
+            work_title = _normalize_title(work.preferred_title)
+            candidate_title = _normalize_title(candidate.title)
+            return (
+                0 if work_title and work_title == candidate_title else 1,
+                len(work_title),
+                work_key,
+            )
+
+        owner = min(members, key=owner_rank)[0]
+        for work_key, _item in members:
+            if work_key != owner:
+                merge_map[work_key] = owner
     return candidates_by_key, merge_map, issues
 
 
@@ -396,36 +442,109 @@ def merge_graph(graph: ResolvedMediaGraph, merge_map: dict[str, str]) -> Resolve
         if existing is None:
             works_by_key[key] = replace(work, work_key=key)
             continue
+        source_evidence_ids = tuple(
+            dict.fromkeys((*existing.source_evidence_ids, *work.source_evidence_ids))
+        )
+        # target 指向的 Work 是上一步按权威候选标题挑出的代表。即使它在
+        # 原图中的遍历顺序晚于 child，也必须保留代表的标题、年份和类型。
         merged = replace(
-            existing,
-            source_evidence_ids=tuple(
-                dict.fromkeys((*existing.source_evidence_ids, *work.source_evidence_ids))
-            ),
+            work if work.work_key == key else existing,
+            work_key=key,
+            source_evidence_ids=source_evidence_ids,
         )
         works_by_key[key] = merged
 
-    episodes = tuple(
-        replace(episode, work_key=target(episode.work_key))
-        for episode in graph.episodes
-    )
-    work_assets = tuple(
-        replace(asset, work_key=target(asset.work_key))
-        for asset in graph.work_assets
-    )
-    relations = tuple(
-        replace(
-            relation,
-            parent_work_key=target(relation.parent_work_key),
-            child_work_key=target(relation.child_work_key),
+    # Work 身份合并后必须再次按逻辑剧集键收拢，否则同一集的中英文发布包
+    # 会留下两个 Episode，确认时既可能触发唯一约束，也会在详情页重复显示。
+    episodes_by_identity: dict[tuple, ResolvedEpisode] = {}
+    for episode in graph.episodes:
+        work_key = target(episode.work_key)
+        absolute_identity = (
+            episode.absolute_episode_number
+            if episode.local_episode_number is None
+            else None
         )
-        for relation in graph.relations
-    )
+        identity = (
+            work_key,
+            episode.local_season_number,
+            episode.local_episode_number,
+            absolute_identity,
+            episode.special_number,
+            episode.edition_key,
+        )
+        existing = episodes_by_identity.get(identity)
+        if existing is None:
+            episode_key = "|".join(
+                str(value)
+                for value in (
+                    work_key,
+                    episode.local_season_number,
+                    episode.local_episode_number,
+                    absolute_identity,
+                    episode.special_number,
+                )
+            )
+            episodes_by_identity[identity] = replace(
+                episode,
+                episode_key=episode_key,
+                work_key=work_key,
+            )
+            continue
+        episodes_by_identity[identity] = replace(
+            existing,
+            absolute_episode_number=(
+                existing.absolute_episode_number
+                if existing.absolute_episode_number is not None
+                else episode.absolute_episode_number
+            ),
+            display_title=existing.display_title or episode.display_title,
+            asset_evidence_ids=tuple(
+                dict.fromkeys((*existing.asset_evidence_ids, *episode.asset_evidence_ids))
+            ),
+            provider_season_number=(
+                existing.provider_season_number
+                if existing.provider_season_number is not None
+                else episode.provider_season_number
+            ),
+            provider_episode_number=(
+                existing.provider_episode_number
+                if existing.provider_episode_number is not None
+                else episode.provider_episode_number
+            ),
+        )
+
+    work_assets_by_identity: dict[tuple[str, str], ResolvedWorkAsset] = {}
+    for asset in graph.work_assets:
+        work_key = target(asset.work_key)
+        identity = (work_key, asset.edition_key)
+        existing = work_assets_by_identity.get(identity)
+        if existing is None:
+            work_assets_by_identity[identity] = replace(asset, work_key=work_key)
+        else:
+            work_assets_by_identity[identity] = replace(
+                existing,
+                asset_evidence_ids=tuple(
+                    dict.fromkeys((*existing.asset_evidence_ids, *asset.asset_evidence_ids))
+                ),
+            )
+
+    relations_by_identity = {}
+    for relation in graph.relations:
+        parent = target(relation.parent_work_key)
+        child = target(relation.child_work_key)
+        if parent == child:
+            continue
+        identity = (parent, child, relation.relation_type)
+        relations_by_identity.setdefault(
+            identity,
+            replace(relation, parent_work_key=parent, child_work_key=child),
+        )
     return replace(
         graph,
         works=tuple(works_by_key.values()),
-        episodes=episodes,
-        work_assets=work_assets,
-        relations=relations,
+        episodes=tuple(episodes_by_identity.values()),
+        work_assets=tuple(work_assets_by_identity.values()),
+        relations=tuple(relations_by_identity.values()),
     )
 
 

@@ -72,7 +72,7 @@ def test_parser_keeps_lightly_cleaned_special_title_as_immutable_fact():
     facts = V4Parser().parse(evidence)
 
     assert facts.special_number == 1
-    assert facts.episode_title == "SP01 - 露营小剧场"
+    assert facts.episode_title == "露营小剧场"
 
 
 @pytest.mark.parametrize(
@@ -82,13 +82,13 @@ def test_parser_keeps_lightly_cleaned_special_title_as_immutable_fact():
             "Angel Beats!",
             "Angel Beats! - S00E02 - OVA1：通向天堂的阶梯（Stairway to Heaven）.mkv",
             2,
-            "S00E02 - OVA1：通向天堂的阶梯（Stairway to Heaven）",
+            "OVA1：通向天堂的阶梯（Stairway to Heaven）",
         ),
         (
             "Re：从零开始的异世界生活",
             "Re：从零开始的异世界生活.S00E55.2024.2160P.BDRIP.mkv",
             55,
-            "S00E55",
+            "特别篇",
         ),
     ],
 )
@@ -132,8 +132,8 @@ def test_confirmed_specials_keep_distinct_local_titles(tmp_path, monkeypatch):
         ).fetchall()
 
     assert [(row["special_number"], row["display_title"]) for row in rows] == [
-        (1, "SP01 - 露营小剧场"),
-        (2, "SP02 - 温泉小剧场"),
+        (1, "露营小剧场"),
+        (2, "温泉小剧场"),
     ]
 
 
@@ -189,8 +189,8 @@ def test_detail_prefers_distinct_local_special_titles_over_duplicate_generic_scr
 
     assert [item["special_number"] for item in specials] == [1, 2]
     assert [item["title"] for item in specials] == [
-        "SP01 - 露营小剧场",
-        "SP02 - 温泉小剧场",
+        "露营小剧场",
+        "温泉小剧场",
     ]
     assert all("VCB-Studio" not in item["title"] for item in specials)
     assert all("1080p" not in item["title"] for item in specials)
@@ -225,8 +225,8 @@ def test_unnumbered_specials_receive_stable_distinct_numbers(tmp_path, monkeypat
         ).fetchall()
 
     assert [(row["special_number"], row["display_title"]) for row in rows] == [
-        (1, "SP01 · Hot Spring"),
-        (2, "SP02 · Winter Camp"),
+        (1, "Hot Spring"),
+        (2, "Winter Camp"),
     ]
 
 
@@ -260,7 +260,7 @@ def test_unnumbered_special_quality_variants_remain_assets_of_one_episode(tmp_pa
 
     assert episode_count == 1
     assert asset_count == 2
-    assert title == "SP01 · Winter Camp"
+    assert title == "Winter Camp"
 
 
 def test_sp00_placeholders_are_replaced_by_allocated_distinct_numbers(tmp_path, monkeypatch):
@@ -292,6 +292,34 @@ def test_sp00_placeholders_are_replaced_by_allocated_distinct_numbers(tmp_path, 
         ).fetchall()
 
     assert [(row["special_number"], row["display_title"]) for row in rows] == [
-        (1, "SP01 - Hot Spring"),
-        (2, "SP02 - Winter Camp"),
+        (1, "Hot Spring"),
+        (2, "Winter Camp"),
     ]
+
+
+def test_special_marker_brackets_are_removed_but_semantic_brackets_are_kept():
+    from app.media_v4.parsing.episode_titles import (
+        clean_special_episode_title,
+    )
+
+    assert clean_special_episode_title(
+        "Yuru Camp/Specials/[VCB-Studio] Yuru Camp [SP08][Making Documentary][Ma10p_1080p].mkv",
+        work_title="Yuru Camp",
+        special_number=8,
+    ) == "Making Documentary"
+
+
+def test_special_marker_does_not_match_inside_a_semantic_word():
+    from app.media_v4.parsing.episode_titles import (
+        clean_special_episode_title,
+        extract_special_episode_number,
+    )
+
+    title = "Show/Specials/Show - CRISP08 Documentary.mkv"
+
+    assert extract_special_episode_number("CRISP08 Documentary") is None
+    assert clean_special_episode_title(
+        title,
+        work_title="Show",
+        special_number=8,
+    ) == "CRISP08 Documentary"

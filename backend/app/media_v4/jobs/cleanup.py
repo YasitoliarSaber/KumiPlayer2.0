@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+from app.media_v4.jobs.control import cancel_requested, claim_running, heartbeat, mark_cancelled
 from app.media_v4.persistence.database import V4Database
 
 
@@ -36,15 +37,6 @@ class V4ArtifactCleanup:
             ).fetchall()
             if any(row["status"] != "succeeded" for row in prerequisites):
                 raise RuntimeError("当前 revision 尚未完整发布，拒绝清理旧产物")
-            cursor = conn.execute(
-                """
-                UPDATE jobs SET status = 'running', attempts = attempts + 1, updated_at = ?
-                WHERE job_id = ? AND status = 'queued'
-                """,
-                (_now(), job_id),
-            )
-            if cursor.rowcount != 1:
-                raise RuntimeError("清理任务已由其他执行器领取")
             rows = conn.execute(
                 """
                 SELECT a.artifact_id, a.target_path
@@ -64,10 +56,19 @@ class V4ArtifactCleanup:
                 (job["revision_id"],),
             ).fetchall()
 
+        if not claim_running(self.database, job_id):
+            if cancel_requested(self.database, job_id):
+                mark_cancelled(self.database, job_id)
+                return ()
+            raise RuntimeError("清理任务已由其他执行器领取")
+
         removed: list[str] = []
         removable_ids: list[str] = []
         try:
             for row in rows:
+                if cancel_requested(self.database, job_id):
+                    mark_cancelled(self.database, job_id)
+                    return tuple(removed)
                 path = Path(row["target_path"])
                 resolved = path.resolve(strict=False)
                 if resolved == root or root not in resolved.parents:
@@ -85,20 +86,32 @@ class V4ArtifactCleanup:
                             break
                         parent = parent.parent
                 removable_ids.append(str(row["artifact_id"]))
+                heartbeat(self.database, job_id)
+            if cancel_requested(self.database, job_id):
+                mark_cancelled(self.database, job_id)
+                return tuple(removed)
             with self.database.connect() as conn:
                 conn.executemany(
                     "DELETE FROM artifacts WHERE artifact_id = ?",
                     [(artifact_id,) for artifact_id in removable_ids],
                 )
                 conn.execute(
-                    "UPDATE jobs SET status = 'succeeded', last_error = '', updated_at = ? WHERE job_id = ?",
-                    (_now(), job_id),
+                    """
+                    UPDATE jobs
+                    SET status = 'succeeded', last_error = '', updated_at = ?, heartbeat_at = ?, finished_at = ?
+                    WHERE job_id = ?
+                    """,
+                    (_now(), _now(), _now(), job_id),
                 )
             return tuple(removed)
         except Exception as exc:
             with self.database.connect() as conn:
                 conn.execute(
-                    "UPDATE jobs SET status = 'failed', last_error = ?, updated_at = ? WHERE job_id = ?",
-                    (str(exc), _now(), job_id),
+                    """
+                    UPDATE jobs
+                    SET status = 'failed', last_error = ?, updated_at = ?, heartbeat_at = ?, finished_at = ?
+                    WHERE job_id = ?
+                    """,
+                    (str(exc), _now(), _now(), _now(), job_id),
                 )
             raise

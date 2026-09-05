@@ -20,6 +20,7 @@ const api = vi.hoisted(() => ({
   startDurableScan: vi.fn(),
   durableScan: vi.fn(),
   cancelDurableScan: vi.fn(),
+  cancelImport: vi.fn(),
   maintenancePreview: vi.fn(),
   maintenanceConfirm: vi.fn(),
   maintenanceResume: vi.fn(),
@@ -67,6 +68,7 @@ beforeEach(() => {
   api.sourceLibraries.mockResolvedValue({ cards: [] })
   api.drafts.mockResolvedValue({ drafts: [] })
   api.openlistStatus.mockResolvedValue({ root_id: 'r', remote_root: '/', source_mode: '', last_scan_mode: '', has_confirmed_baseline: false })
+  api.cancelImport.mockResolvedValue({ revision_id: 'rev-active', running: 0, cancelled: 1 })
   api.maintenancePreview.mockResolvedValue({
     preview_id: 'prev-1', scope: 'all', created_at: '2026-08-25T00:00:00Z', expires_at: '2026-08-25T02:00:00Z',
     root_ids: ['root-baidu'], root_count: 1, work_count: 2, orphan_work_count: 1, mixed_work_count: 1, asset_count: 3, artifact_count: 2,
@@ -197,7 +199,7 @@ test('全选预览会说明未确认来源被安全跳过，而不泄露内部�
   expect(screen.queryByText(/root-draft|root-baidu/)).not.toBeInTheDocument()
 })
 
-test('危险清理必须经确认复选框后才能提交', async () => {
+test('危险清理完成预览后可直接提交，并保留后端阻止态', async () => {
   api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
   render(<MediaManagementPage />)
   await screen.findByText('115 动画')
@@ -205,11 +207,80 @@ test('危险清理必须经确认复选框后才能提交', async () => {
   fireEvent.click(await screen.findByRole('button', { name: '生成删除预览' }))
 
   const confirm = await screen.findByRole('button', { name: '确认清理' })
-  expect(confirm).toBeDisabled()
-  expect(api.maintenanceConfirm).not.toHaveBeenCalled()
-  fireEvent.click(screen.getByRole('checkbox', { name: '我已确认清理范围；源视频、外部 TXT 和设置不会被删除' }))
+  expect(screen.queryByRole('checkbox', { name: /我已确认清理范围/ })).not.toBeInTheDocument()
+  expect(confirm).toBeEnabled()
   fireEvent.click(confirm)
   await waitFor(() => expect(api.maintenanceConfirm).toHaveBeenCalled())
+})
+
+test('确认清理失败时不向维护页透传技术错误', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
+  api.maintenanceConfirm.mockRejectedValueOnce(new Error('sqlite3.IntegrityError: UNIQUE constraint failed: maintenance_operations.operation_id'))
+  render(<MediaManagementPage />)
+  await screen.findByText('115 动画')
+  fireEvent.click(screen.getByRole('button', { name: '媒体库维护' }))
+  fireEvent.click(await screen.findByRole('button', { name: '生成删除预览' }))
+  fireEvent.click(await screen.findByRole('button', { name: '确认清理' }))
+
+  expect(await screen.findByText('删除失败，请重新检查后重试')).toBeVisible()
+  expect(screen.queryByText(/IntegrityError|UNIQUE constraint|maintenance_operations/)).not.toBeInTheDocument()
+})
+
+test('来源卡终止任务失败时不向页面透传技术错误', async () => {
+  api.sourceLibraries.mockResolvedValue({
+    cards: [cardFixture({
+      active_task: { kind: 'execution', revision_id: 'rev-active', status: 'running', label: '正在更新媒体库', percent: 60, can_cancel: true, cancel_requested: false },
+    })],
+  })
+  api.cancelImport.mockRejectedValueOnce(new Error('sqlite3.OperationalError: database is locked'))
+  render(<MediaManagementPage />)
+
+  fireEvent.click(await screen.findByRole('button', { name: '终止任务' }))
+  expect(await screen.findByText('终止任务失败，请稍后重试')).toBeVisible()
+  expect(screen.queryByText(/OperationalError|database is locked/)).not.toBeInTheDocument()
+})
+
+test('来源卡加载失败时不向页面透传技术错误', async () => {
+  api.sourceLibraries.mockRejectedValueOnce(new Error('requests.exceptions.ConnectionError: provider source unavailable'))
+  render(<MediaManagementPage />)
+
+  expect(await screen.findByText('无法读取已导入媒体库')).toBeVisible()
+  expect(screen.queryByText(/ConnectionError|provider source unavailable/)).not.toBeInTheDocument()
+})
+
+test('媒体管理页保留后端给出的中文恢复提示', async () => {
+  api.sourceLibraries.mockRejectedValue(new Error('媒体库正在更新，请稍后重试'))
+  render(<MediaManagementPage />)
+
+  expect(await screen.findByText('媒体库正在更新，请稍后重试')).toBeVisible()
+})
+
+test('后台任务阻止清理时不再伪装成可点击的危险按钮，并提供重新检查入口', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
+  api.maintenancePreview.mockResolvedValue({
+    preview_id: 'prev-blocked', scope: 'all', created_at: '2026-08-25T00:00:00Z', expires_at: '2026-08-25T02:00:00Z',
+    root_ids: ['root-baidu'], root_count: 1, work_count: 29, orphan_work_count: 29, mixed_work_count: 0, asset_count: 2095, artifact_count: 2095,
+    artifact_summaries: [], blocked: true, blocked_job_count: 1, blocked_job_types: ['refresh_projection'],
+    history_count: 648, progress_count: 1, tracking_count: 0,
+    warnings: ['源视频、外挂盘媒体、外部 TXT、OpenList 远端对象、配置与凭据始终保留'],
+    root_names: [{ root_id: 'root-baidu', provider: 'baidu' }], digest: 'd'.repeat(64),
+  })
+  render(<MediaManagementPage />)
+  await screen.findByText('115 动画')
+  fireEvent.click(screen.getByRole('button', { name: '媒体库维护' }))
+  fireEvent.click(await screen.findByRole('button', { name: '生成删除预览' }))
+
+  expect(await screen.findByRole('button', { name: '暂不可清理' })).toBeDisabled()
+  expect(screen.queryByRole('button', { name: '确认清理' })).not.toBeInTheDocument()
+  expect(screen.getByText(/后台任务完成后/)).toBeVisible()
+  expect(screen.queryByText(/refresh_projection/)).not.toBeInTheDocument()
+
+  const css = readFileSync(join(__dirname, '../../src/index.css'), 'utf-8')
+  expect(css).toMatch(/media-v4-maintenance-danger-button\.fui-Button:disabled[^{]*\{[^}]*background:[^;]*--control-bg/s)
+
+  fireEvent.click(screen.getByRole('button', { name: '重新检查清理条件' }))
+  await waitFor(() => expect(api.maintenancePreview).toHaveBeenCalledTimes(2))
+  expect(api.maintenanceConfirm).not.toHaveBeenCalled()
 })
 
 test('确认来源清理后刷新来源卡，并按实际失败状态提示', async () => {
@@ -224,7 +295,6 @@ test('确认来源清理后刷新来源卡，并按实际失败状态提示', as
   await screen.findByText('115 动画')
   fireEvent.click(screen.getByRole('button', { name: '媒体库维护' }))
   fireEvent.click(await screen.findByRole('button', { name: '生成删除预览' }))
-  fireEvent.click(await screen.findByRole('checkbox', { name: '我已确认清理范围；源视频、外部 TXT 和设置不会被删除' }))
   fireEvent.click(await screen.findByRole('button', { name: '确认清理' }))
 
   expect(await screen.findByText(/部分受控生成物清理失败/)).toBeVisible()
@@ -265,7 +335,6 @@ test('部分失败后显示重试按钮并调用 resume API', async () => {
   fireEvent.click(screen.getByRole('button', { name: '媒体库维护' }))
   await screen.findByRole('heading', { name: '按来源清理' })
   fireEvent.click(screen.getByRole('button', { name: '生成删除预览' }))
-  fireEvent.click(await screen.findByRole('checkbox', { name: '我已确认清理范围；源视频、外部 TXT 和设置不会被删除' }))
   fireEvent.click(await screen.findByRole('button', { name: '确认清理' }))
 
   expect(await screen.findByText(/部分受控生成物清理失败/)).toBeVisible()
@@ -276,7 +345,7 @@ test('部分失败后显示重试按钮并调用 resume API', async () => {
 })
 
 
-test('来源卡使用 GridView 式固定方形项目布局', async () => {
+test('来源卡使用紧凑的响应式任务卡布局', async () => {
   api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
   const { container } = render(<MediaManagementPage />)
   await screen.findByText('115 动画')
@@ -287,10 +356,10 @@ test('来源卡使用 GridView 式固定方形项目布局', async () => {
   const scale = container.querySelector('.media-v4-source-card-scale')
   expect(identity).not.toBeNull()
   expect(scale).not.toBeNull()
-  // 来源卡按等尺寸项目排列，避免宽卡把页面撑成维护表格；
   // jsdom 不计算实际尺寸，因此锁定 CSS 结构合同本身。
   const css = readFileSync(join(__dirname, '../../src/index.css'), 'utf-8')
+  // 来源卡按产品约定保持正方形；小窗口才降级为纵向自适应卡片。
   expect(css).toContain('grid-template-columns: repeat(auto-fill, minmax(270px, 300px));')
-  expect(css).toContain('aspect-ratio: 1 / 1;')
-  expect(css).not.toContain('repeat(auto-fit, minmax(540px, 1fr))')
+  expect(css).toMatch(/\.media-v4-library-source-card\s*\{[^}]*aspect-ratio: 1 \/ 1;/s)
+  expect(css).toContain('.media-v4-library-source-card { aspect-ratio: auto; min-height: 210px; }')
 })

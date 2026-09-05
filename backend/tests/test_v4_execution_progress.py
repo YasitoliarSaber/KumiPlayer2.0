@@ -7,6 +7,8 @@ scrape_bindings）读取，禁止从 preview、日志或 Library Projection 反�
 
 from __future__ import annotations
 
+import json
+
 
 def _seed_revision(database, revision_id: str = "rev-progress", status: str = "confirmed") -> None:
     with database.connect() as conn:
@@ -34,6 +36,7 @@ def _seed_work(
     asset_count: int,
     jobs: list[tuple[str, str, int, str]],
     scrape_status: str | None = None,
+    scrape_metadata: dict | None = None,
 ) -> None:
     with database.connect() as conn:
         conn.execute(
@@ -78,8 +81,8 @@ def _seed_work(
         if scrape_status is not None:
             conn.execute(
                 "INSERT INTO scrape_bindings(binding_id, revision_id, work_id, provider, provider_id, metadata_json, status, created_at, updated_at) "
-                "VALUES (?, ?, ?, 'pan115', '1', '{}', ?, 'now', 'now')",
-                (f"scrape-{work_id}", revision_id, work_id, scrape_status),
+                "VALUES (?, ?, ?, 'pan115', '1', ?, ?, 'now', 'now')",
+                (f"scrape-{work_id}", revision_id, work_id, json.dumps(scrape_metadata or {}), scrape_status),
             )
 
 
@@ -161,6 +164,27 @@ def test_mirror_running_and_failed_are_not_hidden(tmp_path):
     assert progress["stage_summary"]["mirror"]["failed"] == 1
 
 
+def test_progress_hides_technical_task_and_metadata_error_details(tmp_path):
+    database = _fresh_database(tmp_path)
+    _seed_revision(database)
+    _seed_work(database, "rev-progress", work_id="w-task", title="任务异常", episode_ids=["ep-a"], asset_count=1, jobs=[
+        ("materialize_mirror", "failed", 1, "UNIQUE constraint failed: provider_bindings.provider_id"),
+        ("scrape_work", "queued", 0, ""),
+    ])
+    _seed_work(database, "rev-progress", work_id="w-metadata", title="资料异常", episode_ids=["ep-b"], asset_count=1, jobs=[
+        ("materialize_mirror", "succeeded", 1, ""),
+        ("scrape_work", "succeeded", 1, ""),
+    ], scrape_status="source_unavailable", scrape_metadata={
+        "reason": "在线资料服务暂不可用，请稍后重试（TMDBClientError）",
+    })
+
+    by_id = {unit["work_id"]: unit for unit in _progress(database)["work_units"]}
+    assert by_id["w-task"]["mirror"]["last_error"] == "媒体身份与已有记录冲突，请检查识别结果后重试"
+    assert by_id["w-metadata"]["metadata_reason"] == "在线资料服务暂不可用，请稍后重试"
+    assert "constraint" not in by_id["w-task"]["mirror"]["last_error"]
+    assert "TMDBClientError" not in by_id["w-metadata"]["metadata_reason"]
+
+
 def test_metadata_stage_state_mapping(tmp_path):
     database = _fresh_database(tmp_path)
     _seed_revision(database)
@@ -185,6 +209,20 @@ def test_metadata_stage_state_mapping(tmp_path):
     assert progress["overall_status"] == "running"
 
 
+def test_fully_cancelled_execution_is_not_reported_as_needing_attention(tmp_path):
+    database = _fresh_database(tmp_path)
+    _seed_revision(database)
+    _seed_work(database, "rev-progress", work_id="w-cancelled", title="用户已终止", episode_ids=["ep-a"], asset_count=1, jobs=[
+        ("materialize_mirror", "succeeded", 1, ""),
+        ("scrape_work", "cancelled", 0, ""),
+    ])
+    _seed_projection_job(database, "rev-progress", "cancelled")
+
+    progress = _progress(database)
+    assert progress["work_units"][0]["overall_status"] == "cancelled"
+    assert progress["overall_status"] == "cancelled"
+
+
 def test_scrape_needs_attention_is_not_completed(tmp_path):
     database = _fresh_database(tmp_path)
     _seed_revision(database)
@@ -197,6 +235,21 @@ def test_scrape_needs_attention_is_not_completed(tmp_path):
     unit = progress["work_units"][0]
     assert unit["overall_status"] == "needs_attention"
     assert progress["overall_status"] == "needs_attention"
+
+
+def test_needs_attention_exposes_a_safe_human_readable_reason(tmp_path):
+    database = _fresh_database(tmp_path)
+    _seed_revision(database)
+    _seed_work(database, "rev-progress", work_id="w-review", title="房间露营", episode_ids=["ep-a"], asset_count=1, jobs=[
+        ("materialize_mirror", "succeeded", 1, ""),
+        ("scrape_work", "succeeded", 1, ""),
+    ], scrape_status="waiting_review", scrape_metadata={
+        "reason": "没有唯一匹配的在线作品，需要人工确认后再继续",
+    })
+
+    unit = _progress(database)["work_units"][0]
+    assert unit["metadata_state"] == "waiting_review"
+    assert unit["metadata_reason"] == "在线媒体信息没有唯一匹配，需要确认正确作品后继续。"
 
 
 def test_overall_priority_queued_over_completed(tmp_path):

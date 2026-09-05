@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from app.media_v4.persistence.schema_v4 import V4_SCHEMA_VERSION
+
 
 def _fresh_database(tmp_path):
     from app.media_v4.persistence.database import V4Database
@@ -93,7 +95,7 @@ def test_v5_layout_with_altered_columns_initializes_and_keeps_data(tmp_path):
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == V4_SCHEMA_VERSION
         root = conn.execute("SELECT * FROM source_roots WHERE root_id = 'root-keep'").fetchone()
         assert root is not None
         assert root["provider"] == "pan115"
@@ -348,7 +350,7 @@ def test_v12_database_migrates_bangumi_tables_without_rebuilding_media_state(tmp
     database.initialize()
 
     with database.connect() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == V4_SCHEMA_VERSION
         assert conn.execute("SELECT provider FROM source_roots WHERE root_id = 'root-v12'").fetchone()[0] == "baidu"
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bangumi_matches'").fetchone()
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bangumi_episode_sync'").fetchone()
@@ -382,7 +384,7 @@ def test_v13_database_adds_immutable_episode_title_fact_without_losing_rows(tmp_
     database.initialize()
 
     with database.connect() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == V4_SCHEMA_VERSION
         columns = {row[1] for row in conn.execute("PRAGMA table_info(parsed_facts)")}
         assert "episode_title" in columns
         assert conn.execute(

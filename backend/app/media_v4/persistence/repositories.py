@@ -78,46 +78,49 @@ class V4Repository:
         if self.get_source_evidence(evidence.evidence_id) != evidence:
             raise ValueError(f"不可变 SourceEvidence 冲突: {evidence.evidence_id}")
 
+    @staticmethod
+    def _source_evidence_values(evidence: SourceEvidence) -> tuple:
+        return (
+            evidence.evidence_id,
+            evidence.scan_id,
+            evidence.root_id,
+            evidence.provider,
+            evidence.source_key,
+            evidence.relative_path,
+            evidence.entry_kind,
+            evidence.size,
+            evidence.mtime,
+            evidence.fingerprint,
+            evidence.raw_file_id,
+            evidence.ingest_method,
+            evidence.source_route_id,
+            evidence.source_locator,
+            evidence.playback_locator,
+            evidence.tmdb_hint_id,
+            evidence.tmdb_hint_type,
+            evidence.import_family,
+            evidence.target_filename,
+            evidence.observed_at,
+            evidence.presence_state,
+        )
+
     def save_scan_evidence_bulk(self, evidence: list[SourceEvidence]) -> None:
         """同一次扫描的证据在单个事务内幂等写入（目录树权威来源）。"""
 
         if not evidence:
             return
         with self.database.connect() as conn:
-            for item in evidence:
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO source_evidence(
-                        evidence_id, scan_id, root_id, provider, source_key, relative_path, entry_kind,
-                        size, mtime, fingerprint, raw_file_id, ingest_method, source_route_id,
-                        source_locator, playback_locator, tmdb_hint_id, tmdb_hint_type,
-                        import_family, target_filename, observed_at, presence_state
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        item.evidence_id,
-                        item.scan_id,
-                        item.root_id,
-                        item.provider,
-                        item.source_key,
-                        item.relative_path,
-                        item.entry_kind,
-                        item.size,
-                        item.mtime,
-                        item.fingerprint,
-                        item.raw_file_id,
-                        item.ingest_method,
-                        item.source_route_id,
-                        item.source_locator,
-                        item.playback_locator,
-                        item.tmdb_hint_id,
-                        item.tmdb_hint_type,
-                        item.import_family,
-                        item.target_filename,
-                        item.observed_at,
-                        item.presence_state,
-                    ),
-                )
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO source_evidence(
+                    evidence_id, scan_id, root_id, provider, source_key, relative_path, entry_kind,
+                    size, mtime, fingerprint, raw_file_id, ingest_method, source_route_id,
+                    source_locator, playback_locator, tmdb_hint_id, tmdb_hint_type,
+                    import_family, target_filename, observed_at, presence_state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [self._source_evidence_values(item) for item in evidence],
+            )
 
     def list_scan_evidence(self, scan_id: str) -> list[SourceEvidence]:
         """读取后端在某次扫描中持久化的全部证据（目录树权威来源）。"""
@@ -157,8 +160,54 @@ class V4Repository:
         return [self._row_to_source_evidence(row) for row in rows]
 
     def save_parsed_facts(self, facts: ParsedFacts) -> None:
+        self.save_parsed_facts_bulk([facts])
+
+    @staticmethod
+    def _parsed_facts_values(facts: ParsedFacts) -> tuple:
+        return (
+            facts.parsed_fact_id,
+            facts.evidence_id,
+            facts.parser_version,
+            facts.resource_type,
+            facts.media_type,
+            facts.group_type,
+            facts.work_title,
+            facts.original_title,
+            facts.series_group,
+            facts.card_type,
+            facts.relation_type,
+            facts.show_type,
+            json.dumps(facts.title_candidates, ensure_ascii=False),
+            facts.year_candidate,
+            facts.season_token_raw,
+            facts.episode_token_raw,
+            facts.episode_title,
+            facts.season_candidate,
+            facts.episode_candidate,
+            facts.absolute_episode_candidate,
+            int(facts.special_candidate),
+            json.dumps(facts.episode_range, ensure_ascii=False),
+            facts.special_number,
+            facts.tmdb_hint_id,
+            facts.tmdb_hint_type,
+            facts.release_group,
+            json.dumps(facts.edition_tags, ensure_ascii=False),
+            json.dumps(facts.quality_tags, ensure_ascii=False),
+            facts.confidence,
+            int(facts.needs_review),
+            int(facts.is_importable),
+            int(facts.is_auxiliary),
+            json.dumps(facts.reasons, ensure_ascii=False),
+            json.dumps(facts.warnings, ensure_ascii=False),
+        )
+
+    def save_parsed_facts_bulk(self, facts: list[ParsedFacts]) -> None:
+        """批量持久化不可变解析事实，避免大库逐条打开 SQLite 连接。"""
+
+        if not facts:
+            return
         with self.database.connect() as conn:
-            conn.execute(
+            conn.executemany(
                 """
                 INSERT OR IGNORE INTO parsed_facts(
                     parsed_fact_id, evidence_id, parser_version, resource_type, media_type,
@@ -174,54 +223,25 @@ class V4Repository:
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
-                (
-                    facts.parsed_fact_id,
-                    facts.evidence_id,
-                    facts.parser_version,
-                    facts.resource_type,
-                    facts.media_type,
-                    facts.group_type,
-                    facts.work_title,
-                    facts.original_title,
-                    facts.series_group,
-                    facts.card_type,
-                    facts.relation_type,
-                    facts.show_type,
-                    json.dumps(facts.title_candidates, ensure_ascii=False),
-                    facts.year_candidate,
-                    facts.season_token_raw,
-                    facts.episode_token_raw,
-                    facts.episode_title,
-                    facts.season_candidate,
-                    facts.episode_candidate,
-                    facts.absolute_episode_candidate,
-                    int(facts.special_candidate),
-                    json.dumps(facts.episode_range, ensure_ascii=False),
-                    facts.special_number,
-                    facts.tmdb_hint_id,
-                    facts.tmdb_hint_type,
-                    facts.release_group,
-                    json.dumps(facts.edition_tags, ensure_ascii=False),
-                    json.dumps(facts.quality_tags, ensure_ascii=False),
-                    facts.confidence,
-                    int(facts.needs_review),
-                    int(facts.is_importable),
-                    int(facts.is_auxiliary),
-                    json.dumps(facts.reasons, ensure_ascii=False),
-                    json.dumps(facts.warnings, ensure_ascii=False),
-                ),
+                [self._parsed_facts_values(item) for item in facts],
             )
-        if self.get_parsed_facts(facts.parsed_fact_id) != facts:
-            raise ValueError(f"不可变 ParsedFacts 冲突: {facts.parsed_fact_id}")
 
-    def get_parsed_facts(self, parsed_fact_id: str) -> ParsedFacts:
-        with self.database.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM parsed_facts WHERE parsed_fact_id = ?",
-                (parsed_fact_id,),
-            ).fetchone()
-        if row is None:
-            raise KeyError(parsed_fact_id)
+            persisted: dict[str, ParsedFacts] = {}
+            ids = [item.parsed_fact_id for item in facts]
+            for offset in range(0, len(ids), 400):
+                batch = ids[offset : offset + 400]
+                placeholders = ",".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"SELECT * FROM parsed_facts WHERE parsed_fact_id IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                persisted.update({row["parsed_fact_id"]: self._row_to_parsed_facts(row) for row in rows})
+        for item in facts:
+            if persisted.get(item.parsed_fact_id) != item:
+                raise ValueError(f"不可变 ParsedFacts 冲突: {item.parsed_fact_id}")
+
+    @staticmethod
+    def _row_to_parsed_facts(row) -> ParsedFacts:
         episode_range = json.loads(row["episode_range_json"])
         return ParsedFacts(
             parsed_fact_id=row["parsed_fact_id"],
@@ -259,3 +279,13 @@ class V4Repository:
             reasons=tuple(json.loads(row["reasons_json"])),
             warnings=tuple(json.loads(row["warnings_json"])),
         )
+
+    def get_parsed_facts(self, parsed_fact_id: str) -> ParsedFacts:
+        with self.database.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM parsed_facts WHERE parsed_fact_id = ?",
+                (parsed_fact_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(parsed_fact_id)
+        return self._row_to_parsed_facts(row)

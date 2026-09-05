@@ -20,22 +20,47 @@ test('来源卡只携带来源摘要与标准操作按钮，不渲染作品预�
   assert.match(page, /media-v4-source-card-action \$\{card\.can_resume \? 'secondary' : 'primary'\}/)
 })
 
-test('未确认 draft 不在媒体库概览生成来源卡', () => {
-  assert.doesNotMatch(page, /mediaV4Api\.drafts\(\)/)
+test('来源卡通过来源根承载扫描与草稿恢复，不展示游离草稿入口', () => {
+  assert.match(page, /mediaV4Api\.sourceLibraries\(\)/)
+  assert.match(page, /mediaV4Api\.drafts\(\)/)
   assert.doesNotMatch(page, /aria-label="待继续导入"/)
   assert.doesNotMatch(page, /resumeDraft/)
 })
 
-test('来源卡使用 WinUI GridView 式方形卡片，不拉伸为整行面板', () => {
+test('来源卡恢复为固定方形 GridView 项目，并保留小窗口单列回退', () => {
+  assert.match(styles, /\.media-v4-source-library-grid\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fill,\s*minmax\(270px,\s*300px\)\)/s)
   assert.match(styles, /\.media-v4-library-source-card\s*\{[^}]*aspect-ratio:\s*1\s*\/\s*1/s)
-  assert.match(styles, /\.media-v4-source-library-grid\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fill,\s*minmax\(/s)
-  assert.doesNotMatch(styles, /repeat\(auto-fit,\s*minmax\(540px,\s*1fr\)\)/)
+  assert.doesNotMatch(styles, /repeat\(auto-fit,\s*minmax\(min\(100%,\s*360px\),\s*1fr\)\)/)
+  assert.match(styles, /@media \(max-width: 760px\)\s*\{\s*\.media-v4-source-library-grid\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/s)
+})
+
+test('来源卡仅显示当前人话任务并提供直接终止入口', () => {
+  assert.match(page, /card\.active_task/)
+  assert.match(page, /mediaV4Api\.cancelImport\(/)
+  assert.match(page, /终止任务/)
+  assert.doesNotMatch(page, /识别草稿与当前扫描不一致/)
 })
 
 test('媒体管理的图标使用 SVG 图标组件，不依赖缺失的字体图标', () => {
   assert.doesNotMatch(maintenance, /@fluentui\/react-icons\/fonts/)
   assert.doesNotMatch(execution, /@fluentui\/react-icons\/fonts/)
-  assert.match(maintenance, /Checkbox/)
+  assert.doesNotMatch(maintenance, /Checkbox/)
+})
+
+test('导入来源采用 4/2/1 响应式网格，并移除重复流程说明', () => {
+  assert.match(styles, /\.media-v4-source-options\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\)/s)
+  assert.match(styles, /@container media-flow \(max-width: 900px\)\s*\{\s*\.media-v4-source-options\s*\{\s*grid-template-columns:\s*repeat\(2,/s)
+  assert.match(styles, /@container media-flow \(max-width: 620px\)\s*\{\s*\.media-v4-source-options\s*\{\s*grid-template-columns:\s*1fr/s)
+  assert.doesNotMatch(page, /选择一个媒体来源，检查识别结果，然后建立可播放的媒体库/)
+  assert.doesNotMatch(page, /四种入口使用同一套识别规则/)
+  assert.doesNotMatch(page, /option\.description/)
+})
+
+test('扫描进度跟随当前操作区，而不是漂在步骤导航上方', () => {
+  const sourceWorkspace = page.indexOf('media-v4-config-panel media-v4-workspace')
+  const scanProgress = page.indexOf('media-v4-scan-progress')
+  assert.ok(sourceWorkspace >= 0)
+  assert.ok(scanProgress > sourceWorkspace)
 })
 
 test('导入工作台使用全宽单列轨道，空媒体库有紧凑的引导容器', () => {

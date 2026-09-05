@@ -133,7 +133,7 @@ export default function OpenListFolderBrowser({
                   aria-label={`打开文件夹 ${entry.name}`}
                   onClick={() => void browse(entry.remote_path)}
                 >
-                  <FolderOpen24Regular /><span>{entry.name}</span><span aria-hidden="true">›</span>
+                  <FolderOpen24Regular /><span>{entry.name}</span><span className="media-openlist-entry-arrow" aria-hidden="true">›</span>
                 </button>
               </div>
             ) : (

@@ -123,7 +123,7 @@ def _enqueue_root_incremental(database, config, *, root_id: str, remote_root: st
         scan_id=scan_id,
         root_id=root_id,
         kind="incremental",
-        scan_fn=lambda: scan_openlist_incremental(
+        scan_fn=lambda should_cancel, on_evidence_batch=None, on_progress=None: scan_openlist_incremental(
             _client(config),
             baseline=baseline,
             state=state,
@@ -131,6 +131,9 @@ def _enqueue_root_incremental(database, config, *, root_id: str, remote_root: st
             mount_root=config.openlist_mount_root,
             default_provider=routed_provider,
             routes=routes,
+            should_cancel=should_cancel,
+            on_evidence_batch=on_evidence_batch,
+            on_progress=on_progress,
         ),
         state_fn=lambda: state,
     )
@@ -203,6 +206,6 @@ def tracking_scan_work(work_id: str, request: TrackingScanRequest):
 def tracking_cancel_scan(scan_id: str):
     from app.media_v4.sources.durable_scan import cancel_durable_scan
 
-    if not cancel_durable_scan(scan_id):
+    if not cancel_durable_scan(scan_id, database=get_database()):
         raise HTTPException(status_code=404, detail=f"扫描任务不存在或已结束: {scan_id}")
     return {"scan_id": scan_id, "status": "cancelling"}

@@ -120,6 +120,40 @@ def test_incremental_scan_uses_txt_baseline_and_a_bounded_rolling_sample():
     assert next_state["directories"]["Show000"]["last_verified_at"] == 1000
 
 
+def test_incremental_scan_emits_live_batches_and_heartbeats_before_return():
+    from app.media_v4.sources.incremental import build_tree_baseline_state, scan_openlist_incremental
+
+    baseline = _baseline()
+    state = build_tree_baseline_state("root-hybrid", "/Anime", baseline)
+    client = _FakeClient()
+    batches: list[list[str]] = []
+    progress: list[tuple[int, int]] = []
+
+    _scan_id, evidence, _next_state, _stats = scan_openlist_incremental(
+        client,
+        baseline=baseline,
+        state=state,
+        mapping_root="/",
+        mount_root="",
+        default_provider="pan115",
+        verification_budget=2,
+        batch_size=1,
+        on_evidence_batch=lambda batch: batches.append([item.relative_path for item in batch]),
+        on_progress=lambda *, processed_count, total_count: progress.append((processed_count, total_count)),
+    )
+
+    assert batches
+    assert all(batch for batch in batches)
+    assert {path for batch in batches for path in batch} == {
+        "Show000/Show000.S01E01.mkv",
+        "Show000/Show000.S01E02.mkv",
+        "Show001/Show001.S01E01.mkv",
+    }
+    assert progress
+    assert progress[-1][0] == len(evidence)
+    assert all(total == 0 for _processed, total in progress)
+
+
 def test_directory_modified_time_only_prioritizes_checks_and_never_replaces_rolling_verification():
     from app.media_v4.sources.incremental import build_tree_baseline_state, scan_openlist_incremental
 

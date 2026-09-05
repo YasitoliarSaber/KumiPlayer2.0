@@ -19,6 +19,7 @@ const api = vi.hoisted(() => ({
   startDurableScan: vi.fn(),
   durableScan: vi.fn(),
   cancelDurableScan: vi.fn(),
+  hideSourceLibraryCard: vi.fn(),
   maintenancePreview: vi.fn(),
   maintenanceConfirm: vi.fn(),
 }))
@@ -69,6 +70,7 @@ beforeEach(() => {
   api.status.mockResolvedValue({ revision_id: 'rev', status: 'confirmed', jobs: [] })
   api.sourceLibraries.mockResolvedValue({ cards: [] })
   api.drafts.mockResolvedValue({ drafts: [] })
+  api.hideSourceLibraryCard.mockResolvedValue({ root_id: 'root-115', hidden: true })
   api.openlistStatus.mockResolvedValue({ root_id: 'r', remote_root: '/', source_mode: '', last_scan_mode: '', has_confirmed_baseline: false })
   api.maintenancePreview.mockResolvedValue({
     preview_id: 'prev-1', scope: 'all', expires_at: '2026-08-25T02:00:00Z',
@@ -143,6 +145,8 @@ test('本地导入创建耐久扫描任务而不等待同步扫描响应', async
 
   await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({ source: 'local' })))
   expect(api.scan).not.toHaveBeenCalled()
+  // 等待本用例启动的异步扫描完整收口，避免其后续导航污染下一用例。
+  expect(await screen.findByRole('heading', { name: '检查识别结果' }, { timeout: 2500 })).toBeVisible()
 })
 
 test('来源卡只显示来源摘要与操作，不展示具体作品名', async () => {
@@ -154,8 +158,8 @@ test('来源卡只显示来源摘要与操作，不展示具体作品名', async
   expect(screen.getByText('115 网盘')).toBeVisible()
   expect(screen.getByText('OpenList 扫描')).toBeVisible()
   expect(screen.queryByText('OpenList 来源')).not.toBeInTheDocument()
-  expect(screen.getByText(/添加于 2026-08-20/)).toBeVisible()
-  expect(screen.getByText(/最近更新 2026-08-24/)).toBeVisible()
+  expect(screen.queryByText(/添加于 2026-08-20/)).not.toBeInTheDocument()
+  expect(screen.queryByText(/最近更新 2026-08-24/)).not.toBeInTheDocument()
   // 卡片只承担来源管理，不重复展示作品库内容。
   expect(screen.queryByText('摇曳露营')).not.toBeInTheDocument()
   expect(screen.queryByText('孤独摇滚')).not.toBeInTheDocument()
@@ -164,6 +168,21 @@ test('来源卡只显示来源摘要与操作，不展示具体作品名', async
   // 用户级进度而非 raw 任务数。
   expect(screen.getByText('上次导入已处理完毕')).toBeVisible()
   expect(screen.queryByText(/6 个任务/)).not.toBeInTheDocument()
+})
+
+test('已完成来源卡可以移除卡片入口，不触碰媒体库数据', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
+  render(<MediaManagementPage />)
+
+  await screen.findByText('115 动画')
+  fireEvent.click(screen.getByRole('button', { name: '删除来源卡：115 动画' }))
+
+  expect(await screen.findByRole('dialog', { name: '删除来源卡' })).toBeVisible()
+  expect(screen.getByText(/不会删除媒体库、镜像、资料或观看状态/)).toBeVisible()
+  fireEvent.click(screen.getByRole('button', { name: '删除来源卡', exact: true }))
+
+  await waitFor(() => expect(api.hideSourceLibraryCard).toHaveBeenCalledWith('root-115'))
+  expect(screen.queryByText('115 动画')).not.toBeInTheDocument()
 })
 
 test('新导入不会恢复到保存的上次执行步骤', async () => {
@@ -202,12 +221,24 @@ test('删除确认调用 maintenance API 并展示逐项结果', async () => {
   fireEvent.click(screen.getByRole('button', { name: '媒体库维护' }))
   await screen.findByRole('heading', { name: '按来源清理' })
   fireEvent.click(screen.getByRole('button', { name: '生成删除预览' }))
-  fireEvent.click(await screen.findByRole('checkbox', { name: '我已确认清理范围；源视频、外部 TXT 和设置不会被删除' }))
-  fireEvent.click(await screen.findByRole('button', { name: '确认清理' }))
+  const confirm = await screen.findByRole('button', { name: '确认清理' })
+  expect(screen.queryByRole('checkbox', { name: /我已确认清理范围/ })).not.toBeInTheDocument()
+  expect(confirm).toBeEnabled()
+  fireEvent.click(confirm)
 
   await waitFor(() => expect(api.maintenanceConfirm).toHaveBeenCalledWith({
     preview_id: 'prev-1', scope: 'all', digest: 'd'.repeat(64),
   }))
   expect(await screen.findByText(/清理完成/)).toBeVisible()
   expect(screen.getByText(/已删除 · root-baidu\/a\.jpg/)).toBeVisible()
+})
+
+test('维护页的预览和返回操作使用带边框的标准按钮', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
+  render(<MediaManagementPage />)
+  await screen.findByText('115 动画')
+  fireEvent.click(screen.getByRole('button', { name: '媒体库维护' }))
+
+  expect(await screen.findByRole('button', { name: '返回媒体管理' })).toHaveClass('media-v4-header-back-button')
+  expect(screen.getByRole('button', { name: '生成删除预览' })).toHaveClass('media-v4-maintenance-preview-button')
 })

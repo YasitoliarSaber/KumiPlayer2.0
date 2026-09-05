@@ -71,6 +71,89 @@ def test_confirmation_is_idempotent_and_does_not_duplicate_jobs(tmp_path):
     assert len(service.list_jobs("rev-1")) == 3
 
 
+def test_reused_provider_identity_keeps_existing_preferred_title_and_records_new_structure_as_alias(tmp_path):
+    """较晚的目录标题不得重命名已确认 Work。"""
+
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "title-provenance.db")
+    database.initialize()
+    service = V4RevisionService(database)
+
+    first_evidence, first_facts = _entry("Yuru Camp", "ev-title-first")
+    first_facts = replace(first_facts, tmdb_hint_id=76075, tmdb_hint_type="tv")
+    service.create_draft("rev-title-first", [(first_evidence, first_facts)])
+    service.confirm("rev-title-first")
+
+    later_evidence, later_facts = _entry("Yuru Camp Movie", "ev-title-later")
+    later_facts = replace(later_facts, tmdb_hint_id=76075, tmdb_hint_type="tv")
+    service.create_draft("rev-title-later", [(later_evidence, later_facts)])
+    service.confirm("rev-title-later")
+
+    with database.connect() as conn:
+        work = conn.execute("SELECT work_id, preferred_title FROM works").fetchone()
+        aliases = {
+            row["normalized_title"]
+            for row in conn.execute(
+                "SELECT normalized_title FROM work_aliases WHERE work_id = ?",
+                (work["work_id"],),
+            ).fetchall()
+        }
+
+    assert work["preferred_title"] == "Yuru Camp"
+    assert "yuru camp movie" in aliases
+
+
+def test_preview_blocks_provider_rebinding_before_confirm_can_hit_unique_constraint(tmp_path):
+    """同一结构 Work 改指向已属于另一 Work 的 Provider 身份必须留在第 2 步。"""
+
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import RevisionBlockedError, V4RevisionService
+
+    database = V4Database(tmp_path / "provider-rebinding.db")
+    database.initialize()
+    service = V4RevisionService(database)
+
+    first_evidence, first_facts = _entry("Show One", "ev-provider-one")
+    service.create_draft(
+        "rev-provider-one",
+        [(first_evidence, replace(first_facts, tmdb_hint_id=101, tmdb_hint_type="tv"))],
+    )
+    service.confirm("rev-provider-one")
+
+    second_evidence, second_facts = _entry("Show Two", "ev-provider-two")
+    service.create_draft(
+        "rev-provider-two",
+        [(second_evidence, replace(second_facts, tmdb_hint_id=202, tmdb_hint_type="tv"))],
+    )
+    service.confirm("rev-provider-two")
+
+    conflicting_evidence, conflicting_facts = _entry("Show One", "ev-provider-conflict")
+    graph = service.create_draft(
+        "rev-provider-conflict",
+        [(conflicting_evidence, replace(conflicting_facts, tmdb_hint_id=202, tmdb_hint_type="tv"))],
+    )
+
+    assert any(issue.code == "provider_identity_conflict" for issue in graph.issues)
+    with pytest.raises(RevisionBlockedError, match="review issue"):
+        service.confirm("rev-provider-conflict")
+
+    with database.connect() as conn:
+        bindings = {
+            (row["provider_id"], row["preferred_title"])
+            for row in conn.execute(
+                """
+                SELECT pb.provider_id, w.preferred_title
+                FROM provider_bindings pb
+                JOIN works w ON w.work_id = pb.work_id
+                ORDER BY pb.provider_id
+                """
+            ).fetchall()
+        }
+    assert bindings == {("101", "Show One"), ("202", "Show Two")}
+
+
 def test_review_issues_block_confirmation_without_legacy_fallback(tmp_path):
     from app.media_v4.persistence.database import V4Database
     from app.media_v4.revisions.service import RevisionBlockedError, V4RevisionService
@@ -319,3 +402,36 @@ def test_new_confirmed_revision_supersedes_same_root_without_unlocking_snapshot(
         )
     with database.connect() as conn, pytest.raises(sqlite3.IntegrityError):
         conn.execute("UPDATE import_revisions SET status = 'draft' WHERE revision_id = 'rev-old'")
+
+
+def test_confirming_a_newer_revision_requests_stop_for_old_running_jobs(tmp_path):
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "supersede-running-jobs.db")
+    database.initialize()
+    service = V4RevisionService(database)
+    service.create_draft("rev-old", [_entry(evidence_id="old-running")])
+    service.confirm("rev-old")
+    with database.connect() as conn:
+        conn.execute(
+            """
+            UPDATE jobs SET status = 'running'
+            WHERE revision_id = 'rev-old' AND job_type = 'materialize_mirror'
+            """
+        )
+
+    evidence, facts = _entry(evidence_id="new-running")
+    service.create_draft("rev-new", [(evidence, replace(facts, episode_candidate=2))])
+    service.confirm("rev-new")
+
+    with database.connect() as conn:
+        jobs = {
+            row["job_type"]: dict(row)
+            for row in conn.execute(
+                "SELECT job_type, status, cancel_requested FROM jobs WHERE revision_id = 'rev-old'"
+            )
+        }
+    assert jobs["materialize_mirror"] == {"job_type": "materialize_mirror", "status": "running", "cancel_requested": 1}
+    assert jobs["scrape_work"]["status"] == "cancelled"
+    assert jobs["refresh_projection"]["status"] == "cancelled"

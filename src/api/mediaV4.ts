@@ -85,10 +85,25 @@ export interface V4SourceLibraryCard {
   source_mode: string
   last_scan_mode: string
   has_confirmed_baseline: boolean
-  overall_status: 'running' | 'needs_attention' | 'queued' | 'completed'
+  overall_status: 'running' | 'needs_attention' | 'queued' | 'cancelled' | 'completed'
+  /** 来源卡当前位于扫描、识别复核还是已确认导入阶段。旧后端可能不返回。 */
+  phase?: 'scan' | 'review' | 'execute' | string
+  scan?: {
+    scan_id: string
+    status: string
+    stage: string
+    stage_label: string
+    processed_count: number
+    total_count: number
+    progress: number | null
+    heartbeat_at: string
+    cancel_requested?: boolean
+  } | null
   attention_count: number
   last_error: string
   source_locator: string
+  /** 面向来源卡的紧凑路径摘要；原始 locator 仍用于恢复来源配置。 */
+  display_path?: string
   playback_locator: string
   route_id: string
   display_name: string
@@ -111,6 +126,16 @@ export interface V4SourceLibraryCard {
     percent: number | null
     message: string
   }
+  active_task?: {
+    kind: 'scan' | 'execution'
+    revision_id: string
+    status: 'queued' | 'running' | 'cancelling' | 'interrupted' | string
+    stage: string
+    label: string
+    percent: number | null
+    can_cancel: boolean
+    cancel_requested: boolean
+  } | null
   available_actions: string[]
   can_resume: boolean
   job_summary: {
@@ -203,6 +228,8 @@ export interface V4WorkProgressUnit {
     | 'failed'
     | 'cancelled'
     | 'completed'
+  metadata_state: string
+  metadata_reason: string
   mirror: { job_id: string; status: string; attempts: number; last_error: string }
   metadata: { job_id: string; status: string; attempts: number; last_error: string }
 }
@@ -220,7 +247,7 @@ export interface V4StageSummary {
 export interface V4ExecutionProgress {
   revision_id: string
   revision_status: string
-  overall_status: 'running' | 'needs_attention' | 'queued' | 'completed'
+  overall_status: 'running' | 'needs_attention' | 'queued' | 'cancelled' | 'completed'
   stage_summary: {
     mirror: V4StageSummary
     metadata: V4StageSummary
@@ -283,6 +310,9 @@ export const mediaV4Api = {
   confirm: (revisionId: string) =>
     api.post<{ revision_id: string; status: string; jobs: V4Job[] }>(`/api/v4/imports/${encodeURIComponent(revisionId)}/confirm`),
 
+  cancelImport: (revisionId: string) =>
+    api.post<{ revision_id: string; running: number; cancelled: number }>(`/api/v4/imports/${encodeURIComponent(revisionId)}/cancel`),
+
   overrideEvidence: (revisionId: string, evidenceId: string, changes: Record<string, unknown>) =>
     api.patch<V4Preview>(`/api/v4/imports/${encodeURIComponent(revisionId)}/evidence/${encodeURIComponent(evidenceId)}`, { changes }),
 
@@ -290,6 +320,9 @@ export const mediaV4Api = {
     api.get<{ revision_id: string; status: string; jobs: V4Job[]; progress: V4ExecutionProgress }>(`/api/v4/imports/${encodeURIComponent(revisionId)}`),
 
   sourceLibraries: () => api.get<{ cards: V4SourceLibraryCard[] }>('/api/v4/sources/libraries'),
+
+  hideSourceLibraryCard: (rootId: string) =>
+    api.delete<{ root_id: string; hidden: boolean }>(`/api/v4/sources/libraries/${encodeURIComponent(rootId)}`),
 
   drafts: () => api.get<{ drafts: V4DraftSummary[] }>('/api/v4/sources/drafts'),
 
@@ -360,7 +393,7 @@ export const mediaV4Api = {
   }) => api.post<{ scan_id: string; root_id: string; scan_mode: string; source_mode?: string; status: string }>('/api/v4/sources/scans', request),
 
   durableScan: (scanId: string, includeEntries = false) =>
-    api.get<{ scan_id: string; root_id: string; status: string; started_at: string; finished_at: string; error: string; evidence_count: number; entries: V4SourceEvidence[] }>(`/api/v4/sources/scans/${encodeURIComponent(scanId)}?include_entries=${includeEntries ? 'true' : 'false'}`),
+    api.get<{ scan_id: string; root_id: string; status: string; started_at: string; finished_at: string; error: string; evidence_count: number; parsed_count?: number; stage: string; stage_label: string; processed_count: number; total_count: number; progress?: number | null; heartbeat_at?: string; cancel_requested?: boolean; entries: V4SourceEvidence[] }>(`/api/v4/sources/scans/${encodeURIComponent(scanId)}?include_entries=${includeEntries ? 'true' : 'false'}`),
 
   cancelDurableScan: (scanId: string) =>
     api.post<{ scan_id: string; status: string }>(`/api/v4/sources/scans/${encodeURIComponent(scanId)}/cancel`),

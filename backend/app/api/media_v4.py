@@ -21,7 +21,7 @@ from app.integrations.openlist.providers import derive_local_path, provider_for_
 from app.media_v4.domain.models import SourceEvidence
 from app.media_v4.jobs.runner import V4JobRunner
 from app.media_v4.jobs.scrape import V4ScrapeService
-from app.media_v4.parsing.parser import V4Parser
+from app.media_v4.parsing.parser import V4Parser, normalize_batch_parsed_facts
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.persistence.repositories import V4Repository
 from app.media_v4.playback.store import V4PlaybackStore
@@ -38,9 +38,7 @@ from app.media_v4.sources.incremental import (
 )
 from app.media_v4.sources.scan_validation import (
     delete_tree_scan_validation,
-    is_tree_validation_expired,
     load_tree_scan_validation,
-    samples_currently_reachable,
     upsert_tree_scan_validation,
 )
 from app.media_v4.sources.scanner import (
@@ -353,6 +351,7 @@ def _ensure_root_container(
                     ELSE source_roots.source_mode
                 END,
                 last_scan_mode = excluded.last_scan_mode,
+                enabled = 1,
                 updated_at = excluded.updated_at
             """,
             (
@@ -440,6 +439,7 @@ def _persist_tree_scan(
                     ELSE source_roots.source_mode
                 END,
                 last_scan_mode = excluded.last_scan_mode,
+                enabled = 1,
                 updated_at = excluded.updated_at
             """,
             (
@@ -481,10 +481,11 @@ def _persist_tree_scan(
         root_id=root_id,
         effective_root=effective_root,
         ok=resolution.ok,
-        hits=resolution.hits,
-        total=resolution.total,
+        hits=0,
+        total=0,
         reason=resolution.reason,
-        samples=_tree_sample_paths(evidence),
+        # 新合同：hits/total=0、samples=[]，说明只是词法映射，不做样本可达性断言。
+        samples=[],
         candidates=list(resolution.candidates),
     )
 
@@ -740,7 +741,7 @@ def preview(request: PreviewRequest):
             str(existing_revision["root_id"]) != request.root_id
             or str(existing_revision["scan_id"]) != request.scan_id
         ):
-            raise HTTPException(status_code=409, detail="识别草稿与当前扫描不一致，请重新扫描")
+            raise HTTPException(status_code=409, detail="这次扫描结果已过期，请重新扫描。")
         if str(existing_revision["status"]) != "draft":
             raise HTTPException(status_code=409, detail="当前识别结果已经不是可编辑草稿")
         graph = V4RevisionService(database).load_draft_graph(request.revision_id)
@@ -755,6 +756,18 @@ def preview(request: PreviewRequest):
         scan_id=request.scan_id,
     )
     validation = load_tree_scan_validation(database, request.scan_id)
+    # 取消合同 B：cancelled/failed scan 的证据只能作审计，永远不能进入
+    # preview / draft / 确认链。目录树验证行不能绕过这一状态门。
+    with database.connect() as conn:
+        scan_row = conn.execute(
+            "SELECT status FROM source_scans WHERE scan_id = ?",
+            (request.scan_id,),
+        ).fetchone()
+    if scan_row is not None and str(scan_row["status"]) not in {"completed", "validated"}:
+        raise HTTPException(
+            status_code=409,
+            detail=f"扫描未完成（当前状态 {scan_row['status']}），请重新扫描后再生成识别预览",
+        )
     evidence_is_persisted = durable_evidence is not None
     if durable_evidence is not None:
         # 所有耐久扫描完成后，证据已经以 scan_id 持久化。preview 只能消费
@@ -805,7 +818,9 @@ def preview(request: PreviewRequest):
                 source_locator = str(root_row["source_locator"] or source_locator)
                 playback_locator = str(root_row["playback_locator"] or playback_locator)
                 source_route_id = str(root_row["route_id"] or source_route_id)
-    parsed = [(item, parser.parse(item, root_container=root_container)) for item in evidence]
+    parsed = normalize_batch_parsed_facts(
+        [(item, parser.parse(item, root_container=root_container)) for item in evidence]
+    )
     service = V4RevisionService(database)
     try:
         graph = service.create_draft(
@@ -879,6 +894,22 @@ def confirm(revision_id: str):
     }
 
 
+@router.post("/imports/{revision_id}/cancel")
+def cancel_confirmed_import(revision_id: str):
+    """请求终止已确认 revision 的后台执行。
+
+    运行中的文件/网络步骤不会被强杀，而是在下一安全边界读取标记后收口；
+    尚未开始的依赖任务立即取消，避免来源卡永久停在“等待中”。
+    """
+
+    from app.media_v4.jobs.runner import V4JobRunner
+
+    try:
+        return V4JobRunner(get_database()).cancel_revision(revision_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"revision 不存在: {revision_id}") from exc
+
+
 def _revision_has_tree_evidence(database, revision_id: str) -> bool:
     """revision 是否包含目录树来源证据（用于 fail-closed 门控判定）。"""
 
@@ -899,9 +930,11 @@ def _revision_has_tree_evidence(database, revision_id: str) -> bool:
 
 
 def _require_tree_validation(database, scan_id: str, root_id: str, *, require: bool) -> None:
-    """目录树 confirm 必须 fail-closed：验证缺失/损坏/过期/根变化/样本不可达都 409。
+    """目录树 confirm 必须 fail-closed：验证缺失/损坏/根变化都 409。
 
     只有 revision 包含 directory_tree 证据时才要求验证记录；本地/OpenList 不适用。
+    映射记录只证明“播放路径已按配置与目录树词法生成”，源盘是否在线由真实播放
+    或用户显式诊断负责，不以 24 小时 TTL 或样本可达性作为确认门控。
     """
 
     if not require:
@@ -915,22 +948,12 @@ def _require_tree_validation(database, scan_id: str, root_id: str, *, require: b
     if not validation["ok"]:
         raise HTTPException(
             status_code=409,
-            detail="目录树媒体路径未验证通过，请检查来源范围或挂载状态后重新扫描",
+            detail="目录树媒体路径未验证通过，请检查来源范围后重新扫描",
         )
     if validation["root_id"] != root_id:
         raise HTTPException(
             status_code=409,
             detail="扫描根与当前 revision 不一致，请重新扫描",
-        )
-    if is_tree_validation_expired(validation):
-        raise HTTPException(
-            status_code=409,
-            detail="目录树路径验证已过期，请重新扫描后再确认",
-        )
-    if not samples_currently_reachable(validation):
-        raise HTTPException(
-            status_code=409,
-            detail="目录树媒体挂载路径当前不可访问，请检查挂载状态后重新扫描",
         )
 
 
@@ -1066,6 +1089,20 @@ def list_source_libraries():
     return {"cards": list_source_cards(get_database())}
 
 
+@router.delete("/sources/libraries/{root_id}")
+def hide_source_library_card(root_id: str):
+    """隐藏一个已停止来源的卡片，不清理它已建立的媒体库。"""
+
+    from app.media_v4.projection.source_libraries import hide_source_card
+
+    try:
+        return hide_source_card(get_database(), root_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="来源卡不存在或已移除") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 def _local_root_identity(path: str) -> tuple[str, str]:
     """为耐久本地扫描预先登记稳定来源根，不枚举目录内容。"""
 
@@ -1087,7 +1124,7 @@ def _durable_draft_finalizer(
     if not revision_id:
         return None
 
-    def finalize(evidence: list[SourceEvidence]) -> None:
+    def finalize(evidence: list[SourceEvidence], should_cancel=None, on_progress=None) -> None:
         with database.connect() as conn:
             root = conn.execute(
                 """
@@ -1100,11 +1137,67 @@ def _durable_draft_finalizer(
         if root is None:
             raise ValueError("来源根记录不存在，请重新扫描")
         root_container = str(root["root_container"] or "")
+        if should_cancel is not None and should_cancel():
+            from app.media_v4.sources.scanner import SourceScanCancelled
+
+            raise SourceScanCancelled()
         parser = V4Parser()
-        parsed = [
-            (item, parser.parse(item, root_container=root_container))
-            for item in evidence
-        ]
+        repository = V4Repository(database)
+        # 大型目录树分批解析并持续上报进度，但编号归一化必须在完整来源批次
+        # 上执行：128 条只是数据库写入边界，不能把同一季度切成两个语义批次。
+        # 解析完成后再统一归一化并分批落盘；取消仍在每个解析/写入批次检查。
+        raw_parsed = []
+        total = len(evidence)
+        if on_progress is not None:
+            on_progress(stage="parsing", processed_count=0, total_count=total)
+        progress_checkpoint_size = 16
+        for offset in range(0, total, 128):
+            if should_cancel is not None and should_cancel():
+                from app.media_v4.sources.scanner import SourceScanCancelled
+
+                # 已解析的前缀属于不可变审计事实。取消时先按当前已观察批次
+                # 完成保守归一化并落盘，但绝不构建 revision；这样既不会把
+                # 半成品导入媒体库，也不会让用户等待过的识别工作完全消失。
+                if raw_parsed:
+                    partial = normalize_batch_parsed_facts(raw_parsed)
+                    repository.save_parsed_facts_bulk(
+                        [facts for _evidence, facts in partial]
+                    )
+                raise SourceScanCancelled()
+            batch = []
+            for index, item in enumerate(evidence[offset : offset + 128], start=1):
+                batch.append((item, parser.parse(item, root_container=root_container)))
+                if on_progress is not None and (
+                    index % progress_checkpoint_size == 0 or offset + index == total
+                ):
+                    on_progress(
+                        stage="parsing",
+                        processed_count=offset + index,
+                        total_count=total,
+                    )
+            raw_parsed.extend(batch)
+        if should_cancel is not None and should_cancel():
+            from app.media_v4.sources.scanner import SourceScanCancelled
+
+            raise SourceScanCancelled()
+        # 进入完整归一化前显式上报 normalizing，让界面不误以为还在读取清单。
+        if on_progress is not None:
+            on_progress(stage="normalizing", processed_count=total, total_count=total)
+        parsed = normalize_batch_parsed_facts(raw_parsed)
+        for offset in range(0, total, 128):
+            if should_cancel is not None and should_cancel():
+                from app.media_v4.sources.scanner import SourceScanCancelled
+
+                raise SourceScanCancelled()
+            repository.save_parsed_facts_bulk(
+                [facts for _evidence, facts in parsed[offset : offset + 128]]
+            )
+        if should_cancel is not None and should_cancel():
+            from app.media_v4.sources.scanner import SourceScanCancelled
+
+            raise SourceScanCancelled()
+        if on_progress is not None:
+            on_progress(stage="preparing_preview", processed_count=total, total_count=total)
         V4RevisionService(database).create_draft(
             revision_id,
             parsed,
@@ -1120,6 +1213,7 @@ def _durable_draft_finalizer(
             },
             source_mode=str(root["source_mode"] or ""),
             _evidence_already_persisted=True,
+            _facts_already_persisted=True,
         )
 
     return finalize
@@ -1150,9 +1244,12 @@ def _start_durable_local_scan(request: SourceScanRequest) -> dict:
         scan_id=scan_id,
         root_id=root_id,
         kind="full",
-        scan_fn=lambda: scan_local_directory(
+        scan_fn=lambda should_cancel, on_evidence_batch=None, on_progress=None: scan_local_directory(
             request.root_path,
             excluded_roots=_configured_cloud_roots(config),
+            should_cancel=should_cancel,
+            on_evidence_batch=on_evidence_batch,
+            on_progress=on_progress,
         )[1:],
         finalize_fn=_durable_draft_finalizer(
             database,
@@ -1216,8 +1313,12 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
     )
     scan_id = "scan_" + uuid.uuid4().hex
 
-    def scan_tree():
+    def scan_tree(should_cancel=None, on_evidence_batch=None, on_progress=None):
         try:
+            if should_cancel is not None and should_cancel():
+                from app.media_v4.sources.scanner import SourceScanCancelled
+
+                raise SourceScanCancelled()
             tree_text = read_directory_tree_text(request.tree_file)
             resolution = TreePlaybackRootResolver(request.tree_file, configured_roots=configured_roots).resolve(tree_text)
             _scan_id, evidence = build_directory_tree_evidence(
@@ -1227,6 +1328,9 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
                 source_root=resolution.root,
                 source_route_id=route_id,
                 scan_id=scan_id,
+                on_evidence_batch=on_evidence_batch,
+                on_progress=on_progress,
+                should_cancel=should_cancel,
             )
             _persist_tree_scan(
                 database,
@@ -1324,7 +1428,7 @@ def start_durable_scan(request: SourceScanRequest):
             scan_id=scan_id,
             root_id=root_id,
             kind="incremental",
-            scan_fn=lambda: scan_openlist_incremental(
+            scan_fn=lambda should_cancel, on_evidence_batch=None, on_progress=None: scan_openlist_incremental(
                 _client(config),
                 baseline=baseline,
                 state=state,
@@ -1332,6 +1436,9 @@ def start_durable_scan(request: SourceScanRequest):
                 mount_root=config.openlist_mount_root,
                 default_provider=routed_provider,
                 routes=routes,
+                should_cancel=should_cancel,
+                on_evidence_batch=on_evidence_batch,
+                on_progress=on_progress,
             ),
             state_fn=lambda: state,
             finalize_fn=_durable_draft_finalizer(
@@ -1360,7 +1467,7 @@ def start_durable_scan(request: SourceScanRequest):
         scan_id=scan_id,
         root_id=root_id,
         kind="full",
-        scan_fn=lambda: scan_openlist_directory(
+        scan_fn=lambda should_cancel, on_evidence_batch=None, on_progress=None: scan_openlist_directory(
             _client(config),
             remote_root=remote_root,
             mapping_root=_remote_root(config),
@@ -1369,6 +1476,9 @@ def start_durable_scan(request: SourceScanRequest):
             default_provider=routed_provider,
             routes=routes,
             directory_observations=directory_observations,
+            should_cancel=should_cancel,
+            on_evidence_batch=on_evidence_batch,
+            on_progress=on_progress,
         ),
         state_fn=lambda: build_full_scan_state(root_id, remote_root, directory_observations),
         finalize_fn=_durable_draft_finalizer(
@@ -1406,7 +1516,7 @@ def cancel_durable_scan(scan_id: str):
         raise HTTPException(status_code=404, detail=f"扫描任务不存在: {scan_id}") from exc
     if current["status"] not in {"running", "queued"}:
         return {"scan_id": scan_id, "status": current["status"]}
-    cancel_durable_scan(scan_id)
+    cancel_durable_scan(scan_id, database=get_database())
     return {"scan_id": scan_id, "status": "cancelling"}
 
 
@@ -1969,13 +2079,12 @@ def metadata_confirm(request: MetadataConfirmRequest):
     from app.media_v4.jobs.metadata import default_metadata_provider
 
     scrape = V4ScrapeService(database)
-    jobs = scrape.enqueue_for_revision(revision["revision_id"])
-    job = next(
-        (item for item in jobs if item["work_id"] == request.work_id),
-        jobs[0] if jobs else None,
-    )
-    if job is None:
-        raise HTTPException(status_code=409, detail="无法为该作品创建刮削任务")
+    try:
+        job = scrape.requeue_work(str(revision["revision_id"]), request.work_id)
+    except KeyError:
+        raise HTTPException(status_code=409, detail="该作品没有可重试的刮削任务") from None
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     scrape.process(job["job_id"], default_metadata_provider)
     V4LibraryProjection(database).rebuild()
     return {

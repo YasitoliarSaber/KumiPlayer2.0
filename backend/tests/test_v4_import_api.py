@@ -47,6 +47,79 @@ def _payload(revision_id: str = "rev-api"):
     }
 
 
+def test_confirmed_revision_can_request_termination_while_a_job_is_running(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    from app.api import media_v4
+    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+    from app.media_v4.revisions.service import V4RevisionService
+
+    evidence = SourceEvidence(
+        evidence_id="ev-cancel", scan_id="scan-cancel", root_id="root-cancel",
+        source_key="cancel", relative_path="Cancel/Cancel.S01E01.mkv", entry_kind="video",
+        source_locator="local://cancel/Cancel.S01E01.mkv",
+        playback_locator="local://cancel/Cancel.S01E01.mkv",
+    )
+    facts = ParsedFacts(
+        parsed_fact_id="facts-cancel", evidence_id=evidence.evidence_id, parser_version="fixture",
+        work_title="Cancel", title_candidates=("Cancel",), media_type="tv", group_type="season",
+        season_candidate=1, episode_candidate=1,
+    )
+    service = V4RevisionService(media_v4.get_database())
+    service.create_draft("rev-cancel-api", [(evidence, facts)])
+    service.confirm("rev-cancel-api")
+    with media_v4.get_database().connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET status = 'running' WHERE revision_id = ? AND job_type = 'materialize_mirror'",
+            ("rev-cancel-api",),
+        )
+
+    response = client.post("/api/v4/imports/rev-cancel-api/cancel")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["running"] == 1
+    assert response.json()["cancelled"] == 2
+
+
+def test_source_card_delete_hides_only_the_card_and_keeps_confirmed_media(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    from app.api import media_v4
+    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+    from app.media_v4.projection.source_libraries import list_source_cards
+    from app.media_v4.revisions.service import V4RevisionService
+
+    evidence = SourceEvidence(
+        evidence_id="ev-delete-card", scan_id="scan-delete-card", root_id="root-delete-card",
+        source_key="delete-card", relative_path="DeleteCard/DeleteCard.S01E01.mkv", entry_kind="video",
+        source_locator="local://delete-card/DeleteCard.S01E01.mkv",
+        playback_locator="local://delete-card/DeleteCard.S01E01.mkv",
+    )
+    facts = ParsedFacts(
+        parsed_fact_id="facts-delete-card", evidence_id=evidence.evidence_id, parser_version="fixture",
+        work_title="Delete Card", title_candidates=("Delete Card",), media_type="tv", group_type="season",
+        season_candidate=1, episode_candidate=1,
+    )
+    database = media_v4.get_database()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-delete-card", [(evidence, facts)])
+    revisions.confirm("rev-delete-card")
+    with database.connect() as conn:
+        conn.execute("UPDATE jobs SET status = 'succeeded' WHERE revision_id = ?", ("rev-delete-card",))
+
+    response = client.delete("/api/v4/sources/libraries/root-delete-card")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"root_id": "root-delete-card", "hidden": True}
+    assert list_source_cards(database) == []
+    with database.connect() as conn:
+        root = conn.execute(
+            "SELECT enabled, retired_at FROM source_roots WHERE root_id = ?", ("root-delete-card",)
+        ).fetchone()
+        assert conn.execute("SELECT COUNT(*) FROM works").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM revision_bindings").fetchone()[0] == 1
+    assert root["enabled"] == 0
+    assert root["retired_at"] == ""
+
+
 def test_tree_scan_accepts_utf16_tree_through_both_entries(tmp_path, monkeypatch):
     _patch_database(tmp_path, monkeypatch)
     from app.api import media_v4
@@ -95,12 +168,14 @@ def test_tree_scan_accepts_utf16_tree_through_both_entries(tmp_path, monkeypatch
     assert hybrid_result["path_validation"]["ok"] is True
 
 
-def test_unreachable_tree_scan_blocks_confirm_with_actionable_message(tmp_path, monkeypatch):
+def test_tree_scan_confirm_succeeds_with_source_disk_offline(tmp_path, monkeypatch):
+    """TXT 确认不要求源盘在线：词法映射成立即可确认，不探测挂载盘。"""
+
     client = _client(tmp_path, monkeypatch)
     from app.api import media_v4
 
     mount = tmp_path / "百度网盘"
-    (mount / "01动画").mkdir(parents=True)  # 子库目录存在但视频不存在
+    (mount / "01动画").mkdir(parents=True)  # 子库目录存在但视频不存在（源盘离线）
     tree = tmp_path / "01动画_文件目录.txt"
     tree.write_text("Show/Show.S01E01.mkv\n", encoding="utf-8")
     monkeypatch.setattr(media_v4, "load_config", lambda: SimpleNamespace(
@@ -116,28 +191,19 @@ def test_unreachable_tree_scan_blocks_confirm_with_actionable_message(tmp_path, 
         tree_file=str(tree),
         provider="baidu",
     ))
-    assert scan["path_validation"]["ok"] is False
-    assert scan["effective_playback_root"] == ""
+    assert scan["path_validation"]["ok"] is True
+    assert scan["effective_playback_root"] == str(mount / "01动画")
 
     preview = client.post("/api/v4/imports/preview", json={
-        "revision_id": "rev-unreachable",
+        "revision_id": "rev-offline-confirm",
         "root_id": scan["root_id"],
         "scan_id": scan["scan_id"],
-        "entries": [{
-            "provider": "baidu",
-            "ingest_method": "directory_tree",
-            "relative_path": "Show/Show.S01E01.mkv",
-            "source_locator": "C:\\fake\\Show\\Show.S01E01.mkv",
-            "playback_locator": "C:\\fake\\Show\\Show.S01E01.mkv",
-        }],
-        "source_locator": "C:\\fake",
-        "playback_locator": "C:\\fake",
+        "entries": [],
     })
     assert preview.status_code == 200, preview.text
 
-    confirmed = client.post("/api/v4/imports/rev-unreachable/confirm")
-    assert confirmed.status_code == 409
-    assert "未验证通过" in confirmed.json()["detail"]
+    confirmed = client.post("/api/v4/imports/rev-offline-confirm/confirm")
+    assert confirmed.status_code == 200, confirmed.text
 
 
 def test_preview_uses_the_backend_effective_root_over_a_stale_frontend_copy(tmp_path, monkeypatch):
@@ -344,7 +410,7 @@ def test_confirmed_source_has_a_reopenable_card_with_live_job_summary(tmp_path, 
     card = cards[0]
     assert card["root_id"] == "root-api"
     assert card["revision_id"] == "rev-source-card"
-    assert card["display_name"] == "本地动画库"
+    assert card["display_name"] == "动画库"
     assert card["source_locator"] == "D:\\Media\\Anime"
     assert card["evidence_count"] == 1
     assert card["work_count"] == 1
@@ -355,13 +421,58 @@ def test_confirmed_source_has_a_reopenable_card_with_live_job_summary(tmp_path, 
     assert "work_previews" not in card
 
 
-def test_source_card_list_omits_unconfirmed_drafts(tmp_path, monkeypatch):
+def test_source_card_strips_provider_prefix_from_legacy_display_name(tmp_path, monkeypatch):
+    """卡片头部已显示来源，不得在标题内重复同一个提供商名称。"""
+
+    client = _client(tmp_path, monkeypatch)
+    payload = _payload("rev-source-display-name")
+    payload["entries"][0]["provider"] = "baidu"
+    payload.update({
+        "source_display_name": "百度网盘 · 01动画",
+        "source_locator": "K:\\百度网盘\\01动画",
+        "playback_locator": "K:\\百度网盘\\01动画",
+    })
+
+    assert client.post("/api/v4/imports/preview", json=payload).status_code == 200
+    assert client.post("/api/v4/imports/rev-source-display-name/confirm").status_code == 200
+
+    cards = client.get("/api/v4/sources/libraries").json()["cards"]
+
+    assert cards[0]["provider"] == "baidu"
+    assert cards[0]["display_name"] == "01动画"
+    assert cards[0]["display_path"] == "01动画"
+
+
+def test_source_card_uses_the_final_path_segment_when_legacy_name_is_empty():
+    """更早的空标题记录也不能把完整挂载路径当作卡片标题。"""
+
+    from app.media_v4.projection.source_libraries import _display_name
+
+    assert _display_name("", "K:\\百度网盘\\01动画", "baidu") == "01动画"
+
+
+def test_source_card_hides_unknown_technical_error_details():
+    """来源卡不得把未枚举的内部异常直接回传给用户。"""
+
+    from app.media_v4.projection.source_libraries import _friendly_error
+
+    detail = "requests.exceptions.ConnectionError: provider_bindings internal state"
+
+    assert _friendly_error(detail) == "任务未能完成，请查看执行结果后重试"
+
+
+def test_source_card_list_exposes_unconfirmed_draft_as_recoverable_recognition(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     assert client.post("/api/v4/imports/preview", json=_payload("rev-draft-only")).status_code == 200
 
     response = client.get("/api/v4/sources/libraries")
     assert response.status_code == 200
-    assert response.json()["cards"] == []
+    cards = response.json()["cards"]
+    assert len(cards) == 1
+    assert cards[0]["revision_id"] == "rev-draft-only"
+    assert cards[0]["phase"] == "review"
+    assert cards[0]["overall_status"] == "needs_attention"
+    assert cards[0]["can_resume"] is True
 
 
 def test_preview_with_unknown_title_returns_review_issue_and_confirm_conflict(tmp_path, monkeypatch):
@@ -1081,12 +1192,63 @@ def test_confirm_rechecks_sample_reachability_after_scan(tmp_path, monkeypatch):
     })
     assert preview.status_code == 200, preview.text
 
-    # scan 后挂载失效：真实视频文件被移除，confirm 必须失败关闭。
+    # scan 后源盘离线：真实视频文件被移除，confirm 仍应成功（词法映射不依赖可达性）。
     (mount / "01动画" / "Show" / "Show.S01E01.mkv").unlink()
 
     confirmed = client.post("/api/v4/imports/rev-offline-after-scan/confirm")
+    assert confirmed.status_code == 200, confirmed.text
+
+
+def test_confirm_rejects_validation_record_with_wrong_root(tmp_path, monkeypatch):
+    """映射记录 root 不匹配仍 409：不能拿其他 scan 的映射冒用。"""
+
+    _mount, scan, client = _tree_scan_fixture(tmp_path, monkeypatch)
+    preview = client.post("/api/v4/imports/preview", json={
+        "revision_id": "rev-root-mismatch",
+        "root_id": scan["root_id"],
+        "scan_id": scan["scan_id"],
+        "entries": [],
+    })
+    assert preview.status_code == 200, preview.text
+
+    from app.api import media_v4
+
+    with media_v4._database.connect() as conn:
+        conn.execute(
+            "UPDATE tree_scan_validation SET root_id = 'root-other' WHERE scan_id = ?",
+            (scan["scan_id"],),
+        )
+
+    confirmed = client.post("/api/v4/imports/rev-root-mismatch/confirm")
     assert confirmed.status_code == 409
-    assert "当前不可访问" in confirmed.json()["detail"]
+    assert "不一致" in confirmed.json()["detail"]
+
+
+def test_confirm_allows_old_validation_with_unchanged_identity(tmp_path, monkeypatch):
+    """过 24 小时但身份和映射未变仍允许：不可变映射不因隔天失效。"""
+
+    _mount, scan, client = _tree_scan_fixture(tmp_path, monkeypatch)
+    preview = client.post("/api/v4/imports/preview", json={
+        "revision_id": "rev-old-validation",
+        "root_id": scan["root_id"],
+        "scan_id": scan["scan_id"],
+        "entries": [],
+    })
+    assert preview.status_code == 200, preview.text
+
+    from datetime import UTC, datetime, timedelta
+
+    from app.api import media_v4
+
+    stale = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
+    with media_v4._database.connect() as conn:
+        conn.execute(
+            "UPDATE tree_scan_validation SET validated_at = ? WHERE scan_id = ?",
+            (stale, scan["scan_id"]),
+        )
+
+    confirmed = client.post("/api/v4/imports/rev-old-validation/confirm")
+    assert confirmed.status_code == 200, confirmed.text
 
 
 def test_confirmed_tree_revision_confirm_is_idempotent_after_validation_cleanup(tmp_path, monkeypatch):
@@ -1182,11 +1344,22 @@ def test_metadata_manual_confirm_requeues_scrape_and_refreshes_projection(tmp_pa
     V4RevisionService(media_v4._database).create_draft("rev-manual", [(evidence, facts)])
     assert client.post("/api/v4/imports/rev-manual/confirm").status_code == 200
 
+    provider_calls = []
+
     def fake_provider(target):
-        assert any(
+        has_confirmed_binding = any(
             b.get("provider") == "tmdb" and str(b.get("provider_id")) == "12345"
             for b in (target.get("provider_bindings") or [])
-        ), "人工确认后 scrape 必须消费已确认 binding，不得重新搜索"
+        )
+        provider_calls.append(has_confirmed_binding)
+        if not has_confirmed_binding:
+            return {
+                "provider": "local",
+                "provider_id": "",
+                "media_type": "tv",
+                "metadata_state": "waiting_review",
+                "reason": "没有唯一匹配的在线作品，需要人工确认后再继续",
+            }
         return {
             "provider": "tmdb",
             "provider_id": "12345",
@@ -1211,6 +1384,20 @@ def test_metadata_manual_confirm_requeues_scrape_and_refreshes_projection(tmp_pa
     with media_v4._database.connect() as conn:
         work_id = conn.execute("SELECT work_id FROM works LIMIT 1").fetchone()["work_id"]
 
+    # 真实人工恢复起点：首次 metadata job 已把无法唯一匹配的作品写为
+    # waiting_review，但 job 本身已经正常结束。旧实现会在 confirm 后复用这个
+    # succeeded job，导致 process() 直接返回，用户选完候选也不会继续。
+    from app.media_v4.jobs.scrape import V4ScrapeService
+
+    initial_job = V4ScrapeService(media_v4._database).enqueue_for_revision("rev-manual")[0]
+    V4ScrapeService(media_v4._database).process(initial_job["job_id"], fake_provider)
+    with media_v4._database.connect() as conn:
+        initial_binding = conn.execute(
+            "SELECT status FROM scrape_bindings WHERE revision_id = 'rev-manual' AND work_id = ?",
+            (work_id,),
+        ).fetchone()
+        assert initial_binding["status"] == "waiting_review"
+
     # 搜索端创建服务端候选，确认端只接受 candidate_id。
     monkeypatch.setattr(
         "app.media_v4.jobs.metadata.search_tmdb_candidates",
@@ -1234,11 +1421,15 @@ def test_metadata_manual_confirm_requeues_scrape_and_refreshes_projection(tmp_pa
 
     with media_v4._database.connect() as conn:
         binding = conn.execute(
-            "SELECT provider, provider_id, status FROM scrape_bindings WHERE work_id = ?",
+            "SELECT provider, provider_id, status FROM scrape_bindings WHERE work_id = ? AND provider = 'tmdb'",
             (work_id,),
         ).fetchone()
         candidates = conn.execute(
             "SELECT provider, provider_id, status FROM revision_work_candidates WHERE work_id = ?",
+            (work_id,),
+        ).fetchall()
+        jobs = conn.execute(
+            "SELECT job_id, status, attempts FROM jobs WHERE revision_id = 'rev-manual' AND work_id = ? AND job_type = 'scrape_work'",
             (work_id,),
         ).fetchall()
     assert binding is not None
@@ -1248,3 +1439,7 @@ def test_metadata_manual_confirm_requeues_scrape_and_refreshes_projection(tmp_pa
         row["provider"] == "tmdb" and row["provider_id"] == "12345" and row["status"] == "confirmed"
         for row in candidates
     )
+    assert provider_calls == [False, True]
+    assert len(jobs) == 1
+    assert jobs[0]["status"] == "succeeded"
+    assert jobs[0]["attempts"] == 2

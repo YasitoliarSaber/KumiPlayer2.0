@@ -26,6 +26,17 @@ _RE_RELEASE_LANGUAGE_SUFFIX = re.compile(r"\s+(?:内封中字|内封简繁|简�
 # 只有紧跟方括号发布/画质标签时才删除，避免误伤作品名本身的“第 1 部”。
 _RE_FILESYSTEM_COPY_SUFFIX = re.compile(r"(?<=\])\s*[（(]\d+[）)]$")
 
+# 电影目录常把画质/介质信息直接写在年份后面，例如
+# ``作品 (2021) -1080p-Blu-ray``。这里只删除明确位于末尾的发布尾巴；
+# 标题中间的数字、4K 等内容保持不动，避免把作品本名误当技术信息。
+_RE_TRAILING_RELEASE_QUALITY = re.compile(
+    r"(?:\s*[-–—._]\s*|\s+)"
+    r"(?:\d{3,4}p|[248]k)"
+    r"(?:\s*[-–—._]\s*(?:blu[- ]?ray|bd(?:rip|remux)?|uhd|web(?:rip|-?dl)?|remux|hdr(?:10\+)?))*"
+    r"\s*$",
+    re.IGNORECASE,
+)
+
 # 方括号 token 正则
 _RE_BRACKET_TOKEN = re.compile(r"\[([^\]]*)\]")
 
@@ -247,6 +258,12 @@ def clean_work_title_container(container: str) -> TitleCleanResult:
                 result.needs_review = True
                 result.warnings.append("无法从方括号 token 中提取作品名")
                 applied.append("无法提取，保留原始值")
+
+    # 3.5 去掉年份之后的明确画质/介质尾巴，使年份重新成为末尾结构事实。
+    release_quality_cleaned = _RE_TRAILING_RELEASE_QUALITY.sub("", cleaned).strip()
+    if release_quality_cleaned != cleaned:
+        cleaned = release_quality_cleaned
+        applied.append("去掉末尾画质与介质信息")
 
     # 4. 去掉末尾年份（.2005、(2005)、（2005）等）
     _year_patterns = [

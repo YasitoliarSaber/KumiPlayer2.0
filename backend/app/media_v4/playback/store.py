@@ -63,7 +63,12 @@ class V4PlaybackStore:
                 """,
                 (episode_id, asset_id, work_id, position, duration, int(completed), _now()),
             )
-            # P-006：播放历史是独立事件（进度可 upsert，历史必须记录事件）。
+
+    def record_activation(self, work_id: str, episode_id: str, asset_id: str) -> None:
+        """仅在用户实际进入一集时写一次历史；播放心跳绝不能制造重复事件。"""
+
+        with self.database.connect() as conn:
+            _assert_confirmed_binding(conn, work_id, episode_id, asset_id)
             _append_history_event(
                 conn,
                 work_id=work_id,
@@ -131,3 +136,30 @@ def _append_history_event(conn, *, work_id: str, episode_id: str, asset_id: str)
             source_provider,
         ),
     )
+
+
+def _assert_confirmed_binding(conn, work_id: str, episode_id: str, asset_id: str) -> None:
+    if episode_id == f"movie:{work_id}":
+        binding = conn.execute(
+            """
+            SELECT 1 FROM revision_bindings rb
+            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+            WHERE rb.work_id = ? AND rb.episode_id IS NULL AND rb.asset_id = ?
+              AND ir.status = 'confirmed'
+            LIMIT 1
+            """,
+            (work_id, asset_id),
+        ).fetchone()
+    else:
+        binding = conn.execute(
+            """
+            SELECT 1 FROM revision_bindings rb
+            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+            WHERE rb.work_id = ? AND rb.episode_id = ? AND rb.asset_id = ?
+              AND ir.status = 'confirmed'
+            LIMIT 1
+            """,
+            (work_id, episode_id, asset_id),
+        ).fetchone()
+    if binding is None:
+        raise KeyError((work_id, episode_id, asset_id))

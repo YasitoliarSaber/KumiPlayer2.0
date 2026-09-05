@@ -76,6 +76,72 @@ def test_runner_materializes_scrapes_and_publishes_projection(tmp_path):
     assert card["metadata"]["plot"] == "metadata reached the projection"
 
 
+def test_independent_scrape_jobs_use_bounded_parallel_workers(tmp_path):
+    """不同 Work 的在线刮削不应被一个串行 worker 放大成线性长等待。"""
+
+    import threading
+    import time
+    from dataclasses import replace
+
+    from app.media_v4.jobs.runner import V4JobRunner
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "parallel-scrapes.db")
+    database.initialize()
+    entries = []
+    for number in range(1, 4):
+        evidence, facts = _entry()
+        title = f"Runner {number}"
+        evidence = replace(
+            evidence,
+            evidence_id=f"ev-parallel-{number}",
+            source_key=f"runner-{number}",
+            relative_path=f"{title}/{title}.S01E01.mkv",
+            source_locator=f"local://runner/{number}.mkv",
+            playback_locator=f"local://runner/{number}.mkv",
+        )
+        facts = replace(
+            facts,
+            parsed_fact_id=f"facts-parallel-{number}",
+            evidence_id=evidence.evidence_id,
+            work_title=title,
+            title_candidates=(title,),
+        )
+        entries.append((evidence, facts))
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-parallel-scrapes", entries)
+    revisions.confirm("rev-parallel-scrapes")
+
+    active = 0
+    peak_active = 0
+    lock = threading.Lock()
+
+    def provider(target):
+        nonlocal active, peak_active
+        with lock:
+            active += 1
+            peak_active = max(peak_active, active)
+        try:
+            time.sleep(0.08)
+            return {
+                "provider": "tmdb",
+                "provider_id": str(target["work_id"]),
+                "title": target["preferred_title"],
+            }
+        finally:
+            with lock:
+                active -= 1
+
+    results = V4JobRunner(database, metadata_provider=provider).process_available(
+        mirror_root=tmp_path / "mirror",
+    )
+
+    assert peak_active >= 2
+    assert [result.job_type for result in results].count("scrape_work") == 3
+    assert all(result.status == "succeeded" for result in results)
+
+
 def test_successful_scrape_marks_projection_dirty_and_becomes_visible_before_final_job(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
@@ -187,7 +253,10 @@ def test_special_episode_nfo_keeps_distinct_local_title_when_scraper_is_generic(
         }
     ).decode("utf-8")
 
-    assert "<title>SP02 - 温泉小剧场</title>" in payload
+    # SP 结构码由 special_number/episode 字段单独承担；NFO 标题只保留
+    # 语义正文，避免播放器/前端把编号重复展示成 "SP02 SP02"。
+    assert "<title>温泉小剧场</title>" in payload
+    assert "<episode>2</episode>" in payload
     assert "<title>特别篇</title>" not in payload
 
 
@@ -266,3 +335,152 @@ def test_superseded_artifacts_are_cleaned_only_after_empty_revision_is_published
     assert not list(mirror_root.rglob("*.*"))
     with database.connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
+
+
+def test_cancelling_a_revision_requests_safe_stop_for_running_job_and_cancels_dependents(tmp_path):
+    """用户终止来源任务后，运行中任务在边界停止，后续 outbox 不再永久排队。"""
+
+    from app.media_v4.jobs.runner import V4JobRunner
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "cancel-revision.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-cancel", [_entry()])
+    revisions.confirm("rev-cancel")
+    with database.connect() as conn:
+        mirror_job = conn.execute(
+            "SELECT job_id FROM jobs WHERE revision_id = ? AND job_type = 'materialize_mirror'",
+            ("rev-cancel",),
+        ).fetchone()["job_id"]
+        conn.execute(
+            "UPDATE jobs SET status = 'running' WHERE job_id = ?",
+            (mirror_job,),
+        )
+
+    result = V4JobRunner(database).cancel_revision("rev-cancel")
+
+    assert result["revision_id"] == "rev-cancel"
+    assert result["running"] == 1
+    assert result["cancelled"] == 2
+    with database.connect() as conn:
+        rows = {
+            row["job_type"]: dict(row)
+            for row in conn.execute("SELECT job_type, status, cancel_requested FROM jobs WHERE revision_id = ?", ("rev-cancel",))
+        }
+    assert rows["materialize_mirror"]["status"] == "running"
+    assert rows["materialize_mirror"]["cancel_requested"] == 1
+    assert rows["scrape_work"]["status"] == "cancelled"
+    assert rows["refresh_projection"]["status"] == "cancelled"
+
+
+def test_stale_running_job_is_recoverable_instead_of_blocking_a_source_forever(tmp_path):
+    from app.media_v4.jobs.runner import V4JobRunner
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "stale-job.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-stale", [_entry()])
+    revisions.confirm("rev-stale")
+    with database.connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET status = 'running', heartbeat_at = '2000-01-01T00:00:00+00:00' "
+            "WHERE revision_id = ? AND job_type = 'materialize_mirror'",
+            ("rev-stale",),
+        )
+
+    recovered = V4JobRunner(database).recover_stale_jobs(max_age_seconds=1)
+
+    assert recovered == 1
+    with database.connect() as conn:
+        row = conn.execute(
+            "SELECT status, last_error FROM jobs WHERE revision_id = ? AND job_type = 'materialize_mirror'",
+            ("rev-stale",),
+        ).fetchone()
+    assert row["status"] == "failed"
+    assert "异常中断" in row["last_error"]
+
+
+def test_cancel_requested_queued_job_is_never_claimed_for_file_writes(tmp_path):
+    from app.media_v4.jobs.runner import V4JobRunner
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "cancel-before-claim.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-before-claim", [_entry()])
+    revisions.confirm("rev-before-claim")
+    with database.connect() as conn:
+        job_id = conn.execute(
+            "SELECT job_id FROM jobs WHERE revision_id = ? AND job_type = 'materialize_mirror'",
+            ("rev-before-claim",),
+        ).fetchone()["job_id"]
+        conn.execute("UPDATE jobs SET cancel_requested = 1 WHERE job_id = ?", (job_id,))
+
+    result = V4JobRunner(database).process_job(job_id, mirror_root=tmp_path / "mirror")
+
+    assert result.status == "cancelled"
+    assert not list((tmp_path / "mirror").rglob("*.strm")) if (tmp_path / "mirror").exists() else True
+
+
+def test_process_available_settles_a_queued_cancel_requested_job(tmp_path):
+    from app.media_v4.jobs.runner import V4JobRunner
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "cancel-available.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-cancel-available", [_entry()])
+    revisions.confirm("rev-cancel-available")
+    with database.connect() as conn:
+        job_id = conn.execute(
+            "SELECT job_id FROM jobs WHERE revision_id = ? AND job_type = 'materialize_mirror'",
+            ("rev-cancel-available",),
+        ).fetchone()["job_id"]
+        conn.execute("UPDATE jobs SET cancel_requested = 1 WHERE job_id = ?", (job_id,))
+
+    results = V4JobRunner(database).process_available(mirror_root=tmp_path / "mirror")
+
+    assert [(result.job_id, result.status) for result in results] == [(job_id, "cancelled")]
+    with database.connect() as conn:
+        row = conn.execute("SELECT status FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+    assert row["status"] == "cancelled"
+    assert not list((tmp_path / "mirror").rglob("*.strm")) if (tmp_path / "mirror").exists() else True
+
+
+def test_running_cleanup_honors_a_termination_request_before_deleting_artifacts(tmp_path):
+    from app.media_v4.jobs.cleanup import V4ArtifactCleanup
+    from app.media_v4.persistence.database import V4Database
+
+    database = V4Database(tmp_path / "cancel-cleanup.db")
+    database.initialize()
+    with database.connect() as conn:
+        conn.executescript(
+            """
+            INSERT INTO source_roots(root_id, provider, ingest_method, created_at, updated_at)
+            VALUES ('root-cleanup', 'local', 'local_scan', 'now', 'now');
+            INSERT INTO source_scans(scan_id, root_id, generation, status)
+            VALUES ('scan-cleanup', 'root-cleanup', 1, 'completed');
+            INSERT INTO import_revisions(revision_id, root_id, scan_id, resolver_version, status, created_at)
+            VALUES ('rev-cleanup', 'root-cleanup', 'scan-cleanup', 'v4', 'confirmed', 'now');
+            INSERT INTO jobs(
+                job_id, job_type, revision_id, status, cancel_requested,
+                idempotency_key, created_at, updated_at
+            ) VALUES (
+                'cleanup-job', 'cleanup_superseded_artifacts', 'rev-cleanup', 'running', 1,
+                'cleanup:rev-cleanup', 'now', 'now'
+            );
+            """
+        )
+
+    removed = V4ArtifactCleanup(database).process("cleanup-job", tmp_path / "mirror")
+
+    assert removed == ()
+    with database.connect() as conn:
+        row = conn.execute("SELECT status FROM jobs WHERE job_id = 'cleanup-job'").fetchone()
+    assert row["status"] == "cancelled"

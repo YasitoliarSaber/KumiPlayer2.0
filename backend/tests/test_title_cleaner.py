@@ -32,6 +32,21 @@ def test_a_paprika():
     assert r.title == "红辣椒.Paprika", f"实际: {r.title}"
 
 
+def test_container_title_strips_terminal_release_quality_after_year():
+    """电影目录尾部画质/介质信息不能进入作品标题。"""
+    from app.recognition.title_cleaner import clean_work_title_container
+
+    cases = {
+        "少女☆歌剧 Revue Starlight 剧场版 (2021) -1080p": "少女☆歌剧 Revue Starlight 剧场版",
+        "吹响吧！上低音号 剧场版：想要传达的旋律 (2017) 2160p": "吹响吧！上低音号 剧场版：想要传达的旋律",
+        "福音战士新剧场版：Q (2012) 4320p": "福音战士新剧场版：Q",
+        "剧场总集篇 孤独摇滚！Re-Re- (2024) -1080p-Blu-ray": "剧场总集篇 孤独摇滚！Re-Re-",
+    }
+
+    for source, expected in cases.items():
+        assert clean_work_title_container(source).title == expected
+
+
 def test_a_lain():
     """玲音.Serial.Experiments.Lain -> 玲音.Serial.Experiments.Lain"""
     from app.recognition.title_cleaner import clean_work_title_container

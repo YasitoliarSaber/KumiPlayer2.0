@@ -38,7 +38,7 @@ def test_gun_gale_spin_off_uses_its_own_series_group():
 
     assert guess.group_type == "season"
     assert guess.season_number == 1
-    assert guess.series_group == "外传：Gun Gale Online"
+    assert guess.series_group == "刀剑神域 外传：Gun Gale Online"
     assert guess.belongs_to_series == "刀剑神域"
 
 
@@ -74,6 +74,17 @@ def test_verified_bindings_cover_confirmed_clannad_and_evangelion_movies():
 
     assert match_verified_tmdb_binding("动画/Milky Subway/Season 1/Milky Subway S01E01.mkv") is None
     assert match_verified_tmdb_binding("动画/刀剑神域 II/Gun Gale Online Arc/S02E01.mkv") is None
+
+
+def test_verified_binding_keeps_heya_camp_as_its_own_tv_spinoff():
+    binding = match_verified_tmdb_binding(
+        "动画/摇曳露营/Heya Camp△/Heya Camp△ S01E01.mkv"
+    )
+
+    assert binding is not None
+    assert binding.tmdb_id == 95213
+    assert binding.tmdb_type == "tv"
+    assert binding.canonical_title == "Heya Camp△"
 
 
 def test_verified_bindings_cover_pan115_missing_movie_metadata():

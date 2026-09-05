@@ -1,8 +1,15 @@
-"""P-008 目录树精确播放根解析：总根/子库作用域候选 + 有界抽样验证。"""
+"""P-008 目录树播放根词法映射（11.19.2 离线合同）。
+
+播放根由配置根、TXT 位置与导出文件名范围纯词法推导，不 stat/open/枚举
+源盘；源盘离线与在线产生完全相同的结果。只有真实的多根歧义才失败。
+"""
 
 from __future__ import annotations
 
-from pathlib import Path
+import os
+from pathlib import Path, PureWindowsPath
+
+import pytest
 
 from app.media_v4.sources.scanner import read_directory_tree_text
 from app.media_v4.sources.tree_root import (
@@ -27,11 +34,81 @@ def _write_tree(root: Path, name: str, lines: list[str]) -> Path:
     return tree
 
 
-def _make_show(root: Path, name: str = "Show.S01E01.mkv") -> Path:
-    media = root / name
-    media.parent.mkdir(parents=True, exist_ok=True)
-    media.write_bytes(b"video")
-    return media
+def _guard_source_io(monkeypatch, roots: list[str | Path]):
+    """源根路径限定的 I/O 哨兵：命中任何 stat/open/枚举/解析即失败。
+
+    只拦截源根下的调用；TXT 输入、tmp_path 与镜像输出不在拦截范围。
+    """
+    prefixes = tuple(
+        str(Path(root).expanduser()).replace("/", "\\").rstrip("\\").casefold()
+        for root in roots
+    )
+    sentinel = AssertionError("TXT 离线映射不得访问源盘")
+
+    def _hit(target) -> bool:
+        try:
+            value = str(target).replace("/", "\\").rstrip("\\").casefold()
+        except (TypeError, ValueError):
+            return False
+        return any(value == prefix or value.startswith(prefix + "\\") for prefix in prefixes)
+
+    original_is_file = Path.is_file
+    original_is_dir = Path.is_dir
+    original_exists = Path.exists
+    original_open = Path.open
+    original_stat = Path.stat
+    original_glob = Path.glob
+    original_rglob = Path.rglob
+    original_os_scandir = os.scandir
+
+    def guarded_is_file(self, *args, **kwargs):
+        if _hit(self):
+            raise sentinel
+        return original_is_file(self, *args, **kwargs)
+
+    def guarded_is_dir(self, *args, **kwargs):
+        if _hit(self):
+            raise sentinel
+        return original_is_dir(self, *args, **kwargs)
+
+    def guarded_exists(self, *args, **kwargs):
+        if _hit(self):
+            raise sentinel
+        return original_exists(self, *args, **kwargs)
+
+    def guarded_open(self, *args, **kwargs):
+        if _hit(self):
+            raise sentinel
+        return original_open(self, *args, **kwargs)
+
+    def guarded_stat(self, *args, **kwargs):
+        if _hit(self):
+            raise sentinel
+        return original_stat(self, *args, **kwargs)
+
+    def guarded_glob(self, *args, **kwargs):
+        if _hit(self):
+            raise sentinel
+        return original_glob(self, *args, **kwargs)
+
+    def guarded_rglob(self, *args, **kwargs):
+        if _hit(self):
+            raise sentinel
+        return original_rglob(self, *args, **kwargs)
+
+    def guarded_scandir(path="."):
+        if _hit(path):
+            raise sentinel
+        return original_os_scandir(path)
+
+    monkeypatch.setattr(Path, "is_file", guarded_is_file)
+    monkeypatch.setattr(Path, "is_dir", guarded_is_dir)
+    monkeypatch.setattr(Path, "exists", guarded_exists)
+    monkeypatch.setattr(Path, "open", guarded_open)
+    monkeypatch.setattr(Path, "stat", guarded_stat)
+    monkeypatch.setattr(Path, "glob", guarded_glob)
+    monkeypatch.setattr(Path, "rglob", guarded_rglob)
+    monkeypatch.setattr(os, "scandir", guarded_scandir)
 
 
 def test_tree_scope_name_extracts_the_media_sub_library():
@@ -44,20 +121,17 @@ def test_tree_scope_name_extracts_the_media_sub_library():
 def test_txt_parent_is_used_when_it_is_a_sub_library_of_the_configured_root(tmp_path):
     mount = tmp_path / "百度网盘"
     library = mount / "01动画"
-    media = _make_show(library / "Show")
     tree = _write_tree(library, "01动画_文件目录.txt", ["Show/Show.S01E01.mkv"])
 
     resolution = _resolve(tree, [mount])
 
     assert resolution.ok is True
     assert Path(resolution.root) == library
-    assert resolution.hits == 1 and resolution.total == 1
-    assert media.exists()
+    assert resolution.hits == 0 and resolution.total == 0
 
 
 def test_total_root_alone_works_for_a_full_mount_export(tmp_path):
     mount = tmp_path / "115网盘"
-    _make_show(mount / "动画" / "Show")
     tree = _write_tree(mount, "根目录_文件目录.txt", ["动画/Show/Show.S01E01.mkv"])
 
     resolution = _resolve(tree, [mount])
@@ -69,8 +143,7 @@ def test_total_root_alone_works_for_a_full_mount_export(tmp_path):
 def test_txt_copied_outside_mount_uses_scope_candidate(tmp_path):
     mount = tmp_path / "百度网盘"
     library = mount / "01动画"
-    _make_show(library / "Show")
-    # TXT 被复制到本地清单目录，不在挂载盘内
+    # TXT 被复制到本地清单目录，不在挂载盘内；不创建源视频
     tree = _write_tree(tmp_path / "清单", "01动画_文件目录.txt", ["Show/Show.S01E01.mkv"])
 
     resolution = _resolve(tree, [mount])
@@ -79,59 +152,130 @@ def test_txt_copied_outside_mount_uses_scope_candidate(tmp_path):
     assert Path(resolution.root) == library
 
 
-def test_zero_hit_root_is_rejected(tmp_path):
+def test_offline_source_disk_maps_without_existence_check(tmp_path, monkeypatch):
+    """源盘不存在/离线：词法映射仍成立，不再做样本可达性验证。"""
+
     mount = tmp_path / "百度网盘"
     library = mount / "01动画"
-    library.mkdir(parents=True)  # 目录存在但视频不存在
-    tree = _write_tree(library, "01动画_文件目录.txt", ["Show/Show.S01E01.mkv"])
-
-    resolution = _resolve(tree, [mount])
-
-    assert resolution.ok is False
-    assert resolution.root == ""
-    assert resolution.reason
-
-
-def test_ambiguous_multiple_all_hit_roots_are_rejected(tmp_path):
-    mount = tmp_path / "百度网盘"
-    sub_a = mount / "01动画"
-    sub_b = mount / "02动画"
-    # 两个候选根下都有同一相对路径的视频 → 歧义
-    _make_show(sub_a / "Show")
-    _make_show(sub_b / "Show")
-    tree = _write_tree(tmp_path / "清单", "动画_文件目录.txt", ["Show/Show.S01E01.mkv"])
-
-    resolution = _resolve(tree, [sub_a, sub_b])
-
-    assert resolution.ok is False
-    assert "多个候选根" in resolution.reason
-
-
-def test_head_middle_tail_sampling_covers_large_trees(tmp_path):
-    mount = tmp_path / "百度网盘"
-    library = mount / "动画"
-    lines = []
-    for index in range(60):
-        media = _make_show(library / "Show", f"Show.S01E{index + 1:02d}.mkv")
-        lines.append(str(media.relative_to(library)).replace("\\", "/"))
-    tree = _write_tree(tmp_path / "清单", "动画_文件目录.txt", lines)
+    tree = _write_tree(tmp_path / "清单", "01动画_文件目录.txt", ["Show/Show.S01E01.mkv"])
+    _guard_source_io(monkeypatch, [mount])
 
     resolution = _resolve(tree, [mount])
 
     assert resolution.ok is True
     assert Path(resolution.root) == library
-    assert resolution.total == 3  # 头/中/尾
-    assert resolution.hits == 3
+    assert resolution.hits == 0 and resolution.total == 0
+    assert "生成" in resolution.reason
+
+
+def test_ambiguous_multiple_roots_are_rejected(tmp_path):
+    mount = tmp_path / "百度网盘"
+    sub_a = mount / "01动画"
+    sub_b = mount / "02动画"
+    # 两个互不相关的配置根，清单无区分证据 → 歧义失败
+    tree = _write_tree(tmp_path / "清单", "动画_文件目录.txt", ["Show/Show.S01E01.mkv"])
+
+    resolution = _resolve(tree, [sub_a, sub_b])
+
+    assert resolution.ok is False
+    assert "多个" in resolution.reason
+
+
+def test_large_tree_maps_lexically_without_sampling_io(tmp_path, monkeypatch):
+    """大清单不做头/中/尾抽样探测，纯词法映射即可确定根。"""
+
+    mount = tmp_path / "百度网盘"
+    library = mount / "动画"
+    lines = [f"Show/Show.S01E{index + 1:02d}.mkv" for index in range(60)]
+    tree = _write_tree(tmp_path / "清单", "动画_文件目录.txt", lines)
+    _guard_source_io(monkeypatch, [mount])
+
+    resolution = _resolve(tree, [mount])
+
+    assert resolution.ok is True
+    assert Path(resolution.root) == library
+    assert resolution.hits == 0 and resolution.total == 0
 
 
 def test_hybrid_route_local_root_is_accepted_without_duplicate_layer(tmp_path):
     mount = tmp_path / "OpenList"
     local_root = mount / "Anime" / "TV"
-    media = _make_show(local_root / "Show")
     tree = _write_tree(tmp_path / "清单", "anime-tree.txt", ["Show/Show.S01E01.mkv"])
 
     resolution = _resolve(tree, [local_root])
 
     assert resolution.ok is True
     assert Path(resolution.root) == local_root
-    assert media.exists()
+
+
+# ── 11.19.2 参数化：配置根/清单名/条目 → 播放根 ─────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "tree_parent, tree_name, configured_roots, entry_line, expected_root",
+    [
+        # 根 Q:\百度网盘，清单名 01动画_文件目录.txt，条目 Show/Season 1/a.mkv
+        (r"D:\清单", "01动画_文件目录.txt", [r"Q:\百度网盘"],
+         "Show/Season 1/a.mkv", r"Q:\百度网盘\01动画"),
+        # 根已是 Q:\百度网盘\01动画，同上条目 → 不重复追加 01动画
+        (r"D:\清单", "01动画_文件目录.txt", [r"Q:\百度网盘\01动画"],
+         "Show/Season 1/a.mkv", r"Q:\百度网盘\01动画"),
+        # 根 Q:\百度网盘，条目已经是 01动画/Show/Season 1/a.mkv → 01动画 只出现一次
+        (r"D:\清单", "01动画_文件目录.txt", [r"Q:\百度网盘"],
+         "01动画/Show/Season 1/a.mkv", r"Q:\百度网盘"),
+        # TXT 在根下的 01动画 子目录，内容从 Show 起 → 由 TXT 位置证明子库范围
+        (r"Q:\百度网盘\01动画", "01动画_文件目录.txt", [r"Q:\百度网盘"],
+         "Show/Season 1/a.mkv", r"Q:\百度网盘\01动画"),
+        # TXT 从源盘复制到普通本地目录 → 复制位置不得作为播放根
+        (r"D:\普通目录\清单", "01动画_文件目录.txt", [r"Q:\百度网盘"],
+         "Show/Season 1/a.mkv", r"Q:\百度网盘\01动画"),
+        # 115 的 根目录…_目录树.txt → 只去掉格式定义的虚拟根
+        (r"D:\清单", "根目录_目录树_20260703203700.txt", [r"Q:\115网盘"],
+         "动画/Show/Show.S01E01.mkv", r"Q:\115网盘"),
+        # 无约定名称 anime-tree.txt → 不把任意文件名当子目录
+        (r"D:\清单", "anime-tree.txt", [r"Q:\百度网盘"],
+         "Show/Season 1/a.mkv", r"Q:\百度网盘"),
+    ],
+)
+def test_offline_root_mapping_is_lexical_and_source_disk_offline_safe(
+    monkeypatch, tree_parent, tree_name, configured_roots, entry_line, expected_root
+):
+    """虚构源根上的一切 stat/open/枚举都被哨兵拦截；映射仍按词法完成。"""
+
+    _guard_source_io(monkeypatch, configured_roots)
+    tree = Path(tree_parent) / tree_name
+    resolver = TreePlaybackRootResolver(tree, configured_roots=configured_roots)
+
+    resolution = resolver.resolve(entry_line + "\n")
+
+    assert resolution.ok is True
+    def norm(value):
+        return str(PureWindowsPath(value))
+
+    assert norm(resolution.root) == norm(expected_root)
+    assert resolution.hits == 0 and resolution.total == 0
+    assert "生成" in resolution.reason
+
+
+def test_offline_root_mapping_preserves_original_directory_case(tmp_path, monkeypatch):
+    """Windows 比较忽略大小写，但输出保留原目录文字。"""
+
+    _guard_source_io(monkeypatch, [r"Q:\百度网盘"])
+    tree = Path(r"D:\清单") / "01动画_文件目录.txt"
+    resolver = TreePlaybackRootResolver(tree, configured_roots=[r"Q:\百度网盘"])
+
+    resolution = resolver.resolve("Show/Season 1/a.mkv\n")
+
+    assert resolution.ok is True
+    assert resolution.root == r"Q:\百度网盘\01动画"
+
+
+def test_unconfigured_root_fails_with_clear_message():
+    tree = Path(r"D:\清单") / "01动画_文件目录.txt"
+    resolver = TreePlaybackRootResolver(tree, configured_roots=[])
+
+    resolution = resolver.resolve("Show/Season 1/a.mkv\n")
+
+    assert resolution.ok is False
+    assert resolution.root == ""
+    assert "配置" in resolution.reason

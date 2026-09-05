@@ -21,6 +21,31 @@ def test_local_scan_emits_only_source_evidence(tmp_path):
     assert evidence[0].source_locator.endswith("Show\\Show.S01E01.mkv")
 
 
+def test_local_scan_emits_evidence_batches_and_heartbeats_before_return(tmp_path):
+    from app.media_v4.sources.scanner import scan_local_directory
+
+    for episode in range(1, 4):
+        path = tmp_path / "Show" / f"Show.S01E{episode:02d}.mkv"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"video")
+    batches: list[int] = []
+    heartbeats: list[tuple[int, int]] = []
+
+    _root_id, _scan_id, evidence = scan_local_directory(
+        tmp_path,
+        on_evidence_batch=lambda batch: batches.append(len(batch)),
+        on_progress=lambda **progress: heartbeats.append(
+            (int(progress["processed_count"]), int(progress["total_count"]))
+        ),
+        batch_size=2,
+    )
+
+    assert len(evidence) == 3
+    assert batches == [2, 1]
+    assert heartbeats
+    assert heartbeats[-1][0] == 3
+
+
 def test_local_scan_rejects_a_configured_cloud_mount_even_when_it_reports_ntfs(tmp_path, monkeypatch):
     from app.media_v4.sources import scanner
 
@@ -39,6 +64,40 @@ def test_tree_root_identity_separates_libraries_but_ignores_export_timestamps():
 
     assert first == refreshed
     assert first != movies
+
+
+def test_openlist_local_mapping_preserves_selected_remote_scope_when_mount_is_parent():
+    """浏览范围不是路径映射根；不能把 ``01动画`` 这一层吞掉。"""
+
+    from app.integrations.openlist.providers import derive_local_path
+
+    assert derive_local_path(
+        "K:\\百度网盘",
+        "/01动画",
+        "/01动画/刮削好的动画/藤本树 17-26/Season 1/01.strm",
+    ) == "K:\\百度网盘\\01动画\\刮削好的动画\\藤本树 17-26\\Season 1\\01.strm"
+
+
+def test_openlist_local_mapping_does_not_duplicate_scope_already_in_mount_root():
+    """用户若把挂载根精确配置到浏览范围，也不能重复追加同名目录。"""
+
+    from app.integrations.openlist.providers import derive_local_path
+
+    assert derive_local_path(
+        "K:\\百度网盘\\01动画",
+        "/01动画",
+        "/01动画/刮削好的动画/辉夜大小姐想让我告白/01.strm",
+    ) == "K:\\百度网盘\\01动画\\刮削好的动画\\辉夜大小姐想让我告白\\01.strm"
+
+
+def test_openlist_local_mapping_uses_partial_segment_overlap_without_repeating_mount_prefix():
+    from app.integrations.openlist.providers import derive_local_path
+
+    assert derive_local_path(
+        "K:\\百度网盘",
+        "/百度网盘/01动画",
+        "/百度网盘/01动画/刮削好的动画/作品/01.strm",
+    ) == "K:\\百度网盘\\01动画\\刮削好的动画\\作品\\01.strm"
 
 
 def test_directory_tree_adapter_preserves_remote_path_without_parsing_identity(tmp_path):
@@ -85,6 +144,31 @@ def test_unicode_tree_adapter_reconstructs_parent_directories_and_playback_path(
     assert evidence[0].playback_locator == str(
         mount / "动画" / "Show (2024) {tmdb-42}" / "Season 1" / "Show.S01E01.2160p.mkv"
     )
+
+
+def test_directory_tree_builder_emits_batches_while_reconstructing_text():
+    from app.media_v4.sources.scanner import build_directory_tree_evidence
+
+    text = (
+        "动画\n"
+        "├── Show\n"
+        "│   ├── Show.S01E01.mkv\n"
+        "│   ├── Show.S01E02.mkv\n"
+        "│   └── Show.S01E03.mkv\n"
+    )
+    batches: list[int] = []
+
+    _scan_id, evidence = build_directory_tree_evidence(
+        text,
+        root_id="root-tree-stream",
+        provider="baidu",
+        scan_id="scan-tree-stream",
+        on_evidence_batch=lambda batch: batches.append(len(batch)),
+        batch_size=2,
+    )
+
+    assert len(evidence) == 3
+    assert batches == [2, 1]
 
 
 def test_115_ascii_tree_adapter_reconstructs_parent_directories(tmp_path):
@@ -152,3 +236,45 @@ def test_openlist_scan_recursively_emits_the_same_source_evidence_contract(tmp_p
         mount / "Anime" / "Show" / "Season 1" / "Show.S01E01.mkv"
     )
     assert set(directories) == {"", "Show", "Show/Season 1"}
+
+
+def test_openlist_scan_emits_evidence_batches_and_heartbeats_during_recursion(tmp_path):
+    from app.integrations.openlist.models import OpenListDirPage, OpenListEntry
+    from app.media_v4.sources.scanner import scan_openlist_directory
+
+    class FakeClient:
+        def list_dir(self, path, page=1, per_page=100, refresh=False):
+            del page, per_page, refresh
+            entries = {
+                "/Anime": [OpenListEntry(name="Show", is_dir=True, remote_path="/Anime/Show")],
+                "/Anime/Show": [
+                    OpenListEntry(
+                        name="Show.S01E01.mkv",
+                        is_dir=False,
+                        remote_path="/Anime/Show/Show.S01E01.mkv",
+                    ),
+                    OpenListEntry(
+                        name="Show.S01E02.mkv",
+                        is_dir=False,
+                        remote_path="/Anime/Show/Show.S01E02.mkv",
+                    ),
+                ],
+            }
+            return OpenListDirPage(entries=entries[path], total=len(entries[path]))
+
+    batches: list[int] = []
+    heartbeats: list[int] = []
+    _scan_id, evidence = scan_openlist_directory(
+        FakeClient(),
+        remote_root="/Anime",
+        mapping_root="/",
+        mount_root=str(tmp_path / "mount"),
+        root_id="root-openlist-stream",
+        on_evidence_batch=lambda batch: batches.append(len(batch)),
+        on_progress=lambda **progress: heartbeats.append(int(progress["processed_count"])),
+        batch_size=1,
+    )
+
+    assert len(evidence) == 2
+    assert batches == [1, 1]
+    assert heartbeats and heartbeats[-1] == 2

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 # ------------------------------------------------------------
 # 提供商与导入方式常量
@@ -193,19 +193,35 @@ def derive_remote_path(mount_root: str, remote_root: str, local_path: str) -> st
 
 
 def derive_local_path(mount_root: str, remote_root: str, remote_path: str) -> str:
-    """由连接级挂载根推导本地路径：mount_root + 远端相对 remote_root 的各段。"""
+    """按路径段重叠把 OpenList 远端定位映射到本地挂载路径。
+
+    ``remote_root`` 是当前浏览或扫描的远端范围，不能天然等同于本地
+    挂载根。若本地路径已经以远端范围的前缀结尾，只追加尚未存在的段；
+    否则保留远端完整前缀，避免把 ``01动画`` 等实际目录层级裁掉。
+    """
     from app.integrations.openlist.client import normalize_remote_path
 
     rroot = normalize_remote_path(remote_root or "/")
     rpath = normalize_remote_path(remote_path)
-    if rroot != "/":
-        if not is_ancestor_or_self(rroot, rpath):
-            raise ValueError("选择的远端目录不在映射根路径之下，无法映射到本地挂载")
-        remainder = rpath[len(rroot):].lstrip("/")
-    else:
-        remainder = rpath.lstrip("/")
+    if rroot != "/" and not is_ancestor_or_self(rroot, rpath):
+        raise ValueError("选择的远端目录不在映射根路径之下，无法映射到本地挂载")
+
+    root_parts = tuple(part for part in PurePosixPath(rroot).parts if part != "/")
+    remote_parts = tuple(part for part in PurePosixPath(rpath).parts if part != "/")
+    local_parts = tuple(
+        part
+        for part in PureWindowsPath(str(mount_root).replace("/", "\\")).parts
+        if part not in {"\\", "/"} and not part.endswith(":\\")
+    )
+    overlap = 0
+    for size in range(min(len(local_parts), len(root_parts)), 0, -1):
+        local_tail = tuple(part.casefold() for part in local_parts[-size:])
+        remote_head = tuple(part.casefold() for part in root_parts[:size])
+        if local_tail == remote_head:
+            overlap = size
+            break
 
     local = Path(mount_root).expanduser()
-    for part in PurePosixPath(remainder).parts:
+    for part in remote_parts[overlap:]:
         local = local / part
     return str(local)

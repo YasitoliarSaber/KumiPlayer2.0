@@ -28,6 +28,44 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _friendly_job_error(value: str) -> str:
+    """将持久任务的诊断错误投影为可行动的用户提示。"""
+
+    text = (value or "").strip()
+    if not text:
+        return ""
+    lowered = text.casefold()
+    if "unique constraint failed" in lowered or "integrityerror" in lowered:
+        return "媒体身份与已有记录冲突，请检查识别结果后重试"
+    if "no such table" in lowered or "no such column" in lowered:
+        return "媒体库结构不完整，请重试；如果仍失败，请检查数据库状态"
+    if "timed out" in lowered or "timeout" in lowered:
+        return "任务响应超时，请检查网络或来源连接后重试"
+    if "filenotfound" in lowered or "enoent" in lowered or "文件不存在" in text:
+        return "媒体文件或播放路径不可用，请检查来源后重试"
+    if "permissionerror" in lowered or "access denied" in lowered or "拒绝访问" in text:
+        return "无法访问媒体文件，请检查权限与挂载后重试"
+    if "取消" in text or "cancel" in lowered:
+        return "任务已终止"
+    if text in {"磁盘写入失败", "任务异常中断，可重试"}:
+        return text
+    return "任务未能完成，请重试"
+
+
+def _friendly_metadata_reason(status: str, value: str) -> str:
+    """元数据状态只暴露稳定的恢复说明，不暴露提供方异常细节。"""
+
+    if status == "waiting_review":
+        return "在线媒体信息没有唯一匹配，需要确认正确作品后继续。"
+    if status == "source_unavailable":
+        return "在线资料服务暂不可用，请稍后重试"
+    if status == "waiting_metadata":
+        return "媒体信息尚未准备好，请检查设置后重试"
+    if status == "failed":
+        return "媒体信息处理未能完成，请重试"
+    return "" if not value else "媒体信息需要处理，请检查后重试"
+
+
 def _job_summary(job: dict | None) -> dict:
     """把单个 job 折叠成作品单元可用的最小投影；无 job 时返回等待态。"""
 
@@ -37,7 +75,7 @@ def _job_summary(job: dict | None) -> dict:
         "job_id": str(job["job_id"] or ""),
         "status": str(job["status"] or "queued"),
         "attempts": int(job["attempts"] or 0),
-        "last_error": str(job["last_error"] or ""),
+        "last_error": _friendly_job_error(str(job["last_error"] or "")),
     }
 
 
@@ -124,16 +162,16 @@ def _stage_summary(jobs: list[dict]) -> dict:
 
 
 def _revision_overall_status(work_units: list[dict], stage: dict[str, list[dict]]) -> str:
-    """revision 级整体状态：running > needs_attention > queued > completed。"""
+    """revision 级整体状态：running > needs_attention > queued > cancelled > completed。"""
 
     if any(unit["overall_status"] in {"running_mirror", "running_metadata"} for unit in work_units):
         return "running"
     if any(stage["projection"] and str(job["status"]) == "running" for job in stage["projection"]):
         return "running"
-    if any(unit["overall_status"] in {"failed", "cancelled", "needs_attention"} for unit in work_units):
+    if any(unit["overall_status"] in {"failed", "needs_attention"} for unit in work_units):
         return "needs_attention"
     if any(
-        str(job["status"]) in {"failed", "cancelled"}
+        str(job["status"]) == "failed"
         for stage_jobs in stage.values()
         for job in stage_jobs
     ):
@@ -146,6 +184,12 @@ def _revision_overall_status(work_units: list[dict], stage: dict[str, list[dict]
         return "queued"
     if any(unit["overall_status"] == "waiting_mirror" or unit["overall_status"] == "waiting_metadata" for unit in work_units):
         return "queued"
+    if any(unit["overall_status"] == "cancelled" for unit in work_units) or any(
+        str(job["status"]) == "cancelled"
+        for stage_jobs in stage.values()
+        for job in stage_jobs
+    ):
+        return "cancelled"
     return "completed"
 
 
@@ -217,6 +261,26 @@ def _persist_candidates(
             )
 
 
+def _reuses_confirmed_provider_identity(conn, work_id: str, candidates: list) -> bool:
+    """仅当本次草稿复用了已确认身份时，才保护现有的作品标题。"""
+
+    confirmed = {
+        (item.provider, item.media_type, item.provider_id)
+        for item in candidates
+        if item.status == "confirmed" and candidate_service.supported_provider(item.provider)
+    }
+    if not confirmed:
+        return False
+    existing = {
+        (str(row["provider"]), str(row["media_type"]), str(row["provider_id"]))
+        for row in conn.execute(
+            "SELECT provider, media_type, provider_id FROM provider_bindings WHERE work_id = ?",
+            (work_id,),
+        ).fetchall()
+    }
+    return bool(confirmed & existing)
+
+
 def _freeze_candidate_bindings(
     conn,
     work_ids: dict[str, str],
@@ -234,11 +298,33 @@ def _freeze_candidate_bindings(
         if len(unique_identities) != 1:
             continue
         chosen = confirmed[0]
+        existing_slot = conn.execute(
+            """
+            SELECT provider_id FROM provider_bindings
+            WHERE work_id = ? AND provider = ? AND media_type = ?
+            """,
+            (work_id, chosen.provider, chosen.media_type),
+        ).fetchone()
+        if existing_slot is not None and str(existing_slot["provider_id"]) != chosen.provider_id:
+            raise RevisionBlockedError(
+                "Provider 身份冲突：该作品已经绑定另一条确认身份，请返回检查识别结果"
+            )
+        identity_owner = conn.execute(
+            """
+            SELECT work_id FROM provider_bindings
+            WHERE provider = ? AND media_type = ? AND provider_id = ?
+            """,
+            (chosen.provider, chosen.media_type, chosen.provider_id),
+        ).fetchone()
+        if identity_owner is not None and str(identity_owner["work_id"]) != work_id:
+            raise RevisionBlockedError(
+                "Provider 身份冲突：该身份已经属于另一部作品，请返回检查识别结果"
+            )
         conn.execute(
             """
             INSERT INTO provider_bindings(work_id, provider, media_type, provider_id)
             VALUES (?, ?, ?, ?)
-            ON CONFLICT(work_id, provider, media_type) DO UPDATE SET provider_id = excluded.provider_id
+            ON CONFLICT(work_id, provider, media_type) DO NOTHING
             """,
             (work_id, chosen.provider, chosen.media_type, chosen.provider_id),
         )
@@ -368,6 +454,82 @@ class V4RevisionService:
                 bindings[work.work_key] = [(str(r[0]), str(r[1]), str(r[2])) for r in rows]
         return bindings
 
+    def _candidate_identity_conflicts(
+        self,
+        graph: ResolvedMediaGraph,
+        candidates_by_key: dict[str, list],
+        entries: list[tuple[SourceEvidence, ParsedFacts]],
+    ) -> list[ResolutionIssue]:
+        """在草稿预览阶段阻断会改写既有 Work 身份的候选。
+
+        同一个本地 ``identity_key`` 已经确认过某个 provider/media_type
+        身份时，新的草稿不能静默换绑到另一个 provider_id。尤其当新 ID 已
+        属于另一 Work 时，确认阶段会触发 SQLite 的全局唯一索引；在这里先
+        生成可读 review issue，既不泄漏 SQL，也避免用户等到第 3 步才发现。
+        """
+
+        issues: list[ResolutionIssue] = []
+        evidence_by_id = {evidence.evidence_id: evidence for evidence, _facts in entries}
+        with self.database.connect() as conn:
+            for work in graph.works:
+                existing_work_ids: set[str] = set()
+                existing = conn.execute(
+                    "SELECT work_id FROM works WHERE identity_key = ?",
+                    (work.work_key,),
+                ).fetchone()
+                if existing is not None:
+                    existing_work_ids.add(str(existing["work_id"]))
+                # Provider key 会把跨语言目录合并到同一候选 Work；同时仍要以
+                # 来源根 + 结构目录检查既有本地谱系，防止一个错误 hint 把
+                # Show One 重绑到已经属于 Show Two 的 provider_id。
+                for evidence_id in work.source_evidence_ids:
+                    evidence = evidence_by_id.get(evidence_id)
+                    if evidence is None:
+                        continue
+                    structural_key = _structural_key(evidence.relative_path)
+                    if not structural_key:
+                        continue
+                    rows = conn.execute(
+                        """
+                        SELECT DISTINCT b.work_id
+                        FROM work_source_bindings b
+                        WHERE b.root_id = ? AND b.structural_key = ?
+                        """,
+                        (evidence.root_id, structural_key),
+                    ).fetchall()
+                    existing_work_ids.update(str(row["work_id"]) for row in rows)
+                if not existing_work_ids:
+                    continue
+                placeholders = ",".join("?" for _ in existing_work_ids)
+                bindings = {
+                    (str(row["provider"]), str(row["media_type"])): str(row["provider_id"])
+                    for row in conn.execute(
+                        "SELECT provider, media_type, provider_id FROM provider_bindings "
+                        f"WHERE work_id IN ({placeholders})",
+                        tuple(sorted(existing_work_ids)),
+                    ).fetchall()
+                }
+                for candidate in candidates_by_key.get(work.work_key, []):
+                    if (
+                        candidate.status not in {"confirmed", "proposed"}
+                        or candidate.confidence != "high"
+                        or not candidate_service.supported_provider(candidate.provider)
+                    ):
+                        continue
+                    existing_id = bindings.get((candidate.provider, candidate.media_type))
+                    if existing_id is None or existing_id == candidate.provider_id:
+                        continue
+                    issues.append(ResolutionIssue(
+                        code="provider_identity_conflict",
+                        evidence_id=next(iter(work.source_evidence_ids), ""),
+                        message=(
+                            "识别到的 Provider 身份与该作品已确认的身份冲突；"
+                            "请在检查识别结果中修正作品或 Provider 提示后重试"
+                        ),
+                    ))
+                    break
+        return issues
+
     def create_draft(
         self,
         revision_id: str,
@@ -382,6 +544,7 @@ class V4RevisionService:
         source_mode: str = "",
         _publish: bool = False,
         _evidence_already_persisted: bool = False,
+        _facts_already_persisted: bool = False,
         _override_payloads: dict[str, dict] | None = None,
         candidate_search: CandidateSearch | None = None,
     ) -> ResolvedMediaGraph:
@@ -406,8 +569,10 @@ class V4RevisionService:
             }.get(source_mode, ingest_method)
 
         graph = self.resolver.resolve(entries)
-        # P-001 7.7 R1：确认前候选解析。draft 时在线/测试搜索并合并同一
-        # provider identity；确认（publish）时复用已冻结候选，不再重新搜索。
+        # 首次草稿只做离线身份解析：显式 TMDB hint、sidecar NFO 与既有
+        # provider binding 可以冻结候选；普通标题的在线搜索由 confirmed
+        # revision 的 scrape job 执行。这样来源扫描不会因作品数量放大网络
+        # 请求，也不会用不稳定的在线候选反向吞并本地主系列/外传边界。
         candidates_by_key: dict[str, list] = {}
         if _publish:
             candidates_by_key = self._load_draft_candidates(revision_id)
@@ -419,19 +584,8 @@ class V4RevisionService:
             if candidate_search is not None:
                 search = candidate_search
             else:
-                # 同一 draft 内共享详情缓存与预算，避免逐查询放大 API。
-                detail_cache: dict = {}
-                detail_budget: list[int] = [0]
-
-                def search(work_key, queries, year, media_type):
-                    return candidate_service.default_candidate_search(
-                        work_key,
-                        queries,
-                        year,
-                        media_type,
-                        detail_cache=detail_cache,
-                        detail_budget=detail_budget,
-                    )
+                def search(_work_key, _queries, _year, _media_type):
+                    return []
 
             existing_bindings = self._existing_bindings_by_key(graph)
             candidates_by_key, merge_map, candidate_issues = candidate_service.plan_work_candidates(
@@ -440,6 +594,7 @@ class V4RevisionService:
                 search,
                 existing_bindings=existing_bindings,
             )
+            candidate_issues.extend(self._candidate_identity_conflicts(graph, candidates_by_key, entries))
             graph = candidate_service.merge_graph(graph, merge_map)
             if candidate_issues:
                 graph = replace(graph, issues=(*graph.issues, *candidate_issues))
@@ -448,6 +603,16 @@ class V4RevisionService:
         created_at = _now()
 
         with self.database.connect() as conn:
+            # 同一来源只允许一份可操作草稿。旧扫描的草稿保留审计证据，
+            # 但必须退出候选集，避免来源卡把新扫描和旧识别结果拼在一起。
+            conn.execute(
+                """
+                UPDATE import_revisions
+                SET status = 'superseded'
+                WHERE root_id = ? AND scan_id != ? AND revision_id != ? AND status = 'draft'
+                """,
+                (root_id, scan_id, revision_id),
+            )
             conn.execute(
                 """
                 INSERT INTO source_roots(
@@ -481,6 +646,7 @@ class V4RevisionService:
                         WHEN excluded.source_mode != '' THEN excluded.source_mode
                         ELSE source_roots.source_mode
                     END,
+                    enabled = 1,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -517,10 +683,10 @@ class V4RevisionService:
         # Facts are immutable. Re-observing the same evidence is idempotent and
         # never replaces the previously parsed payload.
         if not _publish:
-            for evidence, facts in entries:
-                if not _evidence_already_persisted:
-                    self.repository.save_source_evidence(evidence)
-                self.repository.save_parsed_facts(facts)
+            if not _evidence_already_persisted:
+                self.repository.save_scan_evidence_bulk([evidence for evidence, _facts in entries])
+            if not _facts_already_persisted:
+                self.repository.save_parsed_facts_bulk([facts for _evidence, facts in entries])
 
         graph_digest = hashlib.sha256(
             json.dumps(
@@ -756,6 +922,11 @@ class V4RevisionService:
                         )
                     else:
                         work_id = str(existing_work["work_id"])
+                        preserve_preferred_title = _reuses_confirmed_provider_identity(
+                            conn,
+                            work_id,
+                            candidates_by_key.get(work.work_key, []),
+                        )
                         if existing_work["preferred_title"]:
                             conn.execute(
                                 """
@@ -765,10 +936,39 @@ class V4RevisionService:
                                 """,
                                 (work_id, _normalize_title(existing_work["preferred_title"])),
                             )
+                        draft_title = _normalize_title(work.preferred_title)
+                        if draft_title and draft_title != _normalize_title(existing_work["preferred_title"]):
+                            conn.execute(
+                                """
+                                INSERT OR IGNORE INTO work_aliases(
+                                    work_id, normalized_title, alias_type
+                                ) VALUES (?, ?, 'structural')
+                                """,
+                                (work_id, draft_title),
+                            )
                         conn.execute(
-                            "UPDATE works SET preferred_title = ?, year = ?, show_type = ?, "
-                            "card_type = ?, updated_at = ? WHERE work_id = ?",
-                            (work.preferred_title, work.year, work.show_type, work.card_type, created_at, work_id),
+                            """
+                            UPDATE works
+                            SET preferred_title = CASE
+                                    WHEN ? OR ? = '' THEN preferred_title
+                                    ELSE ?
+                                END,
+                                year = COALESCE(year, ?),
+                                show_type = CASE WHEN show_type = '' THEN ? ELSE show_type END,
+                                card_type = CASE WHEN card_type = '' THEN ? ELSE card_type END,
+                                updated_at = ?
+                            WHERE work_id = ?
+                            """,
+                            (
+                                int(preserve_preferred_title),
+                                work.preferred_title,
+                                work.preferred_title,
+                                work.year,
+                                work.show_type,
+                                work.card_type,
+                                created_at,
+                                work_id,
+                            ),
                         )
 
                     work_ids[work.work_key] = work_id
@@ -1128,13 +1328,26 @@ class V4RevisionService:
                 )
                 conn.execute(
                     """
-                    UPDATE jobs SET status = 'cancelled', updated_at = ?
+                    UPDATE jobs
+                    SET status = 'cancelled', cancel_requested = 1, last_error = '',
+                        heartbeat_at = ?, finished_at = ?, updated_at = ?
                     WHERE status = 'queued' AND revision_id IN (
                         SELECT revision_id FROM import_revisions
                         WHERE root_id = ? AND status = 'superseded'
                     )
                     """,
-                    (created_at, root_id),
+                    (created_at, created_at, created_at, root_id),
+                )
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET cancel_requested = 1, heartbeat_at = ?, updated_at = ?
+                    WHERE status = 'running' AND revision_id IN (
+                        SELECT revision_id FROM import_revisions
+                        WHERE root_id = ? AND status = 'superseded'
+                    )
+                    """,
+                    (created_at, created_at, root_id),
                 )
                 conn.execute(
                     "UPDATE import_revisions SET status = 'confirmed', confirmed_at = ? WHERE revision_id = ?",
@@ -1145,7 +1358,7 @@ class V4RevisionService:
                 conn.execute(
                     """
                     UPDATE source_roots
-                    SET retired_at = '', retired_reason = '', updated_at = ?
+                    SET retired_at = '', retired_reason = '', enabled = 1, updated_at = ?
                     WHERE root_id = ?
                     """,
                     (created_at, root_id),
@@ -1510,16 +1723,25 @@ class V4RevisionService:
                     work_ids,
                 ).fetchall():
                     works[str(row["work_id"])] = dict(row)
-            scrape_rows: dict[str, str] = {}
+            scrape_rows: dict[str, dict] = {}
             for row in conn.execute(
-                "SELECT sb.work_id, sb.status FROM scrape_bindings sb "
+                "SELECT sb.work_id, sb.status, sb.metadata_json FROM scrape_bindings sb "
                 "WHERE sb.revision_id = ? AND sb.updated_at = ( "
                 "  SELECT MAX(updated_at) FROM scrape_bindings latest "
                 "  WHERE latest.revision_id = sb.revision_id AND latest.work_id = sb.work_id "
                 ")",
                 (revision_id,),
             ).fetchall():
-                scrape_rows[str(row["work_id"])] = str(row["status"] or "")
+                metadata: dict = {}
+                try:
+                    decoded = json.loads(str(row["metadata_json"] or "{}"))
+                    metadata = decoded if isinstance(decoded, dict) else {}
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    metadata = {}
+                scrape_rows[str(row["work_id"])] = {
+                    "status": str(row["status"] or ""),
+                    "reason": str(metadata.get("reason") or ""),
+                }
 
         jobs_by_work: dict[str, dict] = {}
         stage: dict[str, list[dict]] = {"mirror": [], "metadata": [], "projection": []}
@@ -1542,6 +1764,7 @@ class V4RevisionService:
             job_pair = jobs_by_work.get(work_id, {})
             mirror = job_pair.get("mirror")
             metadata = job_pair.get("metadata")
+            scrape = scrape_rows.get(work_id, {})
             work_units.append({
                 "work_id": work_id,
                 "title": str(work.get("preferred_title") or work_id),
@@ -1557,7 +1780,12 @@ class V4RevisionService:
                 "overall_status": _derive_work_status(
                     mirror,
                     metadata,
-                    scrape_rows.get(work_id, ""),
+                    str(scrape.get("status") or ""),
+                ),
+                "metadata_state": str(scrape.get("status") or ""),
+                "metadata_reason": _friendly_metadata_reason(
+                    str(scrape.get("status") or ""),
+                    str(scrape.get("reason") or ""),
                 ),
                 "mirror": _job_summary(mirror),
                 "metadata": _job_summary(metadata),

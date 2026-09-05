@@ -10,6 +10,8 @@ import sqlite3
 
 import pytest
 
+from app.media_v4.persistence.schema_v4 import V4_SCHEMA_VERSION
+
 
 def test_empty_database_creates_one_strict_v4_schema(tmp_path):
     from app.media_v4.persistence.database import V4Database
@@ -18,7 +20,7 @@ def test_empty_database_creates_one_strict_v4_schema(tmp_path):
     database.initialize()
 
     with database.connect() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == V4_SCHEMA_VERSION
         tables = {
             row[0]
             for row in conn.execute(
@@ -54,6 +56,10 @@ def test_empty_database_creates_one_strict_v4_schema(tmp_path):
         "bangumi_episode_sync",
     } <= tables
 
+    with database.connect() as conn:
+        job_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    assert {"cancel_requested", "heartbeat_at", "started_at", "finished_at"} <= job_columns
+
 
 def test_existing_old_database_requires_reset_instead_of_implicit_migration(tmp_path):
     from app.media_v4.persistence.database import V4Database, V4ResetRequiredError
@@ -72,10 +78,32 @@ def test_future_database_version_is_rejected(tmp_path):
 
     path = tmp_path / "future.db"
     with sqlite3.connect(path) as conn:
-        conn.execute("PRAGMA user_version = 15")
+        conn.execute(f"PRAGMA user_version = {V4_SCHEMA_VERSION + 1}")
 
     with pytest.raises(RuntimeError, match="高于当前程序支持"):
         V4Database(path).initialize()
+
+
+def test_v15_database_is_upgraded_without_resetting_media_data(tmp_path):
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.persistence.schema_v4 import create_schema_v4
+
+    path = tmp_path / "v15-outbox.db"
+    with sqlite3.connect(path) as conn:
+        create_schema_v4(conn)
+        conn.execute("PRAGMA user_version = 15")
+        conn.execute(
+            "INSERT INTO v4_meta(key, value) VALUES ('preserved', 'yes')"
+        )
+
+    database = V4Database(path)
+    database.initialize()
+
+    with database.connect() as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == V4_SCHEMA_VERSION
+        assert conn.execute("SELECT value FROM v4_meta WHERE key = 'preserved'").fetchone()[0] == "yes"
+        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(jobs)")}
+    assert {"cancel_requested", "heartbeat_at", "started_at", "finished_at"} <= columns
 
 
 def test_claimed_v4_database_with_incomplete_physical_schema_requires_reset(tmp_path):

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 14
+V4_SCHEMA_VERSION = 16
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -67,6 +67,11 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             root_id TEXT NOT NULL REFERENCES source_roots(root_id) ON DELETE CASCADE,
             generation INTEGER NOT NULL,
             status TEXT NOT NULL,
+            stage TEXT NOT NULL DEFAULT 'queued',
+            processed_count INTEGER NOT NULL DEFAULT 0,
+            total_count INTEGER NOT NULL DEFAULT 0,
+            heartbeat_at TEXT NOT NULL DEFAULT '',
+            cancel_requested INTEGER NOT NULL DEFAULT 0,
             started_at TEXT NOT NULL DEFAULT '',
             finished_at TEXT NOT NULL DEFAULT '',
             error TEXT NOT NULL DEFAULT '',
@@ -364,6 +369,10 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
                 CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
             attempts INTEGER NOT NULL DEFAULT 0,
             last_error TEXT NOT NULL DEFAULT '',
+            cancel_requested INTEGER NOT NULL DEFAULT 0,
+            heartbeat_at TEXT NOT NULL DEFAULT '',
+            started_at TEXT NOT NULL DEFAULT '',
+            finished_at TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -664,6 +673,7 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
     conn.execute("INSERT INTO v4_meta(key, value) VALUES ('backend_data_epoch', '4')")
     create_v12_structures(conn)
     create_v13_structures(conn)
+    create_v16_structures(conn)
 
 
 def create_tree_scan_validation(conn: sqlite3.Connection) -> None:
@@ -731,7 +741,7 @@ def create_v6_structures(conn: sqlite3.Connection) -> None:
 
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     columns = {
-        str(row["name"])
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
         for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
     }
     if column not in columns:
@@ -919,6 +929,87 @@ def migrate_schema_v13_to_v14(conn: sqlite3.Connection) -> None:
     """v13 → v14：ParsedFacts 保存不可变本地剧集标题。"""
 
     _add_column_if_missing(conn, "parsed_facts", "episode_title", "TEXT NOT NULL DEFAULT ''")
+
+
+def create_v15_structures(conn: sqlite3.Connection) -> None:
+    """v15：SourceScan 持久化阶段、进度、心跳和取消请求。"""
+
+    _add_column_if_missing(conn, "source_scans", "stage", "TEXT NOT NULL DEFAULT 'queued'")
+    _add_column_if_missing(conn, "source_scans", "processed_count", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "source_scans", "total_count", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "source_scans", "heartbeat_at", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "source_scans", "cancel_requested", "INTEGER NOT NULL DEFAULT 0")
+
+
+def migrate_schema_v14_to_v15(conn: sqlite3.Connection) -> None:
+    """v14 → v15：为已有扫描补齐可恢复进度字段，并回填已知计数。"""
+
+    create_v15_structures(conn)
+    conn.execute(
+        """
+        UPDATE source_scans
+        SET total_count = (
+                SELECT COUNT(*) FROM source_evidence se WHERE se.scan_id = source_scans.scan_id
+            ),
+            processed_count = CASE
+                WHEN status = 'completed' THEN (
+                    SELECT COUNT(*) FROM source_evidence se WHERE se.scan_id = source_scans.scan_id
+                )
+                ELSE (
+                    SELECT COUNT(*)
+                    FROM parsed_facts pf
+                    JOIN source_evidence se ON se.evidence_id = pf.evidence_id
+                    WHERE se.scan_id = source_scans.scan_id
+                )
+            END,
+            stage = CASE
+                WHEN status = 'completed' THEN 'ready'
+                WHEN status = 'failed' THEN 'failed'
+                WHEN status = 'cancelled' THEN 'cancelled'
+                WHEN EXISTS (
+                    SELECT 1 FROM source_evidence se WHERE se.scan_id = source_scans.scan_id
+                ) THEN 'recognizing'
+                ELSE 'reading_source'
+            END,
+            heartbeat_at = CASE
+                WHEN finished_at != '' THEN finished_at
+                ELSE started_at
+            END
+        WHERE stage = 'queued'
+        """
+    )
+
+
+def create_v16_structures(conn: sqlite3.Connection) -> None:
+    """v16：V4 outbox 的可终止执行与可恢复心跳字段。"""
+
+    _add_column_if_missing(conn, "jobs", "cancel_requested", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "jobs", "heartbeat_at", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "jobs", "started_at", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "jobs", "finished_at", "TEXT NOT NULL DEFAULT ''")
+
+
+def migrate_schema_v15_to_v16(conn: sqlite3.Connection) -> None:
+    """v15 → v16：为既有 V4 后台任务补齐终止与恢复状态。"""
+
+    create_v16_structures(conn)
+    conn.execute(
+        """
+        UPDATE jobs
+        SET heartbeat_at = CASE
+                WHEN heartbeat_at = '' THEN updated_at
+                ELSE heartbeat_at
+            END,
+            started_at = CASE
+                WHEN status = 'running' AND started_at = '' THEN updated_at
+                ELSE started_at
+            END,
+            finished_at = CASE
+                WHEN status IN ('succeeded', 'failed', 'cancelled') AND finished_at = '' THEN updated_at
+                ELSE finished_at
+            END
+        """
+    )
 
 
 def migrate_schema_v10_to_v11(conn: sqlite3.Connection) -> None:

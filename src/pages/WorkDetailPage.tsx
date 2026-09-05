@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { CheckCircle2, ChevronLeft, ChevronRight, Circle, Ellipsis, FolderOpen, FolderSymlink, Grid2X2, Heart, Image, List, Pencil, Play, ScanLine, SlidersHorizontal, Star, Trash2, Upload, X } from 'lucide-react';
+import { CheckCircle2, ChevronLeft, ChevronRight, Circle, Ellipsis, FolderOpen, FolderSymlink, Grid2X2, Heart, Image, Pencil, Play, ScanLine, SlidersHorizontal, Star, Trash2, Upload, X } from 'lucide-react';
 import { useLibraryStore } from '../stores/library';
 import { useBangumiStore } from '../stores/bangumi';
 import { useUiStore, type CategoryKey } from '../stores/ui';
@@ -8,6 +8,7 @@ import { systemApi } from '../api/system';
 import { bangumiApi as v4BangumiApi, buildBangumiImageUrl, type BangumiEpisode, type BangumiMatch } from '../api/bangumi';
 import { playbackApi } from '../api/playback';
 import { cleanDisplayTitle } from '../utils/title';
+import { stripSpecialEpisodeCode } from '../utils/title';
 import { buildAssetUrl } from '../api/assets';
 import { preferredArtworkPath } from '../utils/artwork';
 import { tasksApi } from '../api/tasks';
@@ -149,7 +150,6 @@ export default function WorkDetailPage() {
   const [notice, setNotice] = useState('');
   const [selectedSeasonKey, setSelectedSeasonKey] = useState('');
   // null = auto-detect (grid if >15 episodes, list otherwise); 'list'|'grid' = user override
-  const [manualEpisodeView, setManualEpisodeView] = useState<'list' | 'grid' | null>(null);
   const [episodeQuickGridOpen, setEpisodeQuickGridOpen] = useState(false);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [plotExpanded, setPlotExpanded] = useState(false);
@@ -584,11 +584,6 @@ export default function WorkDetailPage() {
     });
   }, [work, selectedSeasonKey, selectedSeasonNumber]);
 
-  // Auto-detect episode view: grid if >15, list otherwise; user manual choice wins
-  const autoEpisodeView = episodes.length > 15 ? 'grid' : 'list';
-  const effectiveEpisodeView = manualEpisodeView ?? autoEpisodeView;
-  const hasEpisodeThumbnails = episodes.some((episode: any) => Boolean(episode.thumb_path));
-
   const scrollEpisodeStrip = (direction: -1 | 1) => {
     const strip = episodeStripRef.current;
     if (!strip) return;
@@ -614,7 +609,7 @@ export default function WorkDetailPage() {
 
   useEffect(() => {
     const strip = episodeStripRef.current;
-    if (!strip || !hasEpisodeThumbnails) return;
+    if (!strip) return;
     const syncPosition = () => {
       episodeStripFrameRef.current = null;
       const maxScroll = Math.max(0, strip.scrollWidth - strip.clientWidth);
@@ -636,7 +631,7 @@ export default function WorkDetailPage() {
       strip.removeEventListener('scroll', requestSyncPosition);
       window.removeEventListener('resize', requestSyncPosition);
     };
-  }, [episodes.length, hasEpisodeThumbnails, selectedSeasonKey]);
+  }, [episodes.length, selectedSeasonKey]);
 
   const revealEpisodeInStrip = (index: number) => {
     const strip = episodeStripRef.current;
@@ -644,15 +639,6 @@ export default function WorkDetailPage() {
     if (strip && target) scrollEpisodeIntoView(strip, target);
     setEpisodeQuickGridOpen(false);
   };
-
-  // Reset auto-detect when season changes
-  const prevSeasonKey = useRef(selectedSeasonKey);
-  useEffect(() => {
-    if (prevSeasonKey.current !== selectedSeasonKey) {
-      setManualEpisodeView(null);
-      prevSeasonKey.current = selectedSeasonKey;
-    }
-  }, [selectedSeasonKey]);
 
   const syncedEpisodeIds = useMemo<Set<string>>(() => {
     return new Set((bangumiEpisodes || []).filter((item) => item.synced).map((item) => String(item.episode_id)));
@@ -770,7 +756,7 @@ export default function WorkDetailPage() {
     );
   }
 
-  const seasons = work.seasons || [];
+  const seasons = orderDetailSeasons(work.seasons || []);
   const currentSeason = findSelectedSeason(work, selectedSeasonKey, selectedSeasonNumber);
   const explicitRelatedWorks = Array.isArray(work.related_works) ? work.related_works : [];
   const relatedWorks = mergeRelatedWorks(
@@ -785,11 +771,12 @@ export default function WorkDetailPage() {
     ? cleanDisplayTitle(continueTarget.title || '', episodeFallbackTitle(continueTarget))
     : '';
   const continueEpisodeCode = continueTarget ? formatEpisodeCode(continueTarget) : '';
+  const continueEpisodeParts = [continueEpisodeCode, continueEpisodeTitle].filter(Boolean);
   const continueCompactLabel = !isMovie && isSeries
-    ? `${continueEpisodeCode}${continueEpisodeTitle ? `  ${continueEpisodeTitle}` : ''}`
+    ? continueEpisodeParts.join('  ')
     : work.title;
   const continueHoverLabel = !isMovie && isSeries
-    ? `${continueEpisodeCode}${continueEpisodeTitle ? ` · ${continueEpisodeTitle}` : ''}`
+    ? continueEpisodeParts.join(' · ')
     : work.title;
   const visibleCast: Array<{ person: any; castKey: string }> = (Array.isArray(work.cast) ? work.cast : []).slice(0, 14)
     .map((person: any, index: number) => ({ person, castKey: `${person.id || person.name || 'cast'}-${index}` }))
@@ -1640,30 +1627,23 @@ export default function WorkDetailPage() {
               )}
             </div>
             <div className="detail-episode-toolbar" role="toolbar" aria-label="剧集浏览工具">
-              {hasEpisodeThumbnails ? (
-                <div className="detail-episode-pager" aria-label="剧集翻页">
-                  <button type="button" className="detail-episode-tool-btn" onClick={() => scrollEpisodeStrip(-1)} aria-label="上一组剧集" title="上一组剧集"><ChevronLeft size={18} /></button>
-                  <input
-                    ref={episodeStripSliderRef}
-                    className="modern-range episode-strip-slider"
-                    type="range"
-                    min="0"
-                    max="100"
-                    defaultValue="0"
-                    onInput={(event) => seekEpisodeStrip(Number(event.currentTarget.value))}
-                    disabled={!episodeStripScrollable}
-                    aria-label="拖动定位剧集"
-                    title="拖动定位剧集"
-                  />
-                  <button type="button" className="detail-episode-tool-btn" onClick={() => scrollEpisodeStrip(1)} aria-label="下一组剧集" title="下一组剧集"><ChevronRight size={18} /></button>
-                  <button type="button" className="detail-episode-tool-btn" onClick={() => setEpisodeQuickGridOpen(true)} aria-label="快速选集" title="快速选集"><Grid2X2 size={17} /></button>
-                </div>
-              ) : (
-                <>
-                  <button type="button" className={`detail-episode-tool-btn detail-episode-view-btn ${effectiveEpisodeView === 'list' ? 'active' : ''}`} onClick={() => setManualEpisodeView('list')} aria-label="列表视图" title="列表视图"><List size={17} /></button>
-                  <button type="button" className={`detail-episode-tool-btn detail-episode-view-btn ${effectiveEpisodeView === 'grid' ? 'active' : ''}`} onClick={() => setManualEpisodeView('grid')} aria-label="网格视图" title="网格视图"><Grid2X2 size={17} /></button>
-                </>
-              )}
+              <div className="detail-episode-pager" aria-label="剧集翻页">
+                <button type="button" className="detail-episode-tool-btn" onClick={() => scrollEpisodeStrip(-1)} aria-label="上一组剧集" title="上一组剧集"><ChevronLeft size={18} /></button>
+                <input
+                  ref={episodeStripSliderRef}
+                  className="modern-range episode-strip-slider"
+                  type="range"
+                  min="0"
+                  max="100"
+                  defaultValue="0"
+                  onInput={(event) => seekEpisodeStrip(Number(event.currentTarget.value))}
+                  disabled={!episodeStripScrollable}
+                  aria-label="拖动定位剧集"
+                  title="拖动定位剧集"
+                />
+                <button type="button" className="detail-episode-tool-btn" onClick={() => scrollEpisodeStrip(1)} aria-label="下一组剧集" title="下一组剧集"><ChevronRight size={18} /></button>
+                <button type="button" className="detail-episode-tool-btn" onClick={() => setEpisodeQuickGridOpen(true)} aria-label="快速选集" title="快速选集"><Grid2X2 size={17} /></button>
+              </div>
             </div>
           </div>
           {bangumiPanelOpen && bangumiMatch && bangumiMatchSeasonNumber != null && bangumiMatchSeasonNumber !== (selectedSeasonNumber ?? null) && (
@@ -1678,14 +1658,17 @@ export default function WorkDetailPage() {
           )}
           <div
             ref={episodeStripRef}
-            className={`detail-episode-grid ${hasEpisodeThumbnails ? 'thumbnail-strip' : effectiveEpisodeView === 'grid' ? 'grid-view' : 'list-view'}`}
+            className="detail-episode-grid thumbnail-strip"
           >
             {episodes.map((episode: any, episodeIndex: number) => {
               const rawEpisodeTitle = episode.title || episodeFallbackTitle(episode);
-              const episodeTitle = cleanDisplayTitle(rawEpisodeTitle, episodeFallbackTitle(episode));
+              const cleanedTitle = cleanDisplayTitle(rawEpisodeTitle, episodeFallbackTitle(episode));
+              const episodeTitle = isSpecialEpisode(episode) ? stripSpecialEpisodeCode(cleanedTitle) : cleanedTitle;
               const isWatched = watchedEpisodeIds.has(episode.episode_id);
               const isCurrent = continueTarget?.episode_id === episode.episode_id;
-              const previewImage = episode.thumb_path ? assetUrl(episode.thumb_path, 'episode') : fanartImage;
+              // 缺图时保持占位：把整页背景图复制给每集卡片会让几十个
+              // 并发请求同时拉取同一张原图，是首屏卡顿的主要放大器。
+              const previewImage = episode.thumb_path ? assetUrl(episode.thumb_path, 'episode') : '';
               return (
                 <div
                   key={episode.episode_id}
@@ -1707,15 +1690,10 @@ export default function WorkDetailPage() {
                           fetchPriority={episodeIndex < 2 ? 'high' : 'auto'}
                           revealOnLoad
                           onError={(event) => {
-                            if (fanartImage && event.currentTarget.src !== fanartImage) {
-                              event.currentTarget.onerror = null;
-                              event.currentTarget.src = fanartImage;
-                            } else {
-                              event.currentTarget.style.display = 'none';
-                            }
+                            event.currentTarget.style.display = 'none';
                           }}
                         />
-                      ) : <span><Play size={22} /></span>}
+                      ) : <span className="episode-thumb-placeholder"><Play size={22} /></span>}
                     </span>
                     <span className="episode-card-copy">
                     <span className="text-base font-semibold tabular-nums" style={{ color: 'var(--text-muted)' }}>
@@ -1804,7 +1782,7 @@ export default function WorkDetailPage() {
                   onClick={() => revealEpisodeInStrip(index)}
                   title={cleanDisplayTitle(episode.title || '', episodeFallbackTitle(episode))}
                 >
-                  {episodeNumberLabel(episode)}
+                  {episodeQuickLabel(episode)}
                 </button>
               ))}
             </div>
@@ -2006,7 +1984,7 @@ function manualEpisodeStatusLabel(status: ManualEpisodePreviewItem['status']) {
 }
 
 function formatEpisodeCode(episode: any) {
-  if (isSpecialEpisode(episode)) return episodeNumberLabel(episode);
+  if (isSpecialEpisode(episode)) return '';
   const season = Math.max(0, Number(episode?.season_number || 0));
   const number = Math.max(0, Number(episode?.episode_number || 0));
   return `S${String(season).padStart(2, '0')}E${String(number).padStart(2, '0')}`;
@@ -2019,23 +1997,28 @@ function isSpecialEpisode(episode: any) {
 }
 
 function episodeNumberLabel(episode: any) {
-  if (isSpecialEpisode(episode)) {
-    const number = Math.max(0, Number(episode?.special_number ?? episode?.episode_number ?? 0));
-    return `SP${String(number).padStart(2, '0')}`;
-  }
+  if (isSpecialEpisode(episode)) return '';
   return String(Math.max(0, Number(episode?.episode_number || 0))).padStart(2, '0');
 }
 
 function episodeAriaNumberLabel(episode: any) {
   return isSpecialEpisode(episode)
-    ? episodeNumberLabel(episode)
+    ? episodeFallbackTitle(episode)
     : `第 ${episode?.episode_number ?? '?'} 集`;
 }
 
 function episodeFallbackTitle(episode: any) {
-  return isSpecialEpisode(episode)
-    ? `特别篇 ${episodeNumberLabel(episode)}`
-    : `第 ${episode?.episode_number ?? '?'} 集`;
+  if (!isSpecialEpisode(episode)) return `第 ${episode?.episode_number ?? '?'} 集`;
+  const number = Math.max(0, Number(episode?.special_number ?? episode?.episode_number ?? 0));
+  return number > 0 ? `特别篇 ${number}` : '特别篇';
+}
+
+function episodeQuickLabel(episode: any) {
+  if (!isSpecialEpisode(episode)) return episodeNumberLabel(episode);
+  const title = stripSpecialEpisodeCode(
+    cleanDisplayTitle(episode?.title || '', episodeFallbackTitle(episode)),
+  );
+  return title || episodeFallbackTitle(episode);
 }
 
 function providerDisplayLabel(provider?: string): string {
@@ -2130,7 +2113,7 @@ function findSelectedSeason(work: any, selectedSeasonKey: string, selectedSeason
 }
 
 function resolveInitialSeason(work: any, workId: string) {
-  const seasons = work?.seasons || [];
+  const seasons = orderDetailSeasons(work?.seasons || []);
   if (!seasons.length) return null;
   const remembered = useUiStore.getState().selectedSeasonByWork?.[workId];
   if (remembered?.seasonKey) {
@@ -2142,6 +2125,17 @@ function resolveInitialSeason(work: any, workId: string) {
     if (byNumber) return byNumber;
   }
   return seasons[0];
+}
+
+function orderDetailSeasons(seasons: any[]) {
+  return [...seasons].sort((left, right) => {
+    const leftSpecial = normalizedGroupType(left?.group_type) === 'special' || Number(left?.season_number ?? 0) === 0;
+    const rightSpecial = normalizedGroupType(right?.group_type) === 'special' || Number(right?.season_number ?? 0) === 0;
+    if (leftSpecial !== rightSpecial) return leftSpecial ? 1 : -1;
+    const seasonDiff = Number(left?.season_number ?? 0) - Number(right?.season_number ?? 0);
+    if (seasonDiff !== 0) return seasonDiff;
+    return seasonOptionKey(left).localeCompare(seasonOptionKey(right));
+  });
 }
 
 function bangumiSubjectTypes(showType: string) {

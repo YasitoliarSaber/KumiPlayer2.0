@@ -15,6 +15,8 @@ from app.media_v4.persistence.schema_v4 import (
     create_v9_structures,
     create_v10_structures,
     create_v13_structures,
+    create_v15_structures,
+    create_v16_structures,
     migrate_schema_v4_to_v5,
     migrate_schema_v5_to_v6,
     migrate_schema_v6_to_v7,
@@ -25,6 +27,8 @@ from app.media_v4.persistence.schema_v4 import (
     migrate_schema_v11_to_v12,
     migrate_schema_v12_to_v13,
     migrate_schema_v13_to_v14,
+    migrate_schema_v14_to_v15,
+    migrate_schema_v15_to_v16,
 )
 
 
@@ -160,6 +164,7 @@ class V4Database:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     migrate_schema_v13_to_v14(conn)
+                    migrate_schema_v14_to_v15(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -171,11 +176,44 @@ class V4Database:
                     conn.rollback()
                     raise
                 version = self.CURRENT_SCHEMA_VERSION
+            if version == 14 and self._has_user_tables(conn):
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    migrate_schema_v14_to_v15(conn)
+                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    conn.commit()
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    raise V4ResetRequiredError(
+                        "数据库声明为 V4 但物理结构不完整，需要一次性重置；" + str(exc)
+                    ) from exc
+                except Exception:
+                    conn.rollback()
+                    raise
+                version = self.CURRENT_SCHEMA_VERSION
+            if version == 15 and self._has_user_tables(conn):
+                # v15 → v16：仅为既有 jobs outbox 补齐可终止与心跳字段。
+                # 这不是旧媒体库迁移，不能因为版本号落后一位而误触发重置。
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    migrate_schema_v15_to_v16(conn)
+                    conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
+                    conn.commit()
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    raise V4ResetRequiredError(
+                        "数据库声明为 V4 但任务结构不完整，需要一次性重置；" + str(exc)
+                    ) from exc
+                except Exception:
+                    conn.rollback()
+                    raise
+                version = self.CURRENT_SCHEMA_VERSION
             if version == 12 and self._has_user_tables(conn):
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     migrate_schema_v12_to_v13(conn)
                     migrate_schema_v13_to_v14(conn)
+                    migrate_schema_v14_to_v15(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -194,6 +232,7 @@ class V4Database:
                     migrate_schema_v11_to_v12(conn)
                     migrate_schema_v12_to_v13(conn)
                     migrate_schema_v13_to_v14(conn)
+                    migrate_schema_v14_to_v15(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -213,6 +252,7 @@ class V4Database:
                     migrate_schema_v11_to_v12(conn)
                     migrate_schema_v12_to_v13(conn)
                     migrate_schema_v13_to_v14(conn)
+                    migrate_schema_v14_to_v15(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -233,6 +273,7 @@ class V4Database:
                     migrate_schema_v11_to_v12(conn)
                     migrate_schema_v12_to_v13(conn)
                     migrate_schema_v13_to_v14(conn)
+                    migrate_schema_v14_to_v15(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -254,6 +295,7 @@ class V4Database:
                     migrate_schema_v11_to_v12(conn)
                     migrate_schema_v12_to_v13(conn)
                     migrate_schema_v13_to_v14(conn)
+                    migrate_schema_v14_to_v15(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -276,6 +318,7 @@ class V4Database:
                     migrate_schema_v11_to_v12(conn)
                     migrate_schema_v12_to_v13(conn)
                     migrate_schema_v13_to_v14(conn)
+                    migrate_schema_v14_to_v15(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -299,6 +342,7 @@ class V4Database:
                     migrate_schema_v11_to_v12(conn)
                     migrate_schema_v12_to_v13(conn)
                     migrate_schema_v13_to_v14(conn)
+                    migrate_schema_v14_to_v15(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -323,6 +367,7 @@ class V4Database:
                     migrate_schema_v11_to_v12(conn)
                     migrate_schema_v12_to_v13(conn)
                     migrate_schema_v13_to_v14(conn)
+                    migrate_schema_v14_to_v15(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -348,6 +393,7 @@ class V4Database:
                     migrate_schema_v11_to_v12(conn)
                     migrate_schema_v12_to_v13(conn)
                     migrate_schema_v13_to_v14(conn)
+                    migrate_schema_v14_to_v15(conn)
                     conn.execute(f"PRAGMA user_version = {self.CURRENT_SCHEMA_VERSION}")
                     conn.commit()
                 except sqlite3.OperationalError as exc:
@@ -365,6 +411,20 @@ class V4Database:
                     "V4 不执行旧媒体数据迁移"
                 )
             if version == self.CURRENT_SCHEMA_VERSION and self._has_user_tables(conn):
+                # v15 各条历史迁移链会先收口到当时的完整结构；v16 仅为
+                # outbox 追加可终止/心跳列，迁移幂等且不触碰媒体事实。
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    migrate_schema_v15_to_v16(conn)
+                    conn.commit()
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    raise V4ResetRequiredError(
+                        "数据库声明为 V4 但任务结构不完整，需要一次性重置；" + str(exc)
+                    ) from exc
+                except Exception:
+                    conn.rollback()
+                    raise
                 self._validate_physical_schema(conn)
                 self._reconcile_source_root_activity(conn)
                 return
@@ -449,6 +509,8 @@ class V4Database:
             create_v9_structures(expected)
             create_v10_structures(expected)
             create_v13_structures(expected)
+            create_v15_structures(expected)
+            create_v16_structures(expected)
             for table in sorted(self.REQUIRED_TABLES):
                 actual_cols = self._table_contract(conn, table)
                 expected_cols = self._table_contract(expected, table)

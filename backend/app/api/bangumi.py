@@ -332,11 +332,11 @@ def _season_key(season_number: int | None) -> int:
     return int(season_number or 0)
 
 
-def _ensure_work_and_season(work_id: str, season_number: int | None) -> tuple[dict, int]:
+def _ensure_work_and_season(work_id: str, season_number: int | None, *, database=None) -> tuple[dict, int]:
     """只允许活动 V4 Work/Season 使用 Bangumi；绝不回退 Legacy 媒体库。"""
 
     requested_season = _season_key(season_number)
-    with get_database().connect() as conn:
+    with (database or get_database()).connect() as conn:
         work = conn.execute(
             """
             SELECT w.work_id, w.work_type
@@ -361,13 +361,13 @@ def _ensure_work_and_season(work_id: str, season_number: int | None) -> tuple[di
     return dict(work), requested_season
 
 
-def _local_episodes(work_id: str, season_number: int | None) -> list[dict]:
+def _local_episodes(work_id: str, season_number: int | None, *, database=None) -> list[dict]:
     clauses = ["e.work_id = ?", "e.episode_kind != 'auxiliary'"]
     params: list[object] = [work_id]
     if _season_key(season_number):
         clauses.append("s.local_season_number = ?")
         params.append(_season_key(season_number))
-    with get_database().connect() as conn:
+    with (database or get_database()).connect() as conn:
         rows = conn.execute(
             """
             SELECT e.episode_id, e.local_episode_number, e.display_title,
@@ -397,8 +397,8 @@ def _match_payload(row: dict) -> dict:
     }
 
 
-def _get_match(work_id: str, season_number: int | None) -> dict | None:
-    with get_database().connect() as conn:
+def _get_match(work_id: str, season_number: int | None, *, database=None) -> dict | None:
+    with (database or get_database()).connect() as conn:
         row = conn.execute(
             "SELECT * FROM bangumi_matches WHERE work_id = ? AND season_number = ?",
             (work_id, _season_key(season_number)),
@@ -423,11 +423,18 @@ def _remote_episode_numbers(client: BangumiClient, subject_id: int) -> dict[int,
     return result
 
 
-def _episode_map_for_match(work_id: str, season_number: int | None, client: BangumiClient, subject_id: int) -> dict[str, int]:
+def _episode_map_for_match(
+    work_id: str,
+    season_number: int | None,
+    client: BangumiClient,
+    subject_id: int,
+    *,
+    database=None,
+) -> dict[str, int]:
     remote_numbers = _remote_episode_numbers(client, subject_id)
     return {
         str(item["episode_id"]): remote_numbers[int(item["local_episode_number"])]
-        for item in _local_episodes(work_id, season_number)
+        for item in _local_episodes(work_id, season_number, database=database)
         if item.get("local_episode_number") is not None
         and int(item["local_episode_number"]) in remote_numbers
     }
@@ -440,9 +447,11 @@ def _save_match(
     subject_name: str,
     subject_name_cn: str,
     episode_map: dict[str, int],
+    *,
+    database=None,
 ) -> dict:
     now = _now_iso()
-    with get_database().connect() as conn:
+    with (database or get_database()).connect() as conn:
         conn.execute(
             """
             INSERT INTO bangumi_matches(
@@ -567,8 +576,16 @@ def get_subject_collection(work_id: str, season_number: int | None = None):
     }
 
 
-def _record_episode_sync(episode_id: str, subject_id: int, bangumi_episode_id: int, *, status: str, error: str = "") -> None:
-    with get_database().connect() as conn:
+def _record_episode_sync(
+    episode_id: str,
+    subject_id: int,
+    bangumi_episode_id: int,
+    *,
+    status: str,
+    error: str = "",
+    database=None,
+) -> None:
+    with (database or get_database()).connect() as conn:
         conn.execute(
             """
             INSERT INTO bangumi_episode_sync(
@@ -584,8 +601,17 @@ def _record_episode_sync(episode_id: str, subject_id: int, bangumi_episode_id: i
         )
 
 
-def _refresh_episode_map(work_id: str, season_number: int | None, match: dict, client: BangumiClient) -> dict:
-    episode_map = _episode_map_for_match(work_id, season_number, client, int(match["subject_id"]))
+def _refresh_episode_map(
+    work_id: str,
+    season_number: int | None,
+    match: dict,
+    client: BangumiClient,
+    *,
+    database=None,
+) -> dict:
+    episode_map = _episode_map_for_match(
+        work_id, season_number, client, int(match["subject_id"]), database=database,
+    )
     return _save_match(
         work_id,
         season_number,
@@ -593,16 +619,25 @@ def _refresh_episode_map(work_id: str, season_number: int | None, match: dict, c
         str(match.get("subject_name") or ""),
         str(match.get("subject_name_cn") or ""),
         episode_map,
+        database=database,
     )
 
 
 @router.put("/episodes/{episode_id}/watched")
 def mark_episode_watched(episode_id: str, req: EpisodeWatchedRequest):
-    _ensure_work_and_season(req.work_id, req.season_number)
-    episode = next((item for item in _local_episodes(req.work_id, req.season_number) if item["episode_id"] == episode_id), None)
+    return sync_completed_episode(get_database(), episode_id, req)
+
+
+def sync_completed_episode(database, episode_id: str, req: EpisodeWatchedRequest):
+    """同步一个播放完成事件到 Bangumi，显式使用调用方的 V4 数据库。"""
+
+    _ensure_work_and_season(req.work_id, req.season_number, database=database)
+    episode = next((item for item in _local_episodes(
+        req.work_id, req.season_number, database=database,
+    ) if item["episode_id"] == episode_id), None)
     if episode is None:
         raise HTTPException(status_code=404, detail="剧集不属于当前作品或季度")
-    match = _get_match(req.work_id, req.season_number)
+    match = _get_match(req.work_id, req.season_number, database=database)
     if match is None:
         raise HTTPException(status_code=409, detail="请先确认 Bangumi 条目匹配")
     match_payload = _match_payload(match)
@@ -610,15 +645,30 @@ def mark_episode_watched(episode_id: str, req: EpisodeWatchedRequest):
     client = BangumiClient(timeout=10.0)
     try:
         if not bangumi_episode_id:
-            match_payload = _match_payload(_refresh_episode_map(req.work_id, req.season_number, match, client))
+            match_payload = _match_payload(_refresh_episode_map(
+                req.work_id, req.season_number, match, client, database=database,
+            ))
             bangumi_episode_id = match_payload["episode_map"].get(episode_id)
         if not bangumi_episode_id:
             raise HTTPException(status_code=409, detail="Bangumi 条目中未找到对应剧集")
         payload = client.set_episode_collection(int(bangumi_episode_id), req.type)
     except BangumiError as exc:
-        _record_episode_sync(episode_id, int(match["subject_id"]), int(bangumi_episode_id or 0), status="failed", error=str(exc))
+        _record_episode_sync(
+            episode_id,
+            int(match["subject_id"]),
+            int(bangumi_episode_id or 0),
+            status="failed",
+            error=str(exc),
+            database=database,
+        )
         raise _http_error(exc) from exc
-    _record_episode_sync(episode_id, int(match["subject_id"]), int(bangumi_episode_id), status="succeeded")
+    _record_episode_sync(
+        episode_id,
+        int(match["subject_id"]),
+        int(bangumi_episode_id),
+        status="succeeded",
+        database=database,
+    )
     return {
         "ok": True,
         "work_id": req.work_id,

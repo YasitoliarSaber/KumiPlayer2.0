@@ -141,6 +141,63 @@ def test_plain_series_regular_seasons_do_not_require_a_specials_folder_to_merge(
     } == {1, 2, 3}
 
 
+def test_release_group_subdirectories_keep_main_seasons_together_without_absorbing_spinoff_or_movie():
+    """真实发布组目录必须保持主系列 S1/S2/SP 的同一 Work 身份。"""
+
+    graph = _resolve(
+        [
+            "[VCB-Studio] Yuru Camp/[Airota&Nekomoe kissaten&VCB-Studio] Yuru Camp [Ma10p_1080p]/[Airota&Nekomoe kissaten&VCB-Studio] Yuru Camp [01].mkv",
+            "[VCB-Studio] Yuru Camp/[Airota&Nekomoe kissaten&VCB-Studio] Yuru Camp [Ma10p_1080p]/SPs/[Airota&Nekomoe kissaten&VCB-Studio] Yuru Camp [SP08][Making Documentary][Ma10p_1080p].mkv",
+            "[VCB-Studio] Yuru Camp/[Airota&Nekomoe kissaten&VCB-Studio] Yuru Camp Season 2 [Ma10p_1080p]/[Airota&Nekomoe kissaten&VCB-Studio] Yuru Camp Season 2 [01].mkv",
+            "[VCB-Studio] Yuru Camp/[Airota&Nekomoe kissaten&VCB-Studio] Heya Camp [Ma10p_1080p]/[Airota&Nekomoe kissaten&VCB-Studio] Heya Camp [01].mkv",
+            "[VCB-Studio] Yuru Camp/[Airota&Nekomoe kissaten&VCB-Studio] Yuru Camp Movie [Ma10p_1080p]/[Airota&Nekomoe kissaten&VCB-Studio] Yuru Camp Movie.mkv",
+            "[VCB-Studio] Yuru Camp/[Airota&Nekomoe kissaten&VCB-Studio] Yuru Camp Movie [Ma10p_2160p]/[Airota&Nekomoe kissaten&VCB-Studio] Yuru Camp Movie.2160p.mkv",
+        ]
+    )
+
+    assert {(work.preferred_title, work.media_type) for work in graph.works} == {
+        ("Yuru Camp", "tv"),
+        ("Heya Camp", "tv"),
+        ("Yuru Camp Movie", "movie"),
+    }
+    main_work = next(work for work in graph.works if work.preferred_title == "Yuru Camp")
+    assert {
+        episode.local_season_number
+        for episode in graph.episodes
+        if episode.work_key == main_work.work_key
+    } == {0, 1, 2}
+    movie_work = next(work for work in graph.works if work.preferred_title == "Yuru Camp Movie")
+    movie_asset = next(asset for asset in graph.work_assets if asset.work_key == movie_work.work_key)
+    assert movie_asset.asset_evidence_ids == (
+        "ev-hierarchy-4",
+        "ev-hierarchy-5",
+    )
+
+
+def test_title_number_after_episode_token_never_expands_into_ghost_episodes():
+    graph = _resolve(
+        ["Show/Season 1/Show - S01E15 - 200万年的结晶.mkv"]
+    )
+
+    assert [episode.local_episode_number for episode in graph.episodes] == [15]
+    assert len(graph.episodes[0].asset_evidence_ids) == 1
+
+
+def test_compound_special_tokens_stay_distinct_and_duplicate_versions_share_one_episode():
+    graph = _resolve(
+        [
+            "动画/Show.S1-S2/1.Show.[S1]/SPs/Show [SP01_01][1080p].mkv",
+            "动画/Show.S1-S2/1.Show.[S1]/SPs/Show [SP01_02][1080p].mkv",
+            "动画/Show.S1-S2/2.Show.[S2]/SPs/Show 2 [SP01_01][1080p].mkv",
+            "动画/Show.S1-S2/2.Show.[S2]/SPs/Show 2 [SP01_01][2160p].mkv",
+        ]
+    )
+
+    specials = [episode for episode in graph.episodes if episode.episode_kind == "special"]
+    assert len(specials) == 3
+    assert sorted(len(episode.asset_evidence_ids) for episode in specials) == [1, 1, 2]
+
+
 def test_category_prefix_preserves_work_container_year_and_special_membership():
     graph = _resolve(
         [
@@ -256,6 +313,8 @@ def test_v4_parser_does_not_consume_post_confirmation_verified_title_rules(monke
     parser = V4Parser()
     entries = [(item, parser.parse(item)) for item in evidence]
     graph = MediaResolver().resolve(entries)
+    # 该合同只约束纯解析器；候选阶段可以读取独立维护的已核验身份事实。
+    monkeypatch.undo()
 
     def search(work_key, queries, _year, media_type):
         rows = []
@@ -331,3 +390,134 @@ def test_batch_parser_rebases_continuous_absolute_numbers_in_later_season():
 
     assert [facts.season_candidate for _evidence, facts in normalized] == [2, 2, 2]
     assert [facts.episode_candidate for _evidence, facts in normalized] == [1, 2, 3]
+
+
+def test_batch_parser_prefers_explicit_season_directory_over_stale_filename_season():
+    """季度目录是批次级结构证据，优先于沿用上一季编号的文件名。"""
+
+    from app.media_v4.parsing.parser import normalize_batch_parsed_facts
+
+    parser = V4Parser()
+    entries = []
+    for index, number in enumerate(range(12, 25)):
+        evidence = _evidence(
+            index,
+            f"动画/我推的孩子/我推的孩子.[S2].2024/我推的孩子.S01E{number:02d}.mkv",
+        )
+        entries.append((evidence, parser.parse(evidence)))
+
+    normalized = normalize_batch_parsed_facts(entries)
+
+    assert [facts.season_candidate for _evidence, facts in normalized] == [2] * 13
+    assert [facts.episode_candidate for _evidence, facts in normalized] == list(range(1, 14))
+    assert all(facts.absolute_episode_candidate == number for number, (_evidence, facts) in zip(range(12, 25), normalized, strict=True))
+
+
+def test_verified_absolute_release_is_mapped_to_provider_season_without_guessing():
+    """无 S2 标记的绝对编号发布包，只能由已核验身份规则自动换季。"""
+
+    from app.media_v4.parsing.parser import normalize_batch_parsed_facts
+
+    parser = V4Parser()
+    entries = []
+    for index, number in enumerate(range(13, 25)):
+        evidence = _evidence(
+            index,
+            "动画/[Nekomoe kissaten&LoliHouse] Dandadan [13-24][WebRip 1080p]/"
+            f"[Nekomoe kissaten&LoliHouse] Dandadan - {number:02d} [WebRip 1080p].mkv",
+        )
+        entries.append((evidence, parser.parse(evidence)))
+
+    normalized = normalize_batch_parsed_facts(entries)
+
+    assert [facts.season_candidate for _evidence, facts in normalized] == [2] * 12
+    assert [facts.episode_candidate for _evidence, facts in normalized] == list(range(1, 13))
+    assert [facts.absolute_episode_candidate for _evidence, facts in normalized] == list(range(13, 25))
+
+
+def test_verified_kaguya_episodic_movie_stays_playable_as_series_specials():
+    """四段流媒体版不能冒充第一季，也不能压成一个电影 Asset。"""
+
+    from app.media_v4.parsing.parser import normalize_batch_parsed_facts
+
+    parser = V4Parser()
+    entries = []
+    for index, number in enumerate(range(1, 5)):
+        evidence = _evidence(
+            index,
+            "动画/辉夜大小姐想让我告白.S1-S4+剧场版（将更新）/"
+            "4.辉夜大小姐想让我告白：初吻不会结束.2022/"
+            f"Kaguya-sama wa Kokurasetai - First Kiss wa Owaranai - [{number:02d}].mkv",
+        )
+        entries.append((evidence, parser.parse(evidence)))
+
+    normalized = normalize_batch_parsed_facts(entries)
+    graph = MediaResolver().resolve(normalized)
+
+    assert all(facts.group_type == "special" for _evidence, facts in normalized)
+    assert all(facts.season_candidate == 0 for _evidence, facts in normalized)
+    assert len(graph.works) == 1
+    assert len(graph.episodes) == 4
+    assert all(episode.episode_kind == "special" for episode in graph.episodes)
+    assert len({episode.special_number for episode in graph.episodes}) == 4
+
+
+def test_verified_kaguya_stairway_cross_language_release_maps_to_explicit_fourth_season():
+    """无 S04 的英文发布包应与显式 S04 中文目录合并为同一组 Episode Asset。"""
+
+    from app.media_v4.parsing.parser import normalize_batch_parsed_facts
+    from app.media_v4.resolution.candidates import merge_graph, plan_work_candidates
+
+    evidence = [
+        _evidence(
+            0,
+            "动画/辉夜大小姐想让我告白.S1-S4+剧场版（将更新）/"
+            "5.辉夜大小姐想让我告白：通往大人的阶梯.[S4].2026/"
+            "辉夜大小姐想让我告白 通往大人的阶梯.2025.S04E01.mkv",
+        ),
+        _evidence(
+            1,
+            "动画/[LoliHouse] Kaguya-sama wa Kokurasetai - Otona e no Kaidan [WebRip]/"
+            "[LoliHouse] Kaguya-sama wa Kokurasetai - Otona e no Kaidan - 01.mkv",
+        ),
+    ]
+    parser = V4Parser()
+    entries = normalize_batch_parsed_facts([(item, parser.parse(item)) for item in evidence])
+    graph = MediaResolver().resolve(entries)
+
+    _candidates, merge_map, issues = plan_work_candidates(graph, entries, lambda *_args: [])
+    merged = merge_graph(graph, merge_map)
+
+    assert issues == []
+    assert len(merged.works) == 1
+    assert len(merged.episodes) == 1
+    assert merged.episodes[0].local_season_number == 4
+    assert merged.episodes[0].local_episode_number == 1
+    assert set(merged.episodes[0].asset_evidence_ids) == {item.evidence_id for item in evidence}
+
+
+def test_verified_cross_language_identity_merges_duplicate_episode_assets():
+    """同一 Provider 作品的中英文发布包应是一张卡、一个 Episode、多个 Asset。"""
+
+    from app.media_v4.parsing.parser import normalize_batch_parsed_facts
+    from app.media_v4.resolution.candidates import merge_graph, plan_work_candidates
+
+    evidence = [
+        _evidence(0, "动画/咒术回战/咒术回战.S01E01.mkv"),
+        _evidence(
+            1,
+            "动画/[BeanSub&FZSD][Jujutsu_Kaisen][BDRip][01-47+MOVIE]/"
+            "Jujutsu_Kaisen.S01E01.mkv",
+        ),
+    ]
+    parser = V4Parser()
+    entries = normalize_batch_parsed_facts([(item, parser.parse(item)) for item in evidence])
+    graph = MediaResolver().resolve(entries)
+
+    _candidates, merge_map, issues = plan_work_candidates(graph, entries, lambda *_args: [])
+    merged = merge_graph(graph, merge_map)
+
+    assert issues == []
+    assert len(merged.works) == 1
+    assert len(merged.episodes) == 1
+    assert set(merged.episodes[0].asset_evidence_ids) == {item.evidence_id for item in evidence}

@@ -11,6 +11,7 @@ confirmed revision 仍是唯一执行输入。
 
 from __future__ import annotations
 
+import inspect
 import threading
 from collections.abc import Callable
 from dataclasses import replace
@@ -20,6 +21,7 @@ from app.core.paths import get_data_dir
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.persistence.repositories import V4Repository
 from app.media_v4.sources.incremental import stage_scan_state
+from app.media_v4.sources.scanner import SourceScanCancelled
 
 _cancel_flags: dict[str, threading.Event] = {}
 _threads: dict[str, threading.Thread] = {}
@@ -29,6 +31,118 @@ SCAN_KINDS = {"full", "incremental"}
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _accepts_should_cancel(fn: Callable) -> bool:
+    return _accepts_parameter(fn, "should_cancel")
+
+
+def _accepts_parameter(fn: Callable, name: str) -> bool:
+    try:
+        parameters = inspect.signature(fn).parameters
+        return name in parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+_STAGE_ORDER = {
+    "queued": 0,
+    "reading_source": 1,
+    # recognizing 是 v14 及更早扫描行的兼容读数；新任务使用更细的
+    # parsing/normalizing 阶段，但旧任务不能因为新增列而倒退或改名。
+    "recognizing": 2,
+    "parsing": 3,
+    "normalizing": 4,
+    "preparing_preview": 5,
+    "ready": 6,
+    "failed": 6,
+    "cancelled": 6,
+}
+
+_STAGE_LABELS = {
+    "queued": "准备读取媒体来源",
+    "reading_source": "读取媒体来源",
+    "recognizing": "离线识别与整理",
+    "parsing": "解析媒体条目",
+    "normalizing": "整理识别结果",
+    "preparing_preview": "生成识别预览",
+    "ready": "识别结果已就绪",
+    "failed": "扫描失败",
+    "cancelled": "扫描已取消",
+}
+
+
+def _scan_row(database: V4Database, scan_id: str):
+    with database.connect() as conn:
+        return conn.execute(
+            "SELECT stage, processed_count, total_count, cancel_requested "
+            "FROM source_scans WHERE scan_id = ?",
+            (scan_id,),
+        ).fetchone()
+
+
+def _persisted_cancel_requested(database: V4Database, scan_id: str) -> bool:
+    row = _scan_row(database, scan_id)
+    return bool(row and (int(row["cancel_requested"] or 0) or row["stage"] == "cancelled"))
+
+
+def _update_scan_progress(
+    database: V4Database,
+    scan_id: str,
+    *,
+    stage: str | None = None,
+    processed_count: int | None = None,
+    total_count: int | None = None,
+) -> None:
+    """按阶段语义写入扫描进度；数据库是刷新/离开页面后的唯一事实。
+
+    计数规则（11.19.5）：阶段前进时重置为新阶段传入值（未知总量用 0，
+    不能沿用上一阶段 total）；相同阶段才使用 max 保持单调；旧阶段回调
+    整条忽略，不只保留 stage 却采纳旧计数；终态（ready/failed/cancelled）
+    忽略运行阶段回调。
+    """
+
+    if stage is not None and stage not in _STAGE_ORDER:
+        raise ValueError(f"不支持的扫描阶段: {stage}")
+    with database.connect() as conn:
+        row = conn.execute(
+            "SELECT stage, processed_count, total_count, status FROM source_scans WHERE scan_id = ?",
+            (scan_id,),
+        ).fetchone()
+        if row is None:
+            return
+        current_stage = str(row["stage"] or "queued")
+        current_processed = int(row["processed_count"] or 0)
+        current_total = int(row["total_count"] or 0)
+        if current_stage in {"ready", "failed", "cancelled"}:
+            return
+        incoming_stage = stage or current_stage
+        if _STAGE_ORDER.get(incoming_stage, 0) < _STAGE_ORDER.get(current_stage, 0):
+            return
+        if incoming_stage != current_stage:
+            next_processed = max(0, int(processed_count or 0))
+            next_total = max(next_processed, int(total_count or 0))
+        else:
+            next_processed = max(current_processed, int(processed_count or 0))
+            next_total = max(current_total, int(total_count or 0), next_processed)
+        conn.execute(
+            "UPDATE source_scans SET stage = ?, processed_count = ?, total_count = ?, "
+            "heartbeat_at = ? WHERE scan_id = ?",
+            (incoming_stage, next_processed, next_total, _now(), scan_id),
+        )
+
+
+def _scan_evidence_count(database: V4Database, scan_id: str) -> int:
+    with database.connect() as conn:
+        return int(
+            conn.execute(
+                "SELECT COUNT(*) FROM source_evidence WHERE scan_id = ?",
+                (scan_id,),
+            ).fetchone()[0]
+        )
 
 
 def _scan_root(database: V4Database, scan_id: str) -> str | None:
@@ -48,7 +162,7 @@ def create_durable_scan(
     kind: str,
     scan_fn: Callable[..., tuple],
     state_fn: Callable[[], dict] | None = None,
-    finalize_fn: Callable[[list], None] | None = None,
+    finalize_fn: Callable[..., None] | None = None,
 ) -> str:
     """登记 durable scan 并启动后台线程执行；立即返回 scan_id。"""
 
@@ -64,8 +178,10 @@ def create_durable_scan(
             if existing["status"] in {"running", "queued"}:
                 raise ValueError("同一扫描任务已在执行中")
             conn.execute(
-                "UPDATE source_scans SET status = 'running', started_at = ?, error = '' WHERE scan_id = ?",
-                (now, scan_id),
+                "UPDATE source_scans SET status = 'running', stage = 'queued', "
+                "processed_count = 0, total_count = 0, heartbeat_at = ?, "
+                "cancel_requested = 0, started_at = ?, finished_at = '', error = '' WHERE scan_id = ?",
+                (now, now, scan_id),
             )
         else:
             generation = conn.execute(
@@ -73,49 +189,111 @@ def create_durable_scan(
                 (root_id,),
             ).fetchone()[0]
             conn.execute(
-                "INSERT INTO source_scans(scan_id, root_id, generation, status, started_at) "
-                "VALUES (?, ?, ?, 'running', ?)",
-                (scan_id, root_id, generation, now),
+                "INSERT INTO source_scans(scan_id, root_id, generation, status, stage, heartbeat_at, started_at) "
+                "VALUES (?, ?, ?, 'running', 'queued', ?, ?)",
+                (scan_id, root_id, generation, now, now),
             )
     _cancel_flags[scan_id] = threading.Event()
 
     def _run() -> None:
         cancel = _cancel_flags[scan_id]
+
+        def cancellation_requested() -> bool:
+            # Event 是当前进程的快速路径；取消接口还会写入数据库，批次
+            # 回调会重新读取持久化标记，避免把取消合同建立在内存状态上。
+            return cancel.is_set()
+
+        def report_progress(*, stage: str = "reading_source", processed_count: int = 0, total_count: int = 0) -> None:
+            if cancel.is_set() or _persisted_cancel_requested(database, scan_id):
+                cancel.set()
+                raise _CancelledScan()
+            _update_scan_progress(
+                database,
+                scan_id,
+                stage=stage,
+                processed_count=processed_count,
+                total_count=total_count,
+            )
+
+        def persist_evidence_batch(batch) -> None:
+            if cancel.is_set() or _persisted_cancel_requested(database, scan_id):
+                cancel.set()
+                raise _CancelledScan()
+            if not batch:
+                return
+            normalized = batch
+            if any(item.scan_id != scan_id for item in batch):
+                normalized = [replace(item, scan_id=scan_id) for item in batch]
+            V4Repository(database).save_scan_evidence_bulk(normalized)
+            _update_scan_progress(
+                database,
+                scan_id,
+                stage="reading_source",
+                processed_count=_scan_evidence_count(database, scan_id),
+            )
+
         try:
-            raw = scan_fn()
+            _update_scan_progress(database, scan_id, stage="reading_source")
+            scan_kwargs = {}
+            if _accepts_parameter(scan_fn, "should_cancel"):
+                scan_kwargs["should_cancel"] = cancellation_requested
+            if _accepts_parameter(scan_fn, "on_evidence_batch"):
+                scan_kwargs["on_evidence_batch"] = persist_evidence_batch
+            if _accepts_parameter(scan_fn, "on_progress"):
+                scan_kwargs["on_progress"] = report_progress
+            raw = scan_fn(**scan_kwargs) if scan_kwargs else scan_fn()
             _scan_id, evidence = raw[0], raw[1]
-            if cancel.is_set():
+            if cancellation_requested() or _persisted_cancel_requested(database, scan_id):
                 raise _CancelledScan()
             # 证据必须挂在 durable scan_id 下，预览/恢复才能按 scan_id 读取。
             if _scan_id != scan_id:
                 evidence = [replace(item, scan_id=scan_id) for item in evidence]
             if state_fn is not None:
                 stage_scan_state(scan_id, state_fn())
-            V4Repository(database).save_scan_evidence_bulk(evidence)
-            if cancel.is_set():
+            # 兼容尚未改成回调式的旧 adapter；已流式发出的批次由 INSERT
+            # OR IGNORE 去重，最终以数据库全集作为 finalizer 输入。
+            persist_evidence_batch(evidence)
+            evidence = V4Repository(database).list_scan_evidence(scan_id)
+            report_progress(
+                stage="parsing" if finalize_fn is not None else "preparing_preview",
+                processed_count=0 if finalize_fn is not None else len(evidence),
+                total_count=len(evidence),
+            )
+            if cancellation_requested() or _persisted_cancel_requested(database, scan_id):
                 raise _CancelledScan()
-            # 识别、候选解析与草稿持久化也是来源任务的一部分。它们可以联网且
-            # 耗时，必须留在后台线程；只有草稿可读取后 SourceScan 才能完成。
+            # 识别与草稿持久化属于来源任务，但必须保持纯离线；在线作品匹配
+            # 只能由确认后的 metadata job 执行。取消合同 B：取消只保留
+            # 不可变审计事实；finalizer 在 create_draft 前有最后一道取消
+            # 检查，草稿一旦开始创建就让扫描自然完成，避免出现
+            # "cancelled 状态却挂着 draft" 的矛盾态。
             if finalize_fn is not None:
-                finalize_fn(evidence)
-            if cancel.is_set():
-                raise _CancelledScan()
+                finalize_kwargs = {}
+                if _accepts_parameter(finalize_fn, "should_cancel"):
+                    finalize_kwargs["should_cancel"] = cancellation_requested
+                if _accepts_parameter(finalize_fn, "on_progress"):
+                    finalize_kwargs["on_progress"] = report_progress
+                finalize_fn(evidence, **finalize_kwargs)
             with database.connect() as conn:
                 conn.execute(
-                    "UPDATE source_scans SET status = 'completed', finished_at = ?, error = '' WHERE scan_id = ?",
-                    (_now(), scan_id),
+                    "UPDATE source_scans SET status = 'completed', stage = 'ready', "
+                    "processed_count = total_count, finished_at = ?, heartbeat_at = ?, "
+                    "cancel_requested = 0, error = '' WHERE scan_id = ?",
+                    (_now(), _now(), scan_id),
                 )
-        except _CancelledScan:
+        except (SourceScanCancelled, _CancelledScan):
             with database.connect() as conn:
                 conn.execute(
-                    "UPDATE source_scans SET status = 'cancelled', finished_at = ?, error = '用户已取消扫描' WHERE scan_id = ?",
-                    (_now(), scan_id),
+                    "UPDATE source_scans SET status = 'cancelled', stage = 'cancelled', "
+                    "cancel_requested = 1, finished_at = ?, heartbeat_at = ?, "
+                    "error = '用户已取消扫描' WHERE scan_id = ?",
+                    (_now(), _now(), scan_id),
                 )
         except Exception as exc:  # noqa: BLE001 - 后台线程必须写明确终态
             with database.connect() as conn:
                 conn.execute(
-                    "UPDATE source_scans SET status = 'failed', finished_at = ?, error = ? WHERE scan_id = ?",
-                    (_now(), str(exc)[:400], scan_id),
+                    "UPDATE source_scans SET status = 'failed', stage = 'failed', "
+                    "finished_at = ?, heartbeat_at = ?, error = ? WHERE scan_id = ?",
+                    (_now(), _now(), str(exc)[:400], scan_id),
                 )
         finally:
             _cancel_flags.pop(scan_id, None)
@@ -139,7 +317,8 @@ def get_durable_scan(
 ) -> dict:
     with database.connect() as conn:
         row = conn.execute(
-            "SELECT scan_id, root_id, status, started_at, finished_at, error "
+            "SELECT scan_id, root_id, status, stage, processed_count, total_count, "
+            "heartbeat_at, cancel_requested, started_at, finished_at, error "
             "FROM source_scans WHERE scan_id = ?",
             (scan_id,),
         ).fetchone()
@@ -147,37 +326,104 @@ def get_durable_scan(
             raise KeyError(scan_id)
         status = str(row["status"])
         entries = []
-        evidence_count = 0
-        if status == "completed":
-            evidence_count = int(conn.execute(
-                "SELECT COUNT(*) FROM source_evidence WHERE scan_id = ?",
+        evidence_count = int(conn.execute(
+            "SELECT COUNT(*) FROM source_evidence WHERE scan_id = ?",
+            (scan_id,),
+        ).fetchone()[0])
+        parsed_count = int(conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM parsed_facts pf
+            JOIN source_evidence se ON se.evidence_id = pf.evidence_id
+            WHERE se.scan_id = ?
+            """,
+            (scan_id,),
+        ).fetchone()[0])
+        if status == "completed" and include_entries:
+            evidence_rows = conn.execute(
+                "SELECT * FROM source_evidence WHERE scan_id = ? ORDER BY source_key",
                 (scan_id,),
-            ).fetchone()[0])
-            if include_entries:
-                entries = [
-                    _evidence_dict(item)
-                    for item in V4Repository(database).list_scan_evidence(scan_id)
-                ]
+            ).fetchall()
+            entries = [
+                _evidence_dict(V4Repository._row_to_source_evidence(item))
+                for item in evidence_rows
+            ]
+
+    stored_stage = str(row["stage"] or "queued")
+    stored_processed = int(row["processed_count"] or 0)
+    stored_total = int(row["total_count"] or 0)
+    if status == "completed":
+        stage = "ready"
+        processed_count = evidence_count
+        total_count = evidence_count
+    elif status == "failed":
+        stage = "failed"
+        processed_count = max(stored_processed, parsed_count)
+        total_count = max(stored_total, evidence_count)
+    elif status == "cancelled":
+        stage = "cancelled"
+        processed_count = max(stored_processed, parsed_count)
+        total_count = max(stored_total, evidence_count)
+    elif stored_stage not in {"", "queued"}:
+        stage = stored_stage
+        processed_count = stored_processed
+        total_count = stored_total
+    elif evidence_count == 0:
+        stage, processed_count, total_count = "reading_source", 0, 0
+    elif parsed_count < evidence_count:
+        # 只有没有 v15 阶段事实的旧扫描才会走这里。保留旧 API 的
+        # recognizing 语义，避免刷新旧任务时把“已有证据、尚未解析”误报
+        # 成新任务的 parsing 阶段。
+        stage, processed_count, total_count = "recognizing", parsed_count, evidence_count
+    else:
+        stage, processed_count, total_count = "preparing_preview", evidence_count, evidence_count
+    stage_label = _STAGE_LABELS.get(stage, "处理中")
+    if status == "cancelling":
+        stage_label = "正在取消扫描"
+    progress = None
+    if total_count > 0:
+        progress = min(1.0, max(0.0, processed_count / total_count))
     return {
         "scan_id": scan_id,
         "root_id": str(row["root_id"]),
         "status": status,
         "started_at": str(row["started_at"] or ""),
         "finished_at": str(row["finished_at"] or ""),
+        "heartbeat_at": str(row["heartbeat_at"] or ""),
+        "cancel_requested": bool(row["cancel_requested"] or 0),
         "error": str(row["error"] or ""),
         "evidence_count": evidence_count,
+        "parsed_count": parsed_count,
+        "stage": stage,
+        "stage_label": stage_label,
+        "processed_count": processed_count,
+        "total_count": total_count,
+        "progress": progress,
         "entries": entries,
     }
 
 
-def cancel_durable_scan(scan_id: str) -> bool:
+def cancel_durable_scan(scan_id: str, *, database: V4Database | None = None) -> bool:
     """请求取消；后台线程在安全点丢弃结果。返回是否已登记。"""
 
     cancel = _cancel_flags.get(scan_id)
-    if cancel is None:
-        return False
-    cancel.set()
-    return True
+    if cancel is not None:
+        cancel.set()
+    if database is not None:
+        with database.connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM source_scans WHERE scan_id = ?",
+                (scan_id,),
+            ).fetchone()
+            if row is None or row["status"] not in {"running", "queued", "cancelling"}:
+                return cancel is not None
+            conn.execute(
+                "UPDATE source_scans SET status = 'cancelling', cancel_requested = 1, "
+                "heartbeat_at = ? WHERE scan_id = ?",
+                (_now(), scan_id),
+            )
+            return True
+    return cancel is not None
 
 
 def _evidence_dict(item) -> dict:

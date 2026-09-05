@@ -60,7 +60,7 @@ _AUXILIARY_PATTERNS = [
     re.compile(r"TV\s*SPOT", re.IGNORECASE),
     re.compile(r"TRAILER", re.IGNORECASE),
     re.compile(r"EYECATCH", re.IGNORECASE),
-    re.compile(r"PREVIEW\s*\d+(?:\.\d+)?", re.IGNORECASE),
+    re.compile(r"(?<![A-Za-z])PREVIEW(?:\s*\d+(?:\.\d+)?)?(?![A-Za-z])", re.IGNORECASE),
     re.compile(r"NON[-\s]?TELOP", re.IGNORECASE),
     re.compile(r"\[PV\d*\]", re.IGNORECASE),
     re.compile(r"(?:^|[^A-Za-z])PV\d+", re.IGNORECASE),
@@ -72,6 +72,16 @@ _AUXILIARY_PATTERNS = [
     re.compile(r"\[MENU\d*\]", re.IGNORECASE),
     re.compile(r"(?:^|[^A-Za-z])MENU\d+", re.IGNORECASE),
     re.compile(r"(?:^|[^A-Za-z0-9])MENU\d*(?:$|[^A-Za-z0-9])", re.IGNORECASE),
+    # 光盘 SPs/Extras 目录经常混放制作素材。文件名的具体语义比父目录
+    # “SPs” 更强：这些条目可以作为附属 Asset 保留，但不能生成 S00。
+    re.compile(r"\b(?:OPED|BGM)\s+RECORDING\s*\d*\b", re.IGNORECASE),
+    re.compile(r"\bLOCATION\s+HUNTING\s*\d*\b", re.IGNORECASE),
+    re.compile(r"[\[【]\s*EVENT\s*\d+\s*[\]】]", re.IGNORECASE),
+    re.compile(r"[\[【][^\]】]*\bNC\s+VER\.?[^\]】]*[\]】]", re.IGNORECASE),
+    re.compile(r"\b(?:NON[-\s]?CREDIT|CREDITLESS|TEXTLESS)\b", re.IGNORECASE),
+    re.compile(r"\bPREVIEW\s+COLLECTION\b", re.IGNORECASE),
+    re.compile(r"[\[【]\s*(?:DIGEST|PROGRAM|MOVIE\s+MANNER)\s*[\]】]", re.IGNORECASE),
+    re.compile(r"\bANNOUNCEMENT\b", re.IGNORECASE),
     re.compile(r"菜单|预告|花絮"),
 ]
 
@@ -746,7 +756,7 @@ def _check_standalone(filename: str, parent_dirs: list[str], work_container: str
                 )
                 directory_title = _clean_standalone_dir_title(matching_dir)
                 if directory_title and not _is_generic_movie_directory_title(directory_title):
-                    movie_title = directory_title
+                    movie_title = _qualify_standalone_child_title(directory_title, work_container)
                 else:
                     movie_title = (
                         _extract_bracket_movie_title(filename)
@@ -842,6 +852,7 @@ def _check_spin_off_episode(
     filename: str,
     parent_dirs: list[str],
     subwork_dir: str,
+    work_container: str,
 ) -> MediaGuess | None:
     """检查外传 TV 系列的正片/SP 条目。
 
@@ -869,7 +880,8 @@ def _check_spin_off_episode(
             guess.card_type = "standalone"
             guess.media_type = "tv"
             guess.relation_type = "spin_off"
-            guess.work_title = _clean_standalone_dir_title(subwork_dir) or _clean_standalone_dir_title(parent_dirs[-1])
+            spin_off_title = _clean_standalone_dir_title(subwork_dir) or _clean_standalone_dir_title(parent_dirs[-1])
+            guess.work_title = _qualify_standalone_child_title(spin_off_title, work_container)
             # 外传有自己的季度与集号，分组身份不能沿用主系列，否则计划级
             # 重复集检测会把外传正片错误降级成主系列 Special。
             guess.series_group = guess.work_title
@@ -961,6 +973,32 @@ def _is_generic_movie_directory_title(title: str) -> bool:
     return normalized in {"剧场版", "movie", "movies", "映画", "电影"}
 
 
+def _qualify_standalone_child_title(title: str, series_container: str) -> str:
+    """为只写“剧场版：副标题”的子目录补回父系列名。
+
+    合集目录里的子作品经常只保留关系词和副标题，例如
+    ``中二病也要谈恋爱 / 剧场版：Take On Me``。单独使用子目录名会在
+    预览和媒体库中产生多个语义残缺的“剧场版”卡片；父目录是结构证据，
+    应参与作品标题，但仅限明确以关系词开头且尚未包含父标题的子目录。
+    """
+
+    child = (title or "").strip()
+    parent = _clean_local_series_group(series_container)
+    if not child or not parent:
+        return child
+    child_norm = _normalize_collection_title(child)
+    parent_norm = _normalize_collection_title(parent)
+    if parent_norm and parent_norm in child_norm:
+        return child
+    if not re.match(
+        r"^(?:剧场版|映画|电影|movie|外传|总集篇)(?:$|[\s:：._\-])",
+        child,
+        flags=re.IGNORECASE,
+    ):
+        return child
+    return f"{parent} {child}".strip()
+
+
 def _extract_release_movie_title(filename: str) -> str:
     """从发布文件名提取可用于独立电影卡片的标题。
 
@@ -974,7 +1012,9 @@ def _extract_release_movie_title(filename: str) -> str:
     plain = re.sub(r"\s+", " ", plain).strip(" ._-")
     if not plain or not re.search(r"[A-Za-z\u4e00-\u9fff]", plain):
         return ""
-    return plain
+    from app.recognition.title_cleaner import clean_work_title_container
+
+    return clean_work_title_container(plain).title or plain
 
 
 def _normalize_collection_title(title: str) -> str:
@@ -982,7 +1022,17 @@ def _normalize_collection_title(title: str) -> str:
 
 
 def _same_title_for_collection(left: str, right: str) -> bool:
-    return _normalize_collection_title(left) == _normalize_collection_title(right)
+    normalized_left = _normalize_collection_title(left)
+    normalized_right = _normalize_collection_title(right)
+    if normalized_left == normalized_right:
+        return True
+    # 发布组合集常用短系列名作父目录，例如 KonoSuba，而季度目录使用
+    # Kono Subarashii Sekai ni Shukufuku wo!。规范化后短名是完整标题的
+    # 稳定前缀；至少 6 个字符才采纳，避免 AIR/86 等短词误吞外传。
+    return bool(
+        len(normalized_right) >= 6
+        and normalized_left.startswith(normalized_right)
+    )
 
 
 def _is_explicit_series_season_subwork(subwork_title: str, series_title: str) -> bool:
@@ -1170,7 +1220,7 @@ def _check_path_context_special(
                 # 从目录名提取年份
                 dir_year = _extract_year(d)
                 directory_title = _clean_standalone_dir_title(d)
-                movie_title = directory_title
+                movie_title = _qualify_standalone_child_title(directory_title, work_container)
                 if relation_type == "movie" and _is_generic_movie_directory_title(directory_title):
                     movie_title = _extract_release_movie_title(relative_path.rsplit("/", 1)[-1])
                 # 保留原始目录名作为标题线索
@@ -1959,7 +2009,7 @@ def recognize_media(
         return guess
 
     # 6. 外传 TV 系列（独立卡片，但内部仍按 Season/Special）
-    guess = _check_spin_off_episode(filename, parent_dirs, subwork_dir)
+    guess = _check_spin_off_episode(filename, parent_dirs, subwork_dir, work_container)
     if guess:
         _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess

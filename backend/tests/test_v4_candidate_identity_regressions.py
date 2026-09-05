@@ -137,3 +137,32 @@ def test_explicit_movie_identity_turns_special_folder_files_into_movie_assets():
     assert graph.works[0].media_type == "movie"
     assert graph.episodes == ()
     assert graph.work_assets[0].asset_evidence_ids == ("movie-special",)
+
+
+def test_verified_heya_camp_path_confirms_the_spinoff_without_online_search():
+    """已核验外传路径在第二步即冻结身份，第三步不应落入人工确认。"""
+
+    from app.media_v4.resolution.candidates import plan_work_candidates
+    from app.media_v4.resolution.resolver import MediaResolver
+
+    entry = _entry(
+        "heya-camp",
+        work_title="Heya Camp△",
+        title_candidates=("Heya Camp△",),
+        series_group="Yuru Camp",
+        relation_type="spin_off",
+    )
+    graph = MediaResolver().resolve([entry])
+
+    candidates, _merge_map, issues = plan_work_candidates(
+        graph,
+        [entry],
+        lambda *_args: [],
+    )
+
+    assert issues == []
+    work = next(item for item in graph.works if "heya camp" in item.preferred_title.casefold())
+    assert [
+        (item.provider, item.media_type, item.provider_id, item.status)
+        for item in candidates[work.work_key]
+    ] == [("tmdb", "tv", "95213", "confirmed")]

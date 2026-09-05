@@ -12,6 +12,7 @@ import hashlib
 import json
 import time
 import uuid
+from collections import deque
 from pathlib import Path, PurePosixPath
 
 from app.core.atomic_json import write_json_atomic
@@ -22,7 +23,7 @@ from app.integrations.openlist.models import OpenListEntry, OpenListScanLimitExc
 from app.integrations.openlist.providers import OpenListRouteConfig, derive_local_path, provider_for_remote
 from app.media_v4.domain.models import SourceEvidence
 from app.media_v4.sources.adapters import SourceEntry, to_source_evidence
-from app.media_v4.sources.scanner import VIDEO_SUFFIXES
+from app.media_v4.sources.scanner import VIDEO_SUFFIXES, SourceScanCancelled
 
 STATE_VERSION = 1
 DEFAULT_VERIFICATION_BUDGET = 12
@@ -158,10 +159,13 @@ def _list_all(
     *,
     counter: list[int],
     max_entries: int,
+    should_cancel=None,
 ) -> list[OpenListEntry]:
     entries: list[OpenListEntry] = []
     page = 1
     while True:
+        if should_cancel is not None and should_cancel():
+            raise SourceScanCancelled()
         result = client.list_dir(remote_path, page=page, per_page=100, refresh=False)
         counter[0] += len(result.entries)
         if counter[0] > max_entries:
@@ -210,6 +214,10 @@ def scan_openlist_incremental(
     max_entries: int = 20_000,
     max_depth: int = 32,
     now: float | None = None,
+    should_cancel=None,
+    on_evidence_batch=None,
+    on_progress=None,
+    batch_size: int = 128,
 ) -> tuple[str, list[SourceEvidence], dict, dict[str, int]]:
     """在 confirmed revision 文件全集上合并一轮受控 OpenList 核对。"""
 
@@ -230,22 +238,32 @@ def scan_openlist_incremental(
         (path for path in directories if path),
         key=lambda path: (float(directories[path].get("last_verified_at") or 0), path.casefold()),
     )[:budget]
-    queue = ["", *rolling]
+    queue = deque(["", *rolling])
     queued = set(queue)
     processed: set[str] = set()
     changed_queued: set[str] = set()
     observed_counter = [0]
     route_configs = routes or []
     first_root_entries: list[OpenListEntry] | None = None
+    pending: list[SourceEvidence] = []
+    effective_batch_size = max(1, int(batch_size))
 
     while queue:
-        relative_dir = queue.pop(0)
+        if should_cancel is not None and should_cancel():
+            raise SourceScanCancelled()
+        relative_dir = queue.popleft()
         if relative_dir in processed or relative_dir not in directories:
             continue
         if len(PurePosixPath(relative_dir).parts) > max_depth:
             raise OpenListScanLimitExceeded("OpenList 目录层级超过安全上限，请选择更精确的目录")
         remote_dir = _join_remote(remote_root, relative_dir)
-        entries = _list_all(client, remote_dir, counter=observed_counter, max_entries=max_entries)
+        entries = _list_all(
+            client,
+            remote_dir,
+            counter=observed_counter,
+            max_entries=max_entries,
+            should_cancel=should_cancel,
+        )
         processed.add(relative_dir)
         if relative_dir == "":
             first_root_entries = entries
@@ -316,7 +334,7 @@ def scan_openlist_incremental(
                 derive_local_path(mount_root, mapping_root, remote_path)
                 if mount_root else ""
             )
-            files[relative_file] = to_source_evidence(SourceEntry(
+            current_evidence = to_source_evidence(SourceEntry(
                 root_id=root_id,
                 scan_id=scan_id,
                 provider=provider,
@@ -329,10 +347,24 @@ def scan_openlist_incremental(
                 size=item.size,
                 mtime=item.modified,
             ))
+            files[relative_file] = current_evidence
+            pending.append(current_evidence)
+            if len(pending) >= effective_batch_size:
+                if on_evidence_batch is not None:
+                    on_evidence_batch(pending)
+                pending = []
+
+        if on_progress is not None:
+            # 增量扫描无法在枚举远端前知道最终媒体数；这里持续发送心跳，
+            # 让 durable scan 的读取阶段可见，最终总数在扫描返回后由统一
+            # 持久化边界确定，避免把基线数量伪装成远端总量。
+            on_progress(processed_count=len(files), total_count=0)
         directories[relative_dir]["last_verified_at"] = timestamp
 
     if first_root_entries is None:
         raise RuntimeError("OpenList 根目录未被核对")
+    if pending and on_evidence_batch is not None:
+        on_evidence_batch(pending)
     next_state["remote_verified"] = True
     stats = {
         "requested_directories": len(processed),

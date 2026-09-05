@@ -53,6 +53,9 @@ _EDITION_TOKENS = (
     (re.compile(r"(?i)(?:theatrical(?:[ ._-]?cut)?|院线版)"), "theatrical"),
 )
 _RELEASE_GROUP = re.compile(r"-([A-Za-z0-9][A-Za-z0-9_.-]{1,40})$")
+_SPECIAL_TOKEN_RAW = re.compile(
+    r"(?i)(?<![A-Za-z0-9])((?:S00\s*E\s*\d+)|(?:SP|OVA|OAD|OAV)\s*\d+(?:[_-]\d+)?)(?![A-Za-z0-9])"
+)
 
 
 def _batch_work_identity(facts: ParsedFacts) -> str:
@@ -65,14 +68,25 @@ def _batch_work_identity(facts: ParsedFacts) -> str:
 def _path_has_explicit_season(relative_path: str, season: int) -> bool:
     """仅采纳路径显式声明的 Sxx 季，避免将普通数字误当作季度。"""
 
-    path = (relative_path or "").replace("\\", "/")
-    return bool(
-        re.search(
-            rf"(?:\[S0?{season}\]|(?:^|[\s._-])S0?{season}(?:E\d+|[\s._-]|$))",
-            path,
-            flags=re.IGNORECASE,
-        )
+    return _explicit_season_from_path(relative_path) == season
+
+
+def _explicit_season_from_path(relative_path: str) -> int | None:
+    """从最靠近文件的目录段读取明确季度，忽略合集根里的 ``S1-S4``。"""
+
+    parent_parts = PurePosixPath((relative_path or "").replace("\\", "/")).parts[:-1]
+    patterns = (
+        re.compile(r"\[\s*S0?(\d{1,2})(?:\.\d+)?\s*\]", re.IGNORECASE),
+        re.compile(r"(?:^|[\s._-])Season\s*0?(\d{1,2})(?:[\s._-]|$)", re.IGNORECASE),
+        re.compile(r"第\s*0?(\d{1,2})\s*季", re.IGNORECASE),
+        re.compile(r"(?:^|[\s._-])S0?(\d{1,2})(?:[\s._-]|$)", re.IGNORECASE),
     )
+    for part in reversed(parent_parts):
+        for pattern in patterns:
+            match = pattern.search(part)
+            if match:
+                return int(match.group(1))
+    return None
 
 
 def normalize_batch_parsed_facts(
@@ -86,8 +100,98 @@ def normalize_batch_parsed_facts(
     标季或作品边界不清的条目一律保持原样，交由人工确认。
     """
 
+    # 已核验 Provider 例外只在批量语义阶段参与季度放置，不进入纯 parser，
+    # 因而不会让确认后的可变状态污染初始路径/文件名事实。
+    from app.recognition.verified_titles import (
+        match_verified_tmdb_binding,
+        match_verified_tmdb_episode_placement,
+    )
+
+    normalized = list(entries)
+    for index, (evidence, facts) in enumerate(normalized):
+        if facts.group_type != "season" or facts.episode_candidate is None:
+            continue
+        binding = match_verified_tmdb_binding(evidence.relative_path)
+        if binding is None or binding.tmdb_type != "tv":
+            continue
+        placement = match_verified_tmdb_episode_placement(
+            binding.tmdb_id,
+            evidence.relative_path,
+            int(facts.episode_candidate),
+        )
+        if placement is None:
+            continue
+        season_number, episode_number = placement
+        if (season_number, episode_number) == (
+            facts.season_candidate,
+            facts.episode_candidate,
+        ):
+            continue
+        normalized[index] = (
+            evidence,
+            replace(
+                facts,
+                group_type="special" if season_number == 0 else facts.group_type,
+                season_candidate=season_number,
+                episode_candidate=None if season_number == 0 else episode_number,
+                absolute_episode_candidate=(
+                    facts.absolute_episode_candidate
+                    if facts.absolute_episode_candidate is not None
+                    else int(facts.episode_candidate)
+                ),
+                special_candidate=season_number == 0 or facts.special_candidate,
+                special_number=episode_number if season_number == 0 else facts.special_number,
+                episode_title=(
+                    clean_special_episode_title(
+                        evidence.relative_path,
+                        work_title=facts.work_title,
+                        original_title=facts.original_title,
+                        series_group=facts.series_group,
+                        special_number=episode_number,
+                    )
+                    if season_number == 0
+                    else facts.episode_title
+                ),
+                reasons=(*facts.reasons, "已核验 Provider 季度映射覆盖绝对集号"),
+            ),
+        )
+
+    # 目录层级是整批文件共享的结构证据。文件名可能沿用绝对编号，甚至仍写
+    # S01；只要最近目录明确声明 [S2]/Season 2/第2季，就先校正季度，再判断
+    # 是否需要把累计集号换算为季内集号。
+    for index, (evidence, facts) in enumerate(normalized):
+        if facts.group_type != "season":
+            continue
+        explicit_season = _explicit_season_from_path(evidence.relative_path)
+        if explicit_season is None or explicit_season == facts.season_candidate:
+            continue
+        binding = match_verified_tmdb_binding(evidence.relative_path)
+        placement = (
+            match_verified_tmdb_episode_placement(
+                binding.tmdb_id,
+                evidence.relative_path,
+                int(facts.episode_candidate),
+            )
+            if binding is not None
+            and binding.tmdb_type == "tv"
+            and facts.episode_candidate is not None
+            else None
+        )
+        if placement is not None and placement[0] != explicit_season:
+            # 本地目录可使用篇章号（如 S1.1/S2），已核验 Provider 映射才是
+            # 跨发布包合并所需的季度身份，不能被本地篇章标签反向覆盖。
+            continue
+        normalized[index] = (
+            evidence,
+            replace(
+                facts,
+                season_candidate=explicit_season,
+                reasons=(*facts.reasons, f"目录明确声明第{explicit_season}季，覆盖文件名季度"),
+            ),
+        )
+
     groups: dict[tuple[str, str, int, str], list[int]] = defaultdict(list)
-    for index, (evidence, facts) in enumerate(entries):
+    for index, (evidence, facts) in enumerate(normalized):
         season = int(facts.season_candidate or 0)
         if (
             facts.group_type != "season"
@@ -100,9 +204,8 @@ def normalize_batch_parsed_facts(
         parent = str(PurePosixPath(evidence.relative_path.replace("\\", "/")).parent)
         groups[(evidence.provider, _batch_work_identity(facts), season, parent)].append(index)
 
-    normalized = list(entries)
     for (_provider, _work, season, _parent), indexes in groups.items():
-        numbers = sorted({int(entries[index][1].episode_candidate or 0) for index in indexes})
+        numbers = sorted({int(normalized[index][1].episode_candidate or 0) for index in indexes})
         if len(numbers) < 2 or numbers[0] < 10:
             continue
         if numbers != list(range(numbers[0], numbers[-1] + 1)):
@@ -116,6 +219,11 @@ def normalize_batch_parsed_facts(
                 replace(
                     facts,
                     episode_candidate=episode_number,
+                    absolute_episode_candidate=(
+                        facts.absolute_episode_candidate
+                        if facts.absolute_episode_candidate is not None
+                        else int(facts.episode_candidate or 0)
+                    ),
                     reasons=(*facts.reasons, f"明确第{season}季目录使用连续绝对集号，按季内第{episode_number}集归一化"),
                 ),
             )
@@ -307,6 +415,18 @@ class V4Parser:
         # 目录树 NFO 等 metadata 证据：只保留为只读候选身份证据，不参与
         # Work/Season/Episode 解析，不覆盖本地编号。
         if evidence.entry_kind == "metadata" or PurePosixPath(evidence.relative_path).suffix.casefold() == ".nfo":
+            # TXT 目录树链路的 NFO 是清单噪声：不读取源盘、不进入身份候选，
+            # 绝不调用 _parse_sidecar_nfo（该函数会对绝对定位符做 is_file/open）。
+            if evidence.ingest_method == "directory_tree":
+                return ParsedFacts(
+                    parsed_fact_id="facts_" + evidence.evidence_id,
+                    evidence_id=evidence.evidence_id,
+                    parser_version=self.VERSION,
+                    resource_type="metadata",
+                    title_candidates=(),
+                    is_importable=False,
+                    is_auxiliary=True,
+                )
             stem = PurePosixPath(evidence.relative_path).stem
             parsed = _parse_sidecar_nfo(evidence)
             if parsed is None:
@@ -409,6 +529,13 @@ class V4Parser:
         episode_title = (guess.title or "").strip()
         special_number = guess.special_number
         if group_type == "special":
+            special_token_match = _SPECIAL_TOKEN_RAW.search(stem)
+            if special_token_match:
+                episode_token = re.sub(
+                    r"\s+",
+                    "",
+                    special_token_match.group(1).upper(),
+                )
             source_special_number = extract_special_episode_number(
                 PurePosixPath(evidence.relative_path.replace("\\", "/")).stem
             )

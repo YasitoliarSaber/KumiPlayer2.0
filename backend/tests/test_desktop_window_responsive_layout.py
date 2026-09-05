@@ -70,8 +70,8 @@ def test_media_management_collapses_before_controls_can_overlap():
     assert ".media-v4-select-control" in css
     assert ".media-v4-path-row" in css
     assert "@container media-flow (max-width: 620px) {\n  .media-v4-source-options { grid-template-columns: 1fr; }" in css
-    assert ".media-v4-source-options small {" in css
-    assert "font-size: 12px" in css.split(".media-v4-source-options small {", 1)[1].split("}", 1)[0]
+    assert ".media-v4-source-options small {" not in css
+    assert "option.description" not in page
     assert "font-size: 12px" in css.split(".media-v4-setting-copy span {", 1)[1].split("}", 1)[0]
     assert 'className="media-flow-page media-v4-page"' in page
     assert 'className="media-stage-shell media-v4-stage-panel media-v4-source-card"' in page

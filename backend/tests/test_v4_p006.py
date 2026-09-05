@@ -116,6 +116,7 @@ def test_playback_history_is_event_based_and_respects_limit(tmp_path, monkeypatc
     monkeypatch.setattr(playback_v4, "get_database", lambda: database)
     _seed_work(database, work_id="w1", title="历史作品")
     store = V4PlaybackStore(database)
+    store.record_activation("w1", "ep-w1-1-1", "asset-w1-1-1")
     for index in range(5):
         store.save_progress("w1", "ep-w1-1-1", "asset-w1-1-1", position=10 + index, duration=100, completed=False)
 
@@ -125,7 +126,7 @@ def test_playback_history_is_event_based_and_respects_limit(tmp_path, monkeypatc
     limited = client.get("/api/playback/history?limit=3")
     assert limited.status_code == 200, limited.text
     items = limited.json()["items"]
-    assert len(items) == 3  # 严格尊重 limit
+    assert len(items) == 1  # 同一集的多个进度心跳不得重复写入历史
     assert items[0]["title_snapshot"] == "历史作品"  # 事件含标题快照
     # 进度仍是单条 upsert
     progress = client.get("/api/playback/progress").json()["items"]

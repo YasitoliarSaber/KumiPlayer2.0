@@ -5,23 +5,34 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from app.api.media_v4 import get_database
+from app.media_v4.revisions.service import _friendly_job_error
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
+
+_TASK_STATUS_MESSAGES = {
+    "pending": "等待任务执行",
+    "running": "任务进行中",
+    "succeeded": "任务已完成",
+    "cancelled": "任务已终止",
+}
 
 
 def _task_payload(row) -> dict:
     status = "pending" if row["status"] == "queued" else row["status"]
+    cancelling = bool(row["cancel_requested"]) and status in {"pending", "running"}
+    user_error = _friendly_job_error(str(row["last_error"] or ""))
     return {
         "task_id": row["job_id"],
         "task_type": row["job_type"],
         "source": row["provider"] or "",
         "status": status,
         "progress": 1 if status == "succeeded" else 0,
-        "message": row["last_error"] if status == "failed" else status,
+        "message": user_error if status == "failed" else ("正在终止" if cancelling else _TASK_STATUS_MESSAGES.get(status, "任务状态未知")),
         "created_at": row["created_at"],
-        "started_at": row["updated_at"] if row["status"] == "running" else "",
-        "finished_at": row["updated_at"] if status in {"succeeded", "failed", "cancelled"} else "",
-        "error": row["last_error"] or "",
+        "started_at": row["started_at"] if row["status"] == "running" else "",
+        "finished_at": row["finished_at"] if status in {"succeeded", "failed", "cancelled"} else "",
+        "error": user_error,
+        "cancel_requested": cancelling,
         "result": {
             "revision_id": row["revision_id"],
             "work_id": row["work_id"],
@@ -100,23 +111,23 @@ def cancel_task(task_id: str):
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
-        if row["status"] == "running":
-            raise HTTPException(status_code=409, detail="运行中的任务不能安全取消")
-        if row["status"] == "queued":
-            conn.execute(
-                "UPDATE jobs SET status = 'cancelled', updated_at = datetime('now') WHERE job_id = ?",
-                (task_id,),
-            )
-            row = conn.execute(
-                """
-                SELECT j.*, sr.provider
-                FROM jobs j
-                JOIN import_revisions ir ON ir.revision_id = j.revision_id
-                JOIN source_roots sr ON sr.root_id = ir.root_id
-                WHERE j.job_id = ?
-                """,
-                (task_id,),
-            ).fetchone()
+    if row["status"] in {"queued", "running"}:
+        # 一条 revision 的 outbox 是同一份来源导入的下游链；不能只停当前
+        # worker 而把依赖任务留成永久 queued。运行中任务采用协作式终止。
+        from app.media_v4.jobs.runner import V4JobRunner
+
+        V4JobRunner(get_database()).cancel_revision(str(row["revision_id"]))
+    with get_database().connect() as conn:
+        row = conn.execute(
+            """
+            SELECT j.*, sr.provider
+            FROM jobs j
+            JOIN import_revisions ir ON ir.revision_id = j.revision_id
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            WHERE j.job_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
     return _task_payload(row)
 
 
@@ -142,10 +153,29 @@ def retry_task(task_id: str):
             (row["revision_id"],),
         ).fetchone()[0] != "confirmed":
             raise HTTPException(status_code=409, detail="任务所属 revision 已失效，不能重试")
-        conn.execute(
-            "UPDATE jobs SET status = 'queued', last_error = '', updated_at = datetime('now') WHERE job_id = ?",
-            (task_id,),
-        )
+        if row["status"] == "cancelled":
+            # 终止操作按 revision 收口：运行中任务协作停止，尚未开始的依赖
+            # 同时转成 cancelled。只重试用户点击的一项会让投影继续等待仍
+            # 被取消的前置/后置任务，来源卡表面恢复却永远无法完成。
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'queued', cancel_requested = 0, heartbeat_at = '',
+                    started_at = '', finished_at = '', last_error = '', updated_at = datetime('now')
+                WHERE revision_id = ? AND status = 'cancelled'
+                """,
+                (row["revision_id"],),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'queued', cancel_requested = 0, heartbeat_at = '',
+                    started_at = '', finished_at = '', last_error = '', updated_at = datetime('now')
+                WHERE job_id = ?
+                """,
+                (task_id,),
+            )
         row = conn.execute(
             """
             SELECT j.*, sr.provider

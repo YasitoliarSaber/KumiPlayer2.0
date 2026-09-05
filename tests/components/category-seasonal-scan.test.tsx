@@ -27,19 +27,19 @@ vi.mock('../../src/stores/library', () => ({
     error: null,
   }),
 }));
-vi.mock('../../src/stores/ui', () => ({
-  useUiStore: (selector?: (state: unknown) => unknown) => {
-    const state = {
-      activeCategory: 'seasonal',
-      source: 'all',
-      sort: 'recent',
-      setSort: vi.fn(),
-      posterSize: 'medium',
-      consumeCategoryScrollRestore: vi.fn().mockReturnValue(0),
-    };
-    return selector ? selector(state) : state;
-  },
-}));
+vi.mock('../../src/stores/ui', () => {
+  const state = {
+    activeCategory: 'seasonal',
+    source: 'all',
+    sort: 'recent',
+    setSort: vi.fn(),
+    posterSize: 'medium',
+    consumeCategoryScrollRestore: vi.fn().mockReturnValue(0),
+  };
+  const useUiStore = (selector?: (value: typeof state) => unknown) => selector ? selector(state) : state;
+  useUiStore.getState = () => state;
+  return { useUiStore };
+});
 vi.mock('../../src/platform/folderPicker', () => ({ pickDirectoryTreeFile: vi.fn(), pickFolder: vi.fn() }));
 
 beforeEach(() => {

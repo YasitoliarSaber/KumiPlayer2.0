@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import os
 import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from app.media_v4.jobs.control import cancel_requested, claim_running, heartbeat, mark_cancelled
 from app.media_v4.jobs.paths import work_directory_name
-from app.media_v4.path_validation import validate_playback_locator
+from app.media_v4.path_validation import validate_playback_locator, validate_playback_locator_syntax
 from app.media_v4.persistence.database import V4Database
 
 
@@ -31,6 +33,44 @@ def _sample_locators(locators: list[str]) -> list[str]:
         return locators
     indexes = sorted({0, len(locators) - 1, len(locators) // 2})
     return [locators[index] for index in indexes]
+
+
+def _remove_created_paths(paths: list[Path]) -> None:
+    """只回收本次成功发布的文件，绝不碰任务开始前已存在的目标。"""
+
+    for path in paths:
+        path.unlink(missing_ok=True)
+
+
+def _existing_target_matches(target: Path, locator: str) -> bool:
+    try:
+        return target.read_text(encoding="utf-8-sig") == locator
+    except (OSError, UnicodeError):
+        return False
+
+
+def _publish_target(target: Path, locator: str, created_paths: list[Path]) -> None:
+    """以不覆盖既有文件的方式发布一个 .strm，并记录本轮新建文件。"""
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        if not _existing_target_matches(target, locator):
+            raise RuntimeError(f"镜像目标已存在且内容不一致: {target}")
+        return
+
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(locator, encoding="utf-8", newline="\n")
+        try:
+            # hard link 在同目录内创建目标，遇到同名目标会失败而不会覆盖它。
+            os.link(temporary, target)
+        except FileExistsError:
+            if not _existing_target_matches(target, locator):
+                raise RuntimeError(f"镜像目标已存在且内容不一致: {target}") from None
+            return
+        created_paths.append(target)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,12 +117,14 @@ class V4MirrorMaterializer:
                     s.local_season_number, s.season_kind,
                     e.local_episode_number, e.special_number,
                     a.asset_id, a.fingerprint, a.playback_locator, a.source_locator,
+                    COALESCE(se.ingest_method, '') AS ingest_method,
                     0 AS is_movie
                 FROM revision_bindings rb
                 JOIN works w ON w.work_id = rb.work_id
                 JOIN episodes e ON e.episode_id = rb.episode_id
                 JOIN seasons s ON s.season_id = e.season_id
                 JOIN assets a ON a.asset_id = rb.asset_id
+                LEFT JOIN source_evidence se ON se.evidence_id = rb.evidence_id
                 WHERE rb.revision_id = ? AND rb.work_id = ?
                 ORDER BY e.episode_id, a.asset_id
                 """,
@@ -96,11 +138,13 @@ class V4MirrorMaterializer:
                     NULL AS local_season_number, '' AS season_kind,
                     NULL AS local_episode_number, NULL AS special_number,
                     a.asset_id, a.fingerprint, a.playback_locator, a.source_locator,
+                    COALESCE(se.ingest_method, '') AS ingest_method,
                     1 AS is_movie
                 FROM revision_bindings rb
                 JOIN works w ON w.work_id = rb.work_id
                 JOIN assets a ON a.asset_id = rb.asset_id
                 JOIN work_assets wa ON wa.work_id = rb.work_id AND wa.asset_id = rb.asset_id
+                LEFT JOIN source_evidence se ON se.evidence_id = rb.evidence_id
                 WHERE rb.revision_id = ? AND rb.work_id = ? AND rb.episode_id IS NULL
                 ORDER BY a.asset_id
                 """,
@@ -109,43 +153,55 @@ class V4MirrorMaterializer:
             rows = [*rows, *movie_rows]
             if not rows:
                 raise RuntimeError("confirmed revision 没有可物化 Asset")
-            cursor = conn.execute(
-                """
-                UPDATE jobs SET status = 'running', attempts = attempts + 1, updated_at = ?
-                WHERE job_id = ? AND status = 'queued'
-                """,
-                (_now(), job_id),
-            )
-            if cursor.rowcount != 1:
-                raise RuntimeError("镜像任务已由其他执行器领取")
+        if not claim_running(self.database, job_id):
+            if cancel_requested(self.database, job_id):
+                mark_cancelled(self.database, job_id)
+                return MaterializeResult("cancelled")
+            raise RuntimeError("镜像任务已由其他执行器领取")
 
         paths: list[str] = []
+        created_paths: list[Path] = []
         try:
-            # 写任何 .strm 前按头/中/尾有界抽样复核播放定位；样本任一不可达
-            # 即整批失败，不发布任何 Artifact，也不让 scrape/projection 继续。
-            # 避免大库逐 Asset 访问挂载盘。
-            locators = [
-                str(row["playback_locator"] or row["source_locator"] or "") for row in rows
+            # 写任何 .strm 前，非 TXT 资产按头/中/尾有界抽样复核可达性；样本任一
+            # 不可达即整批失败，不发布任何 Artifact。TXT 资产不做源盘探测，由
+            # 下方逐条纯语法校验兜底。取消检查点保持原有节奏。
+            non_txt_locators = [
+                str(row["playback_locator"] or row["source_locator"] or "")
+                for row in rows
+                if str(row["ingest_method"] or "") != "directory_tree"
             ]
-            for locator in _sample_locators(locators):
+            for locator in _sample_locators(non_txt_locators):
+                if cancel_requested(self.database, job_id):
+                    mark_cancelled(self.database, job_id)
+                    return MaterializeResult("cancelled")
                 ok, reason = validate_playback_locator(locator)
                 if not ok:
                     raise RuntimeError(reason)
             for row in rows:
+                if cancel_requested(self.database, job_id):
+                    _remove_created_paths(created_paths)
+                    mark_cancelled(self.database, job_id)
+                    return MaterializeResult("cancelled")
+                locator = str(row["playback_locator"] or row["source_locator"] or "")
+                # 分支合同：is_txt_asset 由服务端 revision 证据（source_evidence.ingest_method）
+                # 确定，不是 provider/扩展名/客户端标记。TXT 只做纯语法校验即可发布；
+                # 非 TXT 保留原可达性策略（本地文件必须真实存在）。
+                is_txt_asset = str(row["ingest_method"] or "") == "directory_tree"
+                ok, reason = validate_playback_locator_syntax(locator)
+                if not ok:
+                    raise RuntimeError(reason)
+                if not is_txt_asset:
+                    ok, reason = validate_playback_locator(locator)
+                    if not ok:
+                        raise RuntimeError(reason)
                 work_dir = work_directory_name(str(row["work_id"]))
                 asset_identity = row["fingerprint"] or row["asset_id"]
                 asset_tag = _safe_segment(asset_identity[-10:], "asset")
-                locator = row["playback_locator"] or row["source_locator"]
                 if row["is_movie"]:
                     target = root / work_dir / f"movie-{asset_tag}.strm"
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-                    try:
-                        temporary.write_text(locator, encoding="utf-8", newline="\n")
-                        temporary.replace(target)
-                    finally:
-                        temporary.unlink(missing_ok=True)
+                    _publish_target(target, str(locator), created_paths)
                     paths.append(str(target))
+                    heartbeat(self.database, job_id)
                     continue
                 season_number = int(row["local_season_number"] or 0)
                 if row["season_kind"] == "special" or season_number == 0:
@@ -155,14 +211,13 @@ class V4MirrorMaterializer:
                     season_dir = f"Season {season_number:02d}"
                     episode_name = f"S{season_number:02d}E{int(row['local_episode_number'] or 0):02d}"
                 target = root / work_dir / season_dir / f"{episode_name}-{asset_tag}.strm"
-                target.parent.mkdir(parents=True, exist_ok=True)
-                temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-                try:
-                    temporary.write_text(locator, encoding="utf-8", newline="\n")
-                    temporary.replace(target)
-                finally:
-                    temporary.unlink(missing_ok=True)
+                _publish_target(target, str(locator), created_paths)
                 paths.append(str(target))
+                heartbeat(self.database, job_id)
+            if cancel_requested(self.database, job_id):
+                _remove_created_paths(created_paths)
+                mark_cancelled(self.database, job_id)
+                return MaterializeResult("cancelled")
             with self.database.connect() as conn:
                 now = _now()
                 for path in paths:
@@ -176,14 +231,15 @@ class V4MirrorMaterializer:
                         (str(uuid.uuid4()), job["revision_id"], job["work_id"], path, now, now),
                     )
                 conn.execute(
-                    "UPDATE jobs SET status = 'succeeded', updated_at = ?, last_error = ? WHERE job_id = ?",
-                    (now, "", job_id),
+                    "UPDATE jobs SET status = 'succeeded', updated_at = ?, heartbeat_at = ?, finished_at = ?, last_error = ? WHERE job_id = ?",
+                    (now, now, now, "", job_id),
                 )
             return MaterializeResult("succeeded", tuple(paths))
         except Exception as exc:
+            _remove_created_paths(created_paths)
             with self.database.connect() as conn:
                 conn.execute(
-                    "UPDATE jobs SET status = 'failed', last_error = ?, updated_at = ? WHERE job_id = ?",
-                    (str(exc), _now(), job_id),
+                    "UPDATE jobs SET status = 'failed', last_error = ?, updated_at = ?, heartbeat_at = ?, finished_at = ? WHERE job_id = ?",
+                    (str(exc), _now(), _now(), _now(), job_id),
                 )
             raise

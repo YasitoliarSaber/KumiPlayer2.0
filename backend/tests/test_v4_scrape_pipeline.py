@@ -137,6 +137,85 @@ def test_scrape_metadata_does_not_overwrite_local_episode_number(tmp_path, monke
     assert season_mapping["provider_season_number"] == 9
 
 
+def test_scrape_provider_identity_conflict_becomes_recoverable_review_state(tmp_path, monkeypatch):
+    """第三步的重复 Provider 身份不能泄漏 SQLite 唯一索引或写坏既有作品。"""
+
+    from dataclasses import replace
+
+    from app.media_v4.jobs.scrape import V4ScrapeService
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "scrape-provider-conflict.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+
+    owner_evidence, owner_facts = _entry("owner")
+    owner_evidence = replace(
+        owner_evidence,
+        relative_path="Owner Show/S01E01.mkv",
+        source_key="Owner Show/S01E01.mkv",
+    )
+    owner_facts = replace(
+        owner_facts,
+        work_title="Owner Show",
+        title_candidates=("Owner Show",),
+        tmdb_hint_id=None,
+        tmdb_hint_type="",
+    )
+    revisions.create_draft("rev-owner-scrape", [(owner_evidence, owner_facts)])
+    revisions.confirm("rev-owner-scrape")
+    owner_job = V4ScrapeService(database).enqueue_for_revision("rev-owner-scrape")[0]
+    mirror_root = _patch_scrape_env(tmp_path, monkeypatch)
+    V4ScrapeService(database).process(
+        owner_job["job_id"],
+        lambda _target: {**_ready_metadata("99"), "title": "Owner Show"},
+        mirror_root=mirror_root,
+    )
+
+    target_evidence, target_facts = _entry("target")
+    target_evidence = replace(
+        target_evidence,
+        root_id="root-target",
+        scan_id="scan-target",
+        relative_path="Target Show/S01E01.mkv",
+        source_key="Target Show/S01E01.mkv",
+    )
+    target_facts = replace(
+        target_facts,
+        work_title="Target Show",
+        title_candidates=("Target Show",),
+        tmdb_hint_id=None,
+        tmdb_hint_type="",
+    )
+    revisions.create_draft("rev-target-scrape", [(target_evidence, target_facts)])
+    revisions.confirm("rev-target-scrape")
+    target_job = V4ScrapeService(database).enqueue_for_revision("rev-target-scrape")[0]
+
+    V4ScrapeService(database).process(
+        target_job["job_id"],
+        lambda _target: {**_ready_metadata("99"), "title": "Target Show"},
+        mirror_root=mirror_root,
+    )
+
+    with database.connect() as conn:
+        job = conn.execute("SELECT status, last_error FROM jobs WHERE job_id = ?", (target_job["job_id"],)).fetchone()
+        binding = conn.execute(
+            "SELECT provider, status, metadata_json FROM scrape_bindings "
+            "WHERE revision_id = 'rev-target-scrape'"
+        ).fetchone()
+        owners = conn.execute(
+            "SELECT work_id FROM provider_bindings WHERE provider = 'tmdb' AND media_type = 'tv' AND provider_id = '99'"
+        ).fetchall()
+
+    assert job["status"] == "succeeded"
+    assert job["last_error"] == ""
+    assert binding["provider"] == "local"
+    assert binding["status"] == "waiting_review"
+    assert "已关联到另一部作品" in json.loads(binding["metadata_json"])["reason"]
+    assert len(owners) == 1
+
+
 def test_local_artwork_mode_materializes_episode_stills_as_v4_artifacts(tmp_path, monkeypatch):
     from types import SimpleNamespace
 

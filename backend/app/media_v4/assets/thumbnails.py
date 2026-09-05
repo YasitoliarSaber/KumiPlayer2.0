@@ -13,7 +13,7 @@ from PIL import Image
 from app.core.paths import get_cache_dir
 
 _THUMBNAIL_ENCODING_VERSION = 1
-THUMBNAIL_WIDTHS: tuple[int, ...] = (384, 512)
+THUMBNAIL_WIDTHS: tuple[int, ...] = (384, 512, 1280)
 DEFAULT_THUMBNAIL_WIDTH = 384
 _INFLIGHT: dict[str, threading.Event] = {}
 _INFLIGHT_GUARD = threading.Lock()
