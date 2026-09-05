@@ -19,6 +19,7 @@ from app.media_v4.persistence.schema_v4 import (
     create_v15_structures,
     create_v16_structures,
     create_v17_structures,
+    create_v18_structures,
     migrate_schema_v4_to_v5,
     migrate_schema_v5_to_v6,
     migrate_schema_v6_to_v7,
@@ -32,6 +33,7 @@ from app.media_v4.persistence.schema_v4 import (
     migrate_schema_v14_to_v15,
     migrate_schema_v15_to_v16,
     migrate_schema_v16_to_v17,
+    migrate_schema_v17_to_v18,
 )
 
 
@@ -141,7 +143,7 @@ class V4Database:
         使用字面量；写回后立即读回校验，版本升级时若字面量未同步会立即失败。
         """
 
-        conn.execute("PRAGMA user_version = 17")
+        conn.execute("PRAGMA user_version = 18")
         written = int(conn.execute("PRAGMA user_version").fetchone()[0])
         if written != V4_SCHEMA_VERSION:
             raise RuntimeError(
@@ -221,6 +223,22 @@ class V4Database:
                     conn.rollback()
                     raise V4ResetRequiredError(
                         "数据库声明为 V4 但任务结构不完整，需要一次性重置；" + str(exc)
+                    ) from exc
+                except Exception:
+                    conn.rollback()
+                    raise
+                version = self.CURRENT_SCHEMA_VERSION
+            if version == 17 and self._has_user_tables(conn):
+                # v17 → v18：候选数值证据列；加法迁移，不改写既有候选。
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    migrate_schema_v17_to_v18(conn)
+                    self._set_user_version(conn)
+                    conn.commit()
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    raise V4ResetRequiredError(
+                        "数据库声明为 V4 但候选证据结构不完整，需要一次性重置；" + str(exc)
                     ) from exc
                 except Exception:
                     conn.rollback()
@@ -452,6 +470,7 @@ class V4Database:
                 try:
                     migrate_schema_v15_to_v16(conn)
                     migrate_schema_v16_to_v17(conn)
+                    migrate_schema_v17_to_v18(conn)
                     conn.commit()
                 except sqlite3.OperationalError as exc:
                     conn.rollback()
@@ -548,6 +567,7 @@ class V4Database:
             create_v15_structures(expected)
             create_v16_structures(expected)
             create_v17_structures(expected)
+            create_v18_structures(expected)
             for table in sorted(self.REQUIRED_TABLES):
                 actual_cols = self._table_contract(conn, table)
                 expected_cols = self._table_contract(expected, table)

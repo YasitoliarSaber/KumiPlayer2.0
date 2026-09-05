@@ -308,16 +308,40 @@ class V4ScrapeService:
                     ),
                 )
                 if ready:
-                    conn.execute(
-                        """
-                        INSERT INTO provider_bindings(work_id, provider, media_type, provider_id)
-                        SELECT ?, ?, CASE WHEN work_type = 'series' THEN 'tv' ELSE 'movie' END, ?
-                        FROM works WHERE work_id = ?
-                        ON CONFLICT(work_id, provider, media_type) DO UPDATE SET
-                            provider_id = excluded.provider_id
-                        """,
-                        (job["work_id"], provider_name, provider_id, job["work_id"]),
+                    # D5：provider_bindings 的 (provider, media_type, provider_id)
+                    # 全局唯一。该身份已被其他 work 占用时不得覆盖，也不得让
+                    # UNIQUE 约束炸掉任务——记录明确错误，等待人工合并重复条目。
+                    work_row = conn.execute(
+                        "SELECT work_type FROM works WHERE work_id = ?",
+                        (job["work_id"],),
+                    ).fetchone()
+                    binding_media_type = (
+                        "tv" if str((work_row["work_type"] if work_row else "") or "") == "series" else "movie"
                     )
+                    owner = conn.execute(
+                        "SELECT work_id FROM provider_bindings WHERE provider = ? AND media_type = ? AND provider_id = ?",
+                        (binding_provider, binding_media_type, binding_provider_id),
+                    ).fetchone()
+                    if owner is None or str(owner["work_id"]) == str(job["work_id"]):
+                        conn.execute(
+                            """
+                            INSERT INTO provider_bindings(work_id, provider, media_type, provider_id)
+                            SELECT ?, ?, CASE WHEN work_type = 'series' THEN 'tv' ELSE 'movie' END, ?
+                            FROM works WHERE work_id = ?
+                            ON CONFLICT(work_id, provider, media_type) DO UPDATE SET
+                                provider_id = excluded.provider_id
+                            """,
+                            (job["work_id"], binding_provider, binding_provider_id, job["work_id"]),
+                        )
+                    else:
+                        conn.execute(
+                            """
+                            UPDATE scrape_bindings
+                            SET status = 'waiting_review', updated_at = ?
+                            WHERE revision_id = ? AND work_id = ? AND provider = ?
+                            """,
+                            (now, job["revision_id"], job["work_id"], binding_provider),
+                        )
                 for mapping in result.get("episode_mappings") or []:
                     episode_id = str(mapping.get("episode_id") or "")
                     conn.execute(

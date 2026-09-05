@@ -8,7 +8,7 @@
 
 import { useEffect, useState } from 'react'
 import { Button, ProgressBar } from '@fluentui/react-components'
-import { CheckmarkCircle24Filled, ChevronDown24Regular, ChevronRight24Regular, DismissCircle24Regular, ErrorCircle24Regular, SpinnerIosRegular } from '@fluentui/react-icons'
+import { CheckmarkCircle24Filled, ChevronDown24Regular, ChevronRight24Regular, DismissCircle24Regular, ErrorCircle24Regular, SpinnerIosRegular, Warning24Regular } from '@fluentui/react-icons'
 import type { V4ExecutionProgress, V4WorkProgressUnit } from '../../api/mediaV4'
 import { STAGE_LABELS, WORK_PROGRESS_LABELS, sortWorkUnits } from '../../lib/mediaSummary'
 
@@ -62,11 +62,18 @@ function WorkUnit({ unit, busyRetryId, onRetry, resolvingWorkId, onResolveMetada
     <article className={`media-v4-work-progress media-v4-work-progress-${unit.overall_status}`}>
       <button type="button" className="media-v4-work-progress-head" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
         <span className="media-v4-work-progress-state" aria-hidden="true">
-          {unit.overall_status === 'completed' ? <CheckmarkCircle24Filled /> : unit.overall_status === 'failed' ? <ErrorCircle24Regular /> : unit.overall_status === 'cancelled' ? <DismissCircle24Regular /> : <SpinnerIosRegular />}
+          {unit.overall_status === 'completed' ? <CheckmarkCircle24Filled />
+            : unit.overall_status === 'failed' ? <ErrorCircle24Regular />
+            : unit.overall_status === 'cancelled' ? <DismissCircle24Regular />
+            : unit.overall_status === 'needs_attention' ? <Warning24Regular />
+            : <SpinnerIosRegular />}
         </span>
         <span className="media-v4-work-progress-title">{unit.title}</span>
+        {/* 主行只保留一句可扫读的数量：文件数与集数一致时不再重复。 */}
         <span className="media-v4-work-progress-meta">
-          {unit.media_type === 'movie' ? '电影' : '剧集'} · {unit.asset_count} 个文件{unit.episode_count > 0 ? ` · ${unit.episode_count} 集` : ''}
+          {unit.media_type === 'movie' ? '电影' : '剧集'}
+          {unit.episode_count > 0 ? ` · ${unit.episode_count} 集` : ''}
+          {unit.asset_count !== unit.episode_count ? ` · ${unit.asset_count} 个文件` : ''}
         </span>
         <span className="media-v4-work-progress-status">{WORK_PROGRESS_LABELS[unit.overall_status] ?? unit.overall_status}</span>
         {expanded ? <ChevronDown24Regular aria-hidden="true" /> : <ChevronRight24Regular aria-hidden="true" />}

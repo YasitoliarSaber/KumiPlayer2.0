@@ -358,12 +358,15 @@ def test_v4_parser_does_not_consume_post_confirmation_verified_title_rules(monke
 
     assert {work.preferred_title for work in graph.works} == {"Heya Camp", "Yuru Camp Movie"}
     assert not any(issue.code == "candidate_ambiguous" for issue in issues)
+    # 候选阶段允许读取已核验身份事实：Heya Camp 的核验绑定（95213）按
+    # D2 采用顺序压过在线搜索候选（92684，降级为 rejected），剧场版用
+    # 搜索候选（566466）确认；两作品各只有一个高置信身份，无假歧义。
     assert {
         candidate.provider_id
         for rows in candidates.values()
         for candidate in rows
         if candidate.status == "confirmed"
-    } == {"92684", "566466"}
+    } == {"95213", "566466"}
 
 
 def test_batch_parser_rebases_continuous_absolute_numbers_in_later_season():

@@ -343,11 +343,17 @@ def plan_work_candidates(
             except Exception:
                 searched = []
         candidates: dict[tuple[str, str, str], WorkCandidate] = {**confirmed}
+        # D2 采用顺序：既有核验绑定是最高优先身份。在线候选与核验身份不同
+        # 时必须降级（不得并列 high 制造假歧义——独立失败项 candidate_ambiguous
+        # 的根因），相同身份则保持幂等。
+        verified_keys = set(confirmed)
         for candidate in searched:
             if not supported_provider(candidate.provider):
                 continue
             key = (candidate.provider, candidate.media_type, candidate.provider_id)
             scored = _score_candidate(candidate, work, queries, nfo_titles)
+            if verified_keys and key not in verified_keys:
+                scored = replace(scored, confidence="medium", status="rejected")
             if key not in candidates or _confidence_rank(scored.confidence) > _confidence_rank(candidates[key].confidence):
                 candidates[key] = scored
 

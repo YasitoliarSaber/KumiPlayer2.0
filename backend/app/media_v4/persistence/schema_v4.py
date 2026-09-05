@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 17
+V4_SCHEMA_VERSION = 18
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -781,6 +781,7 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
     create_v13_structures(conn)
     create_v16_structures(conn)
     create_v17_structures(conn)
+    create_v18_structures(conn)
 
 
 def create_tree_scan_validation(conn: sqlite3.Connection) -> None:
@@ -906,6 +907,14 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str) ->
         conn.execute("ALTER TABLE jobs ADD COLUMN started_at TEXT NOT NULL DEFAULT ''")
     elif (table, column) == ("jobs", "finished_at"):
         conn.execute("ALTER TABLE jobs ADD COLUMN finished_at TEXT NOT NULL DEFAULT ''")
+    elif (table, column) == ("revision_work_candidates", "score"):
+        conn.execute("ALTER TABLE revision_work_candidates ADD COLUMN score REAL")
+    elif (table, column) == ("revision_work_candidates", "reasons_json"):
+        conn.execute("ALTER TABLE revision_work_candidates ADD COLUMN reasons_json TEXT NOT NULL DEFAULT '[]'")
+    elif (table, column) == ("revision_work_candidates", "popularity"):
+        conn.execute("ALTER TABLE revision_work_candidates ADD COLUMN popularity REAL")
+    elif (table, column) == ("revision_work_candidates", "recommended"):
+        conn.execute("ALTER TABLE revision_work_candidates ADD COLUMN recommended INTEGER NOT NULL DEFAULT 0")
     else:
         raise KeyError(f"未登记的增量列: {table}/{column}，请先在 _add_column_if_missing 登记字面量 DDL")
 
@@ -1181,6 +1190,21 @@ def migrate_schema_v16_to_v17(conn: sqlite3.Connection) -> None:
     """v16 → v17 增量迁移：新增 SourceScan 请求表，不改写既有数据。"""
 
     create_v17_structures(conn)
+
+
+def create_v18_structures(conn: sqlite3.Connection) -> None:
+    """v18：候选数值证据列（score/reasons/popularity/recommended）。"""
+
+    _add_column_if_missing(conn, "revision_work_candidates", "score")
+    _add_column_if_missing(conn, "revision_work_candidates", "reasons_json")
+    _add_column_if_missing(conn, "revision_work_candidates", "popularity")
+    _add_column_if_missing(conn, "revision_work_candidates", "recommended")
+
+
+def migrate_schema_v17_to_v18(conn: sqlite3.Connection) -> None:
+    """v17 → v18 增量迁移：候选排序与解释证据列，不改写既有候选。"""
+
+    create_v18_structures(conn)
 
 
 def migrate_schema_v15_to_v16(conn: sqlite3.Connection) -> None:

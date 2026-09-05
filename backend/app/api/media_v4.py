@@ -1847,6 +1847,18 @@ def metadata_search(request: MetadataSearchRequest):
         return {"work_id": request.work_id, "candidates": []}
     # R16：人工搜索同样补全 provider 别名（预算内），并持久化 original/aliases。
     candidates = enrich_candidate_aliases(candidates, [query], max_details=8)
+    # D4：共享 CandidateRanker 排序；候选按 score 稳定落库并返回推荐标记。
+    from app.media_v4.resolution.ranker import rank_candidates
+
+    ranked = rank_candidates(
+        {
+            "preferred_title": str(work["preferred_title"] or ""),
+            "queries": [query],
+            "media_type": media_type,
+            "year": work["year"],
+        },
+        candidates,
+    )
 
     now = _now_iso()
     with database.connect() as conn:
@@ -1865,33 +1877,50 @@ def metadata_search(request: MetadataSearchRequest):
             (request.work_id,),
         )
         stored = []
-        for item in candidates:
+        for item in ranked:
             candidate_id = str(uuid.uuid4())
             conn.execute(
                 """
                 INSERT INTO revision_work_candidates(
                     candidate_id, revision_id, work_id, draft_work_key, provider,
                     provider_id, media_type, title, original_title, aliases_json, year,
-                    evidence, confidence, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual_search', 'high', 'proposed', ?, ?)
+                    evidence, confidence, status, score, reasons_json, popularity,
+                    recommended, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual_search', 'high', 'proposed', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     candidate_id,
                     owner_revision,
                     request.work_id,
                     str(work["identity_key"]),
-                    "tmdb",
-                    str(item.get("provider_id") or ""),
-                    item.get("media_type") or media_type,
-                    item.get("title") or "",
-                    item.get("original_title") or "",
-                    json.dumps([str(a) for a in (item.get("aliases") or [])], ensure_ascii=False),
-                    item.get("year"),
+                    item.provider,
+                    item.provider_id,
+                    item.media_type,
+                    item.title,
+                    item.original_title,
+                    json.dumps([str(a) for a in item.aliases], ensure_ascii=False),
+                    item.year,
+                    item.score,
+                    json.dumps(list(item.reasons), ensure_ascii=False),
+                    item.popularity,
+                    1 if item.recommended else 0,
                     now,
                     now,
                 ),
             )
-            stored.append({**item, "candidate_id": candidate_id})
+            stored.append({
+                "candidate_id": candidate_id,
+                "provider": item.provider,
+                "provider_id": item.provider_id,
+                "media_type": item.media_type,
+                "title": item.title,
+                "original_title": item.original_title,
+                "aliases": list(item.aliases),
+                "year": item.year,
+                "score": item.score,
+                "reasons": list(item.reasons),
+                "recommended": item.recommended,
+            })
     return {"work_id": request.work_id, "candidates": stored}
 
 

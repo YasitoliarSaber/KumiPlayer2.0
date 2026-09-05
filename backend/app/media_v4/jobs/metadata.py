@@ -7,6 +7,7 @@ import unicodedata
 from typing import Any
 
 from app.core.config import load_config
+from app.media_v4.resolution.ranker import rank_candidates
 from app.scrape.tmdb_client import TMDBClient, TMDBClientError
 
 _METADATA_STATES = frozenset({"ready", "waiting_metadata", "waiting_review", "source_unavailable", "failed"})
@@ -274,15 +275,44 @@ def default_metadata_provider(target: dict) -> dict:
                         max_details=8,
                         client=client,
                     )
-                    alias_selected = _select_enriched_candidate(candidates, target, media_type)
-                    if alias_selected is not None:
-                        provider_id = int(alias_selected["provider_id"])
+                    # 共享 CandidateRanker：数值排序 + 身份门禁自动采用，替代
+                    # 旧的等值门槛独判（D3/D4）。
+                    ranked = rank_candidates(
+                        {
+                            "preferred_title": target.get("preferred_title") or "",
+                            "queries": titles,
+                            "media_type": media_type,
+                            "year": target.get("year"),
+                        },
+                        candidates,
+                    )
+                    from app.media_v4.resolution.ranker import CandidateRanker
+
+                    adopted, _reason = CandidateRanker().auto_adopt(ranked)
+                    if adopted is not None:
+                        provider_id = int(adopted.provider_id)
                     else:
+                        ranked_payload = [
+                            {
+                                "provider": item.provider,
+                                "provider_id": item.provider_id,
+                                "media_type": item.media_type,
+                                "title": item.title,
+                                "original_title": item.original_title,
+                                "aliases": list(item.aliases),
+                                "year": item.year,
+                                "popularity": item.popularity,
+                                "score": item.score,
+                                "reasons": list(item.reasons),
+                                "recommended": item.recommended,
+                            }
+                            for item in ranked
+                        ]
                         return _local_state(
                             "waiting_review",
                             "没有唯一匹配的在线作品，需要人工确认后再继续",
                             attempted_queries=attempted_queries,
-                            candidates=candidates,
+                            candidates=ranked_payload,
                         )
                 else:
                     provider_id = int(selected["id"])

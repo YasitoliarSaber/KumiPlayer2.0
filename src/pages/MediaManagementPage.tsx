@@ -50,6 +50,9 @@ type MetadataRecoveryCandidate = {
   original_title: string
   year: number | null
   aliases: string[]
+  score?: number
+  reasons?: string[]
+  recommended?: boolean
 }
 
 type DurableScanState = {
@@ -1393,7 +1396,7 @@ export default function MediaManagementPage() {
       </section>}
       {metadataRecovery && (
         <Dialog open onOpenChange={(_, data) => { if (!data.open && metadataRecoveryBusy === '') setMetadataRecovery(null) }}>
-          <DialogSurface>
+          <DialogSurface className="media-v4-metadata-dialog" aria-describedby={undefined}>
             <DialogBody>
               <DialogTitle>确认“{metadataRecovery.workTitle}”的在线作品</DialogTitle>
               <DialogContent>
@@ -1401,14 +1404,25 @@ export default function MediaManagementPage() {
                 <div className="media-v4-metadata-search-row">
                   <Input aria-label="搜索作品名称" value={metadataRecoveryQuery} onChange={(_, data) => setMetadataRecoveryQuery(data.value)} />
                   <Button appearance="secondary" disabled={metadataRecoveryBusy !== '' || !metadataRecoveryQuery.trim()} onClick={() => { void searchMetadataRecovery(metadataRecovery.workId, metadataRecoveryQuery.trim()) }}>
-                    搜索
+                    重新搜索
                   </Button>
                 </div>
                 <div className="media-v4-metadata-candidate-list">
-                  {metadataRecovery.candidates.length > 0 ? metadataRecovery.candidates.map((candidate) => (
+                  {metadataRecovery.candidates.length > 0 ? [...metadataRecovery.candidates].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).map((candidate) => (
                     <Button key={candidate.candidate_id} appearance="secondary" className="media-v4-metadata-candidate" disabled={metadataRecoveryBusy !== ''} onClick={() => { void confirmMetadataRecovery(candidate) }}>
-                      <strong>{candidate.title || candidate.original_title || '未命名候选'}</strong>
-                      <span>{[candidate.original_title, candidate.year ? String(candidate.year) : '', candidate.media_type === 'movie' ? '电影' : '剧集'].filter(Boolean).join(' · ')}</span>
+                      <span className="media-v4-metadata-candidate-head">
+                        <strong>{candidate.title || candidate.original_title || '未命名候选'}</strong>
+                        {candidate.recommended && <span className="media-v4-metadata-candidate-badge">推荐</span>}
+                      </span>
+                      <span className="media-v4-metadata-candidate-meta">
+                        {[candidate.original_title, candidate.year ? String(candidate.year) : '', candidate.media_type === 'movie' ? '电影' : '剧集'].filter(Boolean).join(' · ')}
+                      </span>
+                      {(candidate.score != null || (candidate.reasons?.length ?? 0) > 0) && (
+                        <span className="media-v4-metadata-candidate-evidence">
+                          {candidate.score != null && <span className="media-v4-metadata-candidate-score">匹配度 {Math.round(candidate.score)}</span>}
+                          {(candidate.reasons ?? []).slice(0, 2).map((reason) => <span key={reason}>{reason}</span>)}
+                        </span>
+                      )}
                     </Button>
                   )) : <div className="media-v4-empty">没有找到候选。请调整名称后重新搜索，或检查 TMDB 配置。</div>}
                 </div>
