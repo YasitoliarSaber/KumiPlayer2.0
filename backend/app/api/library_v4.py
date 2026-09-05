@@ -193,6 +193,7 @@ def get_work_detail(work_id: str):
             WHERE w.work_id = ? AND EXISTS (
                 SELECT 1 FROM revision_bindings rb
                 JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = ''
                 WHERE rb.work_id = w.work_id AND ir.status = 'confirmed'
             )
             """,
@@ -206,6 +207,7 @@ def get_work_detail(work_id: str):
             WHERE s.work_id = ? AND EXISTS (
                 SELECT 1 FROM revision_bindings rb
                 JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+                JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = ''
                 JOIN episodes e ON e.episode_id = rb.episode_id
                 WHERE e.season_id = s.season_id AND ir.status = 'confirmed'
             )
@@ -220,6 +222,7 @@ def get_work_detail(work_id: str):
                    a.availability_state, se.provider, se.relative_path
             FROM revision_bindings rb
             JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+            JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = ''
             JOIN episodes e ON e.episode_id = rb.episode_id
             JOIN seasons s ON s.season_id = e.season_id
             JOIN assets a ON a.asset_id = rb.asset_id
@@ -242,6 +245,7 @@ def get_work_detail(work_id: str):
                    a.availability_state, se.provider
             FROM revision_bindings rb
             JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+            JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = ''
             JOIN assets a ON a.asset_id = rb.asset_id
             JOIN source_evidence se ON se.evidence_id = a.evidence_id
             WHERE rb.work_id = ? AND rb.episode_id IS NULL
@@ -265,6 +269,7 @@ def get_work_detail(work_id: str):
             SELECT sb.metadata_json
             FROM scrape_bindings sb
             JOIN import_revisions ir ON ir.revision_id = sb.revision_id
+            JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = ''
             WHERE sb.work_id = ? AND ir.status = 'confirmed'
             ORDER BY sb.updated_at DESC, sb.binding_id DESC LIMIT 1
             """,

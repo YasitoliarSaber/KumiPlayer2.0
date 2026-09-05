@@ -174,6 +174,38 @@ def test_detail_only_exposes_latest_confirmed_revision_for_same_root(tmp_path, m
     assert detail.json()["asset_count"] == 1
 
 
+def test_detail_excludes_assets_from_retired_source_roots(tmp_path, monkeypatch):
+    client, database = _client(tmp_path, monkeypatch)
+    retired = _entry("rev-retired-root")
+    retired["root_id"] = "root-retired"
+    retired["entries"] = [retired["entries"][0]]
+    assert client.post("/api/v4/imports/preview", json=retired).status_code == 200
+    assert client.post("/api/v4/imports/rev-retired-root/confirm").status_code == 200
+
+    active = _entry("rev-active-root")
+    active["root_id"] = "root-active"
+    active["entries"] = [active["entries"][1]]
+    assert client.post("/api/v4/imports/preview", json=active).status_code == 200
+    assert client.post("/api/v4/imports/rev-active-root/confirm").status_code == 200
+
+    with database.connect() as conn:
+        work_id = conn.execute("SELECT work_id FROM works LIMIT 1").fetchone()["work_id"]
+        active_asset_id = conn.execute(
+            "SELECT asset_id FROM assets WHERE root_id = 'root-active'"
+        ).fetchone()["asset_id"]
+        conn.execute(
+            "UPDATE source_roots SET retired_at = '2026-09-05T00:00:00+00:00' "
+            "WHERE root_id = 'root-retired'"
+        )
+        conn.commit()
+
+    detail = client.get(f"/api/library/works/{work_id}")
+    assert detail.status_code == 200
+    episode = detail.json()["episodes"][0]
+    assert episode["asset_id"] == active_asset_id
+    assert [asset["asset_id"] for asset in episode["assets"]] == [active_asset_id]
+
+
 def test_library_sources_come_from_each_evidence_not_the_first_root_entry(tmp_path, monkeypatch):
     client, _database = _client(tmp_path, monkeypatch)
     payload = _entry("rev-mixed-provider")
