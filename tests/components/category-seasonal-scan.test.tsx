@@ -11,6 +11,7 @@ const api = vi.hoisted(() => ({
   trackingWorks: vi.fn(),
   trackingScanWork: vi.fn(),
   sourceLibraries: vi.fn(),
+  workExecutionDetail: vi.fn(),
   openlistStatus: vi.fn(),
   drafts: vi.fn(),
 }));
@@ -43,7 +44,8 @@ vi.mock('../../src/stores/ui', () => {
 vi.mock('../../src/platform/folderPicker', () => ({ pickDirectoryTreeFile: vi.fn(), pickFolder: vi.fn() }));
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.clearAllMocks()
+  api.workExecutionDetail.mockResolvedValue({ has_detail: false });
   api.trackingScanAll.mockResolvedValue({
     tasks: [
       { task_id: 'scan-1', root_id: 'r1', remote_root: '/Anime', status: 'running' },

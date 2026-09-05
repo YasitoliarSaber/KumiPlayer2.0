@@ -1683,6 +1683,192 @@ class V4RevisionService:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_work_execution_detail(self, revision_id: str, work_id: str) -> dict:
+        """3.1 P0：作品级执行详情只读投影。
+
+        从 revision_bindings / seasons / episodes / episode_provider_mappings /
+        episode_assets + assets / artifacts / scrape_bindings / jobs 组装，
+        不重新刮削、不重新扫描、不访问源盘、不写库。work 不属于该 revision
+        或不存在时抛 KeyError（路由层转 404）。
+        """
+
+        with self.database.connect() as conn:
+            revision = conn.execute(
+                "SELECT revision_id FROM import_revisions WHERE revision_id = ?",
+                (revision_id,),
+            ).fetchone()
+            if revision is None:
+                raise KeyError(revision_id)
+            belongs = conn.execute(
+                "SELECT 1 FROM revision_bindings WHERE revision_id = ? AND work_id = ? LIMIT 1",
+                (revision_id, work_id),
+            ).fetchone()
+            job_link = conn.execute(
+                "SELECT 1 FROM jobs WHERE revision_id = ? AND work_id = ? LIMIT 1",
+                (revision_id, work_id),
+            ).fetchone()
+            if belongs is None and job_link is None:
+                raise KeyError(work_id)
+            work = conn.execute(
+                "SELECT work_id, preferred_title, work_type FROM works WHERE work_id = ?",
+                (work_id,),
+            ).fetchone()
+            if work is None:
+                raise KeyError(work_id)
+
+            job_rows = conn.execute(
+                "SELECT job_id, job_type, status, attempts, last_error, finished_at "
+                "FROM jobs WHERE revision_id = ? AND work_id = ? "
+                "ORDER BY job_type, updated_at DESC, job_id",
+                (revision_id, work_id),
+            ).fetchall()
+            artifact_rows = conn.execute(
+                "SELECT target_path, status FROM artifacts "
+                "WHERE revision_id = ? AND work_id = ? AND artifact_type = 'mirror' "
+                "ORDER BY target_path LIMIT 20",
+                (revision_id, work_id),
+            ).fetchall()
+            artifact_total = int(conn.execute(
+                "SELECT COUNT(*) FROM artifacts WHERE revision_id = ? AND work_id = ? AND artifact_type = 'mirror'",
+                (revision_id, work_id),
+            ).fetchone()[0])
+            scrape_row = conn.execute(
+                "SELECT provider, provider_id, status, metadata_json FROM scrape_bindings "
+                "WHERE revision_id = ? AND work_id = ? "
+                "ORDER BY updated_at DESC, binding_id DESC LIMIT 1",
+                (revision_id, work_id),
+            ).fetchone()
+            season_rows = conn.execute(
+                "SELECT season_id, local_season_number, season_kind, title FROM seasons "
+                "WHERE work_id = ? ORDER BY local_season_number, season_id",
+                (work_id,),
+            ).fetchall()
+            episode_rows = conn.execute(
+                """
+                SELECT e.episode_id, e.season_id, e.local_episode_number, e.special_number,
+                       e.episode_kind, e.display_title,
+                       s.local_season_number AS season_number, s.season_kind,
+                       epm.provider_season_number, epm.provider_episode_number
+                FROM episodes e
+                JOIN seasons s ON s.season_id = e.season_id
+                LEFT JOIN episode_provider_mappings epm
+                  ON epm.episode_id = e.episode_id AND epm.provider = ?
+                WHERE e.work_id = ?
+                ORDER BY s.local_season_number, e.local_episode_number, e.episode_id
+                """,
+                (str(scrape_row["provider"]) if scrape_row else "tmdb", work_id),
+            ).fetchall()
+            asset_rows = conn.execute(
+                """
+                SELECT ea.episode_id, a.source_locator, a.playback_locator
+                FROM episode_assets ea
+                JOIN assets a ON a.asset_id = ea.asset_id
+                JOIN revision_bindings rb ON rb.asset_id = a.asset_id
+                WHERE rb.revision_id = ? AND rb.work_id = ?
+                ORDER BY ea.episode_id, ea.preference_rank
+                """,
+                (revision_id, work_id),
+            ).fetchall()
+
+        # 刮削集名来自最近一次 scrape_bindings.metadata_json 的 episode_mappings。
+        mappings_by_episode: dict[str, dict] = {}
+        metadata_state = ""
+        metadata_reason = ""
+        provider = ""
+        provider_id = ""
+        if scrape_row is not None:
+            provider = str(scrape_row["provider"] or "")
+            provider_id = str(scrape_row["provider_id"] or "")
+            metadata_state = str(scrape_row["status"] or "")
+            try:
+                metadata = json.loads(str(scrape_row["metadata_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                metadata = {}
+            if isinstance(metadata, dict):
+                # 绑定行的 status 是 confirmed 等订阅状态；面向用户的元数据
+                # 状态（ready/waiting_review/...）保存在 metadata_json 内。
+                metadata_state = str(metadata.get("metadata_state") or metadata_state)
+                metadata_reason = str(metadata.get("reason") or "")
+                for mapping in metadata.get("episode_mappings") or []:
+                    if isinstance(mapping, dict) and mapping.get("episode_id"):
+                        mappings_by_episode.setdefault(str(mapping["episode_id"]), mapping)
+
+        file_by_episode: dict[str, dict] = {}
+        for row in asset_rows:
+            episode_id = str(row["episode_id"])
+            if episode_id in file_by_episode:
+                continue
+            locator = str(row["source_locator"] or "")
+            file_by_episode[episode_id] = {
+                "file_name": locator.replace("\\", "/").rsplit("/", 1)[-1] if locator else "",
+                "playback_ready": bool(str(row["playback_locator"] or "").strip()),
+            }
+
+        episodes: list[dict] = []
+        for row in episode_rows:
+            episode_id = str(row["episode_id"])
+            season_number = int(row["season_number"] or 0)
+            season_kind = str(row["season_kind"] or "")
+            mapping = mappings_by_episode.get(episode_id, {})
+            asset_fact = file_by_episode.get(episode_id, {"file_name": "", "playback_ready": False})
+            special_number = int(row["special_number"] or 0) if row["special_number"] is not None else None
+            episodes.append({
+                "episode_id": episode_id,
+                "season_number": season_number,
+                "season_kind": season_kind,
+                "episode_number": int(row["local_episode_number"] or 0) if row["local_episode_number"] is not None else special_number,
+                "display_title": str(row["display_title"] or ""),
+                "scraped_title": str(mapping.get("title") or ""),
+                "mapped": bool(row["provider_episode_number"] is not None or mapping),
+                "file_name": asset_fact["file_name"],
+                "playback_ready": asset_fact["playback_ready"],
+            })
+
+        mirror_job = next((dict(row) for row in job_rows if row["job_type"] == "materialize_mirror"), None)
+        metadata_job = next((dict(row) for row in job_rows if row["job_type"] == "scrape_work"), None)
+
+        mirror_status = str(mirror_job["status"]) if mirror_job else ""
+        artifacts = [
+            {"file_name": str(row["target_path"]).replace("\\", "/").rsplit("/", 1)[-1], "status": str(row["status"] or "")}
+            for row in artifact_rows
+        ]
+        has_detail = bool(episodes or artifacts or metadata_state in {"confirmed", "ready"})
+
+        return {
+            "revision_id": revision_id,
+            "work_id": work_id,
+            "work": {
+                "title": str(work["preferred_title"] or ""),
+                "media_type": "movie" if str(work["work_type"] or "") == "movie" else "tv",
+                "provider": provider,
+                "provider_id": provider_id,
+                "metadata_state": metadata_state,
+                "metadata_reason": metadata_reason,
+            },
+            "mirror": {
+                "status": mirror_status,
+                "error": str((mirror_job or {}).get("last_error") or ""),
+                "artifact_count": artifact_total,
+                "artifacts": artifacts,
+            },
+            "metadata_job_status": str(metadata_job["status"]) if metadata_job else "",
+            "seasons": [
+                {
+                    "season_number": int(row["local_season_number"] or 0),
+                    "season_kind": str(row["season_kind"] or ""),
+                    "title": str(row["title"] or ""),
+                    "episode_count": sum(
+                        1 for item in episodes if item["season_number"] == int(row["local_season_number"] or 0)
+                    ),
+                }
+                for row in season_rows
+            ],
+            "episodes": episodes,
+            "episode_total": len(episodes),
+            "episodes_truncated": False,
+            "has_detail": has_detail,
+        }
+
     def get_execution_progress(self, revision_id: str) -> dict:
         """P-003：V4 只读执行进度投影。
 

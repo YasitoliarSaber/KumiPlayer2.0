@@ -13782,9 +13782,13 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-review-details summary { cursor: pointer; padding: 10px 12px; font-size: 13px; }
 .media-v4-review-details-body { padding: 10px 12px; border-top: 1px solid color-mix(in srgb, var(--border) 76%, transparent); }
 .media-v4-execution-progress { display: grid; gap: 14px; }
-.media-v4-execution-head { display: grid; gap: 8px; }
-.media-v4-execution-head strong { font-size: 16px; }
-.media-v4-execution-overall { color: var(--text-secondary); font-size: 12px; }
+.media-v4-execution-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 16px; align-items: center; }
+.media-v4-execution-status { font-size: 16px; }
+/* 3.5：总体摘要右对齐，主数字突出、次级标签弱化。 */
+.media-v4-execution-summary { display: inline-flex; align-items: baseline; gap: 6px; justify-self: end; }
+.media-v4-execution-summary-primary { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1; }
+.media-v4-execution-summary-label { color: var(--text-secondary); font-size: 12px; }
+.media-v4-execution-summary-secondary { color: var(--text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
 .media-v4-stage-pills { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .media-v4-stage-pill { display: grid; gap: 2px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--border) 76%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--surface-soft) 62%, transparent); }
 .media-v4-stage-pill strong { font-size: 13px; }
@@ -13795,7 +13799,9 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-projection-error { display: flex; gap: 8px; align-items: center; padding: 10px 12px; border-radius: 8px; color: var(--warning, #c45b52); background: color-mix(in srgb, var(--warning, #c45b52) 10%, transparent); font-size: 13px; }
 .media-v4-work-progress-list { display: grid; gap: 8px; }
 .media-v4-work-progress { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--border) 76%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--surface-soft) 62%, transparent); }
-.media-v4-work-progress-head { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto auto 18px; gap: 10px; align-items: center; width: 100%; padding: 0; border: 0; background: none; text-align: left; cursor: pointer; font: inherit; color: inherit; }
+.media-v4-work-progress-head { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto auto 18px; gap: 10px; align-items: center; width: 100%; padding: 4px 6px; margin: -4px -6px; border: 0; border-radius: 6px; background: none; text-align: left; cursor: pointer; font: inherit; color: inherit; }
+.media-v4-work-progress-head:hover { background: color-mix(in srgb, var(--border) 28%, transparent); }
+.media-v4-work-progress-head:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: -2px; }
 .media-v4-work-progress-title { font-size: 14px; font-weight: 600; }
 .media-v4-work-progress-meta { color: var(--text-secondary); font-size: 12px; }
 .media-v4-work-progress-status { font-size: 12px; color: var(--text-secondary); }
@@ -13934,6 +13940,26 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-completed-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-top: 4px; }
 .media-v4-completed-heading strong { font-size: 14px; }
 .media-v4-completed-heading span { color: var(--text-secondary); font-size: 12px; }
+/* 3.1：展开后的作品执行详情（作品信息 / 镜像结果 / 剧集结果）。 */
+.media-v4-work-detail { display: grid; gap: 12px; }
+.media-v4-work-detail-section { display: grid; gap: 6px; }
+.media-v4-work-detail-section h4 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text-secondary); }
+.media-v4-work-detail-facts { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; }
+.media-v4-work-detail-loading, .media-v4-work-detail-empty { display: flex; gap: 8px; align-items: center; color: var(--text-secondary); font-size: 13px; }
+.media-v4-work-detail-artifacts { margin: 0; padding-left: 18px; color: var(--text-secondary); font-size: 12px; }
+.media-v4-work-detail-episodes { display: grid; gap: 4px; max-height: 240px; overflow: auto; padding-right: 4px; }
+.media-v4-work-detail-episode { display: grid; grid-template-columns: 64px minmax(0, 1fr) minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 3px 6px; border-radius: 4px; font-size: 12px; }
+.media-v4-work-detail-episode:nth-child(odd) { background: color-mix(in srgb, var(--border) 18%, transparent); }
+.media-v4-work-detail-episode-code { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.media-v4-work-detail-episode-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.media-v4-work-detail-episode-file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
+.media-v4-work-detail-episode-state.mapped { color: var(--success, #4e9e5a); }
+.media-v4-work-detail-episode-state.unmapped { color: var(--warning, #c45b52); }
+.media-v4-work-detail-episode-playable { color: var(--text-secondary); }
+@media (max-width: 720px) {
+  .media-v4-work-detail-episode { grid-template-columns: 56px minmax(0, 1fr) auto; }
+  .media-v4-work-detail-episode-file, .media-v4-work-detail-episode-playable { display: none; }
+}
 .media-v4-completed-toggle { justify-self: start; padding: 5px 8px; border: 1px solid color-mix(in srgb, var(--border) 76%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--surface-raised) 70%, transparent); font-size: 12px; }
 .media-v4-completed-toggle:hover { border-color: color-mix(in srgb, var(--accent-strong) 42%, var(--border)); color: var(--text); }
 

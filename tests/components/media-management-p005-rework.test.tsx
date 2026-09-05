@@ -20,6 +20,7 @@ const api = vi.hoisted(() => ({
   startDurableScan: vi.fn(),
   durableScan: vi.fn(),
   cancelDurableScan: vi.fn(),
+  workExecutionDetail: vi.fn(),
   cancelImport: vi.fn(),
   maintenancePreview: vi.fn(),
   maintenanceConfirm: vi.fn(),
@@ -62,6 +63,7 @@ function cardFixture(overrides: Record<string, unknown> = {}) {
 beforeEach(() => {
   localStorage.clear()
   vi.clearAllMocks()
+  api.workExecutionDetail.mockResolvedValue({ has_detail: false })
   useUiStore.setState({ page: 'manage', manageView: 'overview', navigationHistory: [], forwardHistory: [], canGoBack: false, canGoForward: false, query: '' })
   api.scan.mockResolvedValue({ root_id: 'root-local', scan_id: 'scan-1', entries: [] })
   api.preview.mockResolvedValue({ revision_id: 'rev', status: 'draft', works: [], episodes: [], work_assets: [], issues: [] })

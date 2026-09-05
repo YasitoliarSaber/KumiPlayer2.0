@@ -1389,6 +1389,7 @@ export default function MediaManagementPage() {
             onRetry={(jobId: string) => { const job = jobs.find((item) => item.job_id === jobId); if (job) void retryJob(job) }}
             resolvingWorkId={metadataRecoveryBusy}
             onResolveMetadata={(workId: string) => { void searchMetadataRecovery(workId) }}
+            fetchWorkDetail={(revisionId: string, workId: string) => mediaV4Api.workExecutionDetail(revisionId, workId)}
           />
         ) : (
           <div className="media-v4-empty">正在读取执行进度…</div>

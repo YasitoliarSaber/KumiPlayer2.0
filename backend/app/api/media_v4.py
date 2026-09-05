@@ -995,6 +995,17 @@ def get_import(revision_id: str):
     }
 
 
+@router.get("/revisions/{revision_id}/works/{work_id}/execution-detail")
+def get_work_execution_detail(revision_id: str, work_id: str):
+    """作品级执行详情（3.1）：只读投影，展开时按需读取，不启动任务。"""
+
+    service = V4RevisionService(get_database())
+    try:
+        return service.get_work_execution_detail(revision_id, work_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="作品执行详情不存在") from exc
+
+
 def _source_evidence_from_row(row) -> SourceEvidence:
     return SourceEvidence(
         evidence_id=str(row["evidence_id"]),

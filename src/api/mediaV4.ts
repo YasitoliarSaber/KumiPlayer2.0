@@ -234,6 +234,41 @@ export interface V4WorkProgressUnit {
   metadata: { job_id: string; status: string; attempts: number; last_error: string }
 }
 
+export interface V4WorkExecutionDetail {
+  revision_id: string
+  work_id: string
+  work: {
+    title: string
+    media_type: string
+    provider: string
+    provider_id: string
+    metadata_state: string
+    metadata_reason: string
+  }
+  mirror: {
+    status: string
+    error: string
+    artifact_count: number
+    artifacts: Array<{ file_name: string; status: string }>
+  }
+  metadata_job_status: string
+  seasons: Array<{ season_number: number; season_kind: string; title: string; episode_count: number }>
+  episodes: Array<{
+    episode_id: string
+    season_number: number
+    season_kind: string
+    episode_number: number | null
+    display_title: string
+    scraped_title: string
+    mapped: boolean
+    file_name: string
+    playback_ready: boolean
+  }>
+  episode_total: number
+  episodes_truncated: boolean
+  has_detail: boolean
+}
+
 export interface V4StageSummary {
   status: 'idle' | 'running' | 'failed' | 'cancelled' | 'queued' | 'succeeded'
   total: number
@@ -318,6 +353,10 @@ export const mediaV4Api = {
 
   status: (revisionId: string) =>
     api.get<{ revision_id: string; status: string; jobs: V4Job[]; progress: V4ExecutionProgress }>(`/api/v4/imports/${encodeURIComponent(revisionId)}`),
+  workExecutionDetail: (revisionId: string, workId: string) =>
+    api.get<V4WorkExecutionDetail>(
+      `/api/v4/revisions/${encodeURIComponent(revisionId)}/works/${encodeURIComponent(workId)}/execution-detail`,
+    ),
 
   sourceLibraries: () => api.get<{ cards: V4SourceLibraryCard[] }>('/api/v4/sources/libraries'),
 

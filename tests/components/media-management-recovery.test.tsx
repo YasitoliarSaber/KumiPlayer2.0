@@ -19,6 +19,7 @@ const api = vi.hoisted(() => ({
   startDurableScan: vi.fn(),
   durableScan: vi.fn(),
   cancelDurableScan: vi.fn(),
+  workExecutionDetail: vi.fn(),
 }))
 const config = vi.hoisted(() => ({ getConfig: vi.fn() }))
 const openlist = vi.hoisted(() => ({ browse: vi.fn(), getRoutes: vi.fn() }))
@@ -57,6 +58,7 @@ function browseResult(path: string, cacheStatus: 'fresh' | 'stale' | 'none' = 'f
 beforeEach(() => {
   localStorage.clear()
   vi.clearAllMocks()
+  api.workExecutionDetail.mockResolvedValue({ has_detail: false })
   useUiStore.setState({ page: 'manage', manageView: 'overview', navigationHistory: [], forwardHistory: [], canGoBack: false, canGoForward: false, query: '' })
   api.scan.mockResolvedValue({ root_id: 'root-local', scan_id: 'scan-1', entries: [] })
   api.preview.mockResolvedValue({ revision_id: 'rev', status: 'draft', works: [], episodes: [], work_assets: [], issues: [] })

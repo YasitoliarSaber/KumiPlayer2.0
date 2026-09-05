@@ -19,6 +19,7 @@ const api = vi.hoisted(() => ({
   startDurableScan: vi.fn(),
   durableScan: vi.fn(),
   cancelDurableScan: vi.fn(),
+  workExecutionDetail: vi.fn(),
 }))
 const config = vi.hoisted(() => ({ getConfig: vi.fn() }))
 const openlist = vi.hoisted(() => ({ browse: vi.fn(), getRoutes: vi.fn() }))
@@ -71,6 +72,7 @@ function workUnit(workId: string, title: string, overallStatus: string, extra: R
 beforeEach(() => {
   localStorage.clear()
   vi.clearAllMocks()
+  api.workExecutionDetail.mockResolvedValue({ has_detail: false })
   useUiStore.setState({ page: 'manage', manageView: 'overview', navigationHistory: [], forwardHistory: [], canGoBack: false, canGoForward: false, query: '' })
   api.scan.mockResolvedValue({ root_id: 'root-local', scan_id: 'scan-1', entries: [] })
   api.preview.mockResolvedValue({
@@ -370,4 +372,97 @@ test('已终止的第三步执行显示终态而不是准备中', () => {
 
   expect(screen.getByText('任务已终止')).toBeVisible()
   expect(screen.queryByText('正在准备任务')).not.toBeInTheDocument()
+})
+
+function renderProgressWithDetail(units: Array<Record<string, unknown>>, overrides: Record<string, unknown>, fetchWorkDetail: ReturnType<typeof vi.fn>) {
+  return render(
+    <V4ExecutionProgress
+      progress={makeProgress(units, overrides)}
+      busyRetryId=""
+      onRetry={vi.fn()}
+      resolvingWorkId=""
+      onResolveMetadata={vi.fn()}
+      fetchWorkDetail={fetchWorkDetail}
+    />,
+  )
+}
+
+test('展开已完成作品后读取并显示作品信息、镜像结果与剧集结果', async () => {
+  const fetchWorkDetail = vi.fn().mockResolvedValue({
+    revision_id: 'rev-exec',
+    work_id: 'w-done',
+    work: { title: '完成作品', media_type: 'tv', provider: 'tmdb', provider_id: '12345', metadata_state: 'ready', metadata_reason: '' },
+    mirror: { status: 'succeeded', error: '', artifact_count: 1, artifacts: [{ file_name: 'S01E01-abc.strm', status: 'published' }] },
+    metadata_job_status: 'succeeded',
+    seasons: [{ season_number: 1, season_kind: 'regular', title: '', episode_count: 1 }],
+    episodes: [{
+      episode_id: 'ep-1', season_number: 1, season_kind: 'regular', episode_number: 1,
+      display_title: '本地第一集', scraped_title: '远程第一集全名', mapped: true,
+      file_name: 'Show.S01E01.mkv', playback_ready: true,
+    }],
+    episode_total: 1,
+    episodes_truncated: false,
+    has_detail: true,
+  })
+  renderProgressWithDetail(
+    [workUnit('w-done', '完成作品', 'completed')],
+    {
+      overall_status: 'completed',
+      stage_summary: {
+        mirror: { status: 'succeeded', total: 1, queued: 0, running: 0, succeeded: 1, failed: 0, cancelled: 0 },
+        metadata: { status: 'succeeded', total: 1, queued: 0, running: 0, succeeded: 1, failed: 0, cancelled: 0 },
+        projection: { status: 'succeeded', total: 1, queued: 0, running: 0, succeeded: 1, failed: 0, cancelled: 0 },
+      },
+    },
+    fetchWorkDetail,
+  )
+  fireEvent.click(screen.getByRole('button', { name: /完成作品/ }))
+
+  expect(await screen.findByText('作品信息')).toBeVisible()
+  expect(screen.getByText('镜像结果')).toBeVisible()
+  expect(screen.getByText(/剧集结果（1 集）/)).toBeVisible()
+  expect(fetchWorkDetail).toHaveBeenCalledWith('rev-exec', 'w-done')
+  // 一条完整集名 + 季集号 + 阶段结果。
+  expect(screen.getByText('远程第一集全名')).toBeVisible()
+  expect(screen.getByText('S01E01')).toBeVisible()
+  expect(screen.getByText('S01E01-abc.strm')).toBeVisible()
+  expect(screen.getByText('已映射')).toBeVisible()
+})
+
+test('详情读取失败与空详情都有明确状态，重复展开不重复请求', async () => {
+  const fetchWorkDetail = vi.fn()
+    .mockRejectedValueOnce(new Error('后端不可用'))
+    .mockResolvedValueOnce({
+      revision_id: 'rev-exec',
+      work_id: 'w-empty',
+      work: { title: '空详情作品', media_type: 'tv', provider: '', provider_id: '', metadata_state: '', metadata_reason: '' },
+      mirror: { status: 'succeeded', error: '', artifact_count: 0, artifacts: [] },
+      metadata_job_status: 'succeeded',
+      seasons: [],
+      episodes: [],
+      episode_total: 0,
+      episodes_truncated: false,
+      has_detail: false,
+    })
+  renderProgressWithDetail(
+    [workUnit('w-empty', '空详情作品', 'completed')],
+    {
+      overall_status: 'completed',
+      stage_summary: {
+        mirror: { status: 'succeeded', total: 1, queued: 0, running: 0, succeeded: 1, failed: 0, cancelled: 0 },
+        metadata: { status: 'succeeded', total: 1, queued: 0, running: 0, succeeded: 1, failed: 0, cancelled: 0 },
+        projection: { status: 'succeeded', total: 1, queued: 0, running: 0, succeeded: 1, failed: 0, cancelled: 0 },
+      },
+    },
+    fetchWorkDetail,
+  )
+
+  // 第一次展开：读取失败 → 明确错误文案。
+  fireEvent.click(screen.getByRole('button', { name: /空详情作品/ }))
+  expect(await screen.findByText(/执行详情读取失败：后端不可用/)).toBeVisible()
+
+  // 收起再展开：状态键未变 → 命中缓存（含失败状态），不重复请求。
+  fireEvent.click(screen.getByRole('button', { name: /空详情作品/ }))
+  fireEvent.click(screen.getByRole('button', { name: /空详情作品/ }))
+  expect(fetchWorkDetail).toHaveBeenCalledTimes(1)
 })
