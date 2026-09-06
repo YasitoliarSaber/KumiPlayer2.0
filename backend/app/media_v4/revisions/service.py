@@ -1903,7 +1903,9 @@ class V4RevisionService:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def get_work_execution_detail(self, revision_id: str, work_id: str) -> dict:
+    def get_work_execution_detail(
+        self, revision_id: str, work_id: str, *, episode_offset: int = 0, episode_limit: int = 50
+    ) -> dict:
         """3.1 P0：作品级执行详情只读投影。
 
         从 revision_bindings / seasons / episodes / episode_provider_mappings /
@@ -1966,25 +1968,28 @@ class V4RevisionService:
                 ") ORDER BY CASE WHEN s.season_kind = 'special' THEN 1 ELSE 0 END, s.local_season_number, s.season_id",
                 (work_id, revision_id, work_id),
             ).fetchall()
+            episode_total = int(conn.execute(
+                "SELECT COUNT(*) FROM episodes e WHERE e.work_id = ? AND EXISTS ("
+                "SELECT 1 FROM revision_bindings rb WHERE rb.revision_id = ? "
+                "AND rb.work_id = ? AND rb.episode_id = e.episode_id)",
+                (work_id, revision_id, work_id),
+            ).fetchone()[0])
             episode_rows = conn.execute(
                 """
                 SELECT e.episode_id, e.season_id, e.local_episode_number, e.special_number,
                        e.episode_kind, e.display_title,
-                       s.local_season_number AS season_number, s.season_kind,
-                       epm.provider_season_number, epm.provider_episode_number,
-                       epm.provider_episode_id
+                       s.local_season_number AS season_number, s.season_kind
                 FROM episodes e
                 JOIN seasons s ON s.season_id = e.season_id
-                LEFT JOIN episode_provider_mappings epm
-                  ON epm.episode_id = e.episode_id AND epm.provider = ?
                 WHERE e.work_id = ? AND EXISTS (
                   SELECT 1 FROM revision_bindings rb
                   WHERE rb.revision_id = ? AND rb.work_id = ? AND rb.episode_id = e.episode_id
                 )
                 ORDER BY CASE WHEN s.season_kind = 'special' THEN 1 ELSE 0 END,
                          s.local_season_number, e.local_episode_number, e.special_number, e.episode_id
+                LIMIT ? OFFSET ?
                 """,
-                (str(scrape_row["provider"]) if scrape_row else "tmdb", work_id, revision_id, work_id),
+                (work_id, revision_id, work_id, episode_limit, episode_offset),
             ).fetchall()
             asset_rows = conn.execute(
                 """
@@ -2055,10 +2060,13 @@ class V4RevisionService:
                 "display_title": str(row["display_title"] or ""),
                 "scraped_title": str(mapping.get("title") or ""),
                 "scraped_plot": str(mapping.get("plot") or ""),
-                "provider_episode_id": str(mapping.get("provider_episode_id") or row["provider_episode_id"] or ""),
+                # 执行详情只能用本 revision 的 metadata 快照，不能把后续导入
+                # 写入的全局 episode_provider_mappings 反投影回来。
+                "provider_episode_number": _positive_detail_int(mapping.get("provider_episode_number")),
+                "provider_episode_id": str(mapping.get("provider_episode_id") or ""),
                 "runtime": _positive_detail_int(mapping.get("runtime")),
                 "still_url": str(mapping.get("still_url") or ""),
-                "mapped": bool(row["provider_episode_number"] is not None or mapping),
+                "mapped": bool(mapping),
                 "file_name": asset_fact["file_name"],
                 "playback_ready": asset_fact["playback_ready"],
             })
@@ -2103,11 +2111,11 @@ class V4RevisionService:
                 "provider": provider,
                 "provider_id": provider_id,
                 "metadata_state": metadata_state,
-                "metadata_reason": metadata_reason,
+                "metadata_reason": _friendly_metadata_reason(metadata_state, metadata_reason),
             },
             "mirror": {
                 "status": mirror_status,
-                "error": str((mirror_job or {}).get("last_error") or ""),
+                "error": _friendly_job_error(str((mirror_job or {}).get("last_error") or "")),
                 "artifact_count": artifact_total,
                 "artifacts": artifacts,
             },
@@ -2123,8 +2131,9 @@ class V4RevisionService:
                 for row in season_rows
             ],
             "episodes": episodes,
-            "episode_total": len(episodes),
-            "episodes_truncated": False,
+            "episode_total": episode_total,
+            "episodes_truncated": episode_offset + len(episodes) < episode_total,
+            "next_episode_offset": episode_offset + len(episodes) if episode_offset + len(episodes) < episode_total else None,
             "has_detail": has_detail,
         }
 
@@ -2145,7 +2154,7 @@ class V4RevisionService:
             if revision is None:
                 raise KeyError(revision_id)
             job_rows = conn.execute(
-                "SELECT job_id, job_type, work_id, status, attempts, last_error "
+                "SELECT job_id, job_type, work_id, status, attempts, last_error, updated_at "
                 "FROM jobs WHERE revision_id = ? ORDER BY job_type, job_id",
                 (revision_id,),
             ).fetchall()
@@ -2170,7 +2179,7 @@ class V4RevisionService:
                     works[str(row["work_id"])] = dict(row)
             scrape_rows: dict[str, dict] = {}
             for row in conn.execute(
-                "SELECT sb.work_id, sb.status, sb.metadata_json FROM scrape_bindings sb "
+                "SELECT sb.work_id, sb.status, sb.metadata_json, sb.updated_at FROM scrape_bindings sb "
                 "WHERE sb.revision_id = ? AND sb.updated_at = ( "
                 "  SELECT MAX(updated_at) FROM scrape_bindings latest "
                 "  WHERE latest.revision_id = sb.revision_id AND latest.work_id = sb.work_id "
@@ -2186,6 +2195,7 @@ class V4RevisionService:
                 scrape_rows[str(row["work_id"])] = {
                     "status": str(row["status"] or ""),
                     "reason": str(metadata.get("reason") or ""),
+                    "updated_at": str(row["updated_at"] or ""),
                 }
 
         jobs_by_work: dict[str, dict] = {}
@@ -2234,6 +2244,14 @@ class V4RevisionService:
                 ),
                 "mirror": _job_summary(mirror),
                 "metadata": _job_summary(metadata),
+                # 任务状态相同并不代表详情快照不变，例如确认候选会更新
+                # scrape_bindings.metadata_json。用持久更新时间组成版本键，前端
+                # 才能在展开状态下可靠失效旧详情缓存。
+                "detail_version": "|".join((
+                    str((mirror or {}).get("updated_at") or ""),
+                    str((metadata or {}).get("updated_at") or ""),
+                    str(scrape.get("updated_at") or ""),
+                )),
             })
 
         return {

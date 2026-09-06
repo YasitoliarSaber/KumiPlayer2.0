@@ -18,7 +18,7 @@ export interface V4ExecutionProgressProps {
   onRetry: (jobId: string) => void
   resolvingWorkId: string
   onResolveMetadata: (workId: string) => void
-  fetchWorkDetail?: (revisionId: string, workId: string) => Promise<V4WorkExecutionDetail>
+  fetchWorkDetail?: (revisionId: string, workId: string, episodeOffset?: number) => Promise<V4WorkExecutionDetail>
 }
 
 const STAGE_KEYS = ['mirror', 'metadata', 'projection'] as const
@@ -44,7 +44,7 @@ function StageSummary({ stageKey, progress }: { stageKey: (typeof STAGE_KEYS)[nu
 
 type WorkDetailState =
   | { status: 'loading' }
-  | { status: 'loaded'; detail: V4WorkExecutionDetail }
+  | { status: 'loaded'; detail: V4WorkExecutionDetail; loadingMore?: boolean }
   | { status: 'error'; message: string }
 
 function seasonLabel(season: V4WorkExecutionDetail['seasons'][number]): string {
@@ -63,10 +63,12 @@ function candidateDecisionLabel(decision: string): string {
   return decision || '未记录候选决策'
 }
 
-function WorkUnit({ unit, getWorkDetail, requestWorkDetail, busyRetryId, onRetry, resolvingWorkId, onResolveMetadata }: {
+function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loadMoreEpisodes, busyRetryId, onRetry, resolvingWorkId, onResolveMetadata }: {
   unit: V4WorkProgressUnit
   getWorkDetail: (workId: string, cacheKey: string) => WorkDetailState | undefined
   requestWorkDetail: (workId: string, cacheKey: string) => void
+  retryWorkDetail: (workId: string, cacheKey: string) => void
+  loadMoreEpisodes: (workId: string, cacheKey: string) => void
   busyRetryId: string
   onRetry: (jobId: string) => void
   resolvingWorkId: string
@@ -84,7 +86,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, busyRetryId, onRetry
   const workIsPending = ['waiting_mirror', 'running_mirror', 'waiting_metadata', 'running_metadata'].includes(unit.overall_status)
   // 3.1：展开非进行中作品时按需读取执行详情；缓存键包含任务状态，
   // 重新执行该作品后状态变化自然使缓存失效并重新读取。
-  const detailCacheKey = `${unit.mirror.status}:${unit.metadata.status}`
+  const detailCacheKey = unit.detail_version || `${unit.mirror.status}:${unit.metadata.status}`
   const detail = !workIsPending && expanded ? getWorkDetail(unit.work_id, detailCacheKey) : undefined
   // 请求触发放在 effect：渲染期间只读取缓存，不修改父组件状态。
   useEffect(() => {
@@ -169,7 +171,10 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, busyRetryId, onRetry
           {!failedJob && workIsPending && <span className="media-v4-work-progress-hint">任务进行中，完成后自动折叠到“已完成”。</span>}
           {detail?.status === 'loading' && <div className="media-v4-work-detail-loading"><Spinner size="tiny" />正在读取执行详情…</div>}
           {detail?.status === 'error' && (
-            <div className="media-v4-job-error" role="alert">执行详情读取失败：{detail.message}</div>
+            <div className="media-v4-job-error" role="alert">
+              执行详情读取失败：{detail.message}
+              <Button size="small" appearance="secondary" onClick={() => retryWorkDetail(unit.work_id, detailCacheKey)}>重新读取</Button>
+            </div>
           )}
           {detail?.status === 'loaded' && !detailHasContent && (
             <div className="media-v4-work-detail-empty">本次任务未生成详细结果。</div>
@@ -261,18 +266,22 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, busyRetryId, onRetry
                 {detailEpisodes.length === 0 ? (
                   <div className="media-v4-work-detail-empty">本次任务未生成剧集结果。</div>
                 ) : (
+                  <>
                   <div className="media-v4-work-detail-episodes">
                     {detailEpisodes.map((episode) => (
                       <div className="media-v4-work-detail-episode" key={episode.episode_id}>
                         <span className="media-v4-work-detail-episode-code">
-                          {episode.season_kind === 'special' ? `SP${String(episode.episode_number ?? 0).padStart(2, '0')}` : `S${String(episode.season_number).padStart(2, '0')}E${String(episode.episode_number ?? 0).padStart(2, '0')}`}
+                          {episode.season_kind === 'special'
+                            ? episode.episode_number == null ? '特别篇（未编号）' : `SP${String(episode.episode_number).padStart(2, '0')}`
+                            : `S${String(episode.season_number).padStart(2, '0')}E${episode.episode_number == null ? '?' : String(episode.episode_number).padStart(2, '0')}`}
                         </span>
                         <div className="media-v4-work-detail-episode-content">
                           <strong className="media-v4-work-detail-episode-name">{episode.scraped_title || episode.display_title || '未命名'}</strong>
                           <div className="media-v4-work-detail-episode-meta">
                             {episode.display_title && episode.scraped_title && episode.display_title !== episode.scraped_title && <span>本地名称：{episode.display_title}</span>}
                             {episode.file_name && <span>{episode.file_name}</span>}
-                            {episode.provider_episode_id && <span>{detail.detail.work.provider === 'tmdb' ? 'TMDB' : '在线'} 集号 {episode.provider_episode_id}</span>}
+                            {episode.provider_episode_number != null && <span>在线第 {episode.provider_episode_number} 集</span>}
+                            {episode.provider_episode_id && <span>{detail.detail.work.provider === 'tmdb' ? 'TMDB' : '在线'} ID {episode.provider_episode_id}</span>}
                             {detailRuntimeLabel(episode.runtime) && <span>{detailRuntimeLabel(episode.runtime)}</span>}
                           </div>
                           {episode.scraped_plot && <p className="media-v4-work-detail-episode-plot">{episode.scraped_plot}</p>}
@@ -282,6 +291,12 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, busyRetryId, onRetry
                       </div>
                     ))}
                   </div>
+                  {loadedDetail?.next_episode_offset != null && (
+                    <Button size="small" appearance="secondary" disabled={detail.loadingMore} onClick={() => loadMoreEpisodes(unit.work_id, detailCacheKey)}>
+                      {detail.loadingMore ? '正在读取更多剧集…' : `显示更多剧集（已显示 ${detailEpisodes.length}/${loadedDetail?.episode_total ?? 0}）`}
+                    </Button>
+                  )}
+                  </>
                 )}
               </div>
             </div>
@@ -327,6 +342,48 @@ export function V4ExecutionProgress({ progress, busyRetryId, onRetry, resolvingW
         })
       })
   }
+  const retryWorkDetail = (workId: string, cacheKey: string) => {
+    const cacheKeyFull = `${progress.revision_id}:${workId}:${cacheKey}`
+    requestedDetailsRef.current.delete(cacheKeyFull)
+    setDetailStates((current) => {
+      const next = new Map(current)
+      next.delete(cacheKeyFull)
+      return next
+    })
+    requestWorkDetail(workId, cacheKey)
+  }
+  const loadMoreEpisodes = (workId: string, cacheKey: string) => {
+    const cacheKeyFull = `${progress.revision_id}:${workId}:${cacheKey}`
+    const current = detailStates.get(cacheKeyFull)
+    if (!fetchWorkDetail || current?.status !== 'loaded' || current.loadingMore || current.detail.next_episode_offset == null) return
+    const offset = current.detail.next_episode_offset
+    setDetailStates((states) => {
+      const next = new Map(states)
+      next.set(cacheKeyFull, { ...current, loadingMore: true })
+      return next
+    })
+    fetchWorkDetail(progress.revision_id, workId, offset)
+      .then((page) => {
+        setDetailStates((states) => {
+          const latest = states.get(cacheKeyFull)
+          if (latest?.status !== 'loaded') return states
+          const seen = new Set(latest.detail.episodes.map((episode) => episode.episode_id))
+          const episodes = [...latest.detail.episodes, ...page.episodes.filter((episode) => !seen.has(episode.episode_id))]
+          const next = new Map(states)
+          next.set(cacheKeyFull, { status: 'loaded', detail: { ...page, episodes }, loadingMore: false })
+          return next
+        })
+      })
+      .catch(() => {
+        setDetailStates((states) => {
+          const latest = states.get(cacheKeyFull)
+          if (latest?.status !== 'loaded') return states
+          const next = new Map(states)
+          next.set(cacheKeyFull, { ...latest, loadingMore: false })
+          return next
+        })
+      })
+  }
   const sorted = sortWorkUnits(progress.work_units)
   const active = sorted.filter((unit) => unit.overall_status !== 'completed')
   const completed = sorted.filter((unit) => unit.overall_status === 'completed')
@@ -343,6 +400,8 @@ export function V4ExecutionProgress({ progress, busyRetryId, onRetry, resolvingW
       unit={unit}
       getWorkDetail={getWorkDetail}
       requestWorkDetail={requestWorkDetail}
+      retryWorkDetail={retryWorkDetail}
+      loadMoreEpisodes={loadMoreEpisodes}
       busyRetryId={busyRetryId}
       onRetry={onRetry}
       resolvingWorkId={resolvingWorkId}

@@ -230,6 +230,8 @@ export interface V4WorkProgressUnit {
     | 'completed'
   metadata_state: string
   metadata_reason: string
+  /** 每次本作品任务或刮削快照更新时变化，用于使执行详情缓存失效。 */
+  detail_version?: string
   mirror: { job_id: string; status: string; attempts: number; last_error: string }
   metadata: { job_id: string; status: string; attempts: number; last_error: string }
 }
@@ -293,6 +295,7 @@ export interface V4WorkExecutionDetail {
     display_title: string
     scraped_title: string
     scraped_plot: string
+    provider_episode_number: number | null
     provider_episode_id: string
     runtime: number | null
     still_url?: string
@@ -302,6 +305,7 @@ export interface V4WorkExecutionDetail {
   }>
   episode_total: number
   episodes_truncated: boolean
+  next_episode_offset: number | null
   has_detail: boolean
 }
 
@@ -389,9 +393,9 @@ export const mediaV4Api = {
 
   status: (revisionId: string) =>
     api.get<{ revision_id: string; status: string; jobs: V4Job[]; progress: V4ExecutionProgress }>(`/api/v4/imports/${encodeURIComponent(revisionId)}`),
-  workExecutionDetail: (revisionId: string, workId: string) =>
+  workExecutionDetail: (revisionId: string, workId: string, episodeOffset = 0) =>
     api.get<V4WorkExecutionDetail>(
-      `/api/v4/revisions/${encodeURIComponent(revisionId)}/works/${encodeURIComponent(workId)}/execution-detail`,
+      `/api/v4/revisions/${encodeURIComponent(revisionId)}/works/${encodeURIComponent(workId)}/execution-detail?episode_offset=${episodeOffset}`,
     ),
 
   sourceLibraries: () => api.get<{ cards: V4SourceLibraryCard[] }>('/api/v4/sources/libraries'),

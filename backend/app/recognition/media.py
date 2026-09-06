@@ -2046,7 +2046,10 @@ def recognize_media(
     # 5. 文件名明确 SP/OVA/OAD/Lite 时，先按 Special 处理，避免被“剧场版”目录抢先归为电影
     guess = _check_explicit_filename_special(filename, parent_dirs)
     if guess:
-        _apply_movie_special_context(guess, [*parent_dirs, work_container])
+        # 明确的文件名 Special 是比祖先目录更强的事实。电影目录可能同时
+        # 收纳正片电影与番剧 SP；此处若强行归电影会把 S00 从主系列拆走。
+        # 只有没有显式 SP/OVA/OAD 标记、纯靠目录推断的附属文件才允许走
+        # `_apply_movie_special_context`（见 `_check_path_context_special`）。
         _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess
 
@@ -2071,7 +2074,8 @@ def recognize_media(
     # 8. Special（文件名关键词）
     guess = _check_sps(filename, parent_dirs)
     if guess:
-        _apply_movie_special_context(guess, [*parent_dirs, work_container])
+        # 同上：文件名关键词已经明确声明其为主系列特别篇，不能被电影
+        # 祖先目录覆盖。路径上下文 Special 的电影归属由更早的分支处理。
         _enrich_guess(guess, source, work_title, year, original_title, series_group, subwork_dir, clean_warnings, clean_needs_review, tmdb_hint_id, tmdb_hint_type, own_title_override=own_title_override)
         return guess
 

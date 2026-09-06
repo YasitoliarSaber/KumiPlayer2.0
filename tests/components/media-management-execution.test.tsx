@@ -438,11 +438,11 @@ test('展开已完成作品后读取并显示作品信息、镜像结果与剧�
   expect(screen.getByText('S01E01')).toBeVisible()
   expect(screen.getByText('S01E01-abc.strm')).toBeVisible()
   expect(screen.getByText('这一集的刮削简介。')).toBeVisible()
-  expect(screen.getByText('TMDB 集号 9001')).toBeVisible()
+  expect(screen.getByText('TMDB ID 9001')).toBeVisible()
   expect(screen.getByText('已映射')).toBeVisible()
 })
 
-test('详情读取失败与空详情都有明确状态，重复展开不重复请求', async () => {
+test('详情读取失败可在同一展开面板内重新读取，空详情仍使用缓存', async () => {
   const fetchWorkDetail = vi.fn()
     .mockRejectedValueOnce(new Error('后端不可用'))
     .mockResolvedValueOnce({
@@ -474,8 +474,7 @@ test('详情读取失败与空详情都有明确状态，重复展开不重复�
   fireEvent.click(screen.getByRole('button', { name: /空详情作品/ }))
   expect(await screen.findByText(/执行详情读取失败：后端不可用/)).toBeVisible()
 
-  // 收起再展开：状态键未变 → 命中缓存（含失败状态），不重复请求。
-  fireEvent.click(screen.getByRole('button', { name: /空详情作品/ }))
-  fireEvent.click(screen.getByRole('button', { name: /空详情作品/ }))
-  expect(fetchWorkDetail).toHaveBeenCalledTimes(1)
+  // 失败不会永久占据请求锁；用户可以在当前展开面板直接重试。
+  fireEvent.click(screen.getByRole('button', { name: '重新读取' }))
+  await waitFor(() => expect(fetchWorkDetail).toHaveBeenCalledTimes(2))
 })

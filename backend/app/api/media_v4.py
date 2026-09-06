@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.core.config import load_config, resolve_openlist_credentials
@@ -996,12 +996,19 @@ def get_import(revision_id: str):
 
 
 @router.get("/revisions/{revision_id}/works/{work_id}/execution-detail")
-def get_work_execution_detail(revision_id: str, work_id: str):
+def get_work_execution_detail(
+    revision_id: str,
+    work_id: str,
+    episode_offset: int = Query(default=0, ge=0),
+    episode_limit: int = Query(default=50, ge=1, le=100),
+):
     """作品级执行详情（3.1）：只读投影，展开时按需读取，不启动任务。"""
 
     service = V4RevisionService(get_database())
     try:
-        return service.get_work_execution_detail(revision_id, work_id)
+        return service.get_work_execution_detail(
+            revision_id, work_id, episode_offset=episode_offset, episode_limit=episode_limit
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="作品执行详情不存在") from exc
 

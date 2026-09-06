@@ -199,6 +199,34 @@ def test_detail_only_returns_episodes_bound_to_requested_revision(tmp_path, monk
     assert all(item["episode_id"] != "episode-from-other-revision" for item in body["episodes"])
 
 
+def test_detail_pages_episodes_and_never_uses_global_mapping_from_another_revision(tmp_path, monkeypatch):
+    """详情页的集映射必须是本次导入快照，且大列表按页读取。"""
+
+    client, database = _client(tmp_path, monkeypatch)
+    work_id = _seed_confirmed_work(database)
+    with database.connect() as conn:
+        episode_id = str(conn.execute(
+            "SELECT episode_id FROM episodes WHERE work_id = ? AND local_episode_number = 1", (work_id,)
+        ).fetchone()[0])
+        # 这是后续某次导入更新的全局映射，不能污染 rev-detail 的执行证据。
+        conn.execute(
+            "UPDATE episode_provider_mappings SET provider_episode_id = 'leaked-global-id' "
+            "WHERE episode_id = ? AND provider = 'tmdb'",
+            (episode_id,),
+        )
+
+    response = client.get(f"/api/v4/revisions/rev-detail/works/{work_id}/execution-detail?episode_limit=1")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["episode_total"] == 2
+    assert len(body["episodes"]) == 1
+    assert body["episodes_truncated"] is True
+    assert body["next_episode_offset"] == 1
+    assert body["episodes"][0]["provider_episode_id"] == "901"
+    assert body["episodes"][0]["provider_episode_number"] == 1
+
+
 def test_detail_returns_404_for_missing_work(tmp_path, monkeypatch):
     client, database = _client(tmp_path, monkeypatch)
     _seed_confirmed_work(database)
@@ -252,5 +280,5 @@ def test_failed_work_reports_failed_stage(tmp_path, monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body["mirror"]["status"] == "failed"
-    assert "镜像目标已存在" in body["mirror"]["error"]
+    assert body["mirror"]["error"] == "任务未能完成，请重试"
     assert body["has_detail"] is True
