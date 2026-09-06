@@ -1451,8 +1451,8 @@ export default function MediaManagementPage() {
       )}
       </>}
       {sourceCardPendingDelete && (
-        <Dialog open onOpenChange={(_, data) => { if (!data.open && !sourceCardDeleting) setSourceCardPendingDelete(null) }}>
-          <DialogSurface>
+        <Dialog modalType="modal" open onOpenChange={(_, data) => { if (!data.open && !sourceCardDeleting) setSourceCardPendingDelete(null) }}>
+          <DialogSurface className="media-v4-source-card-delete-dialog" aria-describedby={undefined}>
             <DialogBody>
               <DialogTitle>删除来源卡</DialogTitle>
               <DialogContent>

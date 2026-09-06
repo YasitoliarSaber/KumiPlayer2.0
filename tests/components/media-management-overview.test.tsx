@@ -180,6 +180,7 @@ test('已完成来源卡可以移除卡片入口，不触碰媒体库数据', as
   fireEvent.click(screen.getByRole('button', { name: '删除来源卡：115 动画' }))
 
   expect(await screen.findByRole('dialog', { name: '删除来源卡' })).toBeVisible()
+  expect(screen.getByRole('dialog', { name: '删除来源卡' }).className).toContain('media-v4-source-card-delete-dialog')
   expect(screen.getByText(/不会删除媒体库、镜像、资料或观看状态/)).toBeVisible()
   fireEvent.click(screen.getByRole('button', { name: '删除来源卡', exact: true }))
 
