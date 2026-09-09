@@ -212,6 +212,35 @@ def test_metadata_recovery_policy_uses_nested_failure_context(metadata, action, 
     assert policy["hint"]
 
 
+@pytest.mark.parametrize("season_results", [True, 7])
+def test_recovery_policy_tolerates_invalid_season_results(season_results):
+    from app.media_v4.revisions.service import metadata_recovery_policy
+
+    policy = metadata_recovery_policy({
+        "metadata_state": "source_unavailable",
+        "reason_code": "episode_mapping_incomplete",
+        "season_results": season_results,
+    })
+    assert policy["action"] == "retry_metadata"
+
+
+def test_recovery_policy_summary_keeps_mapping_failure_after_two_network_failures():
+    from app.media_v4.revisions.service import metadata_recovery_policy
+
+    policy = metadata_recovery_policy({
+        "metadata_state": "source_unavailable",
+        "reason_code": "episode_mapping_incomplete",
+        "season_results": [
+            {"local_season_number": 1, "reason_code": "source_unavailable"},
+            {"local_season_number": 2, "reason_code": "source_unavailable"},
+            {"local_season_number": 0, "reason_code": "episode_not_found"},
+        ],
+    })
+    assert "特别篇在线集数未匹配" in policy["reason"]
+    assert "服务暂不可用" in policy["reason"]
+    assert "不会修正本地编号" in policy["hint"]
+
+
 def test_detail_projects_one_recovery_policy_and_special_season_failure(tmp_path, monkeypatch):
     client, database = _client(tmp_path, monkeypatch)
     work_id = _seed_confirmed_work(database)

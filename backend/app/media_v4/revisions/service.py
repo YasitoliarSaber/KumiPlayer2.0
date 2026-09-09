@@ -167,8 +167,11 @@ def metadata_recovery_policy(metadata: dict | None, *, binding_status: str = "")
     raw_reason = str(payload.get("reason") or "")
     normalized_reason = raw_reason.strip().casefold()
     failure_stage = str(payload.get("failure_stage") or "").strip().casefold()
+    raw_season_results = payload.get("season_results")
+    if not isinstance(raw_season_results, (list, tuple)):
+        raw_season_results = []
     season_results = [
-        item for item in (payload.get("season_results") or [])
+        item for item in raw_season_results
         if isinstance(item, dict) and str(item.get("reason_code") or "").strip()
     ]
 
@@ -213,7 +216,11 @@ def metadata_recovery_policy(metadata: dict | None, *, binding_status: str = "")
             action = "retry_metadata"
             hint = "请核对季度映射和集号；在线资料更新后可重试，重复请求不会修正本地编号。"
             if len(missing_or_unmapped) < len(season_results):
-                reason = "；".join(_season_failure_reason(item) for item in season_results[:2])
+                # 混合失败各取一类，避免前两季的网络错误掩盖后续集号问题。
+                other_failure = next(item for item in season_results if item not in missing_or_unmapped)
+                reason = "；".join(
+                    _season_failure_reason(item) for item in (other_failure, missing_or_unmapped[0])
+                )
             elif all(
                 str(item.get("reason_code") or "").strip().casefold() == "episode_not_found"
                 for item in missing_or_unmapped
