@@ -404,6 +404,59 @@ test.each(['check_settings', 'retry_metadata', 'review_identity'])('恢复入口
   expect(action === 'review_identity' ? resolve : retry).toHaveBeenCalledWith('w-recover')
 })
 
+test('季度失败摘要保留特别篇并按 choose_candidate 显示恢复入口', async () => {
+  const resolve = vi.fn()
+  const work = {
+    title: '季度异常作品',
+    provider: 'tmdb',
+    provider_id: '42',
+    media_type: 'tv',
+    metadata_state: 'source_unavailable',
+    metadata_reason: '在线作品资料不可用，请重新选择正确的在线作品。',
+    metadata_recovery_action: 'choose_candidate',
+  }
+  const fetchWorkDetail = vi.fn().mockResolvedValue({
+    work,
+    mirror: { status: 'succeeded', artifact_count: 1 },
+    metadata_job_status: 'succeeded',
+    seasons: [{ season_number: 0, season_kind: 'special', title: '', episode_count: 1 }],
+    scrape: {
+      metadata_state: 'source_unavailable',
+      metadata_reason: '特别篇在线集数未匹配，请核对本地季度/集号；在线资料更新后可重试。',
+      metadata_recovery_action: 'retry_metadata',
+      title: '季度异常作品', original_title: '', year: null, plot: '', rating: null, runtime: null,
+      genres: [], studios: [], premiered: '',
+      season_results: [{
+        local_season_number: 0,
+        provider_season_number: 0,
+        status: 'partial',
+        reason_code: 'episode_not_found',
+        failure_stage: 'season_detail',
+        retryable: false,
+      }],
+    },
+    episodes: [],
+    episode_total: 0,
+    has_detail: true,
+  })
+
+  render(<V4ExecutionProgress
+    progress={makeProgress([workUnit('w-season-recover', '季度异常作品', 'needs_attention', work)])}
+    busyRetryId=""
+    onRetry={vi.fn()}
+    resolvingWorkId=""
+    onResolveMetadata={resolve}
+    fetchWorkDetail={fetchWorkDetail}
+  />)
+
+  expect(await screen.findByText('作品信息')).toBeVisible()
+  expect(screen.getByRole('button', { name: '选择正确作品' })).toBeVisible()
+  expect(screen.getByText('特别篇 · 1 集')).toBeVisible()
+  expect(screen.getByText('特别篇：在线集数未匹配')).toBeVisible()
+  fireEvent.click(screen.getByRole('button', { name: '选择正确作品' }))
+  expect(resolve).toHaveBeenCalledWith('w-season-recover')
+})
+
 function renderProgressWithDetail(units: Array<Record<string, unknown>>, overrides: Record<string, unknown>, fetchWorkDetail: ReturnType<typeof vi.fn>) {
   return render(
     <V4ExecutionProgress

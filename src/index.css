@@ -13983,6 +13983,7 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-work-detail-artifacts { display: grid; gap: 4px; margin: 0; padding-left: 18px; color: var(--text-secondary); font-size: 13px; }
 .media-v4-work-detail-seasons { display: flex; flex-wrap: wrap; gap: 8px; }
 .media-v4-work-detail-seasons span { padding: 6px 10px; border: 1px solid color-mix(in srgb, var(--border) 68%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--surface-soft) 70%, transparent); font-size: 14px; font-variant-numeric: tabular-nums; }
+.media-v4-work-detail-season-failures { display: grid; gap: 4px; padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--warning, #c45b52) 9%, transparent); color: var(--warning, #c45b52); font-size: 13px; line-height: 1.45; }
 .media-v4-work-detail-candidate { display: grid; gap: 8px; }
 .media-v4-work-detail-candidates { display: grid; gap: 4px; margin: 0; padding: 8px 10px 8px 26px; border-radius: 6px; background: color-mix(in srgb, var(--surface-soft) 64%, transparent); color: var(--text-secondary); font-size: 13px; }
 .media-v4-work-detail-candidates li { display: flex; justify-content: space-between; gap: 12px; }

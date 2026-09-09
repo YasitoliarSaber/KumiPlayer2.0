@@ -54,6 +54,27 @@ function seasonLabel(season: V4WorkExecutionDetail['seasons'][number]): string {
   return season.season_number > 0 ? `第 ${season.season_number} 季` : (season.title || '未分季')
 }
 
+type SeasonResult = NonNullable<NonNullable<V4WorkExecutionDetail['scrape']>['season_results']>[number]
+
+function seasonFailureLabel(result: SeasonResult): string {
+  if (result.local_season_number === 0) return '特别篇'
+  return result.local_season_number != null ? `第 ${result.local_season_number} 季` : '该季度'
+}
+
+function seasonFailureReason(result: SeasonResult): string {
+  const labels: Record<string, string> = {
+    provider_auth_required: '在线资料授权失效',
+    credentials_missing: '在线资料授权失效',
+    unauthorized: '在线资料授权失效',
+    provider_rate_limited: '在线资料请求过于频繁',
+    provider_resource_missing: '在线资料不可用',
+    episode_not_found: '在线集数未匹配',
+    invalid_response: '在线资料响应异常',
+    source_unavailable: '在线资料服务暂不可用',
+  }
+  return labels[result.reason_code] ?? '在线资料需要处理'
+}
+
 function detailRuntimeLabel(runtime: number | null | undefined): string {
   return runtime != null && runtime > 0 ? `${runtime} 分钟` : ''
 }
@@ -108,6 +129,9 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
   const detailSeasons = loadedDetail?.seasons ?? []
   const detailEpisodes = loadedDetail?.episodes ?? []
   const scrape = loadedDetail?.scrape
+  const seasonFailures = Array.isArray(scrape?.season_results)
+    ? scrape.season_results.filter((result) => Boolean(result.reason_code))
+    : []
   const scrapeHasContent = Boolean(scrape && (
     scrape.title
     || scrape.original_title
@@ -117,6 +141,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
     || scrape.rating != null
     || scrape.runtime != null
     || scrape.premiered
+    || seasonFailures.length > 0
     || (scrape.genres?.length ?? 0) > 0
     || (scrape.studios?.length ?? 0) > 0
   ))
@@ -171,7 +196,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                 {resolvingWorkId === unit.work_id ? '正在重新获取…' : '重新获取媒体信息'}
               </Button>
             )}
-            {(unit.metadata_state === 'waiting_review' || unit.metadata_recovery_action === 'review_identity') && (
+            {(unit.metadata_state === 'waiting_review' || unit.metadata_recovery_action === 'review_identity' || unit.metadata_recovery_action === 'choose_candidate') && (
               <Button size="small" appearance="secondary" disabled={resolvingWorkId !== ''} onClick={() => onResolveMetadata(unit.work_id)}>
                 {resolvingWorkId === unit.work_id ? '正在查找候选…' : '选择正确作品'}
               </Button>
@@ -205,7 +230,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                     {resolvingWorkId === unit.work_id ? '正在重新获取…' : '重新获取媒体信息'}
                   </Button>
                 )}
-                {(detail.detail.work.metadata_recovery_action === 'review_identity' || detail.detail.work.metadata_state === 'waiting_review') && (
+                {(detail.detail.work.metadata_recovery_action === 'review_identity' || detail.detail.work.metadata_recovery_action === 'choose_candidate' || detail.detail.work.metadata_state === 'waiting_review') && (
                   <Button size="small" appearance="secondary" disabled={resolvingWorkId !== ''} onClick={() => onResolveMetadata(unit.work_id)}>
                     {resolvingWorkId === unit.work_id ? '正在查找候选…' : '选择正确作品'}
                   </Button>
@@ -256,16 +281,23 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                   )}
                 </div>
               )}
-              {orderedSeasons.length > 0 && (
+              {(orderedSeasons.length > 0 || seasonFailures.length > 0) && (
                 <div className="media-v4-work-detail-section">
                   <h4>季度结构</h4>
-                  <div className="media-v4-work-detail-seasons">
+                  {orderedSeasons.length > 0 && <div className="media-v4-work-detail-seasons">
                     {orderedSeasons.map((season, index) => (
                       <span key={`${season.season_kind}:${season.season_number}:${index}`}>
                         {seasonLabel(season)} · {season.episode_count} 集
                       </span>
                     ))}
-                  </div>
+                  </div>}
+                  {seasonFailures.length > 0 && <div className="media-v4-work-detail-season-failures" role="status">
+                    {seasonFailures.map((result, index) => (
+                      <span key={`${result.local_season_number ?? 'unknown'}:${result.reason_code}:${index}`}>
+                        {seasonFailureLabel(result)}：{seasonFailureReason(result)}
+                      </span>
+                    ))}
+                  </div>}
                 </div>
               )}
               <div className="media-v4-work-detail-section">

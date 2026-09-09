@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -117,6 +118,140 @@ def _seed_confirmed_work(database, *, revision_id: str = "rev-detail", work_id: 
                 (local_episode_ids[index], index, f"90{index}"),
             )
     return work_id
+
+
+@pytest.mark.parametrize(
+    ("metadata", "action", "reason_fragments"),
+    [
+        (
+            {
+                "metadata_state": "source_unavailable",
+                "reason_code": "episode_mapping_incomplete",
+                "failure_stage": "season_detail",
+                "season_results": [{
+                    "local_season_number": 2,
+                    "reason_code": "provider_auth_required",
+                    "status": "source_unavailable",
+                    "retryable": False,
+                }],
+            },
+            "check_settings",
+            ("第 2 季", "授权"),
+        ),
+        (
+            {
+                "metadata_state": "source_unavailable",
+                "reason_code": "provider_resource_missing",
+                "failure_stage": "work_detail",
+            },
+            "choose_candidate",
+            ("在线作品", "不可用"),
+        ),
+        (
+            {
+                "metadata_state": "source_unavailable",
+                "reason_code": "episode_mapping_incomplete",
+                "failure_stage": "season_detail",
+                "season_results": [{
+                    "local_season_number": 0,
+                    "reason_code": "episode_not_found",
+                    "status": "partial",
+                    "retryable": False,
+                }],
+            },
+            "retry_metadata",
+            ("特别篇", "集数"),
+        ),
+        (
+            {
+                "metadata_state": "source_unavailable",
+                "reason_code": "episode_mapping_incomplete",
+                "failure_stage": "season_detail",
+                "season_results": [{
+                    "local_season_number": 3,
+                    "reason_code": "provider_resource_missing",
+                    "status": "source_unavailable",
+                    "retryable": False,
+                }],
+            },
+            "retry_metadata",
+            ("第 3 季", "不可用"),
+        ),
+        (
+            {
+                "metadata_state": "source_unavailable",
+                "reason_code": "episode_mapping_incomplete",
+                "failure_stage": "season_detail",
+                "season_results": [
+                    {"local_season_number": 1, "reason_code": "provider_rate_limited"},
+                    {"local_season_number": 2, "reason_code": "episode_not_found"},
+                ],
+            },
+            "retry_metadata",
+            ("请求过于频繁", "集数未匹配"),
+        ),
+        (
+            {"metadata_state": "failed", "reason_code": "invalid_response"},
+            "retry_metadata",
+            ("响应",),
+        ),
+        (
+            {"metadata_state": "source_unavailable", "reason_code": "provider_resource_missing"},
+            "retry_metadata",
+            ("资料不可用",),
+        ),
+    ],
+)
+def test_metadata_recovery_policy_uses_nested_failure_context(metadata, action, reason_fragments):
+    from app.media_v4.revisions.service import metadata_recovery_policy
+
+    policy = metadata_recovery_policy(metadata, binding_status="confirmed")
+
+    assert policy["action"] == action
+    assert all(fragment in policy["reason"] for fragment in reason_fragments)
+    assert policy["hint"]
+
+
+def test_detail_projects_one_recovery_policy_and_special_season_failure(tmp_path, monkeypatch):
+    client, database = _client(tmp_path, monkeypatch)
+    work_id = _seed_confirmed_work(database)
+    with database.connect() as conn:
+        metadata = json.loads(conn.execute(
+            "SELECT metadata_json FROM scrape_bindings WHERE binding_id = 'sb-1'"
+        ).fetchone()[0])
+        metadata.update({
+            "metadata_state": "source_unavailable",
+            "reason": "部分剧集资料暂不可用",
+            "reason_code": "episode_mapping_incomplete",
+            "failure_stage": "season_detail",
+            "season_results": [{
+                "local_season_number": 0,
+                "provider_season_number": 0,
+                "status": "partial",
+                "reason_code": "episode_not_found",
+                "failure_stage": "season_detail",
+                "retryable": False,
+            }],
+        })
+        conn.execute(
+            "UPDATE scrape_bindings SET status = 'confirmed', metadata_json = ? WHERE binding_id = 'sb-1'",
+            (json.dumps(metadata, ensure_ascii=False),),
+        )
+
+    response = client.get(f"/api/v4/revisions/rev-detail/works/{work_id}/execution-detail")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    from app.media_v4.revisions.service import V4RevisionService
+
+    progress_unit = V4RevisionService(database).get_execution_progress("rev-detail")["work_units"][0]
+    assert progress_unit["metadata_recovery_action"] == "retry_metadata"
+    assert progress_unit["metadata_reason"] == body["work"]["metadata_reason"]
+    assert body["work"]["metadata_recovery_action"] == "retry_metadata"
+    assert "特别篇" in body["work"]["metadata_reason"]
+    assert "核对" in body["work"]["metadata_recovery_hint"]
+    assert body["scrape"]["metadata_recovery_action"] == body["work"]["metadata_recovery_action"]
+    assert body["scrape"]["season_results"][0]["local_season_number"] == 0
 
 
 def test_completed_work_returns_work_level_and_episode_results(tmp_path, monkeypatch):

@@ -88,25 +88,182 @@ def _friendly_metadata_reason(status: str, value: str, reason_code: str = "") ->
 def _metadata_recovery_action(status: str, reason_code: str = "", reason: str = "") -> str:
     """为前端提供稳定的恢复动作枚举，不把按钮逻辑散落到组件。"""
 
+    return metadata_recovery_policy({
+        "metadata_state": status,
+        "reason_code": reason_code,
+        "reason": reason,
+    })["action"]
+
+
+def _metadata_recovery_hint(action: str) -> str:
+    return {
+        "review_identity": "请检查识别结果，选择正确作品或修正 Provider 后重试。",
+        "choose_candidate": "请从候选作品中选择正确的一部。",
+        "retry_metadata": "可以稍后重试补齐在线资料。",
+        "check_settings": "请先检查 TMDB Token、在线资料或镜像目录设置。",
+        "none": "",
+    }.get(action, "")
+
+
+_IDENTITY_CONFLICT_CODES = frozenset({
+    "provider_identity_conflict",
+    "identity_conflict",
+    "binding_conflict",
+})
+_AUTH_CODES = frozenset({"provider_auth_required", "credentials_missing", "unauthorized"})
+
+
+def _season_failure_label(item: dict) -> str:
+    """把季度级失败转成不暴露 Provider 细节的用户称呼。"""
+
+    local_number = _positive_detail_int(item.get("local_season_number"))
+    if local_number == 0:
+        return "特别篇"
+    if local_number is not None:
+        return f"第 {local_number} 季"
+    return "该季度"
+
+
+def _season_failure_reason(item: dict) -> str:
+    label = _season_failure_label(item)
+    code = str(item.get("reason_code") or "").strip().casefold()
+    if code in _AUTH_CODES:
+        return f"{label}在线资料授权失效，请检查 TMDB Token 后重试。"
+    if code == "provider_rate_limited":
+        return f"{label}在线资料请求过于频繁，请稍后重试。"
+    if code == "provider_resource_missing":
+        return f"{label}在线资料不可用，请稍后重试或核对季度映射。"
+    if code == "episode_not_found":
+        return f"{label}在线集数未匹配，请核对本地季度/集号；在线资料更新后可重试。"
+    if code == "invalid_response":
+        return f"{label}在线资料响应异常，可以稍后重试。"
+    if code == "source_unavailable":
+        return f"{label}在线资料服务暂不可用，请稍后重试。"
+    return f"{label}在线资料需要处理，请检查后重试。"
+
+
+def _join_season_labels(items: list[dict]) -> str:
+    labels: list[str] = []
+    for item in items:
+        label = _season_failure_label(item)
+        if label not in labels:
+            labels.append(label)
+    if len(labels) <= 2:
+        return "、".join(labels)
+    return "、".join(labels[:2]) + "等季度"
+
+
+def metadata_recovery_policy(metadata: dict | None, *, binding_status: str = "") -> dict[str, str]:
+    """根据同一份 metadata 快照决定展示原因、恢复动作和提示。
+
+    季度错误不能在 API、进度投影和详情投影中各自解释；本函数只返回安全的
+    用户文案与动作枚举，调用方仍可保留原始 reason_code/season_results 供内部
+    处理。``binding_status`` 仅用于兼容旧记录中 metadata_state 缺失的情况。
+    """
+
+    payload = metadata if isinstance(metadata, dict) else {}
+    state = str(payload.get("metadata_state") or binding_status or "").strip()
+    reason_code = str(payload.get("reason_code") or "").strip().casefold()
+    raw_reason = str(payload.get("reason") or "")
+    normalized_reason = raw_reason.strip().casefold()
+    failure_stage = str(payload.get("failure_stage") or "").strip().casefold()
+    season_results = [
+        item for item in (payload.get("season_results") or [])
+        if isinstance(item, dict) and str(item.get("reason_code") or "").strip()
+    ]
+
+    has_identity_conflict = reason_code in _IDENTITY_CONFLICT_CODES or any(
+        marker in normalized_reason
+        for marker in ("关联到另一部作品", "身份冲突", "provider 身份", "provider identity")
+    )
+    if has_identity_conflict:
+        action = "review_identity"
+        reason = _friendly_metadata_reason(state, raw_reason, reason_code)
+        return {"reason": reason, "action": action, "hint": _metadata_recovery_hint(action)}
+
+    if reason_code in {"no_candidates", "ambiguous_candidates"} or state == "waiting_review":
+        action = "choose_candidate"
+        reason = _friendly_metadata_reason(state, raw_reason, reason_code)
+        return {"reason": reason, "action": action, "hint": _metadata_recovery_hint(action)}
+
+    auth_failures = [
+        item for item in season_results
+        if str(item.get("reason_code") or "").strip().casefold() in _AUTH_CODES
+    ]
+    if reason_code in _AUTH_CODES or auth_failures:
+        if auth_failures:
+            reason = f"{_join_season_labels(auth_failures)}在线资料授权失效，请检查 TMDB Token 后重试。"
+        else:
+            reason = _friendly_metadata_reason(state, raw_reason, reason_code)
+        action = "check_settings"
+        return {"reason": reason, "action": action, "hint": _metadata_recovery_hint(action)}
+
+    if reason_code == "provider_resource_missing" and failure_stage == "work_detail":
+        action = "choose_candidate"
+        reason = "在线作品资料不可用，请重新选择正确的在线作品。"
+        return {"reason": reason, "action": action, "hint": _metadata_recovery_hint(action)}
+
+    if season_results:
+        missing_or_unmapped = [
+            item for item in season_results
+            if str(item.get("reason_code") or "").strip().casefold()
+            in {"provider_resource_missing", "episode_not_found"}
+        ]
+        if missing_or_unmapped:
+            action = "retry_metadata"
+            hint = "请核对季度映射和集号；在线资料更新后可重试，重复请求不会修正本地编号。"
+            if len(missing_or_unmapped) < len(season_results):
+                reason = "；".join(_season_failure_reason(item) for item in season_results[:2])
+            elif all(
+                str(item.get("reason_code") or "").strip().casefold() == "episode_not_found"
+                for item in missing_or_unmapped
+            ):
+                reason = (
+                    f"{_join_season_labels(missing_or_unmapped)}在线集数未匹配，请核对本地季度/集号；"
+                    "在线资料更新后可重试。"
+                )
+            else:
+                reason = "；".join(_season_failure_reason(item) for item in missing_or_unmapped[:2])
+            return {"reason": reason, "action": action, "hint": hint}
+
+        # 季度级网络、限流或响应异常仍允许用户手动重试；即使某次响应标记
+        # retryable=false，也不能把“当前不宜自动恢复”误当成“永远不能再试”。
+        action = "retry_metadata"
+        reason = "；".join(_season_failure_reason(item) for item in season_results[:2])
+        return {"reason": reason, "action": action, "hint": _metadata_recovery_hint(action)}
+
+    if reason_code == "provider_resource_missing":
+        # 旧快照可能没有 failure_stage；没有证据证明是作品详情 404 时，
+        # 只允许安全重试，不擅自要求用户换绑作品身份。
+        action = "retry_metadata"
+        reason = "在线资料不可用，可以重试；若仍失败，请检查在线作品选择。"
+        return {"reason": reason, "action": action, "hint": _metadata_recovery_hint(action)}
+    if reason_code == "invalid_response":
+        action = "retry_metadata"
+        reason = "在线资料响应异常，可以稍后重试。"
+        return {"reason": reason, "action": action, "hint": _metadata_recovery_hint(action)}
+
+    action = _metadata_recovery_action_fallback(state, reason_code, raw_reason)
+    reason = _friendly_metadata_reason(state, raw_reason, reason_code)
+    return {"reason": reason, "action": action, "hint": _metadata_recovery_hint(action)}
+
+
+def _metadata_recovery_action_fallback(status: str, reason_code: str, reason: str) -> str:
+    """兼容无季度上下文的旧快照，供统一策略内部使用。"""
+
     code = (reason_code or "").strip().casefold()
     normalized_reason = (reason or "").strip().casefold()
-    if code in {"provider_identity_conflict", "identity_conflict", "binding_conflict"} or any(
+    if code in _IDENTITY_CONFLICT_CODES or any(
         marker in normalized_reason
         for marker in ("关联到另一部作品", "身份冲突", "provider 身份", "provider identity")
     ):
         return "review_identity"
-    if code == "no_candidates":
+    if code in {"no_candidates", "ambiguous_candidates"}:
         return "choose_candidate"
-    if code == "ambiguous_candidates":
-        return "choose_candidate"
-    if code == "episode_mapping_incomplete":
-        return "retry_metadata"
-    if code in {"provider_auth_required", "credentials_missing", "unauthorized"}:
+    if code in _AUTH_CODES:
         return "check_settings"
-    if code in {"provider_rate_limited", "source_unavailable", "artifact_incomplete"}:
+    if code in {"provider_rate_limited", "source_unavailable", "artifact_incomplete", "invalid_response", "provider_resource_missing"}:
         return "retry_metadata"
-    if code in {"provider_resource_missing", "invalid_response"}:
-        return "none"
     if code == "mirror_root_missing":
         return "check_settings"
     if status == "source_unavailable":
@@ -118,16 +275,6 @@ def _metadata_recovery_action(status: str, reason_code: str = "", reason: str = 
     if status == "waiting_review":
         return "choose_candidate"
     return "none"
-
-
-def _metadata_recovery_hint(action: str) -> str:
-    return {
-        "review_identity": "请检查识别结果，选择正确作品或修正 Provider 后重试。",
-        "choose_candidate": "请从候选作品中选择正确的一部。",
-        "retry_metadata": "可以稍后重试补齐在线资料。",
-        "check_settings": "请先检查 TMDB Token、在线资料或镜像目录设置。",
-        "none": "",
-    }.get(action, "")
 
 
 def _job_summary(job: dict | None) -> dict:
@@ -2259,7 +2406,6 @@ class V4RevisionService:
         metadata: dict = {}
         mappings_by_episode: dict[str, dict] = {}
         metadata_state = ""
-        metadata_reason = ""
         metadata_reason_code = ""
         provider = ""
         provider_id = ""
@@ -2277,7 +2423,6 @@ class V4RevisionService:
                 # 绑定行的 status 是 confirmed 等订阅状态；面向用户的元数据
                 # 状态（ready/waiting_review/...）保存在 metadata_json 内。
                 metadata_state = str(metadata.get("metadata_state") or metadata_state)
-                metadata_reason = str(metadata.get("reason") or "")
                 metadata_reason_code = str(metadata.get("reason_code") or "")
                 for mapping in metadata.get("episode_mappings") or []:
                     if isinstance(mapping, dict) and mapping.get("episode_id"):
@@ -2336,24 +2481,16 @@ class V4RevisionService:
             for row in artifact_rows
         ]
         candidate_decision = _safe_candidate_decision(metadata.get("candidate_decision"))
+        metadata_policy = metadata_recovery_policy(
+            metadata,
+            binding_status=str(scrape_row["status"] or "") if scrape_row is not None else "",
+        )
         scrape_summary = {
             "metadata_state": metadata_state,
-            "metadata_reason": _friendly_metadata_reason(
-                metadata_state,
-                metadata_reason,
-                metadata_reason_code,
-            ),
+            "metadata_reason": metadata_policy["reason"],
             "metadata_reason_code": metadata_reason_code,
-            "metadata_recovery_action": _metadata_recovery_action(
-                metadata_state,
-                metadata_reason_code,
-                metadata_reason,
-            ),
-            "metadata_recovery_hint": _metadata_recovery_hint(_metadata_recovery_action(
-                metadata_state,
-                metadata_reason_code,
-                metadata_reason,
-            )),
+            "metadata_recovery_action": metadata_policy["action"],
+            "metadata_recovery_hint": metadata_policy["hint"],
             "title": _safe_detail_text(metadata.get("title")),
             "original_title": _safe_detail_text(metadata.get("original_title")),
             "year": _positive_detail_int(metadata.get("year")),
@@ -2375,6 +2512,7 @@ class V4RevisionService:
             episodes
             or artifacts
             or season_rows
+            or bool(metadata.get("season_results"))
             or metadata_state in {"confirmed", "ready"}
             or candidate_decision is not None
             or any(scrape_summary[key] for key in ("title", "original_title", "plot", "year", "rating", "runtime", "genres", "studios", "premiered"))
@@ -2389,22 +2527,10 @@ class V4RevisionService:
                 "provider": provider,
                 "provider_id": provider_id,
                 "metadata_state": metadata_state,
-                "metadata_reason": _friendly_metadata_reason(
-                    metadata_state,
-                    metadata_reason,
-                    metadata_reason_code,
-                ),
+                "metadata_reason": metadata_policy["reason"],
                 "metadata_reason_code": metadata_reason_code,
-                "metadata_recovery_action": _metadata_recovery_action(
-                    metadata_state,
-                    metadata_reason_code,
-                    metadata_reason,
-                ),
-                "metadata_recovery_hint": _metadata_recovery_hint(_metadata_recovery_action(
-                    metadata_state,
-                    metadata_reason_code,
-                    metadata_reason,
-                )),
+                "metadata_recovery_action": metadata_policy["action"],
+                "metadata_recovery_hint": metadata_policy["hint"],
             },
             "mirror": {
                 "status": mirror_status,
@@ -2487,6 +2613,8 @@ class V4RevisionService:
                     metadata = {}
                 scrape_rows[str(row["work_id"])] = {
                     "status": str(row["status"] or ""),
+                    "binding_status": str(row["status"] or ""),
+                    "metadata": metadata,
                     "metadata_state": str(metadata.get("metadata_state") or row["status"] or ""),
                     "reason": str(metadata.get("reason") or ""),
                     "reason_code": str(metadata.get("reason_code") or ""),
@@ -2516,6 +2644,14 @@ class V4RevisionService:
             metadata = job_pair.get("metadata")
             scrape = scrape_rows.get(work_id, {})
             scrape_status = str(scrape.get("metadata_state") or scrape.get("status") or "")
+            metadata_policy = metadata_recovery_policy(
+                scrape.get("metadata") if isinstance(scrape.get("metadata"), dict) else {
+                    "metadata_state": scrape_status,
+                    "reason": scrape.get("reason", ""),
+                    "reason_code": scrape.get("reason_code", ""),
+                },
+                binding_status=str(scrape.get("binding_status") or ""),
+            )
             work_units.append({
                 "work_id": work_id,
                 "title": str(work.get("preferred_title") or work_id),
@@ -2534,22 +2670,10 @@ class V4RevisionService:
                     scrape_status,
                 ),
                 "metadata_state": scrape_status,
-                "metadata_reason": _friendly_metadata_reason(
-                    scrape_status,
-                    str(scrape.get("reason") or ""),
-                    str(scrape.get("reason_code") or ""),
-                ),
+                "metadata_reason": metadata_policy["reason"],
                 "metadata_reason_code": str(scrape.get("reason_code") or ""),
-                "metadata_recovery_action": _metadata_recovery_action(
-                    scrape_status,
-                    str(scrape.get("reason_code") or ""),
-                    str(scrape.get("reason") or ""),
-                ),
-                "metadata_recovery_hint": _metadata_recovery_hint(_metadata_recovery_action(
-                    scrape_status,
-                    str(scrape.get("reason_code") or ""),
-                    str(scrape.get("reason") or ""),
-                )),
+                "metadata_recovery_action": metadata_policy["action"],
+                "metadata_recovery_hint": metadata_policy["hint"],
                 "mirror": _job_summary(mirror),
                 "metadata": _job_summary(metadata),
                 # 任务状态相同并不代表详情快照不变，例如确认候选会更新

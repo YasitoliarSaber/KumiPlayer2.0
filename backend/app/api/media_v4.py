@@ -1985,14 +1985,15 @@ def metadata_retry(request: MetadataRetryRequest):
             metadata = decoded if isinstance(decoded, dict) else {}
         except (TypeError, ValueError, json.JSONDecodeError):
             metadata = {}
-    state_value = metadata.get("metadata_state")
-    if not state_value and binding is not None:
-        state_value = binding["status"]
-    state = str(state_value or "")
-    reason_code = str(metadata.get("reason_code") or "")
-    from app.media_v4.revisions.service import _metadata_recovery_action
+    from app.media_v4.revisions.service import metadata_recovery_policy
 
-    action = _metadata_recovery_action(state, reason_code, str(metadata.get("reason") or ""))
+    policy = metadata_recovery_policy(
+        metadata,
+        binding_status=str(binding["status"] or "") if binding is not None else "",
+    )
+    action = policy["action"]
+    reason_code = str(metadata.get("reason_code") or "")
+    state = str(metadata.get("metadata_state") or (binding["status"] if binding is not None else "") or "")
     if action in {"review_identity", "choose_candidate"}:
         raise HTTPException(status_code=409, detail="请先检查识别结果或选择正确的在线作品")
     if action == "check_settings":

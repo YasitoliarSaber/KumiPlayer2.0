@@ -1500,6 +1500,53 @@ def test_metadata_retry_requeues_recoverable_failure_but_blocks_identity_conflic
     assert blocked.status_code == 409, blocked.text
 
 
+def test_metadata_retry_uses_nested_season_auth_policy(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    from app.api import media_v4
+    from app.media_v4.jobs.scrape import V4ScrapeService
+
+    preview = client.post("/api/v4/imports/preview", json=_payload("season-auth"))
+    assert preview.status_code == 200, preview.text
+    confirmed = client.post("/api/v4/imports/season-auth/confirm")
+    assert confirmed.status_code == 200, confirmed.text
+
+    with media_v4._database.connect() as conn:
+        work_id = str(conn.execute("SELECT work_id FROM works LIMIT 1").fetchone()["work_id"])
+    job = V4ScrapeService(media_v4._database).enqueue_for_revision("season-auth")[0]
+    V4ScrapeService(media_v4._database).process(
+        job["job_id"],
+        lambda _target: {
+            "provider": "tmdb",
+            "provider_id": "42",
+            "media_type": "tv",
+            "title": "Show",
+            "metadata_state": "source_unavailable",
+            "reason": "部分剧集资料暂不可用",
+            "reason_code": "episode_mapping_incomplete",
+            "failure_stage": "season_detail",
+            "retryable": False,
+            "season_results": [{
+                "local_season_number": 2,
+                "provider_season_number": 2,
+                "status": "source_unavailable",
+                "reason_code": "provider_auth_required",
+                "failure_stage": "season_detail",
+                "retryable": False,
+            }],
+        },
+    )
+
+    monkeypatch.setattr(media_v4, "load_config", lambda: SimpleNamespace(tmdb_bearer_token=""))
+    blocked = client.post("/api/v4/metadata/retry", json={"work_id": work_id})
+    assert blocked.status_code == 409
+    assert "Token" in blocked.json()["detail"]
+
+    monkeypatch.setattr(media_v4, "load_config", lambda: SimpleNamespace(tmdb_bearer_token="configured"))
+    queued = client.post("/api/v4/metadata/retry", json={"work_id": work_id})
+    assert queued.status_code == 200, queued.text
+    assert queued.json()["metadata_recovery_action"] == "check_settings"
+
+
 def test_sync_and_durable_tree_entries_share_one_root_identity(tmp_path, monkeypatch):
     """同一 provider、配置总根与 TXT：同步与 durable 入口必须得到一致身份。
 
