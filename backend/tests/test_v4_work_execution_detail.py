@@ -227,6 +227,37 @@ def test_detail_pages_episodes_and_never_uses_global_mapping_from_another_revisi
     assert body["episodes"][0]["provider_episode_number"] == 1
 
 
+def test_detail_season_counts_are_not_limited_by_episode_page(tmp_path, monkeypatch):
+    """季度统计必须覆盖整批 revision，不能只统计当前分页返回的剧集。"""
+
+    client, database = _client(tmp_path, monkeypatch)
+    work_id = _seed_confirmed_work(database)
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO seasons(season_id, work_id, local_season_number, season_kind) "
+            "VALUES ('season-2', ?, 2, 'regular')",
+            (work_id,),
+        )
+        conn.execute(
+            "INSERT INTO episodes(episode_id, work_id, season_id, local_episode_number, episode_kind, display_title) "
+            "VALUES ('episode-3', ?, 'season-2', 1, 'regular', '第二季第一集')",
+            (work_id,),
+        )
+        conn.execute(
+            "INSERT INTO revision_bindings(binding_id, revision_id, evidence_id, work_id, season_id, episode_id, confidence) "
+            "VALUES ('binding-season-2', 'rev-detail', 'ev-1', ?, 'season-2', 'episode-3', 'medium')",
+            (work_id,),
+        )
+
+    response = client.get(f"/api/v4/revisions/rev-detail/works/{work_id}/execution-detail?episode_limit=1")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["episode_total"] == 3
+    assert len(body["episodes"]) == 1
+    assert {item["season_number"]: item["episode_count"] for item in body["seasons"]} == {1: 2, 2: 1}
+
+
 def test_detail_returns_404_for_missing_work(tmp_path, monkeypatch):
     client, database = _client(tmp_path, monkeypatch)
     _seed_confirmed_work(database)
@@ -282,3 +313,20 @@ def test_failed_work_reports_failed_stage(tmp_path, monkeypatch):
     assert body["mirror"]["status"] == "failed"
     assert body["mirror"]["error"] == "任务未能完成，请重试"
     assert body["has_detail"] is True
+
+
+def test_identity_conflict_is_not_reported_as_search_ambiguity(tmp_path, monkeypatch):
+    from app.media_v4.revisions.service import V4RevisionService
+
+    client, database = _client(tmp_path, monkeypatch)
+    work_id = _seed_confirmed_work(database)
+    with database.connect() as conn:
+        meta = json.loads(conn.execute("SELECT metadata_json FROM scrape_bindings WHERE binding_id='sb-1'").fetchone()[0])
+        meta.update(metadata_state='waiting_review', reason='该在线作品已关联到另一部作品，请返回检查识别结果或选择正确候选')
+        conn.execute("UPDATE scrape_bindings SET status='waiting_review', metadata_json=? WHERE binding_id='sb-1'", (json.dumps(meta),))
+    progress = V4RevisionService(database).get_execution_progress('rev-detail')
+    reason = progress['work_units'][0]['metadata_reason']
+    assert '关联' in reason
+    assert '唯一匹配' not in reason
+    response = client.get(f'/api/v4/revisions/rev-detail/works/{work_id}/execution-detail')
+    assert response.json()['work']['metadata_reason'] == reason

@@ -196,7 +196,59 @@ def test_non_txt_assets_keep_bounded_sampling_without_per_row_disk_probes(tmp_pa
     assert len(syntax_calls) == 5
 
 
-def test_remote_tree_asset_with_relative_locator_fails_before_publishing(tmp_path):
+def test_openlist_assets_are_list_only_and_skip_mount_reachability_probe(tmp_path, monkeypatch):
+    """OpenList 扫描只读取目录清单，镜像阶段不得探测挂载盘上的文件。"""
+
+    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+    from app.media_v4.jobs import mirror as mirror_module
+    from app.media_v4.jobs.mirror import V4MirrorMaterializer
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    evidence = SourceEvidence(
+        evidence_id="openlist-only",
+        scan_id="scan-openlist-only",
+        root_id="root-openlist-only",
+        source_key="/Anime/Show/S01E01.mkv",
+        relative_path="Show/S01E01.mkv",
+        entry_kind="video",
+        provider="openlist",
+        ingest_method="openlist_api",
+        source_locator="/Anime/Show/S01E01.mkv",
+        playback_locator=str(tmp_path / "unmounted" / "Show.S01E01.mkv"),
+        fingerprint="sha256:openlist-only",
+    )
+    facts = ParsedFacts(
+        parsed_fact_id="facts-openlist-only",
+        evidence_id=evidence.evidence_id,
+        parser_version="fixture",
+        work_title="Show",
+        title_candidates=("Show",),
+        media_type="tv",
+        group_type="season",
+        season_candidate=1,
+        episode_candidate=1,
+    )
+    database = V4Database(tmp_path / "openlist-only.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-openlist-only", [(evidence, facts)])
+    revisions.confirm("rev-openlist-only")
+    job = next(item for item in revisions.list_jobs("rev-openlist-only") if item["job_type"] == "materialize_mirror")
+
+    monkeypatch.setattr(
+        mirror_module,
+        "validate_playback_locator",
+        lambda _locator: (_ for _ in ()).throw(AssertionError("OpenList 不得探测挂载盘")),
+    )
+
+    result = V4MirrorMaterializer(database).process(job["job_id"], tmp_path / "mirror")
+
+    assert result.status == "succeeded"
+    assert len(list((tmp_path / "mirror").rglob("*.strm"))) == 1
+
+
+def test_remote_tree_asset_with_relative_locator_fails_before_publishing(tmp_path, monkeypatch):
     """无效/相对播放定位不能发布 STRM：mirror 必须失败且零 Artifact。"""
 
     from app.media_v4.domain.models import ParsedFacts, SourceEvidence

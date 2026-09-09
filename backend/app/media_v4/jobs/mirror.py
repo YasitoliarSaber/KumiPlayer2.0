@@ -14,6 +14,18 @@ from app.media_v4.jobs.paths import work_directory_name
 from app.media_v4.path_validation import validate_playback_locator, validate_playback_locator_syntax
 from app.media_v4.persistence.database import V4Database
 
+# 这些来源只提供目录树/清单，不能在镜像阶段通过挂载盘探测文件存在性。
+# ``openlist`` / ``openlist_scan`` 是历史证据中的兼容值，``openlist_api``
+# 是当前扫描器写入的值；三者都必须走同一条“只做语法校验”分支。
+_LIST_ONLY_INGEST_METHODS = frozenset({
+    "directory_tree",
+    "txt_tree",
+    "txt_snapshot",
+    "openlist",
+    "openlist_api",
+    "openlist_scan",
+})
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -168,7 +180,7 @@ class V4MirrorMaterializer:
             non_txt_locators = [
                 str(row["playback_locator"] or row["source_locator"] or "")
                 for row in rows
-                if str(row["ingest_method"] or "") != "directory_tree"
+                if str(row["ingest_method"] or "") not in _LIST_ONLY_INGEST_METHODS
             ]
             for locator in _sample_locators(non_txt_locators):
                 if cancel_requested(self.database, job_id):
@@ -183,9 +195,9 @@ class V4MirrorMaterializer:
                     mark_cancelled(self.database, job_id)
                     return MaterializeResult("cancelled")
                 locator = str(row["playback_locator"] or row["source_locator"] or "")
-                # 分支合同：TXT 与非 TXT 由服务端 revision 证据
-                # （source_evidence.ingest_method）区分，不是 provider/扩展名/
-                # 客户端标记。TXT 只做纯语法校验即可发布；非 TXT 的可达性已经
+                # 分支合同：目录树/TXT/OpenList 与物理扫描由服务端 revision
+                # 证据（source_evidence.ingest_method）区分，不是 provider/扩展名/
+                # 客户端标记。清单来源只做纯语法校验即可发布；物理来源的可达性已经
                 # 在循环前的头/中/尾抽样完成，逐行循环只做语法校验，不得再次
                 # 触碰源盘（否则大库会放大成 N+3 次 I/O）。
                 ok, reason = validate_playback_locator_syntax(locator)

@@ -18,6 +18,7 @@ export interface V4ExecutionProgressProps {
   onRetry: (jobId: string) => void
   resolvingWorkId: string
   onResolveMetadata: (workId: string) => void
+  onRetryMetadata?: (workId: string) => void
   fetchWorkDetail?: (revisionId: string, workId: string, episodeOffset?: number) => Promise<V4WorkExecutionDetail>
 }
 
@@ -34,10 +35,11 @@ const EXECUTION_STATUS_LABELS: Record<V4ExecutionProgress['overall_status'], str
 function StageSummary({ stageKey, progress }: { stageKey: (typeof STAGE_KEYS)[number]; progress: V4ExecutionProgress }) {
   const summary = progress.stage_summary[stageKey]
   const done = summary.succeeded + summary.failed + summary.cancelled
+  const attention = summary.needs_attention ?? 0
   return (
     <div className={`media-v4-stage-pill media-v4-stage-${summary.status}`}>
       <strong>{STAGE_LABELS[stageKey]}</strong>
-      <span>{summary.total > 0 ? `${done}/${summary.total}` : '未开始'}</span>
+      <span>{summary.total > 0 ? `${done}/${summary.total}${attention > 0 ? ` · ${attention} 待处理` : ''}` : '未开始'}</span>
     </div>
   )
 }
@@ -63,7 +65,7 @@ function candidateDecisionLabel(decision: string): string {
   return decision || '未记录候选决策'
 }
 
-function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loadMoreEpisodes, busyRetryId, onRetry, resolvingWorkId, onResolveMetadata }: {
+function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loadMoreEpisodes, busyRetryId, onRetry, resolvingWorkId, onResolveMetadata, onRetryMetadata }: {
   unit: V4WorkProgressUnit
   getWorkDetail: (workId: string, cacheKey: string) => WorkDetailState | undefined
   requestWorkDetail: (workId: string, cacheKey: string) => void
@@ -73,6 +75,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
   onRetry: (jobId: string) => void
   resolvingWorkId: string
   onResolveMetadata: (workId: string) => void
+  onRetryMetadata?: (workId: string) => void
 }) {
   // 失败项保留简洁的摘要，避免错误堆满长列表；真正需要用户确认身份的
   // needs_attention 则直接展开，确保“选择正确作品”的恢复入口不会被藏住。
@@ -162,7 +165,13 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
             <div className="media-v4-job-error" role="status">
               {unit.metadata_reason || '在线媒体信息没有唯一匹配，需要确认正确作品后继续。'}
             </div>
-            {unit.metadata_state === 'waiting_review' && (
+            {unit.metadata_recovery_hint && <div className="media-v4-work-progress-hint">{unit.metadata_recovery_hint}</div>}
+            {unit.metadata_recovery_action === 'retry_metadata' && onRetryMetadata && (
+              <Button size="small" appearance="secondary" disabled={resolvingWorkId !== ''} onClick={() => onRetryMetadata(unit.work_id)}>
+                {resolvingWorkId === unit.work_id ? '正在重新获取…' : '重新获取媒体信息'}
+              </Button>
+            )}
+            {(unit.metadata_state === 'waiting_review' || unit.metadata_recovery_action === 'review_identity') && (
               <Button size="small" appearance="secondary" disabled={resolvingWorkId !== ''} onClick={() => onResolveMetadata(unit.work_id)}>
                 {resolvingWorkId === unit.work_id ? '正在查找候选…' : '选择正确作品'}
               </Button>
@@ -189,6 +198,17 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                   <span>{metadataStateLabels[detail.detail.work.metadata_state] ?? detail.detail.work.metadata_state}</span>
                 </div>
                 {detail.detail.work.metadata_reason && <div className="media-v4-job-error" role="status">{detail.detail.work.metadata_reason}</div>}
+                {detail.detail.work.metadata_recovery_hint && <div className="media-v4-work-progress-hint">{detail.detail.work.metadata_recovery_hint}</div>}
+                {detail.detail.work.metadata_recovery_action === 'retry_metadata' && onRetryMetadata && (
+                  <Button size="small" appearance="secondary" disabled={resolvingWorkId !== ''} onClick={() => onRetryMetadata(unit.work_id)}>
+                    {resolvingWorkId === unit.work_id ? '正在重新获取…' : '重新获取媒体信息'}
+                  </Button>
+                )}
+                {(detail.detail.work.metadata_recovery_action === 'review_identity' || detail.detail.work.metadata_state === 'waiting_review') && (
+                  <Button size="small" appearance="secondary" disabled={resolvingWorkId !== ''} onClick={() => onResolveMetadata(unit.work_id)}>
+                    {resolvingWorkId === unit.work_id ? '正在查找候选…' : '选择正确作品'}
+                  </Button>
+                )}
               </div>
               {scrapeHasContent && scrape && (
                 <div className="media-v4-work-detail-section">
@@ -253,13 +273,6 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                   <span>{detail.detail.mirror.artifact_count} 个播放文件</span>
                 </div>
                 {detail.detail.mirror.error && <div className="media-v4-job-error" role="alert">{detail.detail.mirror.error}</div>}
-                {detail.detail.mirror.artifacts.length > 0 && (
-                  <ul className="media-v4-work-detail-artifacts">
-                    {detail.detail.mirror.artifacts.map((artifact) => (
-                      <li key={artifact.file_name}>{artifact.file_name}</li>
-                    ))}
-                  </ul>
-                )}
               </div>
               <div className="media-v4-work-detail-section">
                 <h4>剧集结果{detail.detail.episode_total > 0 ? `（${detail.detail.episode_total} 集）` : ''}</h4>
@@ -287,7 +300,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                           {episode.scraped_plot && <p className="media-v4-work-detail-episode-plot">{episode.scraped_plot}</p>}
                         </div>
                         <span className={`media-v4-work-detail-episode-state ${episode.mapped ? 'mapped' : 'unmapped'}`}>{episode.mapped ? '已映射' : '未映射'}</span>
-                        {episode.playback_ready && <span className="media-v4-work-detail-episode-playable">可播放</span>}
+                        {(episode.playback_locator_available ?? episode.playback_ready) && <span className="media-v4-work-detail-episode-playable">已生成播放路径</span>}
                       </div>
                     ))}
                   </div>
@@ -307,7 +320,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
   )
 }
 
-export function V4ExecutionProgress({ progress, busyRetryId, onRetry, resolvingWorkId, onResolveMetadata, fetchWorkDetail }: V4ExecutionProgressProps) {
+export function V4ExecutionProgress({ progress, busyRetryId, onRetry, resolvingWorkId, onResolveMetadata, onRetryMetadata, fetchWorkDetail }: V4ExecutionProgressProps) {
   const [completedOpen, setCompletedOpen] = useState(false)
   // 3.1：作品执行详情缓存。键 = workId + 两个任务状态；任务重新执行后
   // 状态变化使旧键失效，下一次展开重新读取。
@@ -406,6 +419,7 @@ export function V4ExecutionProgress({ progress, busyRetryId, onRetry, resolvingW
       onRetry={onRetry}
       resolvingWorkId={resolvingWorkId}
       onResolveMetadata={onResolveMetadata}
+      onRetryMetadata={onRetryMetadata}
     />
   )
 

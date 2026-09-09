@@ -1843,6 +1843,10 @@ class MetadataConfirmRequest(BaseModel):
     candidate_id: str = Field(min_length=1)
 
 
+class MetadataRetryRequest(BaseModel):
+    work_id: str = Field(min_length=1)
+
+
 @router.post("/metadata/search")
 def metadata_search(request: MetadataSearchRequest):
     """V4 手动元数据恢复：搜索端先创建服务端候选记录，供 confirm 选择。"""
@@ -1940,6 +1944,79 @@ def metadata_search(request: MetadataSearchRequest):
                 "recommended": item.recommended,
             })
     return {"work_id": request.work_id, "candidates": stored}
+
+
+@router.post("/metadata/retry")
+def metadata_retry(request: MetadataRetryRequest):
+    """只重排可恢复的资料结果，不把人工候选冲突伪装成普通重试。"""
+
+    database = get_database()
+    with database.connect() as conn:
+        work = conn.execute("SELECT work_id FROM works WHERE work_id = ?", (request.work_id,)).fetchone()
+        revision = conn.execute(
+            """
+            SELECT ir.revision_id
+            FROM import_revisions ir
+            JOIN revision_bindings rb ON rb.revision_id = ir.revision_id
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            WHERE rb.work_id = ? AND ir.status = 'confirmed' AND sr.retired_at = ''
+            ORDER BY ir.confirmed_at DESC, ir.revision_id DESC LIMIT 1
+            """,
+            (request.work_id,),
+        ).fetchone()
+        binding = conn.execute(
+            """
+            SELECT status, metadata_json
+            FROM scrape_bindings
+            WHERE revision_id = ? AND work_id = ?
+            ORDER BY updated_at DESC, binding_id DESC LIMIT 1
+            """,
+            (str(revision["revision_id"]) if revision else "", request.work_id),
+        ).fetchone() if revision else None
+    if work is None:
+        raise HTTPException(status_code=404, detail="作品不存在")
+    if revision is None:
+        raise HTTPException(status_code=409, detail="该作品没有已确认的 revision，无法重试刮削")
+
+    metadata: dict = {}
+    if binding is not None:
+        try:
+            decoded = json.loads(str(binding["metadata_json"] or "{}"))
+            metadata = decoded if isinstance(decoded, dict) else {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            metadata = {}
+    state_value = metadata.get("metadata_state")
+    if not state_value and binding is not None:
+        state_value = binding["status"]
+    state = str(state_value or "")
+    reason_code = str(metadata.get("reason_code") or "")
+    from app.media_v4.revisions.service import _metadata_recovery_action
+
+    action = _metadata_recovery_action(state, reason_code, str(metadata.get("reason") or ""))
+    if action in {"review_identity", "choose_candidate"}:
+        raise HTTPException(status_code=409, detail="请先检查识别结果或选择正确的在线作品")
+    if action == "check_settings":
+        config = load_config()
+        if not config.tmdb_bearer_token:
+            raise HTTPException(status_code=409, detail="请先在设置页配置有效的 TMDB Token")
+        if reason_code == "mirror_root_missing" and _configured_mirror_root() is None:
+            raise HTTPException(status_code=409, detail="请先在设置页配置有效的镜像目录")
+    if action == "none" and state:
+        raise HTTPException(status_code=409, detail="当前资料状态没有可用的自动重试动作")
+
+    try:
+        job = V4ScrapeService(database).requeue_work(str(revision["revision_id"]), request.work_id)
+    except KeyError:
+        raise HTTPException(status_code=409, detail="该作品没有可重试的刮削任务") from None
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "work_id": request.work_id,
+        "revision_id": str(revision["revision_id"]),
+        "job_id": str(job["job_id"]),
+        "status": str(job["status"]),
+        "metadata_recovery_action": action,
+    }
 
 
 @router.post("/metadata/confirm")

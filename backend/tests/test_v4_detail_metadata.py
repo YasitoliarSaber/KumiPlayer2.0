@@ -230,6 +230,105 @@ def test_regular_season_fetch_failure_prevents_false_ready_metadata(monkeypatch)
     assert result["metadata_state"] == "source_unavailable"
 
 
+def test_partial_season_failure_keeps_work_metadata_and_retry_details(monkeypatch):
+    """单个季度失败时保留作品身份与已成功剧集，方便后续增量重试。"""
+
+    from app.media_v4.jobs import metadata as metadata_module
+    from app.scrape.tmdb_client import TMDBClientError
+
+    class FakeTMDBClient:
+        def __init__(self, bearer_token):
+            assert bearer_token == "token"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get_tv_detail(self, _provider_id):
+            return {"name": "Show", "original_name": "Original", "images": {}, "episode_run_time": [24]}
+
+        def get_tv_season_episodes(self, _provider_id, season_number):
+            if season_number == 2:
+                raise TMDBClientError("season unavailable")
+            return {"episodes": [{"id": 101, "episode_number": 1, "name": "S1E1"}]}
+
+        @staticmethod
+        def select_best_poster(_images): return ""
+
+        @staticmethod
+        def select_best_backdrop(_images): return ""
+
+        @staticmethod
+        def select_best_logo(_images): return ""
+
+    monkeypatch.setattr(metadata_module, "TMDBClient", FakeTMDBClient)
+    monkeypatch.setattr(metadata_module, "load_config", lambda: SimpleNamespace(tmdb_bearer_token="token"))
+
+    result = metadata_module.default_metadata_provider({
+        "work_type": "series",
+        "preferred_title": "Show",
+        "provider_bindings": [{"provider": "tmdb", "provider_id": "42", "media_type": "tv"}],
+        "episodes": [
+            {"episode_id": "s1e1", "local_season_number": 1, "local_episode_number": 1, "season_kind": "regular"},
+            {"episode_id": "s2e1", "local_season_number": 2, "local_episode_number": 1, "season_kind": "regular"},
+        ],
+    })
+
+    assert result["provider"] == "tmdb"
+    assert result["provider_id"] == "42"
+    assert result["metadata_state"] == "source_unavailable"
+    assert result["reason_code"] == "episode_mapping_incomplete"
+    assert result["title"] == "Show"
+    assert [item["episode_id"] for item in result["episode_mappings"]] == ["s1e1"]
+    assert result["season_results"] == [{
+        "season_id": "",
+        "local_season_number": 2,
+        "provider_season_number": 2,
+        "status": "source_unavailable",
+        "reason_code": "source_unavailable",
+        "failure_stage": "season_detail",
+        "retryable": True,
+    }]
+
+
+def test_detail_fetch_failure_keeps_provider_identity_for_retry(monkeypatch):
+    """作品详情请求失败时保留已确认的 Provider ID，不退回本地伪身份。"""
+
+    from app.media_v4.jobs import metadata as metadata_module
+    from app.scrape.tmdb_client import TMDBClientError
+
+    class UnavailableTMDBClient:
+        def __init__(self, bearer_token):
+            assert bearer_token == "token"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get_tv_detail(self, _provider_id):
+            raise TMDBClientError("detail unavailable")
+
+    monkeypatch.setattr(metadata_module, "TMDBClient", UnavailableTMDBClient)
+    monkeypatch.setattr(metadata_module, "load_config", lambda: SimpleNamespace(tmdb_bearer_token="token"))
+
+    result = metadata_module.default_metadata_provider({
+        "work_type": "series",
+        "preferred_title": "Show",
+        "provider_bindings": [{"provider": "tmdb", "provider_id": "42", "media_type": "tv"}],
+        "episodes": [],
+    })
+
+    assert result["provider"] == "tmdb"
+    assert result["provider_id"] == "42"
+    assert result["metadata_state"] == "source_unavailable"
+    assert result["reason_code"] == "source_unavailable"
+    assert result["title"] == "Show"
+
+
 def test_regular_season_two_maps_to_provider_season_two_episode_one(monkeypatch):
     """本地 S02E01 必须请求 provider 第 2 季第 1 集，而不是 Season 1 或 E13。"""
 
@@ -304,3 +403,30 @@ def test_regular_season_two_maps_to_provider_season_two_episode_one(monkeypatch)
         "runtime": 24,
         "still_url": "https://image.tmdb.org/t/p/w500/s02e01.jpg",
     }]
+
+
+def test_missing_token_keeps_saved_provider_identity_for_retry(monkeypatch):
+    """缺少 Token 时保留已确认的 Provider 身份，避免重试退回本地伪身份。"""
+
+    from app.media_v4.jobs import metadata as metadata_module
+
+    monkeypatch.setattr(
+        metadata_module,
+        "load_config",
+        lambda: SimpleNamespace(tmdb_bearer_token=""),
+    )
+
+    result = metadata_module.default_metadata_provider({
+        "work_type": "series",
+        "preferred_title": "Show",
+        "provider_bindings": [{"provider": "tmdb", "provider_id": "42", "media_type": "tv"}],
+        "episodes": [],
+    })
+
+    assert result["provider"] == "tmdb"
+    assert result["provider_id"] == "42"
+    assert result["media_type"] == "tv"
+    assert result["metadata_state"] == "waiting_metadata"
+    assert result["reason_code"] == "provider_auth_required"
+    assert result["identity_status"] == "confirmed"
+    assert result["retryable"] is True

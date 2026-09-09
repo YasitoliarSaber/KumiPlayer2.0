@@ -51,9 +51,29 @@ def _friendly_job_error(value: str) -> str:
     return "任务未能完成，请重试"
 
 
-def _friendly_metadata_reason(status: str, value: str) -> str:
+def _friendly_metadata_reason(status: str, value: str, reason_code: str = "") -> str:
     """元数据状态只暴露稳定的恢复说明，不暴露提供方异常细节。"""
 
+    normalized_code = (reason_code or "").strip().casefold()
+    normalized_value = (value or "").strip().casefold()
+    identity_conflict = normalized_code in {
+        "provider_identity_conflict",
+        "identity_conflict",
+        "binding_conflict",
+    } or any(
+        marker in normalized_value
+        for marker in ("关联到另一部作品", "身份冲突", "provider 身份", "provider identity")
+    )
+    if identity_conflict:
+        return "在线作品已关联到另一部作品，请选择正确作品或修正 Provider 后重试。"
+    if normalized_code == "provider_auth_required":
+        return "在线资料授权无效，请检查 TMDB Token 后重试。"
+    if normalized_code == "provider_rate_limited":
+        return "在线资料请求过于频繁，请稍后重试。"
+    if normalized_code == "episode_mapping_incomplete":
+        return "部分剧集资料暂不可用，作品信息已保留，可稍后重试。"
+    if normalized_code == "mirror_root_missing":
+        return "镜像目录未配置，无法生成元数据文件。"
     if status == "waiting_review":
         return "在线媒体信息没有唯一匹配，需要确认正确作品后继续。"
     if status == "source_unavailable":
@@ -63,6 +83,51 @@ def _friendly_metadata_reason(status: str, value: str) -> str:
     if status == "failed":
         return "媒体信息处理未能完成，请重试"
     return "" if not value else "媒体信息需要处理，请检查后重试"
+
+
+def _metadata_recovery_action(status: str, reason_code: str = "", reason: str = "") -> str:
+    """为前端提供稳定的恢复动作枚举，不把按钮逻辑散落到组件。"""
+
+    code = (reason_code or "").strip().casefold()
+    normalized_reason = (reason or "").strip().casefold()
+    if code in {"provider_identity_conflict", "identity_conflict", "binding_conflict"} or any(
+        marker in normalized_reason
+        for marker in ("关联到另一部作品", "身份冲突", "provider 身份", "provider identity")
+    ):
+        return "review_identity"
+    if code == "no_candidates":
+        return "choose_candidate"
+    if code == "ambiguous_candidates":
+        return "choose_candidate"
+    if code == "episode_mapping_incomplete":
+        return "retry_metadata"
+    if code in {"provider_auth_required", "credentials_missing", "unauthorized"}:
+        return "check_settings"
+    if code in {"provider_rate_limited", "source_unavailable", "artifact_incomplete"}:
+        return "retry_metadata"
+    if code in {"provider_resource_missing", "invalid_response"}:
+        return "none"
+    if code == "mirror_root_missing":
+        return "check_settings"
+    if status == "source_unavailable":
+        return "retry_metadata"
+    if status == "waiting_metadata":
+        return "check_settings"
+    if status == "failed":
+        return "retry_metadata"
+    if status == "waiting_review":
+        return "choose_candidate"
+    return "none"
+
+
+def _metadata_recovery_hint(action: str) -> str:
+    return {
+        "review_identity": "请检查识别结果，选择正确作品或修正 Provider 后重试。",
+        "choose_candidate": "请从候选作品中选择正确的一部。",
+        "retry_metadata": "可以稍后重试补齐在线资料。",
+        "check_settings": "请先检查 TMDB Token、在线资料或镜像目录设置。",
+        "none": "",
+    }.get(action, "")
 
 
 def _job_summary(job: dict | None) -> dict:
@@ -109,6 +174,26 @@ def _safe_detail_text_list(value: object) -> list[str]:
         if text and text not in result:
             result.append(text)
     return result[:20]
+
+
+def _safe_season_results(value: object) -> list[dict]:
+    """投影季度级资料状态，避免把原始异常/请求细节带到前端。"""
+
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: list[dict] = []
+    for item in value[:32]:
+        if not isinstance(item, dict):
+            continue
+        result.append({
+            "local_season_number": _positive_detail_int(item.get("local_season_number")),
+            "provider_season_number": _positive_detail_int(item.get("provider_season_number")),
+            "status": _safe_detail_text(item.get("status")),
+            "reason_code": _safe_detail_text(item.get("reason_code")),
+            "failure_stage": _safe_detail_text(item.get("failure_stage")),
+            "retryable": bool(item.get("retryable")),
+        })
+    return result
 
 
 def _safe_candidate_decision(value: object) -> dict | None:
@@ -178,7 +263,7 @@ def _derive_work_status(mirror: dict | None, metadata: dict | None, scrape_statu
             if metadata_job["status"] == "queued":
                 return "waiting_metadata"
             # metadata succeeded
-            if scrape_status and scrape_status != "confirmed":
+            if scrape_status and scrape_status not in {"ready", "confirmed"}:
                 return "needs_attention"
             return "completed"
         return "waiting_metadata"
@@ -192,7 +277,7 @@ def _derive_work_status(mirror: dict | None, metadata: dict | None, scrape_statu
             return "cancelled"
         if metadata_job["status"] == "queued":
             return "waiting_metadata"
-        if scrape_status and scrape_status != "confirmed":
+        if scrape_status and scrape_status not in {"ready", "confirmed"}:
             return "needs_attention"
         return "completed"
     return "waiting_mirror"
@@ -224,7 +309,26 @@ def _stage_summary(jobs: list[dict]) -> dict:
         "succeeded": sum(1 for job in jobs if job["status"] == "succeeded"),
         "failed": sum(1 for job in jobs if job["status"] == "failed"),
         "cancelled": sum(1 for job in jobs if job["status"] == "cancelled"),
+        "needs_attention": 0,
     }
+
+
+def _metadata_stage_summary(jobs: list[dict], scrape_rows: dict[str, dict]) -> dict:
+    """把刮削 job 的成功与“已完成但需处理”分开统计。"""
+
+    summary = _stage_summary(jobs)
+    attention = sum(
+        1
+        for job in jobs
+        if str(job.get("status") or "") == "succeeded"
+        and str(scrape_rows.get(str(job.get("work_id") or ""), {}).get("metadata_state") or "")
+        not in {"", "ready", "confirmed"}
+    )
+    summary["needs_attention"] = attention
+    summary["succeeded"] = max(0, int(summary["succeeded"]) - attention)
+    if attention and summary["status"] == "succeeded":
+        summary["status"] = "needs_attention"
+    return summary
 
 
 def _revision_overall_status(work_units: list[dict], stage: dict[str, list[dict]]) -> str:
@@ -514,6 +618,130 @@ def _lookup_work_by_key(conn, work_key: str, *, exclude_work_id: str = "") -> st
     return str(rows[0]["work_id"]) if len(rows) == 1 else ""
 
 
+def _work_identity_titles(work, related_entries: list[tuple[SourceEvidence, ParsedFacts]] | None = None) -> set[str]:
+    """生成可用于复用 Work 的自身标题集合。
+
+    ``series_group`` 既可能是父系列容器，也可能就是普通目录唯一提供的
+    作品名。只有明确的独立子作品语义才排除父名；主系列自身名必须保留，
+    否则 TXT/OpenList 的普通目录会失去唯一离线身份证据。
+    """
+
+    titles = {_normalize_title(str(getattr(work, "preferred_title", "") or ""))}
+    titles.discard("")
+    for _evidence, facts in related_entries or []:
+        parent_title = _normalize_title(facts.series_group)
+        child_relation = facts.card_type in {"standalone", "movie"} or facts.relation_type in {
+            "spin_off",
+            "movie",
+            "remake",
+            "sequel",
+            "prequel",
+        } or (
+            bool(parent_title)
+            and _normalize_title(facts.work_title) != parent_title
+            and facts.relation_type != "main"
+        )
+        for value in (facts.work_title, facts.original_title, *facts.title_candidates):
+            normalized = _normalize_title(value)
+            if not normalized:
+                continue
+            if child_relation and normalized == parent_title:
+                continue
+            # 纯容器名/季标记不能单独构成作品身份。
+            if re.fullmatch(r"(?:season\s*\d+|第\s*\d+\s*季|specials?|sp)", normalized, re.IGNORECASE):
+                continue
+            titles.add(normalized)
+    return titles
+
+
+def _existing_work_matches(
+    conn,
+    work,
+    related_entries: list[tuple[SourceEvidence, ParsedFacts]] | None = None,
+) -> list:
+    """按 identity key 或自身标题寻找相容已有 Work，返回所有安全候选。
+
+    返回一个元素表示可确定复用；多个元素表示同名历史记录仍有冲突，调用方
+    必须阻止静默新建/绑定。若多个同名记录中只有一个持有 Provider 身份，
+    将其视为唯一权威 owner，以修复历史上“空副本 + 正确 owner”的情况。
+    """
+
+    work_type = "series" if str(getattr(work, "media_type", "") or "") == "tv" else "movie"
+    work_year = getattr(work, "year", None)
+    exact = conn.execute(
+        "SELECT * FROM works WHERE identity_key = ? AND work_type = ? "
+        "AND (year IS NULL OR year = ? OR ? IS NULL)",
+        (getattr(work, "work_key", ""), work_type, work_year, work_year),
+    ).fetchone()
+    titles = _work_identity_titles(work, related_entries)
+    title_rows: list = []
+    if titles:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT w.*
+            FROM works w
+            LEFT JOIN work_aliases a ON a.work_id = w.work_id
+            WHERE w.work_type = ?
+              AND (w.year IS NULL OR w.year = ? OR ? IS NULL)
+            """,
+            (work_type, work_year, work_year),
+        ).fetchall()
+        for row in rows:
+            names = {_normalize_title(str(row["preferred_title"] or ""))}
+            names.update(
+                _normalize_title(str(alias["normalized_title"] or ""))
+                for alias in conn.execute(
+                    "SELECT normalized_title FROM work_aliases WHERE work_id = ?",
+                    (row["work_id"],),
+                ).fetchall()
+            )
+            if names & titles:
+                title_rows.append(row)
+    # identity_key 是强身份线索，但不能单独覆盖一个已有的唯一 Provider
+    # owner：历史上曾先生成空的 series 键、后又留下带 Provider 的 title 键，
+    # 正是本次 TXT 批次冲突的来源。只有“首选标题相同”的 Provider owner
+    # 才能覆盖精确键；仅通过外传保存的父系列别名命中的记录不能抢走主系列。
+    if exact is not None:
+        exact_preferred = _normalize_title(str(exact["preferred_title"] or ""))
+        preferred_rows = [
+            row for row in title_rows
+            if _normalize_title(str(row["preferred_title"] or "")) in titles
+        ]
+        preferred_ids = {str(row["work_id"]) for row in preferred_rows}
+        owner_rows = conn.execute(
+            "SELECT DISTINCT work_id FROM provider_bindings "
+            "WHERE work_id IN (" + ",".join("?" for _ in title_rows) + ")",
+            tuple(str(row["work_id"]) for row in title_rows),
+        ).fetchall() if title_rows else []
+        owner_ids = {str(row["work_id"]) for row in owner_rows}
+        if exact_preferred in titles:
+            preferred_owners = preferred_ids & owner_ids
+            if len(preferred_owners) == 1:
+                owner_id = next(iter(preferred_owners))
+                return [row for row in title_rows if str(row["work_id"]) == owner_id]
+            if len(preferred_owners) > 1:
+                return [row for row in title_rows if str(row["work_id"]) in preferred_owners]
+            return [exact]
+        if len(owner_ids) == 1:
+            owner_id = next(iter(owner_ids))
+            return [row for row in title_rows if str(row["work_id"]) == owner_id]
+        if len(owner_ids) > 1:
+            return [row for row in title_rows if str(row["work_id"]) in owner_ids]
+        return [exact]
+    if title_rows:
+        placeholders = ",".join("?" for _ in title_rows)
+        owner_rows = conn.execute(
+            "SELECT DISTINCT work_id FROM provider_bindings "
+            f"WHERE work_id IN ({placeholders})",
+            tuple(str(row["work_id"]) for row in title_rows),
+        ).fetchall()
+        if len(owner_rows) == 1:
+            owner_id = str(owner_rows[0]["work_id"])
+            return [row for row in title_rows if str(row["work_id"]) == owner_id]
+        return title_rows
+    return [exact] if exact is not None else []
+
+
 class RevisionBlockedError(RuntimeError):
     """Revision 仍有未解决 review issue。"""
 
@@ -577,19 +805,38 @@ class V4RevisionService:
             ))
         return result
 
-    def _existing_bindings_by_key(self, graph: ResolvedMediaGraph) -> dict[str, list[tuple[str, str, str]]]:
-        """按 identity_key 读取既有 provider binding，供跨 revision 候选复用。"""
+    def _existing_bindings_by_key(
+        self,
+        graph: ResolvedMediaGraph,
+        entries: list[tuple[SourceEvidence, ParsedFacts]] | None = None,
+    ) -> dict[str, list[tuple[str, str, str]]]:
+        """读取可安全归属的既有 provider binding，供跨 revision 候选复用。
+
+        目录树、OpenList 与本地扫描可能为同一作品生成不同的 identity_key。
+        先按 identity_key 命中；未命中时再用规范作品标题/别名和媒体类型、
+        年份兼容性寻找唯一 owner。多个同名 owner 时保持空结果，让后续
+        review 流程处理，不能按数据库遍历顺序猜一个。
+        """
 
         bindings: dict[str, list[tuple[str, str, str]]] = {}
         with self.database.connect() as conn:
             for work in graph.works:
+                related_entries = [
+                    (evidence, facts)
+                    for evidence, facts in entries
+                    if evidence.evidence_id in work.source_evidence_ids
+                ]
+                matches = _existing_work_matches(conn, work, related_entries)
+                if len(matches) != 1:
+                    bindings[work.work_key] = []
+                    continue
                 rows = conn.execute(
                     """
                     SELECT pb.provider, pb.media_type, pb.provider_id
-                    FROM works w JOIN provider_bindings pb ON pb.work_id = w.work_id
-                    WHERE w.identity_key = ?
+                    FROM provider_bindings pb
+                    WHERE pb.work_id = ?
                     """,
-                    (work.work_key,),
+                    (str(matches[0]["work_id"]),),
                 ).fetchall()
                 bindings[work.work_key] = [(str(r[0]), str(r[1]), str(r[2])) for r in rows]
         return bindings
@@ -614,12 +861,21 @@ class V4RevisionService:
         with self.database.connect() as conn:
             for work in graph.works:
                 existing_work_ids: set[str] = set()
-                existing = conn.execute(
-                    "SELECT work_id FROM works WHERE identity_key = ?",
-                    (work.work_key,),
-                ).fetchone()
-                if existing is not None:
-                    existing_work_ids.add(str(existing["work_id"]))
+                related_entries = [
+                    (evidence_by_id[evidence_id], facts_by_evidence_id.get(evidence_id))
+                    for evidence_id in work.source_evidence_ids
+                    if evidence_id in evidence_by_id
+                ]
+                title_matches = _existing_work_matches(conn, work, related_entries)
+                if len(title_matches) > 1:
+                    issues.append(ResolutionIssue(
+                        code="work_identity_ambiguous",
+                        evidence_id=next(iter(work.source_evidence_ids), ""),
+                        message="同名作品已有多个相容记录，无法安全复用，请先合并或修正识别结果",
+                    ))
+                    continue
+                if len(title_matches) == 1:
+                    existing_work_ids.add(str(title_matches[0]["work_id"]))
                 # Provider key 会把跨语言目录合并到同一候选 Work；同时仍要以
                 # 来源根 + 结构目录检查既有本地谱系，防止一个错误 hint 把
                 # Show One 重绑到已经属于 Show Two 的 provider_id。
@@ -791,7 +1047,7 @@ class V4RevisionService:
                 def search(_work_key, _queries, _year, _media_type):
                     return []
 
-            existing_bindings = self._existing_bindings_by_key(graph)
+            existing_bindings = self._existing_bindings_by_key(graph, entries)
             candidates_by_key, merge_map, candidate_issues = candidate_service.plan_work_candidates(
                 graph,
                 entries,
@@ -987,10 +1243,12 @@ class V4RevisionService:
                         if evidence.evidence_id in work.source_evidence_ids
                     ]
                     work_type = "series" if work.media_type == "tv" else "movie"
-                    existing_work = conn.execute(
-                        "SELECT * FROM works WHERE identity_key = ?",
-                        (work.work_key,),
-                    ).fetchone()
+                    identity_matches = _existing_work_matches(conn, work, related_entries)
+                    if len(identity_matches) > 1:
+                        raise RevisionBlockedError(
+                            "同名作品已有多个身份归属，无法安全复用；请先合并或修正识别结果"
+                        )
+                    existing_work = identity_matches[0] if identity_matches else None
 
                     if existing_work is None:
                         # P-001 7.8 R6：确认事务按冻结候选 identity 复用已有 Work
@@ -1077,37 +1335,13 @@ class V4RevisionService:
                             ).fetchone()
 
                     if existing_work is None:
-                        candidate_titles = {
-                            _normalize_title(value)
-                            for _evidence, facts in related_entries
-                            for value in (facts.work_title, *facts.title_candidates)
-                            if _normalize_title(value)
-                            and _normalize_title(value) != _normalize_title(facts.series_group)
-                        }
-                        candidate_rows = conn.execute(
-                            """
-                            SELECT DISTINCT w.*
-                            FROM works w
-                            LEFT JOIN work_aliases a ON a.work_id = w.work_id
-                            WHERE w.work_type = ?
-                              AND (w.year IS NULL OR w.year = ? OR ? IS NULL)
-                            """,
-                            (work_type, work.year, work.year),
-                        ).fetchall()
-                        alias_matches = [
-                            row
-                            for row in candidate_rows
-                            if _normalize_title(row["preferred_title"]) in candidate_titles
-                            or any(
-                                _normalize_title(alias["normalized_title"]) in candidate_titles
-                                for alias in conn.execute(
-                                    "SELECT normalized_title FROM work_aliases WHERE work_id = ?",
-                                    (row["work_id"],),
-                                ).fetchall()
-                            )
-                        ]
+                        alias_matches = _existing_work_matches(conn, work, related_entries)
                         if len(alias_matches) == 1:
                             existing_work = alias_matches[0]
+                        elif len(alias_matches) > 1:
+                            raise RevisionBlockedError(
+                                "同名作品已有多个身份归属，无法安全复用；请先合并或修正识别结果"
+                            )
 
                     if existing_work is None:
                         work_id = str(uuid.uuid4())
@@ -1974,6 +2208,22 @@ class V4RevisionService:
                 "AND rb.work_id = ? AND rb.episode_id = e.episode_id)",
                 (work_id, revision_id, work_id),
             ).fetchone()[0])
+            season_count_rows = conn.execute(
+                """
+                SELECT s.season_id, COUNT(DISTINCT rb.episode_id) AS episode_count
+                FROM seasons s
+                LEFT JOIN revision_bindings rb
+                  ON rb.revision_id = ? AND rb.work_id = ? AND rb.season_id = s.season_id
+                WHERE s.work_id = ? AND EXISTS (
+                  SELECT 1 FROM revision_bindings season_binding
+                  WHERE season_binding.revision_id = ?
+                    AND season_binding.work_id = ?
+                    AND season_binding.season_id = s.season_id
+                )
+                GROUP BY s.season_id
+                """,
+                (revision_id, work_id, work_id, revision_id, work_id),
+            ).fetchall()
             episode_rows = conn.execute(
                 """
                 SELECT e.episode_id, e.season_id, e.local_episode_number, e.special_number,
@@ -2010,6 +2260,7 @@ class V4RevisionService:
         mappings_by_episode: dict[str, dict] = {}
         metadata_state = ""
         metadata_reason = ""
+        metadata_reason_code = ""
         provider = ""
         provider_id = ""
         if scrape_row is not None:
@@ -2027,6 +2278,7 @@ class V4RevisionService:
                 # 状态（ready/waiting_review/...）保存在 metadata_json 内。
                 metadata_state = str(metadata.get("metadata_state") or metadata_state)
                 metadata_reason = str(metadata.get("reason") or "")
+                metadata_reason_code = str(metadata.get("reason_code") or "")
                 for mapping in metadata.get("episode_mappings") or []:
                     if isinstance(mapping, dict) and mapping.get("episode_id"):
                         mappings_by_episode.setdefault(str(mapping["episode_id"]), mapping)
@@ -2042,16 +2294,19 @@ class V4RevisionService:
                 "playback_ready": bool(str(row["playback_locator"] or "").strip()),
             }
 
-        season_episode_counts = {str(row["season_id"]): 0 for row in season_rows}
+        season_episode_counts = {
+            str(row["season_id"]): int(row["episode_count"] or 0)
+            for row in season_count_rows
+        }
         episodes: list[dict] = []
         for row in episode_rows:
             episode_id = str(row["episode_id"])
-            season_episode_counts[str(row["season_id"])] = season_episode_counts.get(str(row["season_id"]), 0) + 1
             season_number = int(row["season_number"] or 0)
             season_kind = str(row["season_kind"] or "")
             mapping = mappings_by_episode.get(episode_id, {})
             asset_fact = file_by_episode.get(episode_id, {"file_name": "", "playback_ready": False})
             special_number = int(row["special_number"] or 0) if row["special_number"] is not None else None
+            mapped = bool(str(mapping.get("provider_episode_id") or "").strip())
             episodes.append({
                 "episode_id": episode_id,
                 "season_number": season_number,
@@ -2066,9 +2321,10 @@ class V4RevisionService:
                 "provider_episode_id": str(mapping.get("provider_episode_id") or ""),
                 "runtime": _positive_detail_int(mapping.get("runtime")),
                 "still_url": str(mapping.get("still_url") or ""),
-                "mapped": bool(mapping),
+                "mapped": mapped,
                 "file_name": asset_fact["file_name"],
                 "playback_ready": asset_fact["playback_ready"],
+                "playback_locator_available": asset_fact["playback_ready"],
             })
 
         mirror_job = next((dict(row) for row in job_rows if row["job_type"] == "materialize_mirror"), None)
@@ -2082,6 +2338,22 @@ class V4RevisionService:
         candidate_decision = _safe_candidate_decision(metadata.get("candidate_decision"))
         scrape_summary = {
             "metadata_state": metadata_state,
+            "metadata_reason": _friendly_metadata_reason(
+                metadata_state,
+                metadata_reason,
+                metadata_reason_code,
+            ),
+            "metadata_reason_code": metadata_reason_code,
+            "metadata_recovery_action": _metadata_recovery_action(
+                metadata_state,
+                metadata_reason_code,
+                metadata_reason,
+            ),
+            "metadata_recovery_hint": _metadata_recovery_hint(_metadata_recovery_action(
+                metadata_state,
+                metadata_reason_code,
+                metadata_reason,
+            )),
             "title": _safe_detail_text(metadata.get("title")),
             "original_title": _safe_detail_text(metadata.get("original_title")),
             "year": _positive_detail_int(metadata.get("year")),
@@ -2092,6 +2364,12 @@ class V4RevisionService:
             "studios": _safe_detail_text_list(metadata.get("studios")),
             "premiered": _safe_detail_text(metadata.get("premiered")),
             "candidate_decision": candidate_decision,
+            "identity_status": _safe_detail_text(metadata.get("identity_status")),
+            "work_metadata_status": _safe_detail_text(metadata.get("work_metadata_status")),
+            "episode_mapping_status": _safe_detail_text(metadata.get("episode_mapping_status")),
+            "failure_stage": _safe_detail_text(metadata.get("failure_stage")),
+            "retryable": bool(metadata.get("retryable")),
+            "season_results": _safe_season_results(metadata.get("season_results")),
         }
         has_detail = bool(
             episodes
@@ -2111,7 +2389,22 @@ class V4RevisionService:
                 "provider": provider,
                 "provider_id": provider_id,
                 "metadata_state": metadata_state,
-                "metadata_reason": _friendly_metadata_reason(metadata_state, metadata_reason),
+                "metadata_reason": _friendly_metadata_reason(
+                    metadata_state,
+                    metadata_reason,
+                    metadata_reason_code,
+                ),
+                "metadata_reason_code": metadata_reason_code,
+                "metadata_recovery_action": _metadata_recovery_action(
+                    metadata_state,
+                    metadata_reason_code,
+                    metadata_reason,
+                ),
+                "metadata_recovery_hint": _metadata_recovery_hint(_metadata_recovery_action(
+                    metadata_state,
+                    metadata_reason_code,
+                    metadata_reason,
+                )),
             },
             "mirror": {
                 "status": mirror_status,
@@ -2194,7 +2487,9 @@ class V4RevisionService:
                     metadata = {}
                 scrape_rows[str(row["work_id"])] = {
                     "status": str(row["status"] or ""),
+                    "metadata_state": str(metadata.get("metadata_state") or row["status"] or ""),
                     "reason": str(metadata.get("reason") or ""),
+                    "reason_code": str(metadata.get("reason_code") or ""),
                     "updated_at": str(row["updated_at"] or ""),
                 }
 
@@ -2220,6 +2515,7 @@ class V4RevisionService:
             mirror = job_pair.get("mirror")
             metadata = job_pair.get("metadata")
             scrape = scrape_rows.get(work_id, {})
+            scrape_status = str(scrape.get("metadata_state") or scrape.get("status") or "")
             work_units.append({
                 "work_id": work_id,
                 "title": str(work.get("preferred_title") or work_id),
@@ -2235,13 +2531,25 @@ class V4RevisionService:
                 "overall_status": _derive_work_status(
                     mirror,
                     metadata,
-                    str(scrape.get("status") or ""),
+                    scrape_status,
                 ),
-                "metadata_state": str(scrape.get("status") or ""),
+                "metadata_state": scrape_status,
                 "metadata_reason": _friendly_metadata_reason(
-                    str(scrape.get("status") or ""),
+                    scrape_status,
+                    str(scrape.get("reason") or ""),
+                    str(scrape.get("reason_code") or ""),
+                ),
+                "metadata_reason_code": str(scrape.get("reason_code") or ""),
+                "metadata_recovery_action": _metadata_recovery_action(
+                    scrape_status,
+                    str(scrape.get("reason_code") or ""),
                     str(scrape.get("reason") or ""),
                 ),
+                "metadata_recovery_hint": _metadata_recovery_hint(_metadata_recovery_action(
+                    scrape_status,
+                    str(scrape.get("reason_code") or ""),
+                    str(scrape.get("reason") or ""),
+                )),
                 "mirror": _job_summary(mirror),
                 "metadata": _job_summary(metadata),
                 # 任务状态相同并不代表详情快照不变，例如确认候选会更新
@@ -2260,7 +2568,7 @@ class V4RevisionService:
             "overall_status": _revision_overall_status(work_units, stage),
             "stage_summary": {
                 "mirror": _stage_summary(stage["mirror"]),
-                "metadata": _stage_summary(stage["metadata"]),
+                "metadata": _metadata_stage_summary(stage["metadata"], scrape_rows),
                 "projection": _stage_summary(stage["projection"]),
             },
             "work_units": work_units,

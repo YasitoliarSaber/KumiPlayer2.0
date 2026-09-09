@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from types import SimpleNamespace
 
@@ -1444,6 +1445,59 @@ def test_metadata_manual_confirm_requeues_scrape_and_refreshes_projection(tmp_pa
     assert len(jobs) == 1
     assert jobs[0]["status"] == "succeeded"
     assert jobs[0]["attempts"] == 2
+
+
+def test_metadata_retry_requeues_recoverable_failure_but_blocks_identity_conflict(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    from app.api import media_v4
+    from app.media_v4.jobs.scrape import V4ScrapeService
+
+    preview = client.post("/api/v4/imports/preview", json=_payload("rev-metadata-retry"))
+    assert preview.status_code == 200, preview.text
+    confirmed = client.post("/api/v4/imports/rev-metadata-retry/confirm")
+    assert confirmed.status_code == 200, confirmed.text
+
+    with media_v4._database.connect() as conn:
+        work_id = str(conn.execute("SELECT work_id FROM works LIMIT 1").fetchone()["work_id"])
+    job = V4ScrapeService(media_v4._database).enqueue_for_revision("rev-metadata-retry")[0]
+    V4ScrapeService(media_v4._database).process(
+        job["job_id"],
+        lambda _target: {
+            "provider": "tmdb",
+            "provider_id": "42",
+            "media_type": "tv",
+            "title": "Show",
+            "metadata_state": "source_unavailable",
+            "reason": "TMDB 暂时限流",
+            "reason_code": "provider_rate_limited",
+            "failure_stage": "search",
+            "retryable": True,
+        },
+    )
+
+    queued = client.post("/api/v4/metadata/retry", json={"work_id": work_id})
+    assert queued.status_code == 200, queued.text
+    assert queued.json()["metadata_recovery_action"] == "retry_metadata"
+    with media_v4._database.connect() as conn:
+        refreshed = conn.execute(
+            "SELECT status FROM jobs WHERE job_id = ?", (job["job_id"],)
+        ).fetchone()
+        conn.execute(
+            "UPDATE scrape_bindings SET status = 'waiting_review', metadata_json = ? "
+            "WHERE revision_id = 'rev-metadata-retry' AND work_id = ?",
+            (
+                json.dumps({
+                    "metadata_state": "waiting_review",
+                    "reason_code": "provider_identity_conflict",
+                    "reason": "该在线作品已关联到另一部作品",
+                }, ensure_ascii=False),
+                work_id,
+            ),
+        )
+    assert refreshed["status"] == "queued"
+
+    blocked = client.post("/api/v4/metadata/retry", json={"work_id": work_id})
+    assert blocked.status_code == 409, blocked.text
 
 
 def test_sync_and_durable_tree_entries_share_one_root_identity(tmp_path, monkeypatch):

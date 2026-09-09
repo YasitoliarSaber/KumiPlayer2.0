@@ -201,22 +201,26 @@ class V4ScrapeService:
             metadata_state = str(result.get("metadata_state") or "").strip()
             if not metadata_state:
                 metadata_state = "ready" if provider_name != "local" else "waiting_metadata"
-            ready = metadata_state == "ready" and provider_name not in {"", "local"} and bool(provider_id)
-            if ready:
+            has_provider_identity = provider_name not in {"", "local"} and bool(provider_id)
+            binding_conflict = False
+            ready = metadata_state == "ready" and has_provider_identity
+            if has_provider_identity:
                 with self.database.connect() as conn:
-                    binding_conflict = _provider_binding_conflict(
+                    conflict_reason = _provider_binding_conflict(
                         conn,
                         work_id=str(job["work_id"]),
                         work_type=str(target.get("work_type") or ""),
                         provider=provider_name,
                         provider_id=provider_id,
                     )
-                if binding_conflict:
+                if conflict_reason:
                     ready = False
+                    binding_conflict = True
                     result = {
                         **result,
                         "metadata_state": "waiting_review",
-                        "reason": binding_conflict,
+                        "reason": conflict_reason,
+                        "reason_code": "provider_identity_conflict",
                     }
             if ready and mirror_root is None:
                 # 完整性门控必经：镜像根从配置解析，不能由调用方是否传参决定。
@@ -232,6 +236,7 @@ class V4ScrapeService:
                         **result,
                         "metadata_state": "waiting_metadata",
                         "reason": "镜像目录未配置，无法物化元数据产物",
+                        "reason_code": "mirror_root_missing",
                     }
             valid_episode_ids = {str(item["episode_id"]) for item in target["episodes"]}
             for mapping in result.get("episode_mappings") or []:
@@ -277,8 +282,11 @@ class V4ScrapeService:
                 **result,
                 "metadata_state": "ready" if ready else binding_status,
             }
-            binding_provider = provider_name if ready else "local"
-            binding_provider_id = provider_id if ready else ""
+            # 元数据尚未完整时仍保留已确认的 Provider 身份，下一次重试
+            # 应直接沿用该 ID；只有身份冲突或本地结果才退回 local。
+            identity_ready = has_provider_identity and not binding_conflict
+            binding_provider = provider_name if identity_ready else "local"
+            binding_provider_id = provider_id if identity_ready else ""
             if cancel_requested(self.database, job_id):
                 mark_cancelled(self.database, job_id)
                 return
@@ -307,7 +315,7 @@ class V4ScrapeService:
                         now,
                     ),
                 )
-                if ready:
+                if identity_ready:
                     # D5：provider_bindings 的 (provider, media_type, provider_id)
                     # 全局唯一。该身份已被其他 work 占用时不得覆盖，也不得让
                     # UNIQUE 约束炸掉任务——记录明确错误，等待人工合并重复条目。
@@ -334,53 +342,72 @@ class V4ScrapeService:
                             (job["work_id"], binding_provider, binding_provider_id, job["work_id"]),
                         )
                     else:
+                        # 预检查与真正写入之间可能有并发任务抢先占用身份。
+                        # 这时必须把本次结果降级为待人工复核，并禁止继续写入
+                        # 全局 Provider/Season/Episode 映射，避免把冲突身份扩散到
+                        # 当前 Work 的播放链路。
+                        identity_ready = False
+                        binding_status = "waiting_review"
+                        result = {
+                            **result,
+                            "metadata_state": "waiting_review",
+                            "reason": "该在线作品已关联到另一部作品，请返回检查识别结果或选择正确候选",
+                            "reason_code": "provider_identity_conflict",
+                        }
                         conn.execute(
                             """
                             UPDATE scrape_bindings
-                            SET status = 'waiting_review', updated_at = ?
+                            SET status = 'waiting_review', metadata_json = ?, updated_at = ?
                             WHERE revision_id = ? AND work_id = ? AND provider = ?
                             """,
-                            (now, job["revision_id"], job["work_id"], binding_provider),
+                            (
+                                json.dumps(result, ensure_ascii=False, sort_keys=True),
+                                now,
+                                job["revision_id"],
+                                job["work_id"],
+                                binding_provider,
+                            ),
                         )
-                for mapping in result.get("episode_mappings") or []:
-                    episode_id = str(mapping.get("episode_id") or "")
-                    conn.execute(
-                        """
-                        INSERT INTO episode_provider_mappings(
-                            episode_id, provider, provider_season_number,
-                            provider_episode_number, provider_episode_id
-                        ) VALUES (?, ?, ?, ?, ?)
-                        ON CONFLICT(episode_id, provider) DO UPDATE SET
-                            provider_season_number = excluded.provider_season_number,
-                            provider_episode_number = excluded.provider_episode_number,
-                            provider_episode_id = excluded.provider_episode_id
-                        """,
-                        (
-                            episode_id,
-                            provider_name,
-                            mapping.get("provider_season_number"),
-                            mapping.get("provider_episode_number"),
-                            str(mapping.get("provider_episode_id") or ""),
-                        ),
-                    )
-                for mapping in result.get("season_mappings") or []:
-                    season_id = str(mapping.get("season_id") or "")
-                    conn.execute(
-                        """
-                        INSERT INTO season_provider_mappings(
-                            season_id, provider, provider_season_number, provider_season_id
-                        ) VALUES (?, ?, ?, ?)
-                        ON CONFLICT(season_id, provider) DO UPDATE SET
-                            provider_season_number = excluded.provider_season_number,
-                            provider_season_id = excluded.provider_season_id
-                        """,
-                        (
-                            season_id,
-                            provider_name,
-                            mapping.get("provider_season_number"),
-                            str(mapping.get("provider_season_id") or ""),
-                        ),
-                    )
+                if identity_ready:
+                    for mapping in result.get("episode_mappings") or []:
+                        episode_id = str(mapping.get("episode_id") or "")
+                        conn.execute(
+                            """
+                            INSERT INTO episode_provider_mappings(
+                                episode_id, provider, provider_season_number,
+                                provider_episode_number, provider_episode_id
+                            ) VALUES (?, ?, ?, ?, ?)
+                            ON CONFLICT(episode_id, provider) DO UPDATE SET
+                                provider_season_number = excluded.provider_season_number,
+                                provider_episode_number = excluded.provider_episode_number,
+                                provider_episode_id = excluded.provider_episode_id
+                            """,
+                            (
+                                episode_id,
+                                provider_name,
+                                mapping.get("provider_season_number"),
+                                mapping.get("provider_episode_number"),
+                                str(mapping.get("provider_episode_id") or ""),
+                            ),
+                        )
+                    for mapping in result.get("season_mappings") or []:
+                        season_id = str(mapping.get("season_id") or "")
+                        conn.execute(
+                            """
+                            INSERT INTO season_provider_mappings(
+                                season_id, provider, provider_season_number, provider_season_id
+                            ) VALUES (?, ?, ?, ?)
+                            ON CONFLICT(season_id, provider) DO UPDATE SET
+                                provider_season_number = excluded.provider_season_number,
+                                provider_season_id = excluded.provider_season_id
+                            """,
+                            (
+                                season_id,
+                                provider_name,
+                                mapping.get("provider_season_number"),
+                                str(mapping.get("provider_season_id") or ""),
+                            ),
+                        )
                 conn.execute(
                     "UPDATE jobs SET status = 'succeeded', updated_at = ?, heartbeat_at = ?, finished_at = ?, last_error = '' WHERE job_id = ?",
                     (now, now, now, job_id),

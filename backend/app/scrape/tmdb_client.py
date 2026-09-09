@@ -43,7 +43,29 @@ _GLOBAL_LAST_REQUEST_TIME = 0.0
 
 
 class TMDBClientError(Exception):
-    """TMDB 客户端基础异常"""
+    """TMDB 客户端基础异常。
+
+    ``status_code``、``reason_code`` 与 ``retryable`` 只保存稳定的业务分类，
+    供 V4 元数据任务区分搜索、详情和季度失败；异常文本仍保持向后兼容，
+    不写入 Token、完整请求 URL 或响应头。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 0,
+        reason_code: str = "",
+        retryable: bool = True,
+        failure_stage: str = "",
+        retry_after: int | None = None,
+    ):
+        super().__init__(message)
+        self.status_code = int(status_code or 0)
+        self.reason_code = str(reason_code or "")
+        self.retryable = bool(retryable)
+        self.failure_stage = str(failure_stage or "")
+        self.retry_after = retry_after
 
 
 class TMDBAuthError(TMDBClientError):
@@ -141,7 +163,12 @@ class TMDBClient:
         - 500/502/503/504：指数退避重试
         """
         if not self._token:
-            raise TMDBAuthError("未配置 tmdb_bearer_token")
+            raise TMDBAuthError(
+                "未配置 tmdb_bearer_token",
+                status_code=401,
+                reason_code="provider_auth_required",
+                retryable=False,
+            )
 
         url = f"{_BASE_URL}{path}"
         headers = self._headers()
@@ -167,17 +194,30 @@ class TMDBClient:
                 if resp.status_code in (401, 403):
                     raise TMDBAuthError(
                         f"TMDB 认证失败 ({resp.status_code}): "
-                        f"请检查 tmdb_bearer_token 是否有效"
+                        f"请检查 tmdb_bearer_token 是否有效",
+                        status_code=resp.status_code,
+                        reason_code="provider_auth_required",
+                        retryable=False,
                     )
 
                 # 404：资源不存在
                 if resp.status_code == 404:
-                    raise TMDBClientError(f"TMDB 资源不存在: {path}")
+                    raise TMDBClientError(
+                        f"TMDB 资源不存在: {path}",
+                        status_code=404,
+                        reason_code="provider_resource_missing",
+                        retryable=False,
+                    )
 
                 # 422：参数错误
                 if resp.status_code == 422:
                     error_msg = resp.text[:200] if resp.text else "参数错误"
-                    raise TMDBClientError(f"TMDB 参数错误 (422): {error_msg}")
+                    raise TMDBClientError(
+                        f"TMDB 参数错误 (422): {error_msg}",
+                        status_code=422,
+                        reason_code="invalid_response",
+                        retryable=False,
+                    )
 
                 # 429：速率限制。无 Retry-After 时不再默认等待 30 秒，
                 # 否则前端会长时间无新日志，看起来像刮削卡死。
@@ -189,7 +229,13 @@ class TMDBClient:
                     if attempt < self._max_retries - 1:
                         time.sleep(wait_time)
                         continue
-                    raise TMDBRateLimitError(f"TMDB 速率限制，已重试 {self._max_retries} 次")
+                    raise TMDBRateLimitError(
+                        f"TMDB 速率限制，已重试 {self._max_retries} 次",
+                        status_code=429,
+                        reason_code="provider_rate_limited",
+                        retryable=True,
+                        retry_after=wait_time,
+                    )
 
                 # 5xx：指数退避重试
                 if resp.status_code >= 500:
@@ -198,13 +244,27 @@ class TMDBClient:
                     if attempt < self._max_retries - 1:
                         time.sleep(wait_time)
                         continue
-                    raise TMDBClientError(f"TMDB 服务端错误 ({resp.status_code})")
+                    raise TMDBClientError(
+                        f"TMDB 服务端错误 ({resp.status_code})",
+                        status_code=resp.status_code,
+                        reason_code="source_unavailable",
+                        retryable=True,
+                    )
 
                 # 其他错误
-                raise TMDBClientError(f"TMDB 请求失败 ({resp.status_code}): {resp.text[:200]}")
+                raise TMDBClientError(
+                    f"TMDB 请求失败 ({resp.status_code}): {resp.text[:200]}",
+                    status_code=resp.status_code,
+                    reason_code="source_unavailable",
+                    retryable=False,
+                )
 
             except httpx.TimeoutException:
-                last_error = TMDBClientError("TMDB 请求超时")
+                last_error = TMDBClientError(
+                    "TMDB 请求超时",
+                    reason_code="source_unavailable",
+                    retryable=True,
+                )
                 if attempt < self._max_retries - 1:
                     time.sleep(2 ** attempt)
                     continue
@@ -217,9 +277,15 @@ class TMDBClient:
                         continue
                     raise TMDBClientError(
                         "TMDB SSL 证书校验失败：请检查代理/VPN、DNS、杀毒软件 HTTPS 扫描或网络拦截。"
-                        "当前连接拿到的证书与 api.themoviedb.org 不匹配。"
+                        "当前连接拿到的证书与 api.themoviedb.org 不匹配。",
+                        reason_code="source_unavailable",
+                        retryable=False,
                     ) from None
-                last_error = TMDBClientError(f"TMDB 网络连接失败: {e}")
+                last_error = TMDBClientError(
+                    f"TMDB 网络连接失败: {e}",
+                    reason_code="source_unavailable",
+                    retryable=True,
+                )
                 if attempt < self._max_retries - 1:
                     time.sleep(2 ** attempt)
                     continue
@@ -227,13 +293,21 @@ class TMDBClient:
             except (TMDBAuthError, TMDBRateLimitError, TMDBClientError):
                 raise
             except Exception as e:
-                last_error = TMDBClientError(f"TMDB 请求异常: {e}")
+                last_error = TMDBClientError(
+                    f"TMDB 请求异常: {e}",
+                    reason_code="source_unavailable",
+                    retryable=True,
+                )
                 if attempt < self._max_retries - 1:
                     time.sleep(2 ** attempt)
                     continue
                 raise last_error from None
 
-        raise TMDBClientError(f"TMDB 请求失败: {path}")
+        raise TMDBClientError(
+            f"TMDB 请求失败: {path}",
+            reason_code="source_unavailable",
+            retryable=True,
+        )
 
     @staticmethod
     def _cache_key(method: str, path: str, kwargs: dict) -> tuple[str, str, tuple[tuple[str, str], ...]]:

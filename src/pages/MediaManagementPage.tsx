@@ -988,6 +988,25 @@ export default function MediaManagementPage() {
     }
   }
 
+  const retryMetadataRecovery = async (workId: string) => {
+    setMetadataRecoveryBusy(workId)
+    setError('')
+    try {
+      await mediaV4Api.metadataRetry(workId)
+      const activeRevisionId = executeProgress?.revision_id || revisionId
+      if (activeRevisionId) {
+        const result = await mediaV4Api.status(activeRevisionId)
+        setJobs(result.jobs)
+        if (result.progress) setExecuteProgress(result.progress)
+      }
+      void refreshSourceCards()
+    } catch (cause) {
+      setError(userFacingPageError(cause, '媒体信息重试失败'))
+    } finally {
+      setMetadataRecoveryBusy('')
+    }
+  }
+
   const confirmMetadataRecovery = async (candidate: MetadataRecoveryCandidate) => {
     if (!metadataRecovery) return
     setMetadataRecoveryBusy(candidate.candidate_id)
@@ -1403,6 +1422,7 @@ export default function MediaManagementPage() {
             onRetry={(jobId: string) => { const job = jobs.find((item) => item.job_id === jobId); if (job) void retryJob(job) }}
             resolvingWorkId={metadataRecoveryBusy}
             onResolveMetadata={(workId: string) => { void searchMetadataRecovery(workId) }}
+            onRetryMetadata={(workId: string) => { void retryMetadataRecovery(workId) }}
             fetchWorkDetail={(revisionId: string, workId: string) => mediaV4Api.workExecutionDetail(revisionId, workId)}
           />
         ) : (

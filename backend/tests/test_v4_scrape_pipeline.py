@@ -137,6 +137,56 @@ def test_scrape_metadata_does_not_overwrite_local_episode_number(tmp_path, monke
     assert season_mapping["provider_season_number"] == 9
 
 
+def test_partial_metadata_keeps_provider_identity_for_retry(tmp_path):
+    """季度资料暂不可用时仍保留 TMDB 作品绑定，避免下次重新搜索。"""
+
+    from app.media_v4.jobs.scrape import V4ScrapeService
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "partial-metadata.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-partial", [_entry("a")])
+    revisions.confirm("rev-partial")
+    scrape = V4ScrapeService(database)
+    job = scrape.enqueue_for_revision("rev-partial")[0]
+    with database.connect() as conn:
+        episode_id = str(conn.execute("SELECT episode_id FROM episodes").fetchone()[0])
+
+    scrape.process(
+        job["job_id"],
+        lambda _target: {
+            "provider": "tmdb",
+            "provider_id": "42",
+            "media_type": "tv",
+            "title": "Show",
+            "metadata_state": "source_unavailable",
+            "reason": "部分剧集资料暂不可用，已保留作品信息，可稍后重试",
+            "reason_code": "episode_mapping_incomplete",
+            "episode_mappings": [{
+                "episode_id": episode_id,
+                "provider_season_number": 1,
+                "provider_episode_number": 1,
+                "provider_episode_id": "9001",
+            }],
+        },
+    )
+
+    with database.connect() as conn:
+        binding = conn.execute(
+            "SELECT provider, provider_id, status, metadata_json FROM scrape_bindings WHERE revision_id = 'rev-partial'"
+        ).fetchone()
+        mapping = conn.execute(
+            "SELECT provider, provider_episode_id FROM episode_provider_mappings WHERE episode_id = ?",
+            (episode_id,),
+        ).fetchone()
+
+    assert tuple(binding[:3]) == ("tmdb", "42", "source_unavailable")
+    assert json.loads(binding["metadata_json"])["reason_code"] == "episode_mapping_incomplete"
+    assert tuple(mapping) == ("tmdb", "9001")
+
+
 def test_scrape_provider_identity_conflict_becomes_recoverable_review_state(tmp_path, monkeypatch):
     """第三步的重复 Provider 身份不能泄漏 SQLite 唯一索引或写坏既有作品。"""
 
@@ -191,10 +241,29 @@ def test_scrape_provider_identity_conflict_becomes_recoverable_review_state(tmp_
     revisions.create_draft("rev-target-scrape", [(target_evidence, target_facts)])
     revisions.confirm("rev-target-scrape")
     target_job = V4ScrapeService(database).enqueue_for_revision("rev-target-scrape")[0]
+    with database.connect() as conn:
+        target_episode = conn.execute(
+            "SELECT episode_id, season_id FROM episodes WHERE work_id = ("
+            "SELECT work_id FROM revision_bindings WHERE revision_id = 'rev-target-scrape' LIMIT 1"
+            ") LIMIT 1"
+        ).fetchone()
+        target_episode_id = str(target_episode["episode_id"])
+        target_season_id = str(target_episode["season_id"])
 
     V4ScrapeService(database).process(
         target_job["job_id"],
-        lambda _target: {**_ready_metadata("99"), "title": "Target Show"},
+        lambda _target: {
+            **_ready_metadata("99"),
+            "title": "Target Show",
+            "episode_mappings": [{
+                "episode_id": target_episode_id,
+                "provider_episode_id": "9901",
+            }],
+            "season_mappings": [{
+                "season_id": target_season_id,
+                "provider_season_id": "990",
+            }],
+        },
         mirror_root=mirror_root,
     )
 
@@ -207,6 +276,10 @@ def test_scrape_provider_identity_conflict_becomes_recoverable_review_state(tmp_
         owners = conn.execute(
             "SELECT work_id FROM provider_bindings WHERE provider = 'tmdb' AND media_type = 'tv' AND provider_id = '99'"
         ).fetchall()
+        episode_mappings = conn.execute(
+            "SELECT provider_episode_id FROM episode_provider_mappings WHERE episode_id = ? AND provider = 'tmdb'",
+            (target_episode_id,),
+        ).fetchall()
 
     assert job["status"] == "succeeded"
     assert job["last_error"] == ""
@@ -214,6 +287,7 @@ def test_scrape_provider_identity_conflict_becomes_recoverable_review_state(tmp_
     assert binding["status"] == "waiting_review"
     assert "已关联到另一部作品" in json.loads(binding["metadata_json"])["reason"]
     assert len(owners) == 1
+    assert episode_mappings == []
 
 
 def test_local_artwork_mode_materializes_episode_stills_as_v4_artifacts(tmp_path, monkeypatch):

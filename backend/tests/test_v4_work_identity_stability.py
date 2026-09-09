@@ -12,7 +12,9 @@
 
 from __future__ import annotations
 
-from app.media_v4.domain.models import SourceEvidence
+import pytest
+
+from app.media_v4.domain.models import ParsedFacts, SourceEvidence
 from app.media_v4.parsing.parser import V4Parser, normalize_batch_parsed_facts
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.persistence.repositories import V4Repository
@@ -316,3 +318,37 @@ def test_second_round_does_not_rename_main_series_with_season_title(tmp_path):
             for row in conn.execute("SELECT preferred_title FROM works").fetchall()
         }
     assert "Yuru Camp Season 2" not in titles
+
+
+@pytest.mark.parametrize('title', ['虫师', '奇巧计程车', '紫罗兰永恒花园', '斩服少女', '月色真美', '天国大魔境', 'CLANNAD', '路人女主的养成方法', '想吃掉我的非人少女'])
+@pytest.mark.parametrize('collection_first', [False, True])
+def test_collection_and_plain_directory_share_work_across_sources(tmp_path, title, collection_first):
+    """普通目录与合集是同一主系列；离线 TXT 确认不得再造身份后撞 TMDB 绑定。"""
+    database = V4Database(tmp_path / 'cross-source.db')
+    database.initialize()
+    service = V4RevisionService(database)
+    work_ids = []
+    for index, collection in enumerate((collection_first, not collection_first)):
+        evidence = SourceEvidence(
+            evidence_id=f'ev-{index}', scan_id=f'scan-{index}', root_id=f'root-{index}',
+            source_key=f'{title}/Season 1/01.mkv', relative_path=f'{title}/Season 1/01.mkv',
+            entry_kind='video', provider='baidu',
+            ingest_method='directory_tree' if collection else 'openlist',
+            source_locator=f'offline/{title}/01.mkv', playback_locator=f'Z:/{title}/01.mkv',
+        )
+        facts = ParsedFacts(
+            parsed_fact_id=f'pf-{index}', evidence_id=evidence.evidence_id, parser_version='fixture',
+            work_title=title, title_candidates=(title,), series_group=title,
+            relation_type='main' if collection else '', media_type='tv', group_type='season',
+            season_candidate=1, episode_candidate=1,
+        )
+        service.create_draft(f'rev-{index}', [(evidence, facts)], root_id=evidence.root_id, scan_id=evidence.scan_id)
+        service.confirm(f'rev-{index}')
+        with database.connect() as conn:
+            work_ids.append(conn.execute('SELECT work_id FROM revision_bindings WHERE revision_id=?', (f'rev-{index}',)).fetchone()[0])
+            if index == 0:
+                conn.execute("INSERT INTO provider_bindings(work_id, provider, media_type, provider_id) VALUES (?, 'tmdb', 'tv', '12345')", (work_ids[0],))
+    assert work_ids[0] == work_ids[1]
+    with database.connect() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM works').fetchone()[0] == 1
+        assert conn.execute('SELECT COUNT(*) FROM episodes').fetchone()[0] == 1

@@ -8,7 +8,12 @@ from typing import Any
 
 from app.core.config import load_config
 from app.media_v4.resolution.ranker import CandidateRanker
-from app.scrape.tmdb_client import TMDBClient, TMDBClientError
+from app.scrape.tmdb_client import (
+    TMDBAuthError,
+    TMDBClient,
+    TMDBClientError,
+    TMDBRateLimitError,
+)
 
 _METADATA_STATES = frozenset({"ready", "waiting_metadata", "waiting_review", "source_unavailable", "failed"})
 
@@ -25,6 +30,11 @@ def _local_state(
     candidates: list | None = None,
     reason_code: str | None = None,
     candidate_decision: dict | None = None,
+    identity_status: str = "unresolved",
+    work_metadata_status: str = "unavailable",
+    episode_mapping_status: str = "not_applicable",
+    failure_stage: str = "",
+    retryable: bool | None = None,
 ) -> dict:
     """等待/失败类结果：不再把本地 Work ID 伪装成外部 provider identity。"""
 
@@ -34,7 +44,17 @@ def _local_state(
         "metadata_state": state,
         "reason": reason,
         "attempted_queries": attempted_queries or [],
+        "identity_status": identity_status,
+        "work_metadata_status": work_metadata_status,
+        "episode_mapping_status": episode_mapping_status,
+        "retryable": bool(
+            state in {"waiting_metadata", "source_unavailable"}
+            if retryable is None
+            else retryable
+        ),
     }
+    if failure_stage:
+        result["failure_stage"] = failure_stage
     if candidates:
         result["candidates"] = candidates
     if reason_code:
@@ -42,6 +62,41 @@ def _local_state(
     if candidate_decision is not None:
         result["candidate_decision"] = candidate_decision
     return result
+
+
+def _tmdb_reason_code(error: TMDBClientError) -> str:
+    """把提供方异常归一化为可恢复的业务原因码。"""
+
+    explicit = str(getattr(error, "reason_code", "") or "").strip()
+    if explicit:
+        return explicit
+    if isinstance(error, TMDBAuthError):
+        return "provider_auth_required"
+    if isinstance(error, TMDBRateLimitError):
+        return "provider_rate_limited"
+    status_code = int(getattr(error, "status_code", 0) or 0)
+    if status_code == 404:
+        return "provider_resource_missing"
+    if status_code == 422:
+        return "invalid_response"
+    return "source_unavailable"
+
+
+def _tmdb_failure_stage(error: TMDBClientError, fallback: str) -> str:
+    stage = str(getattr(error, "failure_stage", "") or "").strip()
+    return stage or fallback
+
+
+def _tmdb_retryable(error: TMDBClientError, default: bool = True) -> bool:
+    value = getattr(error, "retryable", None)
+    if value is not None:
+        return bool(value)
+    if isinstance(error, TMDBAuthError):
+        return False
+    status_code = int(getattr(error, "status_code", 0) or 0)
+    if status_code in {404, 422}:
+        return False
+    return default
 
 
 def _normalize_title(value: object) -> str:
@@ -181,6 +236,15 @@ def _target_titles(target: dict) -> list[str]:
             titles.append(value)
             seen.add(normalized)
     return titles
+
+
+def _has_local_episodes(target: dict) -> bool:
+    return any(
+        str(item.get("episode_id") or "").strip()
+        and str(item.get("episode_kind") or "regular") != "auxiliary"
+        for item in target.get("episodes") or []
+        if isinstance(item, dict)
+    )
 
 
 def _select_search_result(results: list[dict], target: dict, media_type: str) -> dict | None:
@@ -346,16 +410,37 @@ def default_metadata_provider(target: dict) -> dict:
     """
 
     config = load_config()
-    if not config.tmdb_bearer_token:
-        return _local_state(
-            "waiting_metadata",
-            "未配置 TMDB API Token，无法获取在线元数据；请先在设置页配置后重新刮削",
-        )
-
     bindings = target.get("provider_bindings") or []
     tmdb_binding = next((item for item in bindings if item.get("provider") == "tmdb"), None)
     media_type = str((tmdb_binding or {}).get("media_type") or target.get("work_type") or "tv")
     media_type = "tv" if media_type in {"tv", "series"} else "movie"
+    if not config.tmdb_bearer_token:
+        saved_provider_id = str((tmdb_binding or {}).get("provider_id") or "").strip()
+        if saved_provider_id:
+            return {
+                "provider": "tmdb",
+                "provider_id": saved_provider_id,
+                "media_type": media_type,
+                "title": str(target.get("preferred_title") or ""),
+                "metadata_state": "waiting_metadata",
+                "reason": "未配置 TMDB API Token，无法获取在线元数据；请先在设置页配置后重新刮削",
+                "reason_code": "provider_auth_required",
+                "episode_mappings": [],
+                "identity_status": "confirmed",
+                "work_metadata_status": "unavailable",
+                "episode_mapping_status": "not_applicable",
+                "failure_stage": "configuration",
+                "retryable": True,
+            }
+        return _local_state(
+            "waiting_metadata",
+            "未配置 TMDB API Token，无法获取在线元数据；请先在设置页配置后重新刮削",
+            reason_code="provider_auth_required",
+            failure_stage="configuration",
+            retryable=True,
+        )
+
+    provider_id: int | None = None
 
     try:
         with TMDBClient(bearer_token=config.tmdb_bearer_token) as client:
@@ -403,7 +488,9 @@ def default_metadata_provider(target: dict) -> dict:
                         "source_unavailable",
                         f"在线资料服务暂不可用，请稍后重试（{type(search_errors[-1]).__name__}）",
                         attempted_queries=attempted_queries,
-                        reason_code="source_unavailable",
+                        reason_code=_tmdb_reason_code(search_errors[-1]),
+                        failure_stage=_tmdb_failure_stage(search_errors[-1], "search"),
+                        retryable=_tmdb_retryable(search_errors[-1]),
                     )
 
                 # 主标题、原文标题及别名查询的所有摘要统一进入评分器。即使
@@ -431,6 +518,8 @@ def default_metadata_provider(target: dict) -> dict:
                         candidates=ranked_payload,
                         reason_code="no_candidates" if not ranked else "ambiguous_candidates",
                         candidate_decision=candidate_decision,
+                        failure_stage="search",
+                        retryable=False,
                     )
                 provider_id = int(adopted.provider_id)
             detail = client.get_tv_detail(provider_id) if media_type == "tv" else client.get_movie_detail(provider_id)
@@ -463,18 +552,140 @@ def default_metadata_provider(target: dict) -> dict:
                 "candidate_decision": candidate_decision,
             }
             if media_type == "tv":
-                result["episode_mappings"] = _build_tv_episode_mappings(client, provider_id, target)
+                season_results: list[dict] = []
+                result["episode_mappings"] = _build_tv_episode_mappings(
+                    client,
+                    provider_id,
+                    target,
+                    season_results=season_results,
+                )
+                mapped_episode_ids = {
+                    str(item.get("episode_id") or "")
+                    for item in result["episode_mappings"]
+                    if str(item.get("episode_id") or "").strip()
+                }
+                unmapped_by_season: dict[tuple[str, int | None], list[dict]] = {}
+                for episode in target.get("episodes") or []:
+                    if not isinstance(episode, dict) or str(episode.get("episode_kind") or "regular") == "auxiliary":
+                        continue
+                    episode_id = str(episode.get("episode_id") or "")
+                    if not episode_id or episode_id in mapped_episode_ids:
+                        continue
+                    key = (
+                        str(episode.get("season_id") or ""),
+                        _positive_int(episode.get("local_season_number")),
+                    )
+                    unmapped_by_season.setdefault(key, []).append(episode)
+                recorded_seasons = {
+                    (
+                        str(item.get("season_id") or ""),
+                        _positive_int(item.get("local_season_number")),
+                    )
+                    for item in season_results
+                }
+                for (season_id, local_season_number), _episodes in unmapped_by_season.items():
+                    if (season_id, local_season_number) in recorded_seasons:
+                        continue
+                    provider_season_number = _positive_int(_episodes[0].get("provider_season_number"))
+                    if provider_season_number is None:
+                        provider_season_number = local_season_number
+                    season_results.append({
+                        "season_id": season_id,
+                        "local_season_number": local_season_number,
+                        "provider_season_number": provider_season_number,
+                        "status": "partial",
+                        "reason_code": "episode_not_found",
+                        "failure_stage": "season_detail",
+                        "retryable": False,
+                    })
+                if season_results:
+                    result.update({
+                        "metadata_state": "source_unavailable",
+                        "reason": "部分剧集资料暂不可用，已保留作品信息，可稍后重试",
+                        "reason_code": "episode_mapping_incomplete",
+                        "season_results": season_results,
+                        "identity_status": "confirmed",
+                        "work_metadata_status": "ready",
+                        "episode_mapping_status": "partial",
+                        "failure_stage": "season_detail",
+                        "retryable": any(item.get("retryable") for item in season_results),
+                    })
+                else:
+                    result.update({
+                        "identity_status": "confirmed",
+                        "work_metadata_status": "ready",
+                        "episode_mapping_status": "complete" if _has_local_episodes(target) else "not_applicable",
+                        "retryable": False,
+                    })
+            else:
+                result.update({
+                    "identity_status": "confirmed",
+                    "work_metadata_status": "ready",
+                    "episode_mapping_status": "not_applicable",
+                    "retryable": False,
+                })
             return result
     except TMDBClientError as exc:
+        if provider_id is not None:
+            # 已经确认过的 Provider 身份不能因为一次详情/季度请求失败
+            # 被降级成 local；保留标题和 ID，下一次重试可直接复用。
+            return {
+                "provider": "tmdb",
+                "provider_id": str(provider_id),
+                "media_type": media_type,
+                "title": str(target.get("preferred_title") or ""),
+                "original_title": str(target.get("original_title") or ""),
+                "metadata_state": "source_unavailable",
+                "reason": f"在线资料服务暂不可用，请稍后重试（{type(exc).__name__}）",
+                "reason_code": _tmdb_reason_code(exc),
+                "episode_mappings": [],
+                "identity_status": "confirmed",
+                "work_metadata_status": "unavailable",
+                "episode_mapping_status": "not_applicable",
+                "failure_stage": _tmdb_failure_stage(exc, "work_detail"),
+                "retryable": _tmdb_retryable(exc),
+            }
         return _local_state(
             "source_unavailable",
             f"在线资料服务暂不可用，请稍后重试（{type(exc).__name__}）",
+            reason_code=_tmdb_reason_code(exc),
+            failure_stage=_tmdb_failure_stage(exc, "search"),
+            retryable=_tmdb_retryable(exc),
         )
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        return _local_state("failed", f"获取在线元数据失败: {type(exc).__name__}")
+        if provider_id is not None:
+            return {
+                "provider": "tmdb",
+                "provider_id": str(provider_id),
+                "media_type": media_type,
+                "title": str(target.get("preferred_title") or ""),
+                "original_title": str(target.get("original_title") or ""),
+                "metadata_state": "failed",
+                "reason": f"在线资料返回内容无效，请稍后重试（{type(exc).__name__}）",
+                "reason_code": "invalid_response",
+                "episode_mappings": [],
+                "identity_status": "confirmed",
+                "work_metadata_status": "unavailable",
+                "episode_mapping_status": "not_applicable",
+                "failure_stage": "work_detail",
+                "retryable": False,
+            }
+        return _local_state(
+            "failed",
+            f"获取在线元数据失败: {type(exc).__name__}",
+            reason_code="invalid_response",
+            failure_stage="work_detail",
+            retryable=False,
+        )
 
 
-def _build_tv_episode_mappings(client: TMDBClient, provider_id: int, target: dict) -> list[dict]:
+def _build_tv_episode_mappings(
+    client: TMDBClient,
+    provider_id: int,
+    target: dict,
+    *,
+    season_results: list[dict] | None = None,
+) -> list[dict]:
     """把已确认的本地 Episode 映射到 TMDB 的标题与剧照。
 
     本地季度和集号永远不在这里改写；这里只保存 provider 的映射和可展示
@@ -504,9 +715,17 @@ def _build_tv_episode_mappings(client: TMDBClient, provider_id: int, target: dic
                 for item in season.get("episodes") or []
                 if _positive_int(item.get("episode_number")) is not None
             }
-        except TMDBClientError:
-            if any(str(item.get("season_kind") or "") != "special" for item in episodes):
-                raise
+        except TMDBClientError as exc:
+            if season_results is not None:
+                season_results.append({
+                    "season_id": str(episodes[0].get("season_id") or ""),
+                    "local_season_number": _positive_int(episodes[0].get("local_season_number")),
+                    "provider_season_number": provider_season,
+                    "status": "source_unavailable",
+                    "reason_code": _tmdb_reason_code(exc),
+                    "failure_stage": _tmdb_failure_stage(exc, "season_detail"),
+                    "retryable": _tmdb_retryable(exc),
+                })
             remote_by_number = {}
 
         for episode in episodes:
@@ -519,6 +738,10 @@ def _build_tv_episode_mappings(client: TMDBClient, provider_id: int, target: dic
             if provider_episode is None:
                 continue
             remote = remote_by_number.get(provider_episode) or {}
+            if not str(remote.get("id") or "").strip():
+                # 没有远端 Episode ID 时不能把空映射写成“已映射”；保留
+                # 本地剧集，待下次按缺失季度重试。
+                continue
             still = str(remote.get("still_path") or "")
             mapping = {
                 "episode_id": str(episode["episode_id"]),

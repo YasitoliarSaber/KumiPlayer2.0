@@ -69,6 +69,13 @@ export interface V4Job {
   last_error?: string
 }
 
+export type V4MetadataRecoveryAction =
+  | 'choose_candidate'
+  | 'retry_metadata'
+  | 'check_settings'
+  | 'review_identity'
+  | 'none'
+
 export interface V4LibraryCard {
   work_id: string
   title: string
@@ -230,6 +237,9 @@ export interface V4WorkProgressUnit {
     | 'completed'
   metadata_state: string
   metadata_reason: string
+  metadata_reason_code?: string
+  metadata_recovery_action?: V4MetadataRecoveryAction
+  metadata_recovery_hint?: string
   /** 每次本作品任务或刮削快照更新时变化，用于使执行详情缓存失效。 */
   detail_version?: string
   mirror: { job_id: string; status: string; attempts: number; last_error: string }
@@ -246,6 +256,9 @@ export interface V4WorkExecutionDetail {
     provider_id: string
     metadata_state: string
     metadata_reason: string
+    metadata_reason_code?: string
+    metadata_recovery_action?: V4MetadataRecoveryAction
+    metadata_recovery_hint?: string
   }
   mirror: {
     status: string
@@ -256,6 +269,10 @@ export interface V4WorkExecutionDetail {
   metadata_job_status: string
   scrape?: {
     metadata_state: string
+    metadata_reason?: string
+    metadata_reason_code?: string
+    metadata_recovery_action?: V4MetadataRecoveryAction
+    metadata_recovery_hint?: string
     title: string
     original_title: string
     year: number | null
@@ -265,6 +282,19 @@ export interface V4WorkExecutionDetail {
     genres: string[]
     studios: string[]
     premiered: string
+    identity_status?: string
+    work_metadata_status?: string
+    episode_mapping_status?: string
+    failure_stage?: string
+    retryable?: boolean
+    season_results?: Array<{
+      local_season_number: number | null
+      provider_season_number: number | null
+      status: string
+      reason_code: string
+      failure_stage: string
+      retryable: boolean
+    }>
     candidate_decision: {
       decision: string
       reason: string
@@ -302,6 +332,7 @@ export interface V4WorkExecutionDetail {
     mapped: boolean
     file_name: string
     playback_ready: boolean
+    playback_locator_available?: boolean
   }>
   episode_total: number
   episodes_truncated: boolean
@@ -310,13 +341,14 @@ export interface V4WorkExecutionDetail {
 }
 
 export interface V4StageSummary {
-  status: 'idle' | 'running' | 'failed' | 'cancelled' | 'queued' | 'succeeded'
+  status: 'idle' | 'running' | 'failed' | 'cancelled' | 'queued' | 'succeeded' | 'needs_attention'
   total: number
   queued: number
   running: number
   succeeded: number
   failed: number
   cancelled: number
+  needs_attention?: number
 }
 
 export interface V4ExecutionProgress {
@@ -444,6 +476,9 @@ export const mediaV4Api = {
 
   metadataSearch: (request: { work_id: string; query?: string; media_type?: string; year?: number | null }) =>
     api.post<{ work_id: string; candidates: Array<{ candidate_id: string; provider_id: string; media_type: string; title: string; original_title: string; year: number | null; aliases: string[] }> }>('/api/v4/metadata/search', request),
+
+  metadataRetry: (workId: string) =>
+    api.post<{ work_id: string; revision_id: string; job_id: string; status: string; metadata_recovery_action: V4MetadataRecoveryAction }>('/api/v4/metadata/retry', { work_id: workId }),
 
   metadataConfirm: (request: { work_id: string; candidate_id: string }) =>
     api.post<{ work_id: string; candidate_id: string; provider: string; provider_id: string; status: string }>('/api/v4/metadata/confirm', request),

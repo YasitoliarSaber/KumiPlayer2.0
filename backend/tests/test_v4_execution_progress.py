@@ -140,6 +140,23 @@ def test_progress_shape_and_completed_state(tmp_path):
     assert unit["metadata"]["job_id"] == "job-w1-1"
 
 
+def test_ready_metadata_state_is_completed(tmp_path):
+    """刮削结果使用 metadata_state=ready 时仍应归入已完成作品。"""
+    database = _fresh_database(tmp_path)
+    _seed_revision(database)
+    _seed_work(database, "rev-progress", work_id="w-ready", title="已就绪", episode_ids=["ep-ready"], asset_count=1, jobs=[
+        ("materialize_mirror", "succeeded", 1, ""),
+        ("scrape_work", "succeeded", 1, ""),
+    ], scrape_status="confirmed", scrape_metadata={"metadata_state": "ready"})
+    _seed_projection_job(database, "rev-progress", "succeeded")
+
+    progress = _progress(database)
+
+    assert progress["work_units"][0]["overall_status"] == "completed"
+    assert progress["stage_summary"]["metadata"]["succeeded"] == 1
+    assert progress["stage_summary"]["metadata"]["needs_attention"] == 0
+
+
 def test_mirror_running_and_failed_are_not_hidden(tmp_path):
     database = _fresh_database(tmp_path)
     _seed_revision(database)
@@ -235,6 +252,23 @@ def test_scrape_needs_attention_is_not_completed(tmp_path):
     unit = progress["work_units"][0]
     assert unit["overall_status"] == "needs_attention"
     assert progress["overall_status"] == "needs_attention"
+
+
+def test_metadata_stage_summary_separates_attention_from_completed_jobs(tmp_path):
+    database = _fresh_database(tmp_path)
+    _seed_revision(database)
+    _seed_work(database, "rev-progress", work_id="w-review", title="需要人工确认", episode_ids=["ep-a"], asset_count=1, jobs=[
+        ("materialize_mirror", "succeeded", 1, ""),
+        ("scrape_work", "succeeded", 1, ""),
+    ], scrape_status="waiting_review", scrape_metadata={
+        "reason_code": "ambiguous_candidates",
+    })
+
+    progress = _progress(database)
+
+    assert progress["stage_summary"]["metadata"]["succeeded"] == 0
+    assert progress["stage_summary"]["metadata"]["needs_attention"] == 1
+    assert progress["stage_summary"]["metadata"]["status"] == "needs_attention"
 
 
 def test_needs_attention_exposes_a_safe_human_readable_reason(tmp_path):
