@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 
 def _entry(evidence_id: str):
     from app.media_v4.domain.models import ParsedFacts, SourceEvidence
@@ -185,6 +187,50 @@ def test_partial_metadata_keeps_provider_identity_for_retry(tmp_path):
     assert tuple(binding[:3]) == ("tmdb", "42", "source_unavailable")
     assert json.loads(binding["metadata_json"])["reason_code"] == "episode_mapping_incomplete"
     assert tuple(mapping) == ("tmdb", "9001")
+
+
+@pytest.mark.parametrize("retry_provider_id", ["42", "43"])
+def test_retry_keeps_successful_details_only_for_same_identity(tmp_path, retry_provider_id):
+    from app.media_v4.jobs.scrape import V4ScrapeService
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "retry.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-retry", [_entry("a")])
+    revisions.confirm("rev-retry")
+    scrape = V4ScrapeService(database)
+    job = scrape.enqueue_for_revision("rev-retry")[0]
+    with database.connect() as conn:
+        episode_id = str(conn.execute("SELECT episode_id FROM episodes").fetchone()[0])
+    previous = {
+        "provider": "tmdb", "provider_id": "42", "media_type": "tv",
+        "title": "Online title", "plot": "Retained plot",
+        "work_metadata_status": "ready", "metadata_state": "source_unavailable",
+        "episode_mappings": [{"episode_id": episode_id, "provider_episode_id": "9001", "title": "Online episode"}],
+    }
+    scrape.process(job["job_id"], lambda _target: previous)
+    with database.connect() as conn:
+        # 模拟用户明确改绑：旧身份资料不能带到新身份。
+        conn.execute("UPDATE provider_bindings SET provider_id = ?", (retry_provider_id,))
+    scrape.requeue_work("rev-retry", job["work_id"])
+    scrape.process(job["job_id"], lambda _target: {
+        "provider": "tmdb", "provider_id": retry_provider_id, "media_type": "tv",
+        "title": "Show", "work_metadata_status": "unavailable",
+        "metadata_state": "source_unavailable", "reason_code": "provider_rate_limited",
+        "episode_mappings": [], "retryable": True,
+    })
+    detail = revisions.get_work_execution_detail("rev-retry", job["work_id"])
+    assert detail["work"]["metadata_state"] == "source_unavailable"
+    assert detail["work"]["metadata_reason_code"] == "provider_rate_limited"
+    if retry_provider_id == "42":
+        assert detail["scrape"]["plot"] == "Retained plot"
+        assert detail["scrape"]["title"] == "Online title"
+        assert detail["episodes"][0]["scraped_title"] == "Online episode"
+    else:
+        assert detail["scrape"]["plot"] == ""
+        assert detail["episodes"][0]["scraped_title"] == ""
 
 
 def test_scrape_provider_identity_conflict_becomes_recoverable_review_state(tmp_path, monkeypatch):

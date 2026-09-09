@@ -17,6 +17,39 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _retain_successful_details(previous: dict, current: dict, target: dict) -> dict:
+    """同批次同身份重试保留已成功资料；本次错误与完成状态仍由 current 决定。"""
+    result = dict(current)
+    if current.get("work_metadata_status") == "unavailable" and (
+        previous.get("work_metadata_status") == "ready" or previous.get("metadata_state") == "ready"
+    ):
+        for key in (
+            "title", "original_title", "year", "plot", "rating", "genres", "studios",
+            "premiered", "runtime", "poster_url", "fanart_url", "clearlogo_url",
+            "poster_file_path", "fanart_file_path", "clearlogo_file_path",
+        ):
+            if key in previous:
+                result[key] = previous[key]
+        result["work_metadata_status"] = "ready"
+    valid_ids = {str(episode["episode_id"]) for episode in target["episodes"]}
+    mappings = {
+        str(mapping.get("episode_id") or ""): mapping
+        for mapping in previous.get("episode_mappings") or []
+        if isinstance(mapping, dict)
+        and str(mapping.get("episode_id") or "") in valid_ids
+        and str(mapping.get("provider_episode_id") or "").strip()
+    }
+    mappings.update({
+        str(mapping.get("episode_id") or ""): mapping
+        for mapping in current.get("episode_mappings") or []
+        if str(mapping.get("provider_episode_id") or "").strip()
+    })
+    if mappings:
+        result["episode_mappings"] = list(mappings.values())
+        result["episode_mapping_status"] = "partial"
+    return result
+
+
 def _provider_binding_conflict(
     conn,
     *,
@@ -248,6 +281,23 @@ class V4ScrapeService:
                 season_id = str(mapping.get("season_id") or "")
                 if season_id not in valid_season_ids:
                     raise ValueError("刮削结果包含不属于当前 revision 的 Season 映射")
+            if has_provider_identity and not binding_conflict and metadata_state in {
+                "source_unavailable", "waiting_metadata", "failed",
+            }:
+                with self.database.connect() as conn:
+                    previous_row = conn.execute(
+                        "SELECT metadata_json FROM scrape_bindings "
+                        "WHERE revision_id = ? AND work_id = ? AND provider = ? AND provider_id = ? "
+                        "AND status != 'waiting_review'",
+                        (job["revision_id"], job["work_id"], provider_name, provider_id),
+                    ).fetchone()
+                if previous_row is not None:
+                    try:
+                        previous = json.loads(previous_row["metadata_json"] or "{}")
+                    except (TypeError, ValueError):
+                        previous = {}
+                    if isinstance(previous, dict):
+                        result = _retain_successful_details(previous, result, target)
             if mirror_root and job["work_id"] and ready:
                 publish_metadata_artifacts(
                     self.database,
