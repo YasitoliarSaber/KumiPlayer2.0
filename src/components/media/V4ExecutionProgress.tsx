@@ -166,7 +166,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
               {unit.metadata_reason || '在线媒体信息没有唯一匹配，需要确认正确作品后继续。'}
             </div>
             {unit.metadata_recovery_hint && <div className="media-v4-work-progress-hint">{unit.metadata_recovery_hint}</div>}
-            {unit.metadata_recovery_action === 'retry_metadata' && onRetryMetadata && (
+            {['retry_metadata', 'check_settings'].includes(unit.metadata_recovery_action ?? '') && onRetryMetadata && (
               <Button size="small" appearance="secondary" disabled={resolvingWorkId !== ''} onClick={() => onRetryMetadata(unit.work_id)}>
                 {resolvingWorkId === unit.work_id ? '正在重新获取…' : '重新获取媒体信息'}
               </Button>
@@ -197,9 +197,10 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                   <span>{detail.detail.work.provider === 'tmdb' ? `TMDB ${detail.detail.work.provider_id}` : detail.detail.work.provider || '未关联在线作品'}</span>
                   <span>{metadataStateLabels[detail.detail.work.metadata_state] ?? detail.detail.work.metadata_state}</span>
                 </div>
+                {unit.overall_status !== 'needs_attention' && <>
                 {detail.detail.work.metadata_reason && <div className="media-v4-job-error" role="status">{detail.detail.work.metadata_reason}</div>}
                 {detail.detail.work.metadata_recovery_hint && <div className="media-v4-work-progress-hint">{detail.detail.work.metadata_recovery_hint}</div>}
-                {detail.detail.work.metadata_recovery_action === 'retry_metadata' && onRetryMetadata && (
+                {['retry_metadata', 'check_settings'].includes(detail.detail.work.metadata_recovery_action ?? '') && onRetryMetadata && (
                   <Button size="small" appearance="secondary" disabled={resolvingWorkId !== ''} onClick={() => onRetryMetadata(unit.work_id)}>
                     {resolvingWorkId === unit.work_id ? '正在重新获取…' : '重新获取媒体信息'}
                   </Button>
@@ -209,6 +210,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                     {resolvingWorkId === unit.work_id ? '正在查找候选…' : '选择正确作品'}
                   </Button>
                 )}
+                </>}
               </div>
               {scrapeHasContent && scrape && (
                 <div className="media-v4-work-detail-section">

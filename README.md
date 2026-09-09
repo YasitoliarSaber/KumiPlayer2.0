@@ -125,7 +125,7 @@ TMDB 需要的是“API 读取访问令牌”，不是 32 位 API Key。以后�
 - TXT 和本地扫描都使用同一个 SourceEvidence → ParsedFacts → MediaGraph 流程。
 - 季度或集数不明确的项目会生成 review issue，必须在确认前处理。
 - confirmed revision 只产生 V4 jobs；任务输入固定为 revision/work/asset 身份，不会重新识别来源。
-- 目录树 TXT 导入按词法映射生成受控镜像，不检查源盘是否在线；非 TXT 来源仍要求实际播放路径可达。
+- 目录树 TXT 与 OpenList 清单导入按词法映射生成受控镜像，不探测挂载盘或读取源视频、NFO、缩略图；本地目录扫描仍进行有界播放路径检查。在线资料图片由独立元数据服务提供。
 - 自动刮削只按 Work 去重，并通过 provider mapping 保存外部 ID，不覆盖本地季度和集号。
 
 ### 播放和观看状态

@@ -257,6 +257,15 @@ test('失败作品显示原因并可精确重试', async () => {
 })
 
 test('完成作品保留可见的作品摘要，避免完成页只剩总数', async () => {
+  const detail = {
+    work: { title: '已完成作品', provider: 'tmdb', provider_id: '42', metadata_state: 'ready' },
+    mirror: { status: 'succeeded', artifact_count: 2 }, seasons: [], has_detail: true,
+    episode_total: 2, next_episode_offset: 1,
+    episodes: [{ episode_id: 'ep-first', season_number: 1, episode_number: 1, display_title: '第一页剧集' }],
+  }
+  api.workExecutionDetail.mockImplementation((_revisionId, _workId, offset = 0) => Promise.resolve(offset === 1
+    ? { ...detail, next_episode_offset: null, episodes: [{ episode_id: 'ep-next', season_number: 1, episode_number: 2, display_title: '下一页剧集' }] }
+    : detail))
   const units = [
     workUnit('w-run', '运行中作品', 'running_mirror'),
     workUnit('w-done', '已完成作品', 'completed'),
@@ -286,6 +295,11 @@ test('完成作品保留可见的作品摘要，避免完成页只剩总数', as
   await waitFor(() => expect(screen.getByText('运行中作品')).toBeVisible())
   expect(screen.getByText('已完成 1 部')).toBeVisible()
   expect(await screen.findByText('已完成作品')).toBeVisible()
+  fireEvent.click(screen.getByRole('button', { name: /已完成作品/ }))
+  fireEvent.click(await screen.findByRole('button', { name: /显示更多剧集/ }))
+  expect(await screen.findByText('下一页剧集')).toBeVisible()
+  expect(screen.getByText('第一页剧集')).toBeVisible()
+  expect(api.workExecutionDetail).toHaveBeenCalledWith('rev-exec', 'w-done', 1)
 })
 
 test('媒体信息需要人工处理的作品不显示为已完成', async () => {
@@ -372,6 +386,22 @@ test('已终止的第三步执行显示终态而不是准备中', () => {
 
   expect(screen.getByText('任务已终止')).toBeVisible()
   expect(screen.queryByText('正在准备任务')).not.toBeInTheDocument()
+})
+
+test.each(['check_settings', 'retry_metadata', 'review_identity'])('恢复入口在详情加载后保持唯一：%s', async (action) => {
+  const retry = vi.fn()
+  const resolve = vi.fn()
+  const work = { title: '恢复作品', provider: '', provider_id: '', media_type: 'tv', metadata_state: action === 'review_identity' ? 'waiting_review' : 'waiting_metadata', metadata_reason: '需要处理', metadata_recovery_action: action }
+  render(<V4ExecutionProgress
+    progress={makeProgress([workUnit('w-recover', '恢复作品', 'needs_attention', work)])}
+    busyRetryId="" onRetry={vi.fn()} resolvingWorkId="" onResolveMetadata={resolve} onRetryMetadata={retry}
+    fetchWorkDetail={vi.fn().mockResolvedValue({ work, mirror: { status: 'succeeded', artifact_count: 1 }, seasons: [], episodes: [], episode_total: 0, has_detail: true })}
+  />)
+  await screen.findByText('作品信息')
+  const buttons = screen.getAllByRole('button', { name: action === 'review_identity' ? '选择正确作品' : '重新获取媒体信息' })
+  expect(buttons).toHaveLength(1)
+  fireEvent.click(buttons[0])
+  expect(action === 'review_identity' ? resolve : retry).toHaveBeenCalledWith('w-recover')
 })
 
 function renderProgressWithDetail(units: Array<Record<string, unknown>>, overrides: Record<string, unknown>, fetchWorkDetail: ReturnType<typeof vi.fn>) {

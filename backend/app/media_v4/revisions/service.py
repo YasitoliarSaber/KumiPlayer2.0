@@ -823,7 +823,7 @@ class V4RevisionService:
             for work in graph.works:
                 related_entries = [
                     (evidence, facts)
-                    for evidence, facts in entries
+                    for evidence, facts in entries or []
                     if evidence.evidence_id in work.source_evidence_ids
                 ]
                 matches = _existing_work_matches(conn, work, related_entries)

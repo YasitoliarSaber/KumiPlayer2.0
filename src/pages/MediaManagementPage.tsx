@@ -1423,7 +1423,7 @@ export default function MediaManagementPage() {
             resolvingWorkId={metadataRecoveryBusy}
             onResolveMetadata={(workId: string) => { void searchMetadataRecovery(workId) }}
             onRetryMetadata={(workId: string) => { void retryMetadataRecovery(workId) }}
-            fetchWorkDetail={(revisionId: string, workId: string) => mediaV4Api.workExecutionDetail(revisionId, workId)}
+            fetchWorkDetail={mediaV4Api.workExecutionDetail}
           />
         ) : (
           <div className="media-v4-empty">正在读取执行进度…</div>
