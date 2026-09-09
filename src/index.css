@@ -13816,20 +13816,38 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 /* 弹窗固定在视口中央并自持滚动：不受 .app-main 滚动位置或祖先 overflow 裁剪影响。 */
 .media-v4-metadata-dialog { min-width: min(480px, 92vw); max-width: 560px; max-height: min(640px, 84vh); }
 .media-v4-metadata-dialog .fui-DialogContent { overflow: auto; }
-/* 来源卡删除是破坏性但不删除媒体数据的确认操作。该弹窗必须脱离来源卡
-   与 app-main 的定位上下文，固定在应用视口中央，避免在长页面底部被裁剪。 */
+/* 来源卡删除是破坏性但不删除媒体数据的确认操作。遮罩和实体表面都在
+   Portal 中明确绘制，避免主题样式遗漏时内容透明地叠在来源卡上。 */
+.media-v4-source-card-delete-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgb(15 23 42 / 36%);
+  backdrop-filter: blur(2px);
+}
+
 .media-v4-source-card-delete-dialog {
   position: fixed !important;
+  z-index: 1000;
   top: 50% !important;
   left: 50% !important;
   width: min(460px, calc(100vw - 32px));
   max-height: calc(100vh - 64px);
   transform: translate(-50%, -50%) !important;
+  padding: 24px;
   overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-raised) !important;
+  box-shadow: var(--shadow-flyout) !important;
+  color: var(--text);
 }
 .media-v4-source-card-delete-dialog .fui-DialogContent { display: grid; gap: 10px; line-height: 1.55; }
 .media-v4-source-card-delete-dialog .fui-DialogContent p { margin: 0; }
-.media-v4-source-card-delete-dialog .fui-DialogActions { justify-content: flex-end; }
+.media-v4-source-card-delete-dialog .fui-DialogActions {
+  justify-content: flex-end;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
 @media (max-width: 640px) {
   .media-v4-metadata-dialog { min-width: 92vw; }
   .media-v4-metadata-search-row { grid-template-columns: 1fr; }

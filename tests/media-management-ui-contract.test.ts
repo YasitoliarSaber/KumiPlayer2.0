@@ -86,6 +86,12 @@ test('媒体库主操作与危险维护操作使用分组命令栏', () => {
   assert.match(styles, /\.media-v4-header-primary-actions\s*\{[^}]*border-inline-start:/s)
 })
 
+test('来源卡删除确认框具有独立遮罩与不透明实体表面', () => {
+  assert.match(page, /backdrop=\{\{ className: 'media-v4-source-card-delete-backdrop' \}\}/)
+  assert.match(styles, /\.media-v4-source-card-delete-backdrop\s*\{[^}]*position:\s*fixed[^}]*inset:\s*0[^}]*background:/s)
+  assert.match(styles, /\.media-v4-source-card-delete-dialog\s*\{[^}]*z-index:[^}]*border:[^}]*background:\s*var\(--surface-raised\)[^}]*box-shadow:\s*var\(--shadow-flyout\)/s)
+})
+
 test('作品墙轮询首次拿到投影摘要时也刷新数据', () => {
   assert.doesNotMatch(app, /if \(lastDigest !== ''\) loadLibrary\(\)/)
   assert.match(app, /loadLibrary\(\{ force: true \}\)/)
