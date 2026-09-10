@@ -286,13 +286,12 @@ def get_cached_subject_image(url: str):
 
 def _cached_remote_image(url: str, cache_name: str, label: str):
     raw_url = unquote(url).strip()
-    # SSRF 防护：仅放行 Bangumi 官方图片域（lain.bgm.tv），并解析主机拒绝
-    # 私网/环回/链路本地等非公网地址。
+    # 先做 URL 白名单校验；命中的缓存由此前通过该校验的同一 URL 写入，
+    # 离线或代理 Fake-IP 网络也应能继续读取，不能因为重新做 DNS 校验而失效。
     from app.core.url_guard import assert_public_dns_resolution, validate_bangumi_image_url
 
     try:
         parsed = validate_bangumi_image_url(raw_url)
-        assert_public_dns_resolution(parsed.hostname or "")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"{label}地址不在受信任域名范围内") from exc
     cache_dir = get_cache_dir() / cache_name
@@ -302,24 +301,37 @@ def _cached_remote_image(url: str, cache_name: str, label: str):
     if suffix not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
         suffix = ".jpg"
     path = cache_dir / f"{digest}{suffix}"
-    if not path.exists():
-        try:
-            # 用白名单校验后的组件重建请求地址：scheme 固定 https、host 取校验
-            # 过的主机名，原始字符串中的解析歧义（反斜杠、@、控制字符）不会
-            # 进入请求；拒绝跟随重定向，白名单域不得跳转到其他主机。
-            components = {
-                "scheme": "https",
-                "host": parsed.hostname,
-                "path": parsed.path or "/",
-            }
-            if parsed.query:
-                components["query"] = parsed.query
-            with httpx.Client(timeout=10, follow_redirects=False) as client:
-                response = client.get(httpx.URL(**components))
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"{label}下载失败: {exc}") from exc
-        path.write_bytes(response.content)
+    if path.exists():
+        return _cached_image_response(path, digest)
+
+    try:
+        # 仅缓存未命中时解析目标地址。此时仍拒绝 DNS rebinding 至私网、
+        # 环回或链路本地地址，且后续请求固定为白名单 https 主机。
+        assert_public_dns_resolution(parsed.hostname or "", allow_proxy_fake_ip=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{label}地址不在受信任域名范围内") from exc
+
+    try:
+        # 用白名单校验后的组件重建请求地址：scheme 固定 https、host 取校验
+        # 过的主机名，原始字符串中的解析歧义（反斜杠、@、控制字符）不会
+        # 进入请求；拒绝跟随重定向，白名单域不得跳转到其他主机。
+        components = {
+            "scheme": "https",
+            "host": parsed.hostname,
+            "path": parsed.path or "/",
+        }
+        if parsed.query:
+            components["query"] = parsed.query
+        with httpx.Client(timeout=10, follow_redirects=False) as client:
+            response = client.get(httpx.URL(**components))
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"{label}下载失败: {exc}") from exc
+    path.write_bytes(response.content)
+    return _cached_image_response(path, digest)
+
+
+def _cached_image_response(path: Path, digest: str) -> Response:
     media_type = mimetypes.guess_type(str(path))[0] or "image/jpeg"
     return Response(
         content=path.read_bytes(),

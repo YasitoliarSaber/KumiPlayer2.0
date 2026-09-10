@@ -30,6 +30,69 @@ from app.integrations.bangumi import (
 SESSION_URL = "/api/integrations/bangumi/session"
 
 
+def test_cached_avatar_is_served_without_rechecking_proxy_dns(monkeypatch, tmp_path):
+    """已有可信缓存必须在离线或 Fake-IP 网络下继续可用。"""
+    import hashlib
+
+    from app.api import bangumi as bangumi_api
+    from app.core import url_guard
+
+    raw_url = "https://lain.bgm.tv/pic/user/l/avatar.jpg"
+    avatar_dir = tmp_path / "cache" / "bangumi_avatars"
+    avatar_dir.mkdir(parents=True)
+    digest = hashlib.sha256(raw_url.encode("utf-8")).hexdigest()[:24]
+    (avatar_dir / f"{digest}.jpg").write_bytes(b"cached-avatar")
+    monkeypatch.setattr(bangumi_api, "get_cache_dir", lambda: tmp_path / "cache")
+
+    def reject_proxy_fake_ip(_hostname: str) -> None:
+        raise ValueError("proxy Fake-IP is not a public address")
+
+    monkeypatch.setattr(url_guard, "assert_public_dns_resolution", reject_proxy_fake_ip)
+
+    response = bangumi_api.get_cached_avatar(raw_url)
+
+    assert response.status_code == 200
+    assert response.body == b"cached-avatar"
+
+
+def test_cached_avatar_keeps_bangumi_url_whitelist(monkeypatch, tmp_path):
+    """缓存命中不绕过 URL 白名单，避免退化为任意本地文件读取入口。"""
+    import hashlib
+
+    from fastapi import HTTPException
+
+    from app.api import bangumi as bangumi_api
+
+    raw_url = "https://untrusted.example/avatar.jpg"
+    avatar_dir = tmp_path / "cache" / "bangumi_avatars"
+    avatar_dir.mkdir(parents=True)
+    digest = hashlib.sha256(raw_url.encode("utf-8")).hexdigest()[:24]
+    (avatar_dir / f"{digest}.jpg").write_bytes(b"must-not-be-served")
+    monkeypatch.setattr(bangumi_api, "get_cache_dir", lambda: tmp_path / "cache")
+
+    with pytest.raises(HTTPException) as error:
+        bangumi_api.get_cached_avatar(raw_url)
+
+    assert error.value.status_code == 400
+
+
+def test_bangumi_image_proxy_allows_proxy_fake_ip_on_cache_miss(monkeypatch):
+    """白名单 Bangumi 图片可经本机代理的 Fake-IP 下载，其他调用仍保持严格模式。"""
+    import socket
+
+    from app.core import url_guard
+
+    monkeypatch.setattr(
+        url_guard.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.19", 443))],
+    )
+
+    with pytest.raises(ValueError):
+        url_guard.assert_public_dns_resolution("lain.bgm.tv")
+    url_guard.assert_public_dns_resolution("lain.bgm.tv", allow_proxy_fake_ip=True)
+
+
 def _fake_token(name: str) -> str:
     """合成测试凭据：仅存在于测试进程内的占位值，不对应任何真实密钥。"""
 

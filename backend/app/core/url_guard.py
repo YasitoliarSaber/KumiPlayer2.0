@@ -22,13 +22,15 @@ TRUSTED_IMAGE_PATHS: dict[str, tuple[str, ...]] = {
 
 #: Bangumi 官方图片域（来自 Bangumi API 真实响应：lain.bgm.tv）
 BANGUMI_IMAGE_HOSTS: tuple[str, ...] = ("lain.bgm.tv",)
+_PROXY_FAKE_IP_NETWORK = ipaddress.ip_network("198.18.0.0/15")
 
 
-def assert_public_dns_resolution(hostname: str) -> None:
+def assert_public_dns_resolution(hostname: str, *, allow_proxy_fake_ip: bool = False) -> None:
     """解析目标主机并拒绝解析到非公网地址的结果（SSRF 防护）。
 
     域名白名单仍可能被 DNS 劫持或 rebinding 指向内网/云元数据地址；请求前
-    解析全部地址并逐个校验，任一非公网地址都拒绝本次请求。
+    解析全部地址并逐个校验，默认任一非公网地址都拒绝本次请求。只有调用方
+    已完成严格 URL 白名单校验时，才可显式接受本机代理使用的 Fake-IP 地址段。
     """
 
     try:
@@ -44,6 +46,10 @@ def assert_public_dns_resolution(hostname: str) -> None:
         raise ValueError("远程图片主机没有可用地址")
     for address in addresses:
         ip = ipaddress.ip_address(address)
+        if allow_proxy_fake_ip and ip in _PROXY_FAKE_IP_NETWORK:
+            # Fake-IP 由本机代理接管，HTTP 请求仍固定使用已验证的 HTTPS 主机名。
+            # 仅供调用方在严格 URL 白名单之后显式启用，默认远程资源仍拒绝该地址段。
+            continue
         if (
             not ip.is_global
             or ip.is_multicast
