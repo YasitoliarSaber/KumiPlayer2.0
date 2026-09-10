@@ -244,6 +244,61 @@ def test_queued_scan_is_claimed_exactly_once(tmp_path):
     assert row["status"] == "running"
 
 
+def test_runner_persists_complete_result_after_streaming_subset(tmp_path, monkeypatch):
+    """runner 结算时补齐流式 adapter 未抽查的 OpenList 基线证据。"""
+
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.sources import source_scan_runner
+    from app.media_v4.sources.adapters import SourceEntry, to_source_evidence
+    from app.media_v4.sources.source_scan_runner import SourceScanRunner
+
+    database = V4Database(tmp_path / "runner-stream-complete.db")
+    database.initialize()
+    _seed_scan(
+        database,
+        status="queued",
+        stage="queued",
+        heartbeat_at=_fresh_heartbeat(),
+        request={"revision_id": ""},
+    )
+    all_evidence = [
+        to_source_evidence(SourceEntry(
+            root_id="root-recover",
+            scan_id="scan-recover",
+            provider="baidu",
+            ingest_method="openlist_api",
+            relative_path=f"Show/Show.S01E0{episode}.mkv",
+            source_key=f"/Show/Show.S01E0{episode}.mkv",
+        ))
+        for episode in range(1, 5)
+    ]
+    def streaming_handler(_database, _task, runtime):
+        runtime.persist_evidence_batch(all_evidence[:2])
+        return all_evidence
+
+    monkeypatch.setattr(source_scan_runner, "get_handler", lambda _kind: streaming_handler)
+    runner = SourceScanRunner(database)
+    task = runner.claim_next_scan()
+    assert task is not None
+
+    runner.run_scan(task)
+
+    with database.connect() as conn:
+        row = conn.execute(
+            "SELECT status, stage, total_count FROM source_scans WHERE scan_id = 'scan-recover'"
+        ).fetchone()
+        stored = conn.execute(
+            "SELECT relative_path FROM source_evidence WHERE scan_id = 'scan-recover' "
+            "ORDER BY relative_path"
+        ).fetchall()
+    assert row["status"] == "completed"
+    assert row["stage"] == "ready"
+    assert int(row["total_count"]) == len(all_evidence)
+    assert [item["relative_path"] for item in stored] == [
+        item.relative_path for item in all_evidence
+    ]
+
+
 def test_runner_shutdown_does_not_turn_active_scan_into_user_cancel(tmp_path, monkeypatch):
     """应用关闭只停止领取新任务，不得伪造用户取消当前扫描。"""
 

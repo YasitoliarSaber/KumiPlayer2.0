@@ -194,7 +194,6 @@ def create_durable_scan(
                 (scan_id, root_id, generation, now, now),
             )
     _cancel_flags[scan_id] = threading.Event()
-    stream_state = {"count": 0}
     # 新适配器显式接收 durable scan_id；只有未升级的外部回调保留兼容归一化。
     enforce_scan_identity = _accepts_parameter(scan_fn, "scan_id")
 
@@ -230,7 +229,6 @@ def create_durable_scan(
                     raise ValueError("扫描适配器返回的证据未使用登记的 scan_id，拒绝写入")
                 normalized = [replace(item, scan_id=scan_id) for item in batch]
             V4Repository(database).save_scan_evidence_bulk(normalized)
-            stream_state["count"] += len(normalized)
             _update_scan_progress(
                 database,
                 scan_id,
@@ -262,11 +260,9 @@ def create_durable_scan(
                 evidence = [replace(item, scan_id=scan_id) for item in evidence]
             if state_fn is not None:
                 stage_scan_state(scan_id, state_fn())
-            # 只有尚未改成回调式的旧 adapter 才需要最终兜底保存；已流式
-            # 发出的批次不再全量重放（C8 节流与去重合同），INSERT OR IGNORE
-            # 仍作为幂等兜底。
-            if stream_state["count"] == 0:
-                persist_evidence_batch(evidence)
+            # 流式 adapter 只会提前写入已观察到的子集；结算时仍须补齐
+            # 返回的完整结果，才能保留未抽查的基线证据。
+            persist_evidence_batch(evidence)
             evidence = V4Repository(database).list_scan_evidence(scan_id)
             report_progress(
                 stage="parsing" if finalize_fn is not None else "preparing_preview",

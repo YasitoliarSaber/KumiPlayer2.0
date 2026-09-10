@@ -71,6 +71,38 @@ def test_durable_full_scan_reaches_completed_and_persists_evidence(tmp_path):
     assert [item.relative_path for item in stored] == ["Show/Show.S01E01.mkv"]
 
 
+def test_durable_scan_persists_complete_result_after_streaming(tmp_path):
+    from app.media_v4.sources.durable_scan import create_durable_scan, get_durable_scan
+
+    database = _fresh_database(tmp_path)
+    _seed_root(database)
+    scan_id = "scan-durable-stream-complete"
+    all_evidence = [
+        _evidence("root-durable", scan_id, f"Show/Show.S01E0{index}.mkv")
+        for index in range(1, 5)
+    ]
+
+    def streaming_scan(on_evidence_batch=None):
+        assert on_evidence_batch is not None
+        on_evidence_batch(all_evidence[:2])
+        return scan_id, all_evidence
+
+    create_durable_scan(
+        database,
+        scan_id=scan_id,
+        root_id="root-durable",
+        kind="incremental",
+        scan_fn=streaming_scan,
+    )
+    _wait_until(lambda: get_durable_scan(database, scan_id)["status"] == "completed")
+
+    result = get_durable_scan(database, scan_id)
+    assert result["evidence_count"] == len(all_evidence)
+    assert {entry["relative_path"] for entry in result["entries"]} == {
+        item.relative_path for item in all_evidence
+    }
+
+
 def test_durable_full_scan_failure_writes_explicit_terminal_state(tmp_path):
     from app.media_v4.sources.durable_scan import create_durable_scan, get_durable_scan
 

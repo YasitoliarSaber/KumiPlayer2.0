@@ -35,10 +35,11 @@ def _assert_scan_identity(task, returned_scan_id, evidence) -> None:
     """内置扫描适配器必须从创建证据起使用 durable scan_id。"""
 
     if returned_scan_id != task.scan_id or any(
-        item.scan_id != task.scan_id for item in (evidence or ())
+        item.scan_id != task.scan_id or item.root_id != task.root_id
+        for item in (evidence or ())
     ):
         raise ValueError(
-            "扫描适配器返回的证据未使用登记的 scan_id，拒绝写入"
+            "扫描适配器返回的证据未使用登记的 scan_id/root_id，拒绝写入"
         )
 
 
@@ -112,8 +113,8 @@ def scan_tree_source(database, task, runtime):
             task.scan_id,
             build_tree_baseline_state(task.root_id, str(request.get("remote_root") or ""), evidence),
         )
-    # 流式 adapter 的证据已在批次回调落库；假 adapter 只返回列表时由
-    # runner 依据 streamed_items 判断是否兜底保存。
+    # 流式 adapter 的证据会先在批次回调落库；runner 结算时仍用完整返回值
+    # 补齐未抽查的基线条目，再从数据库读取证据全集。
     return evidence
 
 

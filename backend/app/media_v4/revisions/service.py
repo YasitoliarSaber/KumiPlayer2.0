@@ -1359,13 +1359,7 @@ class V4RevisionService:
             if not _facts_already_persisted:
                 self.repository.save_parsed_facts_bulk([facts for _evidence, facts in entries])
 
-        graph_digest = hashlib.sha256(
-            json.dumps(
-                asdict(graph),
-                sort_keys=True,
-                ensure_ascii=False,
-            ).encode("utf-8")
-        ).hexdigest()
+        graph_digest = self._graph_digest(graph)
         facts_by_evidence = {evidence.evidence_id: facts for evidence, facts in entries}
         episodes_by_evidence: dict[str, list] = {}
         for episode in graph.episodes:

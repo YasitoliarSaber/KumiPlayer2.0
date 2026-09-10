@@ -98,6 +98,7 @@ class V4Repository:
             by_scan_key[scan_key] = values
 
         with self.database.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             existing_by_id: dict[str, tuple] = {}
             ids = list(by_id)
             for offset in range(0, len(ids), 400):
@@ -116,23 +117,46 @@ class V4Repository:
                     }
                 )
 
-            scan_ids = sorted({scan_id for scan_id, _source_key in by_scan_key})
             existing_by_scan_key: dict[tuple[str, str], tuple] = {}
+            scan_keys_by_id: dict[str, list[str]] = {}
+            for scan_id, source_key in by_scan_key:
+                scan_keys_by_id.setdefault(scan_id, []).append(source_key)
+            for scan_id, source_keys in scan_keys_by_id.items():
+                for offset in range(0, len(source_keys), 400):
+                    chunk = source_keys[offset : offset + 400]
+                    placeholders = ",".join("?" for _ in chunk)
+                    rows = conn.execute(
+                        "SELECT * FROM source_evidence WHERE scan_id = ? "
+                        f"AND source_key IN ({placeholders})",
+                        [scan_id, *chunk],
+                    ).fetchall()
+                    existing_by_scan_key.update(
+                        {
+                            (str(row["scan_id"]), str(row["source_key"])): self._source_evidence_values(
+                                self._row_to_source_evidence(row)
+                            )
+                            for row in rows
+                        }
+                    )
+
+            scan_ids = sorted(scan_keys_by_id)
+            scan_roots: dict[str, str] = {}
             for offset in range(0, len(scan_ids), 400):
                 chunk = scan_ids[offset : offset + 400]
                 placeholders = ",".join("?" for _ in chunk)
                 rows = conn.execute(
-                    f"SELECT * FROM source_evidence WHERE scan_id IN ({placeholders})",
+                    f"SELECT scan_id, root_id FROM source_scans WHERE scan_id IN ({placeholders})",
                     chunk,
                 ).fetchall()
-                existing_by_scan_key.update(
-                    {
-                        (str(row["scan_id"]), str(row["source_key"])): self._source_evidence_values(
-                            self._row_to_source_evidence(row)
-                        )
-                        for row in rows
-                    }
-                )
+                scan_roots.update({str(row["scan_id"]): str(row["root_id"]) for row in rows})
+
+            for item in evidence:
+                expected_root = scan_roots.get(item.scan_id)
+                if expected_root is not None and expected_root != item.root_id:
+                    raise ValueError(
+                        "SourceEvidence root_id 与 source_scan 不一致: "
+                        f"{item.scan_id}/{item.root_id}"
+                    )
 
             for evidence_id, values in by_id.items():
                 existing = existing_by_id.get(evidence_id)
@@ -156,6 +180,7 @@ class V4Repository:
                 """,
                 unique_values,
             )
+            conn.commit()
 
     def list_scan_evidence(self, scan_id: str) -> list[SourceEvidence]:
         """读取后端在某次扫描中持久化的全部证据（目录树权威来源）。"""

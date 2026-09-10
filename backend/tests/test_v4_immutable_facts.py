@@ -286,3 +286,39 @@ def test_bulk_source_evidence_rejects_existing_and_batch_conflicts_atomically(tm
     with pytest.raises(ValueError, match="SourceEvidence 冲突"):
         repository.save_scan_evidence_bulk([second, duplicate_id])
     assert repository.list_scan_evidence("scan") == [first]
+
+
+def test_source_evidence_must_belong_to_the_scan_root(tmp_path):
+    from app.media_v4.domain.models import SourceEvidence
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.persistence.repositories import V4Repository
+
+    database = V4Database(tmp_path / "evidence-root-contract.db")
+    database.initialize()
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO source_roots(root_id, provider, ingest_method, created_at, updated_at) "
+            "VALUES ('root-a', 'local', 'local_scan', 'now', 'now')"
+        )
+        conn.execute(
+            "INSERT INTO source_roots(root_id, provider, ingest_method, created_at, updated_at) "
+            "VALUES ('root-b', 'local', 'local_scan', 'now', 'now')"
+        )
+        conn.execute(
+            "INSERT INTO source_scans(scan_id, root_id, generation, status) "
+            "VALUES ('scan-a', 'root-a', 1, 'completed')"
+        )
+
+    evidence = SourceEvidence(
+        evidence_id="cross-root-evidence",
+        scan_id="scan-a",
+        root_id="root-b",
+        source_key="Show/E01.mkv",
+        relative_path="Show/E01.mkv",
+        entry_kind="video",
+    )
+
+    with pytest.raises(ValueError, match="root"):
+        V4Repository(database).save_source_evidence(evidence)
+
+    assert V4Repository(database).list_scan_evidence("scan-a") == []

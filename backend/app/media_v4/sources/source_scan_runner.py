@@ -220,7 +220,6 @@ class _ExecutionRuntime:
         self.database = database
         self.scan_id = scan_id
         self._cancel_event = cancel_event or threading.Event()
-        self.streamed_items = 0
         self._last_progress_ts = 0.0
         self._items_since_write = 0
 
@@ -300,7 +299,6 @@ class _ExecutionRuntime:
         if any(item.scan_id != self.scan_id for item in batch):
             raise ValueError("扫描适配器返回的证据未使用登记的 scan_id，拒绝写入")
         V4Repository(self.database).save_scan_evidence_bulk(batch)
-        self.streamed_items += len(batch)
         _update_scan_progress(
             self.database,
             self.scan_id,
@@ -448,7 +446,7 @@ class SourceScanRunner:
             returned = handler(self.database, task, runtime)
             if runtime.cancellation_requested():
                 raise _CancelledScan()
-            evidence = self._settled_evidence(task, runtime, returned)
+            evidence = self._settled_evidence(task, returned)
             self._settle_total(task.scan_id, len(evidence))
             if runtime.cancellation_requested():
                 raise _CancelledScan()
@@ -464,15 +462,14 @@ class SourceScanRunner:
             if self._active_scan_id == task.scan_id:
                 self._active_scan_id = None
 
-    def _settled_evidence(self, task: ScanTask, runtime: _ExecutionRuntime, returned) -> list:
+    def _settled_evidence(self, task: ScanTask, returned) -> list:
         """扫描阶段结束后的证据全集：优先读数据库，必要时兜底保存。
 
-        流式 adapter 的每条证据已经在批次回调中落库（C8：不再做全量重放）；
-        只有未支持流式回调的旧 adapter 才允许这里一次性兜底保存。
+        流式 adapter 可能已经落库部分证据；这里用返回的完整结果补齐未落库项。
         """
 
         repository = V4Repository(self.database)
-        if runtime.streamed_items == 0 and returned:
+        if returned:
             if any(item.scan_id != task.scan_id for item in returned):
                 raise ValueError("扫描适配器返回的证据未使用登记的 scan_id，拒绝写入")
             repository.save_scan_evidence_bulk(returned)

@@ -328,3 +328,25 @@ def test_openlist_scan_uses_durable_scan_id_when_supplied(tmp_path):
 
     assert returned_scan_id == "scan-durable-openlist"
     assert [item.scan_id for item in evidence] == ["scan-durable-openlist"]
+
+
+def test_scan_handler_rejects_evidence_from_another_source_root():
+    from types import SimpleNamespace
+
+    import pytest
+
+    from app.media_v4.domain.models import SourceEvidence
+    from app.media_v4.sources.scan_handlers import _assert_scan_identity
+
+    task = SimpleNamespace(scan_id="scan-a", root_id="root-a")
+    evidence = SourceEvidence(
+        evidence_id="cross-root-handler",
+        scan_id="scan-a",
+        root_id="root-b",
+        source_key="Show/E01.mkv",
+        relative_path="Show/E01.mkv",
+        entry_kind="video",
+    )
+
+    with pytest.raises(ValueError, match="root_id"):
+        _assert_scan_identity(task, "scan-a", [evidence])
