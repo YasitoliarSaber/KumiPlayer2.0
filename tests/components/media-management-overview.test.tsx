@@ -188,6 +188,17 @@ test('已完成来源卡可以移除卡片入口，不触碰媒体库数据', as
   expect(screen.queryByText('115 动画')).not.toBeInTheDocument()
 })
 
+test('删除来源卡确认框在 Portal 中保留 Fluent 主题容器', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
+  render(<MediaManagementPage />)
+
+  await screen.findByText('115 动画')
+  fireEvent.click(screen.getByRole('button', { name: '删除来源卡：115 动画' }))
+
+  const dialog = await screen.findByRole('dialog', { name: '删除来源卡' })
+  expect(dialog.querySelector('.media-v4-source-card-delete-dialog-provider')).toBeInTheDocument()
+})
+
 test('新导入不会恢复到保存的上次执行步骤', async () => {
   localStorage.setItem('kumiplayer.media-v4.active-revision', 'rev-existing')
   api.status.mockResolvedValue({ revision_id: 'rev-existing', status: 'confirmed', jobs: [], progress: null })

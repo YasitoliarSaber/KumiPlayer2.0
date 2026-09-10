@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Button, Checkbox, Dialog, DialogActions, DialogBody, DialogContent, DialogSurface, DialogTitle, Input, MessageBar, MessageBarBody, ProgressBar, Select, Spinner } from '@fluentui/react-components'
+import { Button, Checkbox, Dialog, DialogActions, DialogBody, DialogContent, DialogSurface, DialogTitle, FluentProvider, Input, MessageBar, MessageBarBody, ProgressBar, Select, Spinner } from '@fluentui/react-components'
 import {
   Add24Regular,
   ArrowLeft24Regular,
@@ -32,6 +32,7 @@ import { LibraryMaintenancePanel } from '../components/media/LibraryMaintenanceP
 import { pickDirectoryTreeFile, pickFolder } from '../platform/folderPicker'
 import { useMediaWorkflowStore } from '../stores/mediaWorkflow'
 import { useUiStore } from '../stores/ui'
+import { getKumiFluentTheme } from '../design/fluentTheme'
 
 type ImportKind = 'local' | 'tree' | 'openlist' | 'hybrid'
 type WorkflowStage = 'source' | 'review' | 'execute'
@@ -240,6 +241,7 @@ export default function MediaManagementPage() {
   const goSettings = useUiStore((state) => state.goSettings)
   const pageMode = useUiStore((state) => state.manageView)
   const goManageView = useUiStore((state) => state.goManageView)
+  const appearanceMode = useUiStore((state) => state.appearanceMode)
   const [kind, setKind] = useState<ImportKind>('local')
   const [path, setPath] = useState('')
   const [provider, setProvider] = useState<Exclude<ProviderId, 'local' | 'other'>>('pan115')
@@ -1477,17 +1479,19 @@ export default function MediaManagementPage() {
             backdrop={{ className: 'media-v4-source-card-delete-backdrop' }}
             aria-describedby={undefined}
           >
-            <DialogBody>
-              <DialogTitle>删除来源卡</DialogTitle>
-              <DialogContent>
-                <p>从“已导入来源”中移除“{sourceCardPendingDelete.display_name}”吗？</p>
-                <p>这不会删除媒体库、镜像、资料或观看状态；以后重新扫描同一来源时，卡片会再次出现。</p>
-              </DialogContent>
-              <DialogActions>
-                <Button appearance="secondary" disabled={sourceCardDeleting} onClick={() => setSourceCardPendingDelete(null)}>取消</Button>
-                <Button appearance="primary" icon={sourceCardDeleting ? <Spinner size="tiny" /> : <Delete24Regular />} disabled={sourceCardDeleting} onClick={() => void hideSourceCard()}>{sourceCardDeleting ? '正在删除…' : '删除来源卡'}</Button>
-              </DialogActions>
-            </DialogBody>
+            <FluentProvider theme={getKumiFluentTheme(appearanceMode)} className="media-v4-source-card-delete-dialog-provider">
+              <DialogBody>
+                <DialogTitle>删除来源卡</DialogTitle>
+                <DialogContent>
+                  <p>从“已导入来源”中移除“{sourceCardPendingDelete.display_name}”吗？</p>
+                  <p>这不会删除媒体库、镜像、资料或观看状态；以后重新扫描同一来源时，卡片会再次出现。</p>
+                </DialogContent>
+                <DialogActions>
+                  <Button appearance="secondary" disabled={sourceCardDeleting} onClick={() => setSourceCardPendingDelete(null)}>取消</Button>
+                  <Button appearance="primary" icon={sourceCardDeleting ? <Spinner size="tiny" /> : <Delete24Regular />} disabled={sourceCardDeleting} onClick={() => void hideSourceCard()}>{sourceCardDeleting ? '正在删除…' : '删除来源卡'}</Button>
+                </DialogActions>
+              </DialogBody>
+            </FluentProvider>
           </DialogSurface>
         </Dialog>
       )}
