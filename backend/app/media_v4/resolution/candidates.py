@@ -429,6 +429,10 @@ def plan_work_candidates(
                 message="该作品存在多个互不相同的可信 Provider 候选，需人工确认后才能导入",
             ))
 
+    from app.media_v4.resolution.identity_policy import reject_conflicting_candidates
+
+    candidates_by_key, identity_issues = reject_conflicting_candidates(graph, candidates_by_key)
+    issues.extend(identity_issues)
     merge_map = merge_map_from_candidates(graph, candidates_by_key)
     return candidates_by_key, merge_map, issues
 
@@ -451,6 +455,14 @@ def merge_map_from_candidates(
     merge_map: dict[str, str] = {}
     for members in identity_members.values():
         if len(members) < 2:
+            continue
+
+        from app.media_v4.resolution.identity_policy import can_merge_provider_identity
+
+        if not can_merge_provider_identity(
+            graph,
+            {work_key for work_key, _item in members},
+        ):
             continue
 
         def owner_rank(member: tuple[str, WorkCandidate]) -> tuple[int, int, str]:

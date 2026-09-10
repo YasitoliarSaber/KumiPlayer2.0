@@ -199,6 +199,49 @@ export interface V4MaintenanceResult {
   projection_status: string
 }
 
+export interface V4IdentityRepairPreview {
+  preview_id: string
+  work_id: string
+  old_work: { work_id: string; identity_key: string; title: string }
+  target_works: Array<{
+    work_key: string
+    title: string
+    media_type: string
+    work_type: string
+    card_type: string
+    relation_type: string
+  }>
+  items: Array<{
+    asset_id: string
+    evidence_id: string
+    relative_path: string
+    target_work_key: string
+    local_season_number: number | null
+    local_episode_number: number | null
+  }>
+  provider_assignments: Array<{
+    provider: string
+    media_type: string
+    provider_id: string
+    target_work_key: string
+  }>
+  blocked: boolean
+  blocked_reasons: Array<{ reason_code: string; reason: string; asset_id?: string; provider?: string; provider_id?: string }>
+  digest: string
+  created_at: string
+  expires_at: string
+}
+
+export interface V4IdentityRepairResult {
+  preview_id: string
+  status: string
+  old_work_id: string
+  target_work_ids: Record<string, string>
+  new_revision_ids: string[]
+  migrated_asset_count: number
+  migrated_progress_count: number
+}
+
 export interface V4DraftSummary {
   revision_id: string
   root_id: string
@@ -445,6 +488,15 @@ export const mediaV4Api = {
 
   maintenanceResume: (previewId: string) =>
     api.post<V4MaintenanceResult>('/api/v4/library-maintenance/delete-resume', { preview_id: previewId }),
+
+  identityRepairPreview: (workId: string) =>
+    api.post<V4IdentityRepairPreview>(`/api/v4/works/${encodeURIComponent(workId)}/identity-repair-preview`, {}),
+
+  identityRepairApply: (request: { preview_id: string; digest: string }) =>
+    api.post<V4IdentityRepairResult>('/api/v4/identity-repair/apply', request),
+
+  identityRepairResume: (operationId: string) =>
+    api.post<V4IdentityRepairResult>('/api/v4/identity-repair/resume', { operation_id: operationId }),
 
   setWorkTitle: (workId: string, title: string) =>
     api.patch<{ work_id: string; title: string }>(`/api/v4/works/${encodeURIComponent(workId)}/title`, { title }),

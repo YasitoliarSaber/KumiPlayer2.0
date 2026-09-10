@@ -21,6 +21,7 @@ from app.media_v4.persistence.database import V4Database
 from app.media_v4.persistence.repositories import V4Repository
 from app.media_v4.resolution import candidates as candidate_service
 from app.media_v4.resolution.candidates import CandidateSearch
+from app.media_v4.resolution.identity_policy import historical_identity_conflict
 from app.media_v4.resolution.resolver import MediaResolver
 
 
@@ -59,11 +60,13 @@ def _friendly_metadata_reason(status: str, value: str, reason_code: str = "") ->
     normalized_value = (value or "").strip().casefold()
     identity_conflict = normalized_code in {
         "provider_identity_conflict",
+        "work_identity_conflict",
+        "historical_identity_conflict",
         "identity_conflict",
         "binding_conflict",
     } or any(
         marker in normalized_value
-        for marker in ("关联到另一部作品", "身份冲突", "provider 身份", "provider identity")
+        for marker in ("关联到另一部作品", "作品身份冲突", "身份冲突", "provider 身份", "provider identity")
     )
     if identity_conflict:
         return "在线作品已关联到另一部作品，请选择正确作品或修正 Provider 后重试。"
@@ -108,6 +111,8 @@ def _metadata_recovery_hint(action: str) -> str:
 
 _IDENTITY_CONFLICT_CODES = frozenset({
     "provider_identity_conflict",
+    "work_identity_conflict",
+    "historical_identity_conflict",
     "identity_conflict",
     "binding_conflict",
 })
@@ -178,7 +183,7 @@ def metadata_recovery_policy(metadata: dict | None, *, binding_status: str = "")
 
     has_identity_conflict = reason_code in _IDENTITY_CONFLICT_CODES or any(
         marker in normalized_reason
-        for marker in ("关联到另一部作品", "身份冲突", "provider 身份", "provider identity")
+        for marker in ("关联到另一部作品", "作品身份冲突", "身份冲突", "provider 身份", "provider identity")
     )
     if has_identity_conflict:
         action = "review_identity"
@@ -263,7 +268,7 @@ def _metadata_recovery_action_fallback(status: str, reason_code: str, reason: st
     normalized_reason = (reason or "").strip().casefold()
     if code in _IDENTITY_CONFLICT_CODES or any(
         marker in normalized_reason
-        for marker in ("关联到另一部作品", "身份冲突", "provider 身份", "provider identity")
+        for marker in ("关联到另一部作品", "作品身份冲突", "身份冲突", "provider 身份", "provider identity")
     ):
         return "review_identity"
     if code in {"no_candidates", "ambiguous_candidates"}:
@@ -719,7 +724,7 @@ def _snapshot_structural_bindings(conn, root_id: str) -> dict[str, list[dict]]:
         SELECT b.structural_key, w.work_id, w.work_type, w.year
         FROM work_source_bindings b
         JOIN works w ON w.work_id = b.work_id
-        WHERE b.root_id = ?
+        WHERE b.root_id = ? AND w.status = 'active'
         """,
         (root_id,),
     ).fetchall()
@@ -737,7 +742,7 @@ def _snapshot_structural_bindings(conn, root_id: str) -> dict[str, list[dict]]:
 
 def _lookup_work_by_key(conn, work_key: str, *, exclude_work_id: str = "") -> str:
     row = conn.execute(
-        "SELECT work_id FROM works WHERE identity_key = ?", (work_key,)
+        "SELECT work_id FROM works WHERE identity_key = ? AND status = 'active'", (work_key,)
     ).fetchone()
     if row:
         return str(row["work_id"])
@@ -759,6 +764,7 @@ def _lookup_work_by_key(conn, work_key: str, *, exclude_work_id: str = "") -> st
         FROM works
         JOIN work_aliases ON work_aliases.work_id = works.work_id
         WHERE work_aliases.normalized_title = ? AND works.work_type = ?
+          AND works.status = 'active'
           AND (? = '' OR works.work_id != ?)
         """,
         (normalized_title, work_type, exclude_work_id, exclude_work_id),
@@ -818,9 +824,22 @@ def _existing_work_matches(
     work_year = getattr(work, "year", None)
     exact = conn.execute(
         "SELECT * FROM works WHERE identity_key = ? AND work_type = ? "
-        "AND (year IS NULL OR year = ? OR ? IS NULL)",
+        "AND status = 'active' AND (year IS NULL OR year = ? OR ? IS NULL)",
         (getattr(work, "work_key", ""), work_type, work_year, work_year),
     ).fetchone()
+    def safe_historical_row(row):
+        structural_keys = {
+            str(binding["structural_key"] or "")
+            for binding in conn.execute(
+                "SELECT structural_key FROM work_source_bindings WHERE work_id = ?",
+                (str(row["work_id"]),),
+            ).fetchall()
+        }
+        if historical_identity_conflict(work, structural_keys) is not None:
+            return None
+        return row
+
+    exact = safe_historical_row(exact) if exact is not None else None
     titles = _work_identity_titles(work, related_entries)
     title_rows: list = []
     if titles:
@@ -829,7 +848,7 @@ def _existing_work_matches(
             SELECT DISTINCT w.*
             FROM works w
             LEFT JOIN work_aliases a ON a.work_id = w.work_id
-            WHERE w.work_type = ?
+            WHERE w.status = 'active' AND w.work_type = ?
               AND (w.year IS NULL OR w.year = ? OR ? IS NULL)
             """,
             (work_type, work_year, work_year),
@@ -844,7 +863,9 @@ def _existing_work_matches(
                 ).fetchall()
             )
             if names & titles:
-                title_rows.append(row)
+                safe_row = safe_historical_row(row)
+                if safe_row is not None:
+                    title_rows.append(safe_row)
     # identity_key 是强身份线索，但不能单独覆盖一个已有的唯一 Provider
     # owner：历史上曾先生成空的 series 键、后又留下带 Provider 的 title 键，
     # 正是本次 TXT 批次冲突的来源。只有“首选标题相同”的 Provider owner
@@ -1044,11 +1065,47 @@ class V4RevisionService:
                         """
                         SELECT DISTINCT b.work_id
                         FROM work_source_bindings b
+                        JOIN works w ON w.work_id = b.work_id
                         WHERE b.root_id = ? AND b.structural_key = ?
+                          AND w.status = 'active'
                         """,
                         (evidence.root_id, structural_key),
                     ).fetchall()
                     existing_work_ids.update(str(row["work_id"]) for row in rows)
+                # Provider owner 可能没有被标题/结构查询选中，但确认阶段仍会
+                # 通过全局 Provider 唯一键回收它。先检查 owner 的历史结构边界，
+                # 防止污染 Work 绕过上面的安全复用筛选再次进入 confirmed。
+                for candidate in candidates_by_key.get(work.work_key, []):
+                    if (
+                        candidate.status not in {"confirmed", "proposed"}
+                        or candidate.confidence != "high"
+                        or not candidate_service.supported_provider(candidate.provider)
+                    ):
+                        continue
+                    owner = conn.execute(
+                        "SELECT work_id FROM provider_bindings "
+                        "WHERE provider = ? AND media_type = ? AND provider_id = ?",
+                        (candidate.provider, candidate.media_type, candidate.provider_id),
+                    ).fetchone()
+                    if owner is None:
+                        continue
+                    owner_keys = {
+                        str(binding["structural_key"] or "")
+                        for binding in conn.execute(
+                            "SELECT structural_key FROM work_source_bindings WHERE work_id = ?",
+                            (str(owner["work_id"]),),
+                        ).fetchall()
+                    }
+                    if historical_identity_conflict(work, owner_keys) is not None:
+                        issues.append(ResolutionIssue(
+                            code="work_identity_conflict",
+                            evidence_id=next(iter(work.source_evidence_ids), ""),
+                            message=(
+                                "Provider 身份属于一个同时覆盖主系列与独立作品的历史记录；"
+                                "请先执行作品身份修复，不能继续复用"
+                            ),
+                        ))
+                        break
                 if not existing_work_ids:
                     continue
                 placeholders = ",".join("?" for _ in existing_work_ids)
@@ -1119,13 +1176,15 @@ class V4RevisionService:
                         """
                         SELECT DISTINCT b.work_id
                         FROM work_source_bindings b
+                        JOIN works w ON w.work_id = b.work_id
                         WHERE b.root_id = ? AND b.structural_key = ?
+                          AND w.status = 'active'
                         """,
                         (next(iter(root_ids)), structural_key),
                     ).fetchall()
                     owner_ids.update(str(row["work_id"]) for row in rows)
                 identity_row = conn.execute(
-                    "SELECT work_id FROM works WHERE identity_key = ?",
+                    "SELECT work_id FROM works WHERE identity_key = ? AND status = 'active'",
                     (work.work_key,),
                 ).fetchone()
                 identity_id = str(identity_row["work_id"]) if identity_row is not None else ""

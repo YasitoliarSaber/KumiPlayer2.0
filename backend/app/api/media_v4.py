@@ -159,6 +159,15 @@ class MaintenanceConfirmRequest(BaseModel):
     digest: str = Field(min_length=32)
 
 
+class IdentityRepairApplyRequest(BaseModel):
+    preview_id: str = Field(min_length=1)
+    digest: str = Field(min_length=32)
+
+
+class IdentityRepairResumeRequest(BaseModel):
+    operation_id: str = Field(min_length=1)
+
+
 def _configured_mirror_root():
     from app.core.paths import get_mirror_root
 
@@ -2086,6 +2095,52 @@ def metadata_retry(request: MetadataRetryRequest):
         "status": str(job["status"]),
         "metadata_recovery_action": action,
     }
+
+
+@router.post("/works/{work_id}/identity-repair-preview")
+def identity_repair_preview(work_id: str):
+    """生成作品身份恢复预览；不修改媒体关系。"""
+
+    from app.media_v4.maintenance.identity_repair import build_identity_repair_preview
+
+    try:
+        return build_identity_repair_preview(get_database(), work_id=work_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="作品不存在") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/identity-repair/apply")
+def identity_repair_apply(request: IdentityRepairApplyRequest):
+    """校验服务端预览摘要后应用身份恢复。"""
+
+    from app.media_v4.maintenance.identity_repair import apply_identity_repair
+
+    try:
+        return apply_identity_repair(
+            get_database(),
+            preview_id=request.preview_id,
+            digest=request.digest,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="身份恢复预览不存在") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/identity-repair/resume")
+def identity_repair_resume(request: IdentityRepairResumeRequest):
+    """继续同一份身份恢复操作，已完成时返回原结果。"""
+
+    from app.media_v4.maintenance.identity_repair import resume_identity_repair
+
+    try:
+        return resume_identity_repair(get_database(), operation_id=request.operation_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="身份恢复操作不存在") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/metadata/confirm")
