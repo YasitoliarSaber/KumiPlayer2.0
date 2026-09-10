@@ -177,16 +177,23 @@ def _list_all(
         page += 1
 
 
-def _clone_for_scan(item: SourceEvidence, scan_id: str) -> SourceEvidence:
+def _clone_for_scan(
+    item: SourceEvidence,
+    scan_id: str,
+    *,
+    source_key: str | None = None,
+    source_locator: str | None = None,
+    playback_locator: str | None = None,
+) -> SourceEvidence:
     return to_source_evidence(SourceEntry(
         root_id=item.root_id,
         scan_id=scan_id,
         provider=item.provider,
         ingest_method=item.ingest_method,
         relative_path=item.relative_path,
-        source_key=item.source_key or item.relative_path,
-        source_locator=item.source_locator,
-        playback_locator=item.playback_locator,
+        source_key=source_key if source_key is not None else (item.source_key or item.relative_path),
+        source_locator=source_locator if source_locator is not None else item.source_locator,
+        playback_locator=playback_locator if playback_locator is not None else item.playback_locator,
         raw_file_id=item.raw_file_id,
         source_route_id=item.source_route_id,
         size=item.size,
@@ -208,6 +215,7 @@ def scan_openlist_incremental(
     state: dict,
     mapping_root: str,
     mount_root: str,
+    scan_id: str | None = None,
     default_provider: str = "unknown",
     routes: list[OpenListRouteConfig] | None = None,
     verification_budget: int = DEFAULT_VERIFICATION_BUDGET,
@@ -230,10 +238,23 @@ def scan_openlist_incremental(
     mapping_root = normalize_remote_path(mapping_root)
     timestamp = float(time.time() if now is None else now)
     budget = max(0, min(int(verification_budget), MAX_VERIFICATION_BUDGET))
-    scan_id = "scan_" + uuid.uuid4().hex
+    actual_scan_id = scan_id or ("scan_" + uuid.uuid4().hex)
     next_state = copy.deepcopy(state)
     directories: dict[str, dict] = next_state["directories"]
-    files = {item.relative_path: _clone_for_scan(item, scan_id) for item in baseline}
+    files = {}
+    for item in baseline:
+        remote_path = _join_remote(remote_root, item.relative_path)
+        playback_locator = (
+            derive_local_path(mount_root, mapping_root, remote_path)
+            if mount_root else item.playback_locator
+        )
+        files[item.relative_path] = _clone_for_scan(
+            item,
+            actual_scan_id,
+            source_key=remote_path,
+            source_locator=remote_path,
+            playback_locator=playback_locator,
+        )
     rolling = sorted(
         (path for path in directories if path),
         key=lambda path: (float(directories[path].get("last_verified_at") or 0), path.casefold()),
@@ -336,7 +357,7 @@ def scan_openlist_incremental(
             )
             current_evidence = to_source_evidence(SourceEntry(
                 root_id=root_id,
-                scan_id=scan_id,
+                scan_id=actual_scan_id,
                 provider=provider,
                 ingest_method="openlist_api",
                 relative_path=relative_file,
@@ -371,4 +392,4 @@ def scan_openlist_incremental(
         "rolling_verified": sum(1 for path in rolling if path in processed),
         "changed_directories": len(changed_queued),
     }
-    return scan_id, [files[path] for path in sorted(files, key=str.casefold)], next_state, stats
+    return actual_scan_id, [files[path] for path in sorted(files, key=str.casefold)], next_state, stats

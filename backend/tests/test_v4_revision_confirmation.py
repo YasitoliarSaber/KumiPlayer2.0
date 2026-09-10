@@ -261,6 +261,75 @@ def test_ambiguous_existing_structural_bindings_block_confirmation(tmp_path):
         service.confirm("rev-ambiguous-structure")
 
 
+def test_override_rechecks_structural_identity_before_confirmation(tmp_path):
+    """人工修正不能通过删除旧 issue 把结构歧义带入发布。"""
+
+    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import RevisionBlockedError, V4RevisionService
+
+    database = V4Database(tmp_path / "override-structural-identity.db")
+    database.initialize()
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO source_roots(root_id, provider, ingest_method, created_at, updated_at) "
+            "VALUES ('root-override-structure', 'local', 'local_scan', 'now', 'now')"
+        )
+        for work_id, identity_key in (
+            ("old-work-a", "series:old-a:tv"),
+            ("old-work-b", "series:old-b:tv"),
+        ):
+            conn.execute(
+                "INSERT INTO works(work_id, identity_key, work_type, preferred_title, created_at, updated_at) "
+                "VALUES (?, ?, 'series', ?, 'now', 'now')",
+                (work_id, identity_key, identity_key),
+            )
+            conn.execute(
+                "INSERT INTO work_source_bindings(work_id, root_id, structural_key, confidence, binding_source) "
+                "VALUES (?, 'root-override-structure', 'series:show:tv', 'medium', 'resolver')",
+                (work_id,),
+            )
+
+    evidence = SourceEvidence(
+        evidence_id="ev-override-structure",
+        scan_id="scan-override-structure",
+        root_id="root-override-structure",
+        source_key="Show/Show.S01E01.mkv",
+        relative_path="Show/Show.S01E01.mkv",
+        entry_kind="video",
+        provider="local",
+    )
+    facts = ParsedFacts(
+        parsed_fact_id="facts-override-structure",
+        evidence_id=evidence.evidence_id,
+        parser_version="fixture",
+        work_title="Show",
+        series_group="Show",
+        card_type="main_series",
+        title_candidates=("Show",),
+        media_type="tv",
+        group_type="season",
+        season_candidate=1,
+        episode_candidate=1,
+    )
+    service = V4RevisionService(database)
+    service.create_draft(
+        "rev-override-structure",
+        [(evidence, facts)],
+        candidate_search=lambda *_args: [],
+    )
+
+    graph = service.apply_override(
+        "rev-override-structure",
+        evidence.evidence_id,
+        {"episode_candidate": 2},
+    )
+
+    assert any(issue.code == "structural_identity_ambiguous" for issue in graph.issues)
+    with pytest.raises(RevisionBlockedError):
+        service.confirm("rev-override-structure")
+
+
 def test_preview_blocks_provider_rebinding_before_confirm_can_hit_unique_constraint(tmp_path):
     """同一结构 Work 改指向已属于另一 Work 的 Provider 身份必须留在第 2 步。"""
 

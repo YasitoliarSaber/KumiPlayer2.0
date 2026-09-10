@@ -278,3 +278,53 @@ def test_openlist_scan_emits_evidence_batches_and_heartbeats_during_recursion(tm
     assert len(evidence) == 2
     assert batches == [1, 1]
     assert heartbeats and heartbeats[-1] == 2
+
+
+def test_local_scan_uses_durable_scan_id_when_supplied(tmp_path):
+    from app.media_v4.sources.scanner import scan_local_directory
+
+    media = tmp_path / "Show" / "Show.S01E01.mkv"
+    media.parent.mkdir(parents=True)
+    media.write_bytes(b"video")
+
+    _root_id, returned_scan_id, evidence = scan_local_directory(
+        tmp_path,
+        scan_id="scan-durable-local",
+    )
+
+    assert returned_scan_id == "scan-durable-local"
+    assert [item.scan_id for item in evidence] == ["scan-durable-local"]
+
+
+def test_openlist_scan_uses_durable_scan_id_when_supplied(tmp_path):
+    from app.integrations.openlist.models import OpenListDirPage, OpenListEntry
+    from app.media_v4.sources.scanner import scan_openlist_directory
+
+    class FakeClient:
+        def list_dir(self, path, page=1, per_page=100, refresh=False):
+            del page, per_page, refresh
+            if path == "/Anime":
+                return OpenListDirPage(
+                    entries=[OpenListEntry(name="Show", is_dir=True, remote_path="/Anime/Show")],
+                    total=1,
+                )
+            return OpenListDirPage(
+                entries=[OpenListEntry(
+                    name="Show.S01E01.mkv",
+                    is_dir=False,
+                    remote_path="/Anime/Show/Show.S01E01.mkv",
+                )],
+                total=1,
+            )
+
+    returned_scan_id, evidence = scan_openlist_directory(
+        FakeClient(),
+        remote_root="/Anime",
+        mapping_root="/",
+        mount_root=str(tmp_path / "mount"),
+        root_id="root-openlist-scan-id",
+        scan_id="scan-durable-openlist",
+    )
+
+    assert returned_scan_id == "scan-durable-openlist"
+    assert [item.scan_id for item in evidence] == ["scan-durable-openlist"]

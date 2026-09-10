@@ -145,7 +145,7 @@ def test_durable_scan_api_contract(tmp_path, monkeypatch):
         root_id = kwargs["root_id"]
         evidence = [to_source_evidence(SourceEntry(
             root_id=root_id,
-            scan_id="scan-inner",
+            scan_id=kwargs["scan_id"],
             provider="pan115",
             ingest_method="openlist_api",
             relative_path="Show/Show.S01E01.mkv",
@@ -153,7 +153,7 @@ def test_durable_scan_api_contract(tmp_path, monkeypatch):
             source_locator="Show/Show.S01E01.mkv",
             playback_locator="X:\\OpenList\\Anime\\Show\\Show.S01E01.mkv",
         ))]
-        return "scan-inner", evidence
+        return kwargs["scan_id"], evidence
 
     monkeypatch.setattr(media_v4, "scan_openlist_directory", fake_full_scan)
     from app.api import openlist_v4

@@ -180,3 +180,97 @@ def test_projection_uses_latest_scrape_metadata_and_real_sources(tmp_path):
     assert card["title"] == "Online Title"
     assert card["metadata"]["original_title"] == "Original"
     assert card["metadata"]["sources"] == ["local"]
+
+
+def test_projection_checks_completeness_against_selected_scrape_revision(tmp_path, monkeypatch):
+    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.projection.library import V4LibraryProjection
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "projection-revision-pair.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+
+    def entry(root_id: str, scan_id: str, suffix: str):
+        evidence = SourceEvidence(
+            evidence_id=f"ev-{suffix}",
+            scan_id=scan_id,
+            root_id=root_id,
+            source_key=f"Show/{suffix}.mkv",
+            relative_path=f"Show/{suffix}.mkv",
+            entry_kind="video",
+            provider="local",
+            source_locator=f"local://{suffix}",
+        )
+        facts = ParsedFacts(
+            parsed_fact_id=f"facts-{suffix}",
+            evidence_id=evidence.evidence_id,
+            parser_version="fixture",
+            work_title="Show",
+            title_candidates=("Show",),
+            year_candidate=2024,
+            media_type="tv",
+            group_type="season",
+            season_candidate=1,
+            episode_candidate=1,
+        )
+        return evidence, facts
+
+    revisions.create_draft("rev-a", [entry("root-a", "scan-a", "a")])
+    revisions.confirm("rev-a")
+    revisions.create_draft("rev-b", [entry("root-b", "scan-b", "b")])
+    revisions.confirm("rev-b")
+    with database.connect() as conn:
+        work_id = str(conn.execute("SELECT work_id FROM works").fetchone()[0])
+        conn.execute(
+            """
+            INSERT INTO scrape_bindings(
+                binding_id, revision_id, work_id, provider, provider_id,
+                metadata_json, status, created_at, updated_at
+            ) VALUES (?, ?, ?, 'tmdb', ?, ?, 'confirmed', ?, ?)
+            """,
+            (
+                "binding-a",
+                "rev-a",
+                work_id,
+                "1",
+                '{"title":"A","metadata_state":"ready"}',
+                "2026-09-09T00:00:00+00:00",
+                "2026-09-09T02:00:00+00:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO scrape_bindings(
+                binding_id, revision_id, work_id, provider, provider_id,
+                metadata_json, status, created_at, updated_at
+            ) VALUES (?, ?, ?, 'tmdb', ?, ?, 'failed', ?, ?)
+            """,
+            (
+                "binding-b",
+                "rev-b",
+                work_id,
+                "2",
+                '{"title":"B","metadata_state":"failed"}',
+                "2026-09-09T01:00:00+00:00",
+                "2026-09-09T01:00:00+00:00",
+            ),
+        )
+
+    checked: list[str] = []
+
+    def capture(_database, *, revision_id, work_id, metadata):
+        del work_id, metadata
+        checked.append(revision_id)
+        return True, []
+
+    monkeypatch.setattr(
+        "app.media_v4.jobs.completeness.assess_persisted_completeness",
+        capture,
+    )
+
+    card = V4LibraryProjection(database).rebuild().cards[0]
+
+    assert card["metadata"]["title"] == "A"
+    assert checked == ["rev-a"]

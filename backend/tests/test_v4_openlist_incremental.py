@@ -260,3 +260,46 @@ def test_incremental_checkpoint_only_becomes_active_after_revision_confirmation(
 
     incremental.activate_scan_state("scan-tree")
     assert incremental.load_active_state("root-hybrid") == state
+
+
+def test_incremental_scan_uses_durable_scan_id_when_supplied():
+    from app.media_v4.sources.incremental import build_tree_baseline_state, scan_openlist_incremental
+
+    baseline = _baseline()
+    state = build_tree_baseline_state("root-hybrid", "/Anime", baseline)
+    _scan_id, evidence, _next_state, _stats = scan_openlist_incremental(
+        _FakeClient(),
+        baseline=baseline,
+        state=state,
+        mapping_root="/",
+        mount_root="",
+        default_provider="pan115",
+        scan_id="scan-durable-incremental",
+    )
+
+    assert evidence
+    assert {item.scan_id for item in evidence} == {"scan-durable-incremental"}
+
+
+def test_incremental_rebuilds_txt_baseline_locators_from_openlist_mapping():
+    from app.integrations.openlist.providers import derive_local_path
+    from app.media_v4.sources.incremental import build_tree_baseline_state, scan_openlist_incremental
+
+    baseline = _baseline()
+    state = build_tree_baseline_state("root-hybrid", "/Anime", baseline)
+    _scan_id, evidence, _next_state, _stats = scan_openlist_incremental(
+        _FakeClient(),
+        baseline=baseline,
+        state=state,
+        mapping_root="/",
+        mount_root="K:\\OpenList",
+        default_provider="pan115",
+        verification_budget=0,
+        now=1000,
+    )
+
+    untouched = next(item for item in evidence if item.relative_path.startswith("Show004/"))
+    remote_path = "/Anime/Show004/Show004.S01E01.mkv"
+    assert untouched.source_key == remote_path
+    assert untouched.source_locator == remote_path
+    assert untouched.playback_locator == derive_local_path("K:\\OpenList", "/", remote_path)

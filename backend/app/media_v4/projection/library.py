@@ -76,6 +76,25 @@ class V4LibraryProjection:
             try:
                 rows = conn.execute(
                     """
+                    WITH latest_scrapes AS (
+                        SELECT work_id, revision_id, status, metadata_json
+                        FROM (
+                            SELECT
+                                sb.work_id,
+                                sb.revision_id,
+                                sb.status,
+                                sb.metadata_json,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY sb.work_id
+                                    ORDER BY sb.updated_at DESC, sb.binding_id DESC
+                                ) AS row_number
+                            FROM scrape_bindings sb
+                            JOIN import_revisions sir ON sir.revision_id = sb.revision_id
+                            JOIN source_roots srs ON srs.root_id = sir.root_id
+                            WHERE sir.status = 'confirmed' AND srs.retired_at = ''
+                        )
+                        WHERE row_number = 1
+                    )
                     SELECT
                         w.work_id,
                         w.preferred_title AS title,
@@ -83,12 +102,7 @@ class V4LibraryProjection:
                         w.show_type,
                         w.card_type,
                         CASE WHEN w.work_type = 'series' THEN 'tv' ELSE 'movie' END AS media_type,
-                        (
-                            SELECT ir.revision_id FROM import_revisions ir
-                            JOIN revision_bindings rb ON rb.revision_id = ir.revision_id
-                            WHERE rb.work_id = w.work_id AND ir.status = 'confirmed'
-                            ORDER BY ir.confirmed_at DESC, ir.revision_id DESC LIMIT 1
-                        ) AS revision_id,
+                        latest_scrapes.revision_id AS revision_id,
                         CASE WHEN w.work_type = 'series' THEN (
                             SELECT COUNT(DISTINCT rb.episode_id)
                             FROM revision_bindings rb
@@ -111,20 +125,8 @@ class V4LibraryProjection:
                             WHERE rb.work_id = w.work_id AND rb.asset_id IS NOT NULL
                               AND ir.status = 'confirmed'
                         ) AS asset_count,
-                        COALESCE((
-                            SELECT sb.metadata_json FROM scrape_bindings sb
-                            JOIN import_revisions sir ON sir.revision_id = sb.revision_id
-                            JOIN source_roots srs ON srs.root_id = sir.root_id AND srs.retired_at = ''
-                            WHERE sb.work_id = w.work_id AND sir.status = 'confirmed'
-                            ORDER BY sb.updated_at DESC, sb.binding_id DESC LIMIT 1
-                        ), '{}') AS scraped_metadata_json,
-                        COALESCE((
-                            SELECT sb.status FROM scrape_bindings sb
-                            JOIN import_revisions sir ON sir.revision_id = sb.revision_id
-                            JOIN source_roots srs ON srs.root_id = sir.root_id AND srs.retired_at = ''
-                            WHERE sb.work_id = w.work_id AND sir.status = 'confirmed'
-                            ORDER BY sb.updated_at DESC, sb.binding_id DESC LIMIT 1
-                        ), '') AS scrape_binding_status,
+                        COALESCE(latest_scrapes.metadata_json, '{}') AS scraped_metadata_json,
+                        COALESCE(latest_scrapes.status, '') AS scrape_binding_status,
                         COALESCE((
                             SELECT GROUP_CONCAT(DISTINCT provider) FROM (
                                 SELECT se.provider
@@ -166,6 +168,8 @@ class V4LibraryProjection:
                               AND e.episode_kind = 'regular'
                         ) AS latest_episode_number
                     FROM works w
+                    LEFT JOIN latest_scrapes
+                      ON latest_scrapes.work_id = w.work_id
                     WHERE EXISTS (
                         SELECT 1 FROM revision_bindings rb
                         JOIN import_revisions ir ON ir.revision_id = rb.revision_id

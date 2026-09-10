@@ -542,6 +542,20 @@ def test_hybrid_tree_scan_reuses_the_openlist_root_identity(tmp_path, monkeypatc
     assert result["effective_playback_root"] == str(mount / "Anime" / "TV")
     assert result["path_validation"]["ok"] is True
 
+    preview = media_v4.preview(media_v4.PreviewRequest(
+        revision_id="rev-hybrid-locators",
+        root_id=result["root_id"],
+        scan_id=result["scan_id"],
+        entries=[],
+    ))
+    assert preview["issues"] == []
+    with media_v4.get_database().connect() as conn:
+        root = conn.execute(
+            "SELECT source_locator, playback_locator FROM source_roots WHERE root_id = ?",
+            (result["root_id"],),
+        ).fetchone()
+    assert tuple(root) == ("/Anime/TV", str(mount / "Anime" / "TV"))
+
 
 def test_tree_scan_preserves_quark_as_the_content_provider(tmp_path, monkeypatch):
     _patch_database(tmp_path, monkeypatch)
@@ -807,6 +821,13 @@ def test_plain_openlist_full_scan_confirm_enables_incremental_and_keeps_mode(tmp
     ))
     assert full["scan_mode"] == "full"
     assert full["source_mode"] == "openlist_full"
+    assert full["effective_playback_root"] == r"X:\OpenList\Anime"
+    with media_v4.get_database().connect() as conn:
+        root = conn.execute(
+            "SELECT source_locator, playback_locator FROM source_roots WHERE root_id = ?",
+            (full["root_id"],),
+        ).fetchone()
+    assert tuple(root) == ("/Anime", r"X:\OpenList\Anime")
 
     # draft 未确认时显式 incremental 仍然拒绝，不悄悄退化为全量。
     with pytest.raises(HTTPException) as exc_info:

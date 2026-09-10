@@ -31,6 +31,17 @@ def _callbacks(runtime) -> dict:
     }
 
 
+def _assert_scan_identity(task, returned_scan_id, evidence) -> None:
+    """内置扫描适配器必须从创建证据起使用 durable scan_id。"""
+
+    if returned_scan_id != task.scan_id or any(
+        item.scan_id != task.scan_id for item in (evidence or ())
+    ):
+        raise ValueError(
+            "扫描适配器返回的证据未使用登记的 scan_id，拒绝写入"
+        )
+
+
 def _tree_resolution(task):
     """恢复注册期完成的纯词法解析结果；归档文本 + 登记期证据已足够。"""
 
@@ -72,6 +83,7 @@ def scan_tree_source(database, task, runtime):
         scan_id=task.scan_id,
         **_callbacks(runtime),
     )
+    _assert_scan_identity(task, _scan_id, evidence)
     _persist_tree_scan(
         database,
         root_id=task.root_id,
@@ -79,6 +91,12 @@ def scan_tree_source(database, task, runtime):
         scan_id=task.scan_id,
         route_id=str(request.get("route_id") or ""),
         effective_root=resolution.root,
+        source_locator=(
+            str(request.get("remote_root") or "")
+            if task.source_mode == "tree_openlist"
+            else resolution.root
+        ),
+        playback_locator=resolution.root or str(request.get("identity_root") or ""),
         root_container=_container_name(resolution.root or str(request.get("identity_root") or "")),
         evidence=evidence,
         resolution=resolution,
@@ -110,8 +128,10 @@ def scan_local_source(database, task, runtime):
     _root_id, _inner_scan_id, evidence = scan_local_directory(
         str(task.request.get("root_path") or ""),
         excluded_roots=_configured_cloud_roots(config),
+        scan_id=task.scan_id,
         **_callbacks(runtime),
     )
+    _assert_scan_identity(task, _inner_scan_id, evidence)
     return evidence
 
 
@@ -149,11 +169,13 @@ def scan_openlist_full_source(database, task, runtime):
         mapping_root=str(request.get("mapping_root") or _remote_root(config)),
         mount_root=str(request.get("mount_root") or ""),
         root_id=task.root_id,
+        scan_id=task.scan_id,
         default_provider=str(request.get("provider") or ""),
         routes=_routes_from(request),
         directory_observations=directory_observations,
         **_callbacks(runtime),
     )
+    _assert_scan_identity(task, _scan_id, evidence)
     stage_scan_state(
         task.scan_id,
         build_full_scan_state(task.root_id, str(request.get("remote_root") or ""), directory_observations),
@@ -191,9 +213,11 @@ def scan_openlist_incremental_source(database, task, runtime):
         state=state,
         mapping_root=mapping_root,
         mount_root=str(request.get("mount_root") or ""),
+        scan_id=task.scan_id,
         default_provider=str(request.get("provider") or ""),
         routes=_routes_from(request),
         **_callbacks(runtime),
     )
+    _assert_scan_identity(task, _scan_id, evidence)
     stage_scan_state(task.scan_id, next_state)
     return evidence

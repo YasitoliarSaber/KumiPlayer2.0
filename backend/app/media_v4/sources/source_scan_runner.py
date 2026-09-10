@@ -72,6 +72,7 @@ def register_source_scan(
     source_mode: str,
     request: dict | None = None,
     archive: InputArchive | None = None,
+    conn=None,
 ) -> str:
     """登记 queued 扫描与可序列化请求；立即返回，不启动任何线程。
 
@@ -83,24 +84,24 @@ def register_source_scan(
     archive_path = archive.archive_path if archive else ""
     archive_sha = archive.sha256 if archive else ""
     original_name = archive.original_filename if archive else ""
-    with database.connect() as conn:
-        existing = conn.execute(
+    def write(connection) -> str:
+        existing = connection.execute(
             "SELECT 1 FROM source_scans WHERE scan_id = ?", (scan_id,)
         ).fetchone()
         if existing is not None:
             raise ValueError("扫描任务已存在: " + str(scan_id))
-        generation = conn.execute(
+        generation = connection.execute(
             "SELECT COALESCE(MAX(generation), 0) + 1 FROM source_scans WHERE root_id = ?",
             (root_id,),
         ).fetchone()[0]
-        conn.execute(
+        connection.execute(
             """
             INSERT INTO source_scans(scan_id, root_id, generation, status, stage, heartbeat_at, started_at)
             VALUES (?, ?, ?, 'queued', 'queued', ?, ?)
             """,
             (scan_id, root_id, generation, now, now),
         )
-        conn.execute(
+        connection.execute(
             """
             INSERT INTO source_scan_requests(
                 scan_id, scan_kind, source_mode, request_json,
@@ -110,7 +111,19 @@ def register_source_scan(
             """,
             (scan_id, scan_kind, source_mode, payload, archive_path, archive_sha, original_name, now, now),
         )
-    return scan_id
+        return scan_id
+
+    if conn is not None:
+        return write(conn)
+    with database.connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            result = write(connection)
+            connection.commit()
+            return result
+        except Exception:
+            connection.rollback()
+            raise
 
 
 def _load_task(database: V4Database, scan_id: str) -> ScanTask | None:
@@ -284,13 +297,10 @@ class _ExecutionRuntime:
             raise _CancelledScan()
         if not batch:
             return
-        from dataclasses import replace
-
-        normalized = batch
         if any(item.scan_id != self.scan_id for item in batch):
-            normalized = [replace(item, scan_id=self.scan_id) for item in batch]
-        V4Repository(self.database).save_scan_evidence_bulk(normalized)
-        self.streamed_items += len(normalized)
+            raise ValueError("扫描适配器返回的证据未使用登记的 scan_id，拒绝写入")
+        V4Repository(self.database).save_scan_evidence_bulk(batch)
+        self.streamed_items += len(batch)
         _update_scan_progress(
             self.database,
             self.scan_id,
@@ -461,15 +471,11 @@ class SourceScanRunner:
         只有未支持流式回调的旧 adapter 才允许这里一次性兜底保存。
         """
 
-        from dataclasses import replace
-
         repository = V4Repository(self.database)
         if runtime.streamed_items == 0 and returned:
-            normalized = [
-                replace(item, scan_id=task.scan_id) if item.scan_id != task.scan_id else item
-                for item in returned
-            ]
-            repository.save_scan_evidence_bulk(normalized)
+            if any(item.scan_id != task.scan_id for item in returned):
+                raise ValueError("扫描适配器返回的证据未使用登记的 scan_id，拒绝写入")
+            repository.save_scan_evidence_bulk(returned)
         return repository.list_scan_evidence(task.scan_id)
 
     def _settle_total(self, scan_id: str, count: int) -> None:

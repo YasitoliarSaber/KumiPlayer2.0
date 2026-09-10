@@ -35,11 +35,11 @@ def test_local_durable_entrypoint_returns_before_the_directory_scan_finishes(tmp
         started.set()
         assert release.wait(3)
         evidence = to_source_evidence(SourceEntry(
-            root_id=expected_root_id, scan_id="scan-inner", provider="local", ingest_method="local_scan",
+            root_id=expected_root_id, scan_id=_kwargs["scan_id"], provider="local", ingest_method="local_scan",
             relative_path="Show/Show.S01E01.mkv", source_key="Show/Show.S01E01.mkv",
             source_locator="D:/Media/Show/Show.S01E01.mkv", playback_locator="D:/Media/Show/Show.S01E01.mkv",
         ))
-        return expected_root_id, "scan-inner", [evidence]
+        return expected_root_id, _kwargs["scan_id"], [evidence]
 
     monkeypatch.setattr(media_v4, "scan_local_directory", slow_local_scan)
     monkeypatch.setattr(media_v4, "load_config", lambda: SimpleNamespace(
@@ -110,7 +110,7 @@ def test_local_durable_entrypoint_keeps_online_candidate_search_out_of_scan_enti
     def local_scan(_root_path, **_kwargs):
         evidence = to_source_evidence(SourceEntry(
             root_id=expected_root_id,
-            scan_id="scan-inner",
+            scan_id=_kwargs["scan_id"],
             provider="local",
             ingest_method="local_scan",
             relative_path="Show/Show.S01E01.mkv",
@@ -118,7 +118,7 @@ def test_local_durable_entrypoint_keeps_online_candidate_search_out_of_scan_enti
             source_locator="D:/Media/Show/Show.S01E01.mkv",
             playback_locator="D:/Media/Show/Show.S01E01.mkv",
         ))
-        return expected_root_id, "scan-inner", [evidence]
+        return expected_root_id, _kwargs["scan_id"], [evidence]
 
     def forbidden_candidate_search(work_key, *_args, **_kwargs):
         search_calls.append(work_key)

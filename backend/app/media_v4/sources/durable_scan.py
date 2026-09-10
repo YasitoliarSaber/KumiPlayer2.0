@@ -195,6 +195,8 @@ def create_durable_scan(
             )
     _cancel_flags[scan_id] = threading.Event()
     stream_state = {"count": 0}
+    # 新适配器显式接收 durable scan_id；只有未升级的外部回调保留兼容归一化。
+    enforce_scan_identity = _accepts_parameter(scan_fn, "scan_id")
 
     def _run() -> None:
         cancel = _cancel_flags[scan_id]
@@ -224,6 +226,8 @@ def create_durable_scan(
                 return
             normalized = batch
             if any(item.scan_id != scan_id for item in batch):
+                if enforce_scan_identity:
+                    raise ValueError("扫描适配器返回的证据未使用登记的 scan_id，拒绝写入")
                 normalized = [replace(item, scan_id=scan_id) for item in batch]
             V4Repository(database).save_scan_evidence_bulk(normalized)
             stream_state["count"] += len(normalized)
@@ -243,11 +247,17 @@ def create_durable_scan(
                 scan_kwargs["on_evidence_batch"] = persist_evidence_batch
             if _accepts_parameter(scan_fn, "on_progress"):
                 scan_kwargs["on_progress"] = report_progress
+            if _accepts_parameter(scan_fn, "scan_id"):
+                scan_kwargs["scan_id"] = scan_id
             raw = scan_fn(**scan_kwargs) if scan_kwargs else scan_fn()
             _scan_id, evidence = raw[0], raw[1]
             if cancellation_requested() or _persisted_cancel_requested(database, scan_id):
                 raise _CancelledScan()
             # 证据必须挂在 durable scan_id 下，预览/恢复才能按 scan_id 读取。
+            if enforce_scan_identity and (
+                _scan_id != scan_id or any(item.scan_id != scan_id for item in evidence)
+            ):
+                raise ValueError("扫描适配器返回的证据未使用登记的 scan_id，拒绝写入")
             if _scan_id != scan_id:
                 evidence = [replace(item, scan_id=scan_id) for item in evidence]
             if state_fn is not None:

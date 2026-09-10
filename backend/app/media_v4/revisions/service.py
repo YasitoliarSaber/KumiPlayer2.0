@@ -7,6 +7,7 @@ import json
 import re
 import unicodedata
 import uuid
+from contextlib import nullcontext
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 
@@ -545,20 +546,13 @@ def _should_preserve_existing_title(existing_title: str, draft_title: str) -> bo
     )
 
 
-def _merge_map_from_candidates(candidates_by_key: dict[str, list]) -> dict[str, str]:
-    """从已确认候选重建合并映射（同一 provider identity 的 draft Work 合并）。"""
+def _merge_map_from_candidates(
+    graph: ResolvedMediaGraph,
+    candidates_by_key: dict[str, list],
+) -> dict[str, str]:
+    """从候选快照按确定性标题规则重建合并映射。"""
 
-    identity_owner: dict[tuple[str, str, str], str] = {}
-    merge_map: dict[str, str] = {}
-    for work_key, items in candidates_by_key.items():
-        for item in items:
-            if item.status != "confirmed":
-                continue
-            identity = (item.provider, item.media_type, item.provider_id)
-            owner = identity_owner.setdefault(identity, work_key)
-            if owner != work_key:
-                merge_map[work_key] = owner
-    return merge_map
+    return candidate_service.merge_map_from_candidates(graph, candidates_by_key)
 
 
 def _persist_candidates(
@@ -929,13 +923,13 @@ class V4RevisionService:
         "is_auxiliary",
     })
 
-    def _load_draft_candidates(self, revision_id: str) -> dict[str, list]:
+    def _load_draft_candidates(self, revision_id: str, conn=None) -> dict[str, list]:
         """确认时复用 draft 已冻结候选，避免再次联网搜索。"""
 
         from app.media_v4.resolution.candidates import WorkCandidate
 
-        with self.database.connect() as conn:
-            rows = conn.execute(
+        with (nullcontext(conn) if conn is not None else self.database.connect()) as connection:
+            rows = connection.execute(
                 "SELECT * FROM revision_work_candidates WHERE revision_id = ?",
                 (revision_id,),
             ).fetchall()
@@ -963,6 +957,7 @@ class V4RevisionService:
         self,
         graph: ResolvedMediaGraph,
         entries: list[tuple[SourceEvidence, ParsedFacts]] | None = None,
+        conn=None,
     ) -> dict[str, list[tuple[str, str, str]]]:
         """读取可安全归属的既有 provider binding，供跨 revision 候选复用。
 
@@ -973,7 +968,7 @@ class V4RevisionService:
         """
 
         bindings: dict[str, list[tuple[str, str, str]]] = {}
-        with self.database.connect() as conn:
+        with (nullcontext(conn) if conn is not None else self.database.connect()) as conn:
             for work in graph.works:
                 related_entries = [
                     (evidence, facts)
@@ -1000,6 +995,7 @@ class V4RevisionService:
         graph: ResolvedMediaGraph,
         candidates_by_key: dict[str, list],
         entries: list[tuple[SourceEvidence, ParsedFacts]],
+        conn=None,
     ) -> list[ResolutionIssue]:
         """在草稿预览阶段阻断会改写既有 Work 身份的候选。
 
@@ -1012,7 +1008,7 @@ class V4RevisionService:
         issues: list[ResolutionIssue] = []
         evidence_by_id = {evidence.evidence_id: evidence for evidence, _facts in entries}
         facts_by_evidence_id = {evidence.evidence_id: facts for evidence, facts in entries}
-        with self.database.connect() as conn:
+        with (nullcontext(conn) if conn is not None else self.database.connect()) as conn:
             for work in graph.works:
                 existing_work_ids: set[str] = set()
                 related_entries = [
@@ -1089,13 +1085,14 @@ class V4RevisionService:
         self,
         graph: ResolvedMediaGraph,
         entries: list[tuple[SourceEvidence, ParsedFacts]],
+        conn=None,
     ) -> list[ResolutionIssue]:
         """阻止一个稳定来源边界静默对应多个既有 Work。"""
 
         evidence_by_id = {evidence.evidence_id: evidence for evidence, _facts in entries}
         facts_by_evidence_id = {evidence.evidence_id: facts for evidence, facts in entries}
         issues: list[ResolutionIssue] = []
-        with self.database.connect() as conn:
+        with (nullcontext(conn) if conn is not None else self.database.connect()) as conn:
             for work in graph.works:
                 work_entries = [
                     (evidence_by_id[evidence_id], facts_by_evidence_id.get(evidence_id))
@@ -1143,6 +1140,64 @@ class V4RevisionService:
                     )
                 )
         return issues
+
+    def _evaluate_draft(
+        self,
+        entries: list[tuple[SourceEvidence, ParsedFacts]],
+        *,
+        conn,
+        frozen_candidates: dict[str, list] | None = None,
+        candidate_search: CandidateSearch | None = None,
+    ) -> tuple[ResolvedMediaGraph, dict[str, list]]:
+        """在调用方事务快照内重算草稿图、候选和全部身份检查。
+
+        ``frozen_candidates`` 只作为离线候选输入，绝不触发网络搜索；人工
+        修正导致 Work key 改变时，旧 key 没有候选会自然回到待确认状态。
+        """
+
+        graph = self.resolver.resolve(entries)
+        if frozen_candidates is not None:
+            def search(work_key, _queries, _year, _media_type):
+                return frozen_candidates.get(work_key, [])
+        elif candidate_search is not None:
+            search = candidate_search
+        else:
+            def search(_work_key, _queries, _year, _media_type):
+                return []
+
+        existing_bindings = self._existing_bindings_by_key(
+            graph,
+            entries,
+            conn=conn,
+        )
+        candidates_by_key, merge_map, candidate_issues = candidate_service.plan_work_candidates(
+            graph,
+            entries,
+            search,
+            existing_bindings=existing_bindings,
+            preserve_candidate_status=frozen_candidates is not None,
+        )
+        candidate_issues.extend(
+            self._candidate_identity_conflicts(
+                graph,
+                candidates_by_key,
+                entries,
+                conn=conn,
+            )
+        )
+        candidate_issues.extend(
+            self._structural_identity_conflicts(graph, entries, conn=conn)
+        )
+        graph = candidate_service.merge_graph(graph, merge_map)
+        if candidate_issues:
+            graph = replace(graph, issues=(*graph.issues, *candidate_issues))
+        return graph, candidates_by_key
+
+    @staticmethod
+    def _graph_digest(graph: ResolvedMediaGraph) -> str:
+        return hashlib.sha256(
+            json.dumps(asdict(graph), sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
 
     def create_draft(
         self,
@@ -1192,7 +1247,7 @@ class V4RevisionService:
             candidates_by_key = self._load_draft_candidates(revision_id)
             graph = candidate_service.merge_graph(
                 graph,
-                _merge_map_from_candidates(candidates_by_key),
+                _merge_map_from_candidates(graph, candidates_by_key),
             )
         else:
             if candidate_search is not None:
@@ -1217,83 +1272,84 @@ class V4RevisionService:
         source_metadata = source_metadata or {}
         created_at = _now()
 
-        with self.database.connect() as conn:
-            # 同一来源只允许一份可操作草稿。旧扫描的草稿保留审计证据，
-            # 但必须退出候选集，避免来源卡把新扫描和旧识别结果拼在一起。
-            conn.execute(
-                """
-                UPDATE import_revisions
-                SET status = 'superseded'
-                WHERE root_id = ? AND scan_id != ? AND revision_id != ? AND status = 'draft'
-                """,
-                (root_id, scan_id, revision_id),
-            )
-            conn.execute(
-                """
-                INSERT INTO source_roots(
-                    root_id, provider, ingest_method, source_locator, playback_locator,
-                    route_id, display_name, root_container, source_mode, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(root_id) DO UPDATE SET
-                    provider = excluded.provider,
-                    ingest_method = excluded.ingest_method,
-                    source_locator = CASE
-                        WHEN excluded.source_locator != '' THEN excluded.source_locator
-                        ELSE source_roots.source_locator
-                    END,
-                    playback_locator = CASE
-                        WHEN excluded.playback_locator != '' THEN excluded.playback_locator
-                        ELSE source_roots.playback_locator
-                    END,
-                    route_id = CASE
-                        WHEN excluded.route_id != '' THEN excluded.route_id
-                        ELSE source_roots.route_id
-                    END,
-                    display_name = CASE
-                        WHEN excluded.display_name != '' THEN excluded.display_name
-                        ELSE source_roots.display_name
-                    END,
-                    root_container = CASE
-                        WHEN excluded.root_container != '' THEN excluded.root_container
-                        ELSE source_roots.root_container
-                    END,
-                    source_mode = CASE
-                        WHEN excluded.source_mode != '' THEN excluded.source_mode
-                        ELSE source_roots.source_mode
-                    END,
-                    enabled = 1,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    root_id,
-                    source_provider,
-                    ingest_method,
-                    str(source_metadata.get("source_locator") or ""),
-                    str(source_metadata.get("playback_locator") or ""),
-                    str(source_metadata.get("route_id") or ""),
-                    str(source_metadata.get("display_name") or ""),
-                    str(source_metadata.get("root_container") or ""),
-                    source_mode,
-                    created_at,
-                    created_at,
-                ),
-            )
-            existing_scan = conn.execute(
-                "SELECT scan_id FROM source_scans WHERE scan_id = ?",
-                (scan_id,),
-            ).fetchone()
-            if existing_scan is None:
-                generation = conn.execute(
-                    "SELECT COALESCE(MAX(generation), 0) + 1 FROM source_scans WHERE root_id = ?",
-                    (root_id,),
-                ).fetchone()[0]
+        if not _publish:
+            with self.database.connect() as conn:
+                # 同一来源只允许一份可操作草稿。旧扫描的草稿保留审计证据，
+                # 但必须退出候选集，避免来源卡把新扫描和旧识别结果拼在一起。
                 conn.execute(
                     """
-                    INSERT INTO source_scans(scan_id, root_id, generation, status)
-                    VALUES (?, ?, ?, 'completed')
+                    UPDATE import_revisions
+                    SET status = 'superseded'
+                    WHERE root_id = ? AND scan_id != ? AND revision_id != ? AND status = 'draft'
                     """,
-                    (scan_id, root_id, generation),
+                    (root_id, scan_id, revision_id),
                 )
+                conn.execute(
+                    """
+                    INSERT INTO source_roots(
+                        root_id, provider, ingest_method, source_locator, playback_locator,
+                        route_id, display_name, root_container, source_mode, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(root_id) DO UPDATE SET
+                        provider = excluded.provider,
+                        ingest_method = excluded.ingest_method,
+                        source_locator = CASE
+                            WHEN excluded.source_locator != '' THEN excluded.source_locator
+                            ELSE source_roots.source_locator
+                        END,
+                        playback_locator = CASE
+                            WHEN excluded.playback_locator != '' THEN excluded.playback_locator
+                            ELSE source_roots.playback_locator
+                        END,
+                        route_id = CASE
+                            WHEN excluded.route_id != '' THEN excluded.route_id
+                            ELSE source_roots.route_id
+                        END,
+                        display_name = CASE
+                            WHEN excluded.display_name != '' THEN excluded.display_name
+                            ELSE source_roots.display_name
+                        END,
+                        root_container = CASE
+                            WHEN excluded.root_container != '' THEN excluded.root_container
+                            ELSE source_roots.root_container
+                        END,
+                        source_mode = CASE
+                            WHEN excluded.source_mode != '' THEN excluded.source_mode
+                            ELSE source_roots.source_mode
+                        END,
+                        enabled = 1,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        root_id,
+                        source_provider,
+                        ingest_method,
+                        str(source_metadata.get("source_locator") or ""),
+                        str(source_metadata.get("playback_locator") or ""),
+                        str(source_metadata.get("route_id") or ""),
+                        str(source_metadata.get("display_name") or ""),
+                        str(source_metadata.get("root_container") or ""),
+                        source_mode,
+                        created_at,
+                        created_at,
+                    ),
+                )
+                existing_scan = conn.execute(
+                    "SELECT scan_id FROM source_scans WHERE scan_id = ?",
+                    (scan_id,),
+                ).fetchone()
+                if existing_scan is None:
+                    generation = conn.execute(
+                        "SELECT COALESCE(MAX(generation), 0) + 1 FROM source_scans WHERE root_id = ?",
+                        (root_id,),
+                    ).fetchone()[0]
+                    conn.execute(
+                        """
+                        INSERT INTO source_scans(scan_id, root_id, generation, status)
+                        VALUES (?, ?, ?, 'completed')
+                        """,
+                        (scan_id, root_id, generation),
+                    )
 
         # Facts are immutable. Re-observing the same evidence is idempotent and
         # never replaces the previously parsed payload.
@@ -1323,6 +1379,42 @@ class V4RevisionService:
         with self.database.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
+                if _publish:
+                    # 确认发布必须在同一写事务中重新读取事实、覆盖和冻结候选。
+                    # confirm() 之前的预览只能作为提示，不能把旧快照直接写入权威表。
+                    current_revision = conn.execute(
+                        "SELECT status, root_id, scan_id FROM import_revisions "
+                        "WHERE revision_id = ?",
+                        (revision_id,),
+                    ).fetchone()
+                    if current_revision is None:
+                        raise KeyError(revision_id)
+                    if current_revision["status"] != "draft":
+                        raise ValueError(f"revision 已经不是可重建草稿: {revision_id}")
+                    entries = self._load_revision_entries(revision_id, conn=conn)
+                    candidates_by_key = self._load_draft_candidates(revision_id, conn=conn)
+                    graph, candidates_by_key = self._evaluate_draft(
+                        entries,
+                        conn=conn,
+                        frozen_candidates=candidates_by_key,
+                    )
+                    if graph.issues:
+                        raise RevisionBlockedError("revision 仍有 review issue，不能确认")
+                    root_id = str(current_revision["root_id"] or root_id)
+                    scan_id = str(current_revision["scan_id"] or scan_id)
+                    override_payloads = self._load_override_payloads(revision_id, conn=conn)
+                    graph_digest = self._graph_digest(graph)
+                    facts_by_evidence = {
+                        evidence.evidence_id: facts for evidence, facts in entries
+                    }
+                    episodes_by_evidence = {}
+                    for episode in graph.episodes:
+                        for evidence_id in episode.asset_evidence_ids:
+                            episodes_by_evidence.setdefault(evidence_id, []).append(episode)
+                    work_assets_by_evidence = {}
+                    for work_asset in graph.work_assets:
+                        for evidence_id in work_asset.asset_evidence_ids:
+                            work_assets_by_evidence.setdefault(evidence_id, []).append(work_asset)
                 existing_revision = conn.execute(
                     "SELECT status FROM import_revisions WHERE revision_id = ?",
                     (revision_id,),
@@ -1482,6 +1574,10 @@ class V4RevisionService:
                                 ):
                                     continue
                                 source_work_ids.add(binding["work_id"])
+                        if len(source_work_ids) > 1:
+                            raise RevisionBlockedError(
+                                "同一来源作品边界已对应多部作品，无法安全复用；请检查识别结果后重试"
+                            )
                         if len(source_work_ids) == 1:
                             existing_work = conn.execute(
                                 "SELECT * FROM works WHERE work_id = ?",
@@ -2007,32 +2103,14 @@ class V4RevisionService:
                 raise KeyError(revision_id)
             if revision["status"] != "draft":
                 raise RuntimeError("只有 draft revision 可以读取识别预览")
-            issue_rows = conn.execute(
-                """
-                SELECT code, evidence_id, message
-                FROM revision_issues
-                WHERE revision_id = ? AND resolved = 0
-                ORDER BY issue_id
-                """,
-                (revision_id,),
-            ).fetchall()
-
-        entries = self._load_revision_entries(revision_id)
-        graph = self.resolver.resolve(entries)
-        candidates_by_key = self._load_draft_candidates(revision_id)
-        graph = candidate_service.merge_graph(
-            graph,
-            _merge_map_from_candidates(candidates_by_key),
-        )
-        issues = tuple(
-            ResolutionIssue(
-                code=str(row["code"]),
-                evidence_id=str(row["evidence_id"] or ""),
-                message=str(row["message"]),
+            entries = self._load_revision_entries(revision_id, conn=conn)
+            candidates_by_key = self._load_draft_candidates(revision_id, conn=conn)
+            graph, _candidates = self._evaluate_draft(
+                entries,
+                conn=conn,
+                frozen_candidates=candidates_by_key,
             )
-            for row in issue_rows
-        )
-        return replace(graph, issues=issues)
+            return graph
 
     def apply_override(
         self,
@@ -2047,49 +2125,69 @@ class V4RevisionService:
             raise ValueError("人工修正不能为空")
         normalized = self._normalize_override(changes)
         with self.database.connect() as conn:
-            revision = conn.execute(
-                "SELECT status, root_id, scan_id FROM import_revisions WHERE revision_id = ?",
-                (revision_id,),
-            ).fetchone()
-            if revision is None:
-                raise KeyError(revision_id)
-            if revision["status"] != "draft":
-                raise RuntimeError("只有 draft revision 可以人工修正")
-            member = conn.execute(
-                "SELECT 1 FROM revision_evidence WHERE revision_id = ? AND evidence_id = ?",
-                (revision_id, evidence_id),
-            ).fetchone()
-            if member is None:
-                raise KeyError(evidence_id)
-            existing = conn.execute(
-                "SELECT overrides_json FROM revision_overrides WHERE revision_id = ? AND evidence_id = ?",
-                (revision_id, evidence_id),
-            ).fetchone()
-            merged = json.loads(existing["overrides_json"] or "{}") if existing is not None else {}
-            merged.update(normalized)
-            conn.execute(
-                """
-                INSERT INTO revision_overrides(
-                    revision_id, evidence_id, overrides_json, created_at
-                ) VALUES (?, ?, ?, ?)
-                ON CONFLICT(revision_id, evidence_id) DO UPDATE SET
-                    overrides_json = excluded.overrides_json
-                """,
-                (revision_id, evidence_id, json.dumps(merged, ensure_ascii=False), _now()),
-            )
-        entries = self._load_revision_entries(revision_id)
-        graph = self.resolver.resolve(entries)
-        with self.database.connect() as conn:
-            conn.execute("DELETE FROM revision_issues WHERE revision_id = ?", (revision_id,))
-            for index, issue in enumerate(graph.issues):
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                revision = conn.execute(
+                    "SELECT status FROM import_revisions WHERE revision_id = ?",
+                    (revision_id,),
+                ).fetchone()
+                if revision is None:
+                    raise KeyError(revision_id)
+                if revision["status"] != "draft":
+                    raise RuntimeError("只有 draft revision 可以人工修正")
+                member = conn.execute(
+                    "SELECT 1 FROM revision_evidence WHERE revision_id = ? AND evidence_id = ?",
+                    (revision_id, evidence_id),
+                ).fetchone()
+                if member is None:
+                    raise KeyError(evidence_id)
+                existing = conn.execute(
+                    "SELECT overrides_json FROM revision_overrides "
+                    "WHERE revision_id = ? AND evidence_id = ?",
+                    (revision_id, evidence_id),
+                ).fetchone()
+                merged = (
+                    json.loads(existing["overrides_json"] or "{}")
+                    if existing is not None
+                    else {}
+                )
+                merged.update(normalized)
                 conn.execute(
                     """
-                    INSERT INTO revision_issues(revision_id, issue_id, code, evidence_id, message)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO revision_overrides(
+                        revision_id, evidence_id, overrides_json, created_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(revision_id, evidence_id) DO UPDATE SET
+                        overrides_json = excluded.overrides_json
                     """,
-                    (revision_id, f"issue-{index}", issue.code, issue.evidence_id, issue.message),
+                    (revision_id, evidence_id, json.dumps(merged, ensure_ascii=False), _now()),
                 )
-        return graph
+
+                entries = self._load_revision_entries(revision_id, conn=conn)
+                frozen_candidates = self._load_draft_candidates(revision_id, conn=conn)
+                graph, _candidates = self._evaluate_draft(
+                    entries,
+                    conn=conn,
+                    frozen_candidates=frozen_candidates,
+                )
+                conn.execute("DELETE FROM revision_issues WHERE revision_id = ?", (revision_id,))
+                for index, issue in enumerate(graph.issues):
+                    conn.execute(
+                        """
+                        INSERT INTO revision_issues(revision_id, issue_id, code, evidence_id, message)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (revision_id, f"issue-{index}", issue.code, issue.evidence_id, issue.message),
+                    )
+                conn.execute(
+                    "UPDATE import_revisions SET graph_digest = ? WHERE revision_id = ?",
+                    (self._graph_digest(graph), revision_id),
+                )
+                conn.commit()
+                return graph
+            except Exception:
+                conn.rollback()
+                raise
 
     @staticmethod
     def _normalize_override(changes: dict) -> dict:
@@ -2151,9 +2249,9 @@ class V4RevisionService:
                 raise ValueError(f"人工修正字段 {key} 必须是布尔值")
         return normalized
 
-    def _load_revision_entries(self, revision_id: str) -> list[tuple[SourceEvidence, ParsedFacts]]:
-        with self.database.connect() as conn:
-            rows = conn.execute(
+    def _load_revision_entries(self, revision_id: str, conn=None) -> list[tuple[SourceEvidence, ParsedFacts]]:
+        with (nullcontext(conn) if conn is not None else self.database.connect()) as connection:
+            rows = connection.execute(
                 """
                 SELECT re.evidence_id, re.parsed_fact_id,
                        COALESCE(ro.overrides_json, '{}') AS overrides_json
@@ -2165,20 +2263,24 @@ class V4RevisionService:
                 """,
                 (revision_id,),
             ).fetchall()
-        entries = []
-        tuple_fields = {"title_candidates", "edition_tags"}
-        for row in rows:
-            evidence = self.repository.get_source_evidence(row["evidence_id"])
-            facts = self.repository.get_parsed_facts(row["parsed_fact_id"])
-            overrides = json.loads(row["overrides_json"] or "{}")
-            for key in tuple_fields:
-                if key in overrides:
-                    overrides[key] = tuple(overrides[key] or ())
-            entries.append((evidence, replace(facts, **overrides)))
+            entries = []
+            tuple_fields = {"title_candidates", "edition_tags"}
+            for row in rows:
+                evidence = self.repository.get_source_evidence(
+                    row["evidence_id"], conn=connection
+                )
+                facts = self.repository.get_parsed_facts(
+                    row["parsed_fact_id"], conn=connection
+                )
+                overrides = json.loads(row["overrides_json"] or "{}")
+                for key in tuple_fields:
+                    if key in overrides:
+                        overrides[key] = tuple(overrides[key] or ())
+                entries.append((evidence, replace(facts, **overrides)))
         return entries
 
-    def _load_override_payloads(self, revision_id: str) -> dict[str, dict]:
-        with self.database.connect() as conn:
+    def _load_override_payloads(self, revision_id: str, conn=None) -> dict[str, dict]:
+        with (nullcontext(conn) if conn is not None else self.database.connect()) as conn:
             rows = conn.execute(
                 "SELECT evidence_id, overrides_json FROM revision_overrides WHERE revision_id = ?",
                 (revision_id,),
@@ -2200,21 +2302,12 @@ class V4RevisionService:
                 return
             if revision["status"] != "draft":
                 raise RuntimeError(f"revision 状态不可确认: {revision['status']}")
-            unresolved = conn.execute(
-                "SELECT 1 FROM revision_issues WHERE revision_id = ? AND resolved = 0 LIMIT 1",
-                (revision_id,),
-            ).fetchone()
-            if unresolved is not None:
-                raise RevisionBlockedError("revision 仍有 review issue，不能确认")
-        entries = self._load_revision_entries(revision_id)
-        override_payloads = self._load_override_payloads(revision_id)
         self.create_draft(
             revision_id,
-            entries,
+            [],
             root_id=str(revision["root_id"]),
             scan_id=str(revision["scan_id"]),
             _publish=True,
-            _override_payloads=override_payloads,
         )
 
     @staticmethod

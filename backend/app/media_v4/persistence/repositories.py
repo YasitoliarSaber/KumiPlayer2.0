@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 
 from app.media_v4.domain.models import ParsedFacts, SourceEvidence
 from app.media_v4.persistence.database import V4Database
@@ -41,42 +42,7 @@ class V4Repository:
         )
 
     def save_source_evidence(self, evidence: SourceEvidence) -> None:
-        with self.database.connect() as conn:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO source_evidence(
-                    evidence_id, scan_id, root_id, provider, source_key, relative_path, entry_kind,
-                    size, mtime, fingerprint, raw_file_id, ingest_method, source_route_id,
-                    source_locator, playback_locator, tmdb_hint_id, tmdb_hint_type,
-                    import_family, target_filename, observed_at, presence_state
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    evidence.evidence_id,
-                    evidence.scan_id,
-                    evidence.root_id,
-                    evidence.provider,
-                    evidence.source_key,
-                    evidence.relative_path,
-                    evidence.entry_kind,
-                    evidence.size,
-                    evidence.mtime,
-                    evidence.fingerprint,
-                    evidence.raw_file_id,
-                    evidence.ingest_method,
-                    evidence.source_route_id,
-                    evidence.source_locator,
-                    evidence.playback_locator,
-                    evidence.tmdb_hint_id,
-                    evidence.tmdb_hint_type,
-                    evidence.import_family,
-                    evidence.target_filename,
-                    evidence.observed_at,
-                    evidence.presence_state,
-                ),
-            )
-        if self.get_source_evidence(evidence.evidence_id) != evidence:
-            raise ValueError(f"不可变 SourceEvidence 冲突: {evidence.evidence_id}")
+        self.save_scan_evidence_bulk([evidence])
 
     @staticmethod
     def _source_evidence_values(evidence: SourceEvidence) -> tuple:
@@ -109,7 +75,76 @@ class V4Repository:
 
         if not evidence:
             return
+        # SQLite 的两个唯一约束分别保护 evidence 身份和扫描内来源键。
+        # 先在内存和同一连接中核对完整 payload，不能让 INSERT OR IGNORE
+        # 把冲突静默吞掉；这样流式批次和最终兜底路径遵守同一合同。
+        by_id: dict[str, tuple] = {}
+        by_scan_key: dict[tuple[str, str], tuple] = {}
+        unique_values: list[tuple] = []
+        for item in evidence:
+            values = self._source_evidence_values(item)
+            previous = by_id.get(item.evidence_id)
+            if previous is not None and previous != values:
+                raise ValueError(f"不可变 SourceEvidence 冲突: {item.evidence_id}")
+            scan_key = (item.scan_id, item.source_key)
+            previous = by_scan_key.get(scan_key)
+            if previous is not None and previous != values:
+                raise ValueError(
+                    f"不可变 SourceEvidence 冲突: {item.scan_id}/{item.source_key}"
+                )
+            if item.evidence_id not in by_id:
+                unique_values.append(values)
+            by_id[item.evidence_id] = values
+            by_scan_key[scan_key] = values
+
         with self.database.connect() as conn:
+            existing_by_id: dict[str, tuple] = {}
+            ids = list(by_id)
+            for offset in range(0, len(ids), 400):
+                chunk = ids[offset : offset + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT * FROM source_evidence WHERE evidence_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                existing_by_id.update(
+                    {
+                        str(row["evidence_id"]): self._source_evidence_values(
+                            self._row_to_source_evidence(row)
+                        )
+                        for row in rows
+                    }
+                )
+
+            scan_ids = sorted({scan_id for scan_id, _source_key in by_scan_key})
+            existing_by_scan_key: dict[tuple[str, str], tuple] = {}
+            for offset in range(0, len(scan_ids), 400):
+                chunk = scan_ids[offset : offset + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT * FROM source_evidence WHERE scan_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                existing_by_scan_key.update(
+                    {
+                        (str(row["scan_id"]), str(row["source_key"])): self._source_evidence_values(
+                            self._row_to_source_evidence(row)
+                        )
+                        for row in rows
+                    }
+                )
+
+            for evidence_id, values in by_id.items():
+                existing = existing_by_id.get(evidence_id)
+                if existing is not None and existing != values:
+                    raise ValueError(f"不可变 SourceEvidence 冲突: {evidence_id}")
+            for scan_key, values in by_scan_key.items():
+                existing = existing_by_scan_key.get(scan_key)
+                if existing is not None and existing != values:
+                    raise ValueError(
+                        f"不可变 SourceEvidence 冲突: {scan_key[0]}/{scan_key[1]}"
+                    )
+
             conn.executemany(
                 """
                 INSERT OR IGNORE INTO source_evidence(
@@ -119,7 +154,7 @@ class V4Repository:
                     import_family, target_filename, observed_at, presence_state
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                [self._source_evidence_values(item) for item in evidence],
+                unique_values,
             )
 
     def list_scan_evidence(self, scan_id: str) -> list[SourceEvidence]:
@@ -132,8 +167,8 @@ class V4Repository:
             ).fetchall()
         return [self._row_to_source_evidence(row) for row in rows]
 
-    def get_source_evidence(self, evidence_id: str) -> SourceEvidence:
-        with self.database.connect() as conn:
+    def get_source_evidence(self, evidence_id: str, conn=None) -> SourceEvidence:
+        with (nullcontext(conn) if conn is not None else self.database.connect()) as conn:
             row = conn.execute(
                 "SELECT * FROM source_evidence WHERE evidence_id = ?",
                 (evidence_id,),
@@ -280,8 +315,8 @@ class V4Repository:
             warnings=tuple(json.loads(row["warnings_json"])),
         )
 
-    def get_parsed_facts(self, parsed_fact_id: str) -> ParsedFacts:
-        with self.database.connect() as conn:
+    def get_parsed_facts(self, parsed_fact_id: str, conn=None) -> ParsedFacts:
+        with (nullcontext(conn) if conn is not None else self.database.connect()) as conn:
             row = conn.execute(
                 "SELECT * FROM parsed_facts WHERE parsed_fact_id = ?",
                 (parsed_fact_id,),

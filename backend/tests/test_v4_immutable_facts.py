@@ -244,3 +244,45 @@ def test_reusing_immutable_identity_with_different_payload_is_rejected(tmp_path)
 
     with pytest.raises(ValueError, match="SourceEvidence 冲突"):
         repository.save_source_evidence(replace(evidence, relative_path="Other/file.mkv"))
+
+
+def test_bulk_source_evidence_rejects_existing_and_batch_conflicts_atomically(tmp_path):
+    from dataclasses import replace
+
+    from app.media_v4.domain.models import SourceEvidence
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.persistence.repositories import V4Repository
+
+    database = V4Database(tmp_path / "bulk-evidence-conflict.db")
+    database.initialize()
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO source_roots(root_id, provider, ingest_method, created_at, updated_at) "
+            "VALUES ('root', 'local', 'scan', 'now', 'now')"
+        )
+        conn.execute(
+            "INSERT INTO source_scans(scan_id, root_id, generation, status) "
+            "VALUES ('scan', 'root', 1, 'completed')"
+        )
+
+    repository = V4Repository(database)
+    first = SourceEvidence(
+        evidence_id="ev-existing",
+        scan_id="scan",
+        root_id="root",
+        source_key="Show/01.mkv",
+        relative_path="Show/01.mkv",
+        entry_kind="video",
+    )
+    repository.save_source_evidence(first)
+    second = replace(first, evidence_id="ev-second", source_key="Show/02.mkv", relative_path="Show/02.mkv")
+
+    with pytest.raises(ValueError, match="SourceEvidence 冲突"):
+        repository.save_scan_evidence_bulk([second, replace(first, size=99)])
+
+    assert repository.list_scan_evidence("scan") == [first]
+
+    duplicate_id = replace(second, evidence_id="ev-second", relative_path="Show/other.mkv")
+    with pytest.raises(ValueError, match="SourceEvidence 冲突"):
+        repository.save_scan_evidence_bulk([second, duplicate_id])
+    assert repository.list_scan_evidence("scan") == [first]

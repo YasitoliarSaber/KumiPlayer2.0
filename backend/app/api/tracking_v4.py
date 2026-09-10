@@ -127,6 +127,7 @@ def _enqueue_root_incremental(database, config, *, root_id: str, remote_root: st
             _client(config),
             baseline=baseline,
             state=state,
+            scan_id=scan_id,
             mapping_root=_remote_root(config),
             mount_root=config.openlist_mount_root,
             default_provider=routed_provider,

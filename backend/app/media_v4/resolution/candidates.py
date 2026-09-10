@@ -241,8 +241,14 @@ def plan_work_candidates(
     search: CandidateSearch,
     *,
     existing_bindings: dict[str, list[tuple[str, str, str]]] | None = None,
+    preserve_candidate_status: bool = False,
 ) -> tuple[dict[str, list[WorkCandidate]], dict[str, str], list[ResolutionIssue]]:
-    """为每个 draft Work 生成候选，并给出合并映射与歧义 issue。"""
+    """为每个 draft Work 生成候选，并给出合并映射与歧义 issue。
+
+    ``preserve_candidate_status`` 用于确认阶段复核已持久化的候选快照。
+    此时不重新评分或把冲突候选降级，否则同一份草稿会在预览与确认之间改变
+    issue 语义；新候选仍按默认路径评分。
+    """
 
     bindings = existing_bindings or {}
     candidates_by_key: dict[str, list[WorkCandidate]] = {}
@@ -351,8 +357,12 @@ def plan_work_candidates(
             if not supported_provider(candidate.provider):
                 continue
             key = (candidate.provider, candidate.media_type, candidate.provider_id)
-            scored = _score_candidate(candidate, work, queries, nfo_titles)
-            if verified_keys and key not in verified_keys:
+            scored = (
+                candidate
+                if preserve_candidate_status
+                else _score_candidate(candidate, work, queries, nfo_titles)
+            )
+            if not preserve_candidate_status and verified_keys and key not in verified_keys:
                 scored = replace(scored, confidence="medium", status="rejected")
             if key not in candidates or _confidence_rank(scored.confidence) > _confidence_rank(candidates[key].confidence):
                 candidates[key] = scored
@@ -419,9 +429,16 @@ def plan_work_candidates(
                 message="该作品存在多个互不相同的可信 Provider 候选，需人工确认后才能导入",
             ))
 
-    # 合并映射：同一 provider identity 的多个 draft Work → 最接近权威候选标题
-    # 的 work_key。不能简单采用遍历到的第一个，否则“主系列 + 特别篇发布包”
-    # 恰好先扫到特别篇时，会让短篇包标题反向覆盖主系列卡片标题。
+    merge_map = merge_map_from_candidates(graph, candidates_by_key)
+    return candidates_by_key, merge_map, issues
+
+
+def merge_map_from_candidates(
+    graph: ResolvedMediaGraph,
+    candidates_by_key: dict[str, list[WorkCandidate]],
+) -> dict[str, str]:
+    """按候选标题确定性选择同一 Provider 身份的主 Work。"""
+
     works_by_key = {work.work_key: work for work in graph.works}
     identity_members: dict[tuple[str, str, str], list[tuple[str, WorkCandidate]]] = {}
     for work in graph.works:
@@ -430,6 +447,8 @@ def plan_work_candidates(
                 continue
             identity = (item.provider, item.media_type, item.provider_id)
             identity_members.setdefault(identity, []).append((work.work_key, item))
+
+    merge_map: dict[str, str] = {}
     for members in identity_members.values():
         if len(members) < 2:
             continue
@@ -449,7 +468,7 @@ def plan_work_candidates(
         for work_key, _item in members:
             if work_key != owner:
                 merge_map[work_key] = owner
-    return candidates_by_key, merge_map, issues
+    return merge_map
 
 
 def merge_graph(graph: ResolvedMediaGraph, merge_map: dict[str, str]) -> ResolvedMediaGraph:

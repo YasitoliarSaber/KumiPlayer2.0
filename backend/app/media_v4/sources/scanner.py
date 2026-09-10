@@ -403,6 +403,7 @@ def scan_local_directory(
     root_path: str | Path,
     *,
     excluded_roots: Iterable[str | Path] = (),
+    scan_id: str | None = None,
     should_cancel=None,
     on_evidence_batch: Callable | None = None,
     on_progress: Callable | None = None,
@@ -416,7 +417,7 @@ def scan_local_directory(
     if not root.is_dir():
         raise NotADirectoryError(str(root))
     root_id = _root_id(root)
-    scan_id = "scan_" + uuid.uuid4().hex
+    actual_scan_id = scan_id or ("scan_" + uuid.uuid4().hex)
     evidence = []
     pending: list = []
     effective_batch_size = max(1, int(batch_size))
@@ -439,7 +440,7 @@ def scan_local_directory(
         item = to_source_evidence(
             SourceEntry(
                 root_id=root_id,
-                scan_id=scan_id,
+                scan_id=actual_scan_id,
                 provider="local",
                 ingest_method="local_scan",
                 relative_path=relative,
@@ -475,7 +476,7 @@ def scan_local_directory(
             total_count=len(evidence),
         )
     evidence.sort(key=lambda item: item.source_key.casefold())
-    return root_id, scan_id, evidence
+    return root_id, actual_scan_id, evidence
 
 
 def parse_directory_tree_file(
@@ -506,6 +507,7 @@ def scan_openlist_directory(
     mapping_root: str,
     mount_root: str,
     root_id: str,
+    scan_id: str | None = None,
     default_provider: str = "unknown",
     routes: list[OpenListRouteConfig] | None = None,
     max_entries: int = 20_000,
@@ -520,7 +522,7 @@ def scan_openlist_directory(
 
     selected_root = normalize_remote_path(remote_root)
     mapping_root = normalize_remote_path(mapping_root)
-    scan_id = "scan_" + uuid.uuid4().hex
+    actual_scan_id = scan_id or ("scan_" + uuid.uuid4().hex)
     evidence = []
     queue: deque[tuple[str, int]] = deque([(selected_root, 0)])
     seen_directories: set[str] = set()
@@ -568,7 +570,7 @@ def scan_openlist_directory(
                 item_evidence = to_source_evidence(
                     SourceEntry(
                         root_id=root_id,
-                        scan_id=scan_id,
+                        scan_id=actual_scan_id,
                         provider=provider,
                         ingest_method="openlist_api",
                         relative_path=relative,
@@ -608,4 +610,4 @@ def scan_openlist_directory(
             total_count=len(evidence),
         )
     evidence.sort(key=lambda item: item.source_key.casefold())
-    return scan_id, evidence
+    return actual_scan_id, evidence
