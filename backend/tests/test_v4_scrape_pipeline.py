@@ -464,6 +464,7 @@ def test_scrape_target_contains_provider_hint_and_episode_mapping(tmp_path):
     ]
     assert captured[0]["episodes"][0]["local_season_number"] == 1
     assert captured[0]["episodes"][0]["local_episode_number"] == 1
+    assert captured[0]["show_type"] == "anime_series"
     with database.connect() as conn:
         binding = conn.execute(
             "SELECT media_type FROM provider_bindings WHERE provider = 'tmdb'"

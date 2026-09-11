@@ -187,6 +187,7 @@ def test_metadata_ranks_all_title_queries_instead_of_adopting_first_exact_hit(mo
                     "original_name": "Less Trusted Result",
                     "first_air_date": "2020-01-01",
                     "popularity": 1,
+                    "genre_ids": [18],
                 }]
             assert query == "原文作品名"
             return [{
@@ -195,6 +196,7 @@ def test_metadata_ranks_all_title_queries_instead_of_adopting_first_exact_hit(mo
                 "original_name": "原文作品名",
                 "first_air_date": "2020-01-01",
                 "popularity": 99,
+                "genre_ids": [16],
             }]
 
         def get_tv_detail(self, provider_id):
@@ -233,6 +235,7 @@ def test_metadata_ranks_all_title_queries_instead_of_adopting_first_exact_hit(mo
 
     result = metadata_module.default_metadata_provider({
         "work_type": "series",
+        "show_type": "anime_series",
         "preferred_title": "本地化名称",
         "original_title": "原文作品名",
         "year": 2020,
@@ -246,6 +249,104 @@ def test_metadata_ranks_all_title_queries_instead_of_adopting_first_exact_hit(mo
     assert result["candidate_decision"]["decision"] == "auto_adopted"
     assert result["candidate_decision"]["selected_score"] >= 55
     assert result["candidate_decision"]["ranked_candidates"][0]["provider_id"] == "200"
+
+
+def test_metadata_uses_anime_domain_to_resolve_same_title_live_action_result(monkeypatch):
+    """真实同名动画/真人候选应依靠作品域自动选择动画，而非要求人工确认。"""
+
+    from app.media_v4.jobs import metadata as metadata_module
+
+    class FakeTMDBClient:
+        def __init__(self, bearer_token):
+            assert bearer_token == "token"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def search_tv(self, query, year):
+            assert query == "Yuru Camp"
+            assert year is None
+            return [
+                {
+                    "id": 76075,
+                    "name": "摇曳露营△",
+                    "original_name": "ゆるキャン△",
+                    "first_air_date": "2018-01-04",
+                    "popularity": 22.5,
+                    "genre_ids": [16, 35],
+                },
+                {
+                    "id": 95623,
+                    "name": "摇曳露营△",
+                    "original_name": "ゆるキャン△",
+                    "first_air_date": "2020-01-10",
+                    "popularity": 3.5,
+                    "genre_ids": [18],
+                },
+            ]
+
+        def get_tv_detail(self, provider_id):
+            if provider_id == 76075:
+                return {
+                    "id": 76075,
+                    "name": "摇曳露营△",
+                    "original_name": "ゆるキャン△",
+                    "first_air_date": "2018-01-04",
+                    "genres": [{"id": 16, "name": "Animation"}],
+                    "alternative_titles": {"results": [{"title": "Yuru Camp"}]},
+                    "translations": {"translations": []},
+                    "images": {},
+                    "episode_run_time": [24],
+                }
+            assert provider_id == 95623
+            return {
+                "id": 95623,
+                "name": "摇曳露营△",
+                "original_name": "ゆるキャン△",
+                "first_air_date": "2020-01-10",
+                "genres": [{"id": 18, "name": "Drama"}],
+                "alternative_titles": {"results": [{"title": "Yuru Camp"}]},
+                "translations": {"translations": []},
+                "images": {},
+                "episode_run_time": [24],
+            }
+
+        @staticmethod
+        def select_best_poster(_images):
+            return ""
+
+        @staticmethod
+        def select_best_backdrop(_images):
+            return ""
+
+        @staticmethod
+        def select_best_logo(_images):
+            return ""
+
+        @staticmethod
+        def build_image_url(path, size):
+            return f"https://image.tmdb.org/t/p/{size}{path}"
+
+    monkeypatch.setattr(metadata_module, "TMDBClient", FakeTMDBClient)
+    monkeypatch.setattr(
+        metadata_module,
+        "load_config",
+        lambda: SimpleNamespace(tmdb_bearer_token="token"),
+    )
+
+    result = metadata_module.default_metadata_provider({
+        "work_type": "series",
+        "show_type": "anime_series",
+        "preferred_title": "Yuru Camp",
+        "provider_bindings": [],
+        "episodes": [],
+    })
+
+    assert result["metadata_state"] == "ready"
+    assert result["provider_id"] == "76075"
 
 
 def test_search_retries_without_year_when_year_filtered_query_is_empty(monkeypatch):

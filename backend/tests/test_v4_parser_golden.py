@@ -5,7 +5,12 @@ from __future__ import annotations
 import pytest
 
 
-def _evidence(relative_path: str, *, provider: str = "local"):
+def _evidence(
+    relative_path: str,
+    *,
+    provider: str = "local",
+    import_family: str = "anime",
+):
     from app.media_v4.sources.adapters import SourceEntry, to_source_evidence
 
     return to_source_evidence(
@@ -15,6 +20,7 @@ def _evidence(relative_path: str, *, provider: str = "local"):
             provider=provider,
             ingest_method="local_scan",
             relative_path=relative_path,
+            import_family=import_family,
         )
     )
 
@@ -45,6 +51,54 @@ def test_parser_keeps_special_and_auxiliary_as_facts_without_destroying_episode_
     assert special.special_candidate is True
     assert auxiliary.group_type in {"auxiliary", "ignored"}
     assert auxiliary.is_importable is False
+
+
+def test_parser_preserves_import_family_as_the_work_show_type():
+    """V4 不能丢掉来源已声明的动画/真人作品域。"""
+
+    from app.media_v4.parsing.parser import V4Parser
+
+    anime = V4Parser().parse(_evidence("Show/Show.S01E01.mkv", import_family="anime"))
+    live = V4Parser().parse(_evidence("Show/Show.S01E01.mkv", import_family="live"))
+
+    assert anime.show_type == "anime_series"
+    assert live.show_type == "live_series"
+
+
+def test_parser_keeps_filename_series_title_as_cross_language_candidate():
+    """目录标题与文件名异语时，两者都必须进入同一 Work 的查询证据。"""
+
+    from app.media_v4.parsing.parser import V4Parser
+
+    facts = V4Parser().parse(
+        _evidence(
+            "动画/莉可丽丝 (2022)/Season 1/"
+            "Lycoris Recoil S01E01-[1080p].mkv",
+            provider="baidu",
+            import_family="anime",
+        )
+    )
+
+    assert facts.work_title == "莉可丽丝"
+    assert "Lycoris Recoil" in facts.title_candidates
+
+
+@pytest.mark.parametrize(
+    "filename",
+    (
+        "Show [CM Collection 01].mkv",
+        "Show [Yuru Camp 2019 Music Concert].mkv",
+    ),
+)
+def test_parser_keeps_disc_promotional_collections_out_of_specials(filename: str):
+    """广告合集和演唱会附赠视频不能占用 TMDB Special 集号。"""
+
+    from app.media_v4.parsing.parser import V4Parser
+
+    facts = V4Parser().parse(_evidence(f"Show/SPs/{filename}"))
+
+    assert facts.group_type == "auxiliary"
+    assert facts.is_importable is False
 
 
 @pytest.mark.parametrize(

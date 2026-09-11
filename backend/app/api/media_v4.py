@@ -1957,6 +1957,7 @@ def metadata_search(request: MetadataSearchRequest):
             "queries": [query],
             "media_type": media_type,
             "year": work["year"],
+            "show_type": str(work["show_type"] or ""),
         },
         candidates,
     )

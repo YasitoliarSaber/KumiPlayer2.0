@@ -214,7 +214,12 @@ def test_draft_graph_keeps_movie_specials_in_one_movie_work(tmp_path):
         for evidence_id in asset.asset_evidence_ids:
             previous = evidence_work_keys.setdefault(evidence_id, asset.work_key)
             assert previous == asset.work_key
-    assert len(evidence_work_keys) == len(parsed)
+    importable_evidence_ids = {
+        evidence.evidence_id
+        for evidence, facts in parsed
+        if facts.is_importable and not facts.is_auxiliary
+    }
+    assert set(evidence_work_keys) == importable_evidence_ids
 
 
 def _work_snapshot(database: V4Database) -> dict:

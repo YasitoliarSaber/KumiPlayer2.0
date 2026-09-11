@@ -474,7 +474,7 @@ def test_library_returns_persisted_show_type_and_card_type(tmp_path, monkeypatch
 # ---------------------------------------------------------------------------
 
 
-def test_directory_tree_keeps_nfo_as_metadata_evidence_and_uses_it_for_candidates(tmp_path):
+def test_directory_tree_filters_nfo_from_offline_identity_evidence():
     from app.media_v4.sources.scanner import build_directory_tree_evidence
 
     text = "摇曳露营.nfo\nSeason 1/摇曳露营.S01E01.mkv\n"
@@ -483,6 +483,6 @@ def test_directory_tree_keeps_nfo_as_metadata_evidence_and_uses_it_for_candidate
         root_id="root-nfo",
         provider="baidu",
     )
-    by_kind = {item.entry_kind: item for item in evidence}
-    assert by_kind["metadata"].relative_path == "摇曳露营.nfo"
-    assert by_kind["video"].relative_path == "Season 1/摇曳露营.S01E01.mkv"
+    assert len(evidence) == 1
+    assert evidence[0].entry_kind == "video"
+    assert evidence[0].relative_path == "Season 1/摇曳露营.S01E01.mkv"

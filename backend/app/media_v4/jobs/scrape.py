@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from app.media_v4.jobs.completeness import assess_metadata_completeness
 from app.media_v4.jobs.control import cancel_requested, claim_running, heartbeat, mark_cancelled
 from app.media_v4.jobs.metadata_artifacts import publish_metadata_artifacts
+from app.media_v4.parsing.parser import show_type_from_import_family
 from app.media_v4.persistence.database import V4Database
 
 
@@ -203,6 +204,25 @@ class V4ScrapeService:
                 raise KeyError(job_id)
             target = dict(work) if work is not None else {"work_id": job["work_id"]}
             target["revision_id"] = job["revision_id"]
+            if not str(target.get("show_type") or "").strip():
+                import_families = {
+                    str(row["import_family"] or "").strip().casefold()
+                    for row in conn.execute(
+                        """
+                        SELECT DISTINCT se.import_family
+                        FROM revision_bindings rb
+                        JOIN source_evidence se ON se.evidence_id = rb.evidence_id
+                        WHERE rb.revision_id = ? AND rb.work_id = ?
+                        """,
+                        (job["revision_id"], job["work_id"]),
+                    ).fetchall()
+                    if str(row["import_family"] or "").strip()
+                }
+                if len(import_families) == 1:
+                    target["show_type"] = show_type_from_import_family(
+                        next(iter(import_families)),
+                        str(target.get("work_type") or ""),
+                    )
             target["provider_bindings"] = [
                 dict(row)
                 for row in conn.execute(

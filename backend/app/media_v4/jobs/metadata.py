@@ -7,7 +7,7 @@ import unicodedata
 from typing import Any
 
 from app.core.config import load_config
-from app.media_v4.resolution.ranker import CandidateRanker
+from app.media_v4.resolution.ranker import CandidateRanker, RankedCandidate
 from app.scrape.tmdb_client import (
     TMDBAuthError,
     TMDBClient,
@@ -104,8 +104,8 @@ def _normalize_title(value: object) -> str:
     return re.sub(r"[^\w\u3400-\u9fff]+", "", normalized)
 
 
-def _candidate_summary(item: dict) -> dict:
-    return {
+def _candidate_summary(item: dict) -> dict[str, Any]:
+    summary: dict[str, Any] = {
         "provider": "tmdb",
         "provider_id": str(item.get("id") or ""),
         "title": item.get("name") or item.get("title") or "",
@@ -114,11 +114,16 @@ def _candidate_summary(item: dict) -> dict:
         "media_type": "tv" if "first_air_date" in item or "name" in item else "movie",
         "popularity": _safe_float(item.get("popularity")),
     }
+    if item.get("genre_ids") is not None:
+        summary["genre_ids"] = list(item.get("genre_ids") or [])
+    if item.get("genres") is not None:
+        summary["genres"] = list(item.get("genres") or [])
+    return summary
 
 
 def _safe_float(value: object) -> float:
     try:
-        return float(value or 0.0)
+        return float(str(value or 0.0))
     except (TypeError, ValueError):
         return 0.0
 
@@ -164,7 +169,11 @@ def _ranked_candidate_payload(ranked: list) -> list[dict]:
     ]
 
 
-def _candidate_decision_payload(ranked: list, adopted, reason: str) -> dict:
+def _candidate_decision_payload(
+    ranked: list[RankedCandidate],
+    adopted: RankedCandidate | None,
+    reason: str,
+) -> dict:
     return {
         "decision": "auto_adopted" if adopted is not None else "waiting_review",
         "reason": reason,
@@ -196,7 +205,7 @@ def _rank_metadata_candidates(
     titles: list[str],
     results_by_id: dict[str, dict],
     client: TMDBClient,
-) -> tuple[list, object | None, str]:
+) -> tuple[list[RankedCandidate], RankedCandidate | None, str]:
     """把多次搜索结果统一交给 CandidateRanker 决策。"""
 
     candidates = enrich_candidate_aliases(
@@ -212,6 +221,7 @@ def _rank_metadata_candidates(
             "queries": titles,
             "media_type": media_type,
             "year": target.get("year"),
+            "show_type": target.get("show_type") or "",
         },
         candidates,
     )
@@ -347,7 +357,7 @@ def enrich_candidate_aliases(
     local_queries: list[str],
     *,
     max_details: int = 8,
-    detail_cache: dict | None = None,
+    detail_cache: dict[tuple[str, str], dict[str, Any] | None] | None = None,
     detail_budget: list[int] | None = None,
     client: TMDBClient | None = None,
 ) -> list[dict]:
@@ -382,6 +392,7 @@ def enrich_candidate_aliases(
                         else client.get_movie_detail(int(provider_id))
                     )
                 else:
+                    assert config is not None
                     with TMDBClient(bearer_token=config.tmdb_bearer_token) as detail_client:
                         detail = (
                             detail_client.get_tv_detail(int(provider_id))
@@ -393,7 +404,17 @@ def enrich_candidate_aliases(
             cache[cache_key] = detail
         detail = cache.get(cache_key)
         aliases = _extract_aliases(detail, media_type) if detail else []
-        enriched.append({**item, "aliases": aliases})
+        enriched_item = {**item, "aliases": aliases}
+        if detail:
+            detail_genres = list(detail.get("genres") or [])
+            if detail_genres:
+                enriched_item["genres"] = detail_genres
+                enriched_item["genre_ids"] = [
+                    genre.get("id")
+                    for genre in detail_genres
+                    if isinstance(genre, dict) and genre.get("id") is not None
+                ]
+        enriched.append(enriched_item)
     return enriched
 
 
@@ -441,6 +462,7 @@ def default_metadata_provider(target: dict) -> dict:
         )
 
     provider_id: int | None = None
+    candidate_decision: dict[str, Any]
 
     try:
         with TMDBClient(bearer_token=config.tmdb_bearer_token) as client:
@@ -529,7 +551,7 @@ def default_metadata_provider(target: dict) -> dict:
             clearlogo = client.select_best_logo(images) or ""
             date = detail.get("first_air_date") if media_type == "tv" else detail.get("release_date")
             runtimes = detail.get("episode_run_time") or [detail.get("runtime") or 0]
-            result = {
+            result: dict[str, Any] = {
                 "provider": "tmdb",
                 "provider_id": str(provider_id),
                 "media_type": media_type,

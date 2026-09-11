@@ -15,6 +15,7 @@ reasons；popularity 只作同分排序信号，绝不覆盖身份冲突。
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field, replace
 
 # 自动采用门槛（由人工确认语料回放校准：recall ≥ 95%、precision ≥ 98%）。
@@ -29,8 +30,6 @@ _GENERIC_TITLE_PATTERN = re.compile(r"^(剧场版| movie|映画|特别篇|总集
 _GENERIC_MIN_LENGTH = 4
 
 # 中文/日文直接等值比较前，去掉的装饰性包裹词。
-_PUNCT_PATTERN = re.compile(r"[\s·・!！?？~～_\-—–·.。'’\"”()（）\[\]【】]+")
-
 # 常见译名等值辅助：日文假名不参与规范化折叠，等值依赖别名链证据。
 _KANA_PATTERN = re.compile(r"[\u3040-\u30ff]")
 
@@ -56,13 +55,60 @@ class RankedCandidate:
 
 
 def _normalize_title(value: str | None) -> str:
-    """完整规范化标题：去装饰符号、全角折叠、小写；不做前缀截断。"""
+    """完整规范化标题：统一全角并去除全部装饰标点，不截断正文。"""
 
-    text = str(value or "").strip()
+    text = unicodedata.normalize("NFKC", str(value or "")).strip().casefold()
     if not text:
         return ""
-    text = _PUNCT_PATTERN.sub("", text)
-    return text.casefold()
+    # 不能枚举标点：网盘标题会同时出现中英文逗号、顿号、书名号和发行组
+    # 分隔符。只保留 Unicode 字母与数字，避免同一标题因一个全角逗号失配。
+    return "".join(char for char in text if char.isalnum())
+
+
+def _animation_state(candidate: dict) -> bool | None:
+    """从 TMDB genre 事实判断动画域；缺少 genre 时返回未知。"""
+
+    genre_ids: set[int] = set()
+    genre_names: set[str] = set()
+    for raw in candidate.get("genre_ids") or ():
+        try:
+            genre_ids.add(int(raw))
+        except (TypeError, ValueError):
+            continue
+    for genre in candidate.get("genres") or ():
+        raw_name = None
+        if isinstance(genre, dict):
+            raw_id = genre.get("id")
+            raw_name = genre.get("name")
+            try:
+                if raw_id is not None:
+                    genre_ids.add(int(raw_id))
+            except (TypeError, ValueError):
+                pass
+        else:
+            raw_name = genre
+        if raw_name:
+            genre_names.add(str(raw_name).strip().casefold())
+    if not genre_ids and not genre_names:
+        return None
+    return 16 in genre_ids or bool(
+        genre_names.intersection({"animation", "anime", "动画", "動畫", "アニメ"})
+    )
+
+
+def _domain_level(target: dict, candidate: dict) -> tuple[int, str]:
+    """1=作品域匹配，0=未知，-1=动画/真人域明确冲突。"""
+
+    show_type = str(target.get("show_type") or "").strip().casefold()
+    if not show_type.startswith(("anime", "live")):
+        return 0, ""
+    is_animation = _animation_state(candidate)
+    if is_animation is None:
+        return 0, ""
+    wants_animation = show_type.startswith("anime")
+    if is_animation == wants_animation:
+        return 1, "动画作品域匹配" if wants_animation else "真人作品域匹配"
+    return -1, "作品域不符（真人候选）" if wants_animation else "作品域不符（动画候选）"
 
 
 def _is_generic_title(value: str) -> bool:
@@ -210,6 +256,14 @@ def score_candidate(
         score -= 30.0
         reasons.append("类型不符")
 
+    domain_level, domain_reason = _domain_level(target, candidate)
+    if domain_level == 1:
+        score += 10.0
+        reasons.append(domain_reason)
+    elif domain_level == -1:
+        score -= 40.0
+        reasons.append(domain_reason)
+
     if part_mismatch is None:
         part_mismatch = _part_mismatch(target_titles, candidate)
     if part_mismatch:
@@ -222,10 +276,15 @@ def score_candidate(
         score -= 20.0
         reasons.append("查询标题过短或过于通用")
 
-    identity_safe = identity_level >= 2 and type_match
+    identity_safe = identity_level >= 2 and type_match and domain_level != -1
     # 硬阻断：年份硬冲突、篇章相反、类型不符——无论分数多高都不自动采用，
     # 也不进入推荐位（人工确认仍能看到完整理由）。
-    blocked = year_level == -1 or bool(part_mismatch) or not type_match
+    blocked = (
+        year_level == -1
+        or bool(part_mismatch)
+        or not type_match
+        or domain_level == -1
+    )
     return RankedCandidate(
         provider=str(candidate.get("provider") or ""),
         provider_id=str(candidate.get("provider_id") or ""),
@@ -239,6 +298,10 @@ def score_candidate(
         reasons=tuple(reasons),
         identity_safe=identity_safe,
         blocked=blocked,
+        extra={
+            "genre_ids": tuple(candidate.get("genre_ids") or ()),
+            "genres": tuple(candidate.get("genres") or ()),
+        },
     )
 
 
@@ -308,18 +371,24 @@ def auto_adopt(
 
     if not ranked:
         return None, "无候选"
-    best = ranked[0]
-    if best.blocked:
+    viable = [item for item in ranked if not item.blocked]
+    if not viable:
+        best = ranked[0]
         return None, best.reasons[0] if best.reasons else "候选被身份门禁阻断"
+    best = viable[0]
     if not best.identity_safe:
         if not best.reasons or "等值" not in "".join(best.reasons) and "前缀" not in "".join(best.reasons):
             return None, "无完整标题或可信别名等值证据"
     if best.score < min_score:
         return None, f"最高分候选分数不足（{best.score} < {min_score}）"
-    if len(ranked) > 1:
-        runner_up = ranked[1]
+    competitors = [
+        item
+        for item in viable[1:]
+        if item.identity_safe and item.score >= min_score
+    ]
+    if competitors:
+        runner_up = competitors[0]
         margin = best.score - runner_up.score
-        full_title_equal = any("完整标题等值" in reason for reason in best.reasons)
-        if margin < min_margin and not full_title_equal:
+        if margin < min_margin:
             return None, f"与第二名分差不足（{margin:.1f} < {min_margin}）"
     return best, "最高分候选，自动采用"

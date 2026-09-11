@@ -96,6 +96,80 @@ def test_unique_candidate_with_exact_title_auto_adopts():
     assert "唯一" in reason or "等值" in reason or "采用" in reason
 
 
+def test_cjk_punctuation_difference_still_counts_as_the_same_title():
+    """中文全角标点不能把唯一正确候选降成仅有类型分。"""
+
+    target = _target(
+        preferred_title="上伊那牡丹醉姿如百合",
+        queries=["上伊那牡丹醉姿如百合"],
+    )
+    candidate = _candidate(
+        provider_id="283905",
+        title="上伊那牡丹，醉姿如百合",
+        original_title="上伊那ぼたん、酔へる姿は百合の花",
+        year=2026,
+    )
+
+    ranked = rank_candidates(target, [candidate])
+    adopted, _reason = CandidateRanker().auto_adopt(ranked)
+
+    assert ranked[0].identity_safe is True
+    assert adopted is not None and adopted.provider_id == "283905"
+
+
+def test_anime_target_rejects_same_title_live_action_runner_up():
+    """动画库同名搜索结果中，真人剧不能制造需要人工处理的假歧义。"""
+
+    target = _target(
+        preferred_title="Yuru Camp",
+        queries=["Yuru Camp"],
+        show_type="anime_series",
+    )
+    anime = _candidate(
+        provider_id="76075",
+        title="摇曳露营△",
+        original_title="ゆるキャン△",
+        aliases=("Yuru Camp",),
+        year=2018,
+        popularity=22.5,
+        genre_ids=(16, 35),
+    )
+    live_action = _candidate(
+        provider_id="95623",
+        title="摇曳露营△",
+        original_title="ゆるキャン△",
+        aliases=("Yuru Camp",),
+        year=2020,
+        popularity=3.5,
+        genre_ids=(18,),
+    )
+
+    ranked = rank_candidates(target, [anime, live_action])
+    adopted, _reason = CandidateRanker().auto_adopt(ranked)
+
+    assert adopted is not None and adopted.provider_id == "76075"
+    assert next(item for item in ranked if item.provider_id == "95623").blocked is True
+
+
+def test_same_domain_same_title_candidates_still_require_review():
+    """两个同域同名候选没有其他区分证据时仍保留人工确认。"""
+
+    target = _target(
+        preferred_title="Same Anime",
+        queries=["Same Anime"],
+        show_type="anime_series",
+    )
+    candidates = [
+        _candidate(provider_id="1", title="Same Anime", genre_ids=(16,)),
+        _candidate(provider_id="2", title="Same Anime", genre_ids=(16,)),
+    ]
+
+    ranked = rank_candidates(target, candidates)
+    adopted, _reason = CandidateRanker().auto_adopt(ranked)
+
+    assert adopted is None
+
+
 # ── 语料：硬阻断（必须进入人工确认）────────────────────────────────────────
 
 

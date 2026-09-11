@@ -19,6 +19,7 @@ from app.media_v4.parsing.episode_titles import (
 )
 from app.media_v4.sources.adapters import provider_to_source
 from app.recognition.media import (
+    _extract_series_name_from_filename,
     _extract_work_container,
     _is_bracket_heavy,
     _is_generic_category_name,
@@ -43,6 +44,18 @@ _ABSOLUTE_TOKEN = re.compile(
     r"|\s(?P<trailing>\d{1,3})\s*$"
     r")"
 )
+
+
+def show_type_from_import_family(import_family: str, media_type: str) -> str:
+    """把来源域映射为稳定作品分类；不依赖在线刮削结果。"""
+
+    family = (import_family or "").strip().casefold()
+    suffix = "movie" if (media_type or "").strip().casefold() == "movie" else "series"
+    if family == "anime":
+        return f"anime_{suffix}"
+    if family == "live":
+        return f"live_{suffix}"
+    return ""
 _QUALITY_TOKENS = re.compile(
     r"(?i)(?<![a-z0-9])(2160p|1080p|1080i|720p|4k|uhd|hdr10\+?|dolby[ ._-]?vision)(?![a-z0-9])"
 )
@@ -412,7 +425,7 @@ def _parse_sidecar_nfo(evidence: SourceEvidence) -> tuple[int | None, str, str, 
 class V4Parser:
     """从一个 SourceEvidence 生成一个不可变 ParsedFacts。"""
 
-    VERSION = "v4-parser-1"
+    VERSION = "v4-parser-2"
 
     def parse(
         self,
@@ -475,8 +488,6 @@ class V4Parser:
             parse_relative = PurePosixPath(*parts[1:]).as_posix() if len(parts) > 1 else ""
             if not existing_title:
                 # 首层是通用容器时，从文件名提取稳定系列名作为权威作品名。
-                from app.recognition.media import _extract_series_name_from_filename
-
                 filename_title = _extract_series_name_from_filename(
                     PurePosixPath(parse_relative).name or PurePosixPath(evidence.relative_path).name
                 )
@@ -532,8 +543,18 @@ class V4Parser:
             # 必须服从路径已经明确声明的系列合集边界；电影/外传独立卡不吸收。
             resolved_series_group = structural_series_group
             resolved_relation_type = resolved_relation_type or "main"
+        filename_series_title = _extract_series_name_from_filename(filename)
+        if filename_series_title:
+            filename_series_title = _parse_work_title_and_year(filename_series_title)[0]
+        if is_generic_container_name(filename_series_title):
+            filename_series_title = ""
         title_candidates = _unique_non_empty(
-            (guess.work_title, resolved_series_group, guess.original_title)
+            (
+                guess.work_title,
+                resolved_series_group,
+                guess.original_title,
+                filename_series_title,
+            )
         )
         episode_title = (guess.title or "").strip()
         special_number = guess.special_number
@@ -568,7 +589,10 @@ class V4Parser:
             series_group=resolved_series_group,
             card_type=guess.card_type,
             relation_type=resolved_relation_type,
-            show_type="",
+            show_type=show_type_from_import_family(
+                evidence.import_family,
+                guess.media_type,
+            ),
             title_candidates=title_candidates,
             year_candidate=guess.year,
             season_token_raw=season_token,

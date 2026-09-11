@@ -67,7 +67,7 @@ _AUXILIARY_PATTERNS = [
     re.compile(r"(?:^|[^A-Za-z])PV(?:\s|$|[([])", re.IGNORECASE),
     re.compile(r"[\[【]MV\d*(?:\s+[^\]】]+)?[\]】]", re.IGNORECASE),
     re.compile(r"[\[【]TEASER\d*[\]】]", re.IGNORECASE),
-    re.compile(r"\[CM\d*\]", re.IGNORECASE),
+    re.compile(r"[\[【]CM(?:\s+COLLECTION)?\s*\d*[\]】]", re.IGNORECASE),
     re.compile(r"(?:^|[^A-Za-z])CM\d+", re.IGNORECASE),
     re.compile(r"\[MENU\d*\]", re.IGNORECASE),
     re.compile(r"(?:^|[^A-Za-z])MENU\d+", re.IGNORECASE),
@@ -82,6 +82,7 @@ _AUXILIARY_PATTERNS = [
     re.compile(r"\bPREVIEW\s+COLLECTION\b", re.IGNORECASE),
     re.compile(r"[\[【]\s*(?:DIGEST|PROGRAM|MOVIE\s+MANNER)\s*[\]】]", re.IGNORECASE),
     re.compile(r"\bANNOUNCEMENT\b", re.IGNORECASE),
+    re.compile(r"[\[【][^\]】]*\b(?:MUSIC\s+)?CONCERT\b[^\]】]*[\]】]", re.IGNORECASE),
     re.compile(r"菜单|预告|花絮"),
 ]
 
