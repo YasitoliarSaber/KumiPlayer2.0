@@ -316,8 +316,10 @@ def plan_work_candidates(
         # 中英文发布包合并，并保持电影/外传边界。
         from app.recognition.verified_titles import match_verified_tmdb_binding
 
-        for evidence, _facts in related:
-            binding = match_verified_tmdb_binding(evidence.relative_path)
+        # 规则必须属于解析后的作品本身。整个路径中的父目录/赠品文件名
+        # 可能包含另一作品名，不能因此把它的 ID 提升为本作品的权威。
+        for title in build_query_inputs(work, entries, related_facts=[facts for _e, facts in related]):
+            binding = match_verified_tmdb_binding(title)
             if binding is None or binding.tmdb_type != work.media_type:
                 continue
             key = ("tmdb", binding.tmdb_type, str(binding.tmdb_id))
@@ -357,6 +359,10 @@ def plan_work_candidates(
             if not supported_provider(candidate.provider):
                 continue
             key = (candidate.provider, candidate.media_type, candidate.provider_id)
+            if candidate.evidence in {"existing_provider_binding", "verified_path_binding"} and key not in confirmed:
+                # 草稿快照不是独立权威：历史绑定已解除，或旧路径规则不再
+                # 适用于本 Work 时，确认/覆盖重算不能让它从冻结候选复活。
+                continue
             scored = (
                 candidate
                 if preserve_candidate_status

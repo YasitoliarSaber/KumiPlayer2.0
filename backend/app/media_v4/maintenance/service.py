@@ -562,6 +562,16 @@ def _verify_and_claim_tx(
             raise ValueError("来源根状态已变化，请重新生成删除预览")
     for work_id in preview.get("orphan_works", []):
         _work_playback_and_tracking(conn, work_id)
+        from app.media_v4.persistence.identity_lifecycle import retire_work_identity
+
+        retire_work_identity(conn, work_id, now)
+    for root in preview.get("roots", []):
+        # 保留 revision 证据，但不能在同一来源重导入后重新获得执行权。
+        conn.execute(
+            "UPDATE import_revisions SET status = 'superseded' WHERE root_id = ? AND status = 'confirmed'",
+            (root["root_id"],),
+        )
+        conn.execute("DELETE FROM work_source_bindings WHERE root_id = ?", (root["root_id"],))
     return {"__completed__": False, "preview": preview}
 
 
@@ -768,65 +778,119 @@ def resume_operation(database: V4Database, *, preview_id: str, mirror_root: Path
 
 def _scope_from_digest_preview(preview: dict) -> str:
     return str(preview.get("scope") or "all")
-def compute_work_delete_preview(database: V4Database, *, work_id: str, mirror_root: Path | None = None) -> dict:
-    """单作品删除预览：列出该作品在活动来源中的受控生成物与个人状态影响。"""
 
-    with database.connect() as conn:
-        revision = conn.execute(
+
+def _work_delete_state(
+    database: V4Database,
+    *,
+    work_id: str,
+    mirror_root: Path | None,
+    conn: sqlite3.Connection | None = None,
+) -> dict:
+    """在同一数据库快照内生成单作品删除状态，供预览和确认共同使用。"""
+
+    with _read_conn(database, conn) as c:
+        revision = c.execute(
             """
             SELECT ir.revision_id FROM import_revisions ir
             JOIN revision_bindings rb ON rb.revision_id = ir.revision_id
             JOIN source_roots sr ON sr.root_id = ir.root_id
-            WHERE rb.work_id = ? AND ir.status = 'confirmed' AND sr.retired_at = ''
+            JOIN works w ON w.work_id = rb.work_id
+            WHERE rb.work_id = ? AND w.status = 'active'
+              AND ir.status = 'confirmed' AND sr.retired_at = ''
             ORDER BY ir.confirmed_at DESC LIMIT 1
             """,
             (work_id,),
         ).fetchone()
         if revision is None:
             raise ValueError("该作品不在任何活动媒体库中")
-        artifact_rows = conn.execute(
-            "SELECT artifact_id, target_path FROM artifacts WHERE revision_id = ? AND work_id = ? ORDER BY target_path",
+        artifact_rows = c.execute(
+            "SELECT artifact_id, target_path FROM artifacts "
+            "WHERE revision_id = ? AND work_id = ? ORDER BY target_path",
             (revision["revision_id"], work_id),
         ).fetchall()
-        playback_count = conn.execute(
+        playback_count = c.execute(
             "SELECT COUNT(*) AS c FROM playback_progress WHERE work_id = ?", (work_id,)
         ).fetchone()["c"]
-        tracking_count = conn.execute(
+        tracking_count = c.execute(
             "SELECT COUNT(*) AS c FROM tracking_states WHERE work_id = ?", (work_id,)
         ).fetchone()["c"]
+        active_jobs = [
+            dict(row)
+            for row in c.execute(
+                "SELECT job_id, job_type, revision_id, status FROM jobs "
+                "WHERE work_id = ? AND status IN ('queued', 'running') ORDER BY job_id",
+                (work_id,),
+            ).fetchall()
+        ]
+
     artifact_paths: list[str] = []
-    for artifact in artifact_rows:
-        path = Path(artifact["target_path"])
-        if mirror_root is not None:
-            try:
-                resolved = path.resolve(strict=False)
-                root_resolved = mirror_root.resolve(strict=False)
-                if resolved == root_resolved or root_resolved not in resolved.parents:
+    if mirror_root is not None:
+        try:
+            root_resolved = mirror_root.resolve(strict=False)
+        except OSError:
+            root_resolved = None
+        if root_resolved is not None:
+            for artifact in artifact_rows:
+                try:
+                    resolved = Path(artifact["target_path"]).resolve(strict=False)
+                    if resolved == root_resolved or root_resolved not in resolved.parents:
+                        continue
+                    if resolved.is_dir() and not resolved.is_symlink():
+                        continue
+                except OSError:
                     continue
-            except OSError:
-                continue
-        artifact_paths.append(str(path))
-    preview = {
-        "preview_id": "prev_work_" + uuid.uuid4().hex,
+                artifact_paths.append(str(resolved))
+
+    revision_id = str(revision["revision_id"])
+    digest = _digest(
+        "work:" + work_id,
+        [{"root_id": "", "revision_id": revision_id}],
+        [{"work_id": work_id}],
+        artifact_paths,
+        _mirror_identity(mirror_root),
+        active_jobs,
+    )
+    return {
         "work_id": work_id,
-        "artifact_count": len(artifact_paths),
+        "revision_id": revision_id,
         "artifact_paths": artifact_paths,
         "playback_count": int(playback_count or 0),
         "tracking_count": int(tracking_count or 0),
-        "digest": _digest("work:" + work_id, [{"root_id": "", "revision_id": str(revision["revision_id"])}], [{"work_id": work_id}], artifact_paths, ""),
+        "blocked": bool(active_jobs),
+        "blocked_job_count": len(active_jobs),
+        "blocked_job_types": sorted({str(job["job_type"]) for job in active_jobs}),
+        "digest": digest,
     }
-    return preview
+
+
+def compute_work_delete_preview(database: V4Database, *, work_id: str, mirror_root: Path | None = None) -> dict:
+    """单作品删除预览：列出该作品在活动来源中的受控生成物与个人状态影响。"""
+
+    state = _work_delete_state(database, work_id=work_id, mirror_root=mirror_root)
+    return {
+        "preview_id": "prev_work_" + uuid.uuid4().hex,
+        **state,
+        "artifact_count": len(state["artifact_paths"]),
+    }
 
 
 def confirm_work_delete(database: V4Database, *, work_id: str, preview_id: str, digest: str, mirror_root: Path | None = None) -> dict:
     """校验并执行单作品删除：标记隐藏 + 清理受控生成物 + 播放/追更状态 + 投影重建。"""
 
-    current = compute_work_delete_preview(database, work_id=work_id, mirror_root=mirror_root)
-    if current["digest"] != digest:
-        raise ValueError("作品状态已变化，请重新生成删除预览")
     with database.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
+            current = _work_delete_state(
+                database,
+                work_id=work_id,
+                mirror_root=mirror_root,
+                conn=conn,
+            )
+            if current["blocked"]:
+                raise ValueError("该作品仍有排队或运行中的后台任务，请等待任务结束后重试")
+            if current["digest"] != digest:
+                raise ValueError("作品状态已变化，请重新生成删除预览")
             existing = conn.execute(
                 "SELECT override_json FROM work_overrides WHERE work_id = ?", (work_id,)
             ).fetchone()
@@ -841,6 +905,9 @@ def confirm_work_delete(database: V4Database, *, work_id: str, preview_id: str, 
                 (work_id, json.dumps(payload, ensure_ascii=False), _now(), _now()),
             )
             _work_playback_and_tracking(conn, work_id)
+            from app.media_v4.persistence.identity_lifecycle import retire_work_identity
+
+            retire_work_identity(conn, work_id, _now())
             conn.commit()
         except Exception:
             conn.rollback()

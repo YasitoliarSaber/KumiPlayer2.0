@@ -62,7 +62,10 @@ def _provider_binding_conflict(
 
     media_type = "tv" if work_type == "series" else "movie"
     owner = conn.execute(
-        "SELECT work_id FROM provider_bindings WHERE provider = ? AND media_type = ? AND provider_id = ?",
+        "SELECT pb.work_id FROM provider_bindings pb "
+        "JOIN works w ON w.work_id = pb.work_id "
+        "WHERE pb.provider = ? AND pb.media_type = ? AND pb.provider_id = ? "
+        "AND w.status = 'active'",
         (provider, media_type, provider_id),
     ).fetchone()
     if owner is not None and str(owner["work_id"]) != work_id:
@@ -93,7 +96,9 @@ class V4ScrapeService:
             if revision["status"] != "confirmed":
                 raise RuntimeError("只有 confirmed revision 才能创建刮削任务")
             work_rows = conn.execute(
-                "SELECT DISTINCT work_id FROM revision_bindings WHERE revision_id = ? ORDER BY work_id",
+                "SELECT DISTINCT rb.work_id FROM revision_bindings rb "
+                "JOIN works w ON w.work_id = rb.work_id "
+                "WHERE rb.revision_id = ? AND w.status = 'active' ORDER BY rb.work_id",
                 (revision_id,),
             ).fetchall()
             now = _now()
@@ -109,7 +114,9 @@ class V4ScrapeService:
                     (str(uuid.uuid4()), revision_id, work_id, f"scrape_work:{revision_id}:{work_id}", now, now),
                 )
             rows = conn.execute(
-                "SELECT * FROM jobs WHERE revision_id = ? AND job_type = 'scrape_work' ORDER BY job_id",
+                "SELECT j.* FROM jobs j JOIN works w ON w.work_id = j.work_id "
+                "WHERE j.revision_id = ? AND j.job_type = 'scrape_work' "
+                "AND w.status = 'active' ORDER BY j.job_id",
                 (revision_id,),
             ).fetchall()
         return [dict(row) for row in rows]
@@ -124,6 +131,11 @@ class V4ScrapeService:
             ).fetchone()
             if revision is None or revision["status"] != "confirmed":
                 raise RuntimeError("只有 confirmed revision 才能重试刮削")
+            work = conn.execute(
+                "SELECT status FROM works WHERE work_id = ?", (work_id,)
+            ).fetchone()
+            if work is None or work["status"] != "active":
+                raise RuntimeError("该作品已退出媒体库，不能重试刮削")
             bound = conn.execute(
                 "SELECT 1 FROM revision_bindings WHERE revision_id = ? AND work_id = ? LIMIT 1",
                 (revision_id, work_id),
@@ -172,9 +184,12 @@ class V4ScrapeService:
             ).fetchone()
             if revision is None or revision["status"] != "confirmed":
                 raise RuntimeError("只有 confirmed revision 才能执行刮削")
-            work = conn.execute("SELECT * FROM works WHERE work_id = ?", (job["work_id"],)).fetchone()
+            work = conn.execute(
+                "SELECT * FROM works WHERE work_id = ? AND status = 'active'",
+                (job["work_id"],),
+            ).fetchone()
             if work is None and job["work_id"]:
-                raise RuntimeError("刮削任务对应的 Work 不存在")
+                raise RuntimeError("刮削任务对应的作品不存在或已退出媒体库")
             if job["status"] == "succeeded":
                 return
         if not claim_running(self.database, job_id):
@@ -375,6 +390,16 @@ class V4ScrapeService:
                     ).fetchone()
                     binding_media_type = (
                         "tv" if str((work_row["work_type"] if work_row else "") or "") == "series" else "movie"
+                    )
+                    from app.media_v4.persistence.identity_lifecycle import (
+                        release_inactive_provider_identity,
+                    )
+
+                    release_inactive_provider_identity(
+                        conn,
+                        binding_provider,
+                        binding_media_type,
+                        binding_provider_id,
                     )
                     owner = conn.execute(
                         "SELECT work_id FROM provider_bindings WHERE provider = ? AND media_type = ? AND provider_id = ?",

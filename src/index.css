@@ -13816,6 +13816,38 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 /* 弹窗固定在视口中央并自持滚动：不受 .app-main 滚动位置或祖先 overflow 裁剪影响。 */
 .media-v4-metadata-dialog { min-width: min(480px, 92vw); max-width: 560px; max-height: min(640px, 84vh); }
 .media-v4-metadata-dialog .fui-DialogContent { overflow: auto; }
+/* 识别弹窗通过 Portal 挂到页面之外，显式保留遮罩、居中和实体底色。 */
+.media-v4-recognition-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  background: rgb(15 23 42 / 36%);
+}
+.media-v4-recognition-dialog {
+  position: fixed !important;
+  z-index: 1000;
+  inset: 50% auto auto 50% !important;
+  transform: translate(-50%, -50%) !important;
+  box-sizing: border-box;
+  width: min(560px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 48px);
+  margin: 0;
+  padding: 24px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-solid) !important;
+  color: var(--text);
+  box-shadow: var(--shadow-flyout);
+}
+.media-v4-recognition-dialog .fui-FluentProvider { background: transparent; color: inherit; }
+.media-v4-recognition-dialog .fui-DialogBody { display: grid; gap: 16px; }
+.media-v4-recognition-dialog .fui-DialogContent { min-width: 0; overflow-wrap: anywhere; }
+.media-v4-recognition-dialog .media-v4-override-dialog-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.media-v4-recognition-dialog .fui-DialogActions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.media-v4-identity-help { display: grid; gap: 12px; line-height: 1.6; }
+.media-v4-identity-help p { margin: 0; }
 /* 来源卡删除是破坏性但不删除媒体数据的确认操作。遮罩和实体表面都在
    Portal 中明确绘制，避免主题样式遗漏时内容透明地叠在来源卡上。 */
 .media-v4-source-card-delete-backdrop {

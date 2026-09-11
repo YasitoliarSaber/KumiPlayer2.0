@@ -116,7 +116,7 @@ def provider_identity_conflicts(
                 evidence_id=evidence_id,
                 message=(
                     f"Provider 身份 {identity[0]}:{identity[2]} 同时命中独立作品，"
-                    "不能自动合并；请修正历史作品绑定"
+                    "不能自动合并；请检查作品身份，不能通过修改单集编号解决"
                 ),
             )
         )

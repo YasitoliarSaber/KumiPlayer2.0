@@ -653,6 +653,11 @@ def _freeze_candidate_bindings(
             raise RevisionBlockedError(
                 "Provider 身份冲突：该作品已经绑定另一条确认身份，请返回检查识别结果"
             )
+        from app.media_v4.persistence.identity_lifecycle import release_inactive_provider_identity
+
+        release_inactive_provider_identity(
+            conn, chosen.provider, chosen.media_type, chosen.provider_id
+        )
         identity_owner = conn.execute(
             """
             SELECT work_id FROM provider_bindings
@@ -724,12 +729,18 @@ def _snapshot_structural_bindings(conn, root_id: str) -> dict[str, list[dict]]:
         SELECT b.structural_key, w.work_id, w.work_type, w.year
         FROM work_source_bindings b
         JOIN works w ON w.work_id = b.work_id
-        WHERE b.root_id = ? AND w.status = 'active'
+        JOIN source_roots sr ON sr.root_id = b.root_id
+        WHERE b.root_id = ? AND w.status = 'active' AND sr.retired_at = ''
         """,
         (root_id,),
     ).fetchall()
+    from app.media_v4.persistence.identity_lifecycle import retired_only_work_ids
+
+    retired_ids = retired_only_work_ids(conn)
     snapshot: dict[str, list[dict]] = {}
     for row in rows:
+        if str(row["work_id"]) in retired_ids:
+            continue
         snapshot.setdefault(str(row["structural_key"]), []).append(
             {
                 "work_id": str(row["work_id"]),
@@ -820,6 +831,9 @@ def _existing_work_matches(
     将其视为唯一权威 owner，以修复历史上“空副本 + 正确 owner”的情况。
     """
 
+    from app.media_v4.persistence.identity_lifecycle import retired_only_work_ids
+
+    retired_ids = retired_only_work_ids(conn)
     work_type = "series" if str(getattr(work, "media_type", "") or "") == "tv" else "movie"
     work_year = getattr(work, "year", None)
     exact = conn.execute(
@@ -828,10 +842,14 @@ def _existing_work_matches(
         (getattr(work, "work_key", ""), work_type, work_year, work_year),
     ).fetchone()
     def safe_historical_row(row):
+        if str(row["work_id"]) in retired_ids:
+            return None
         structural_keys = {
             str(binding["structural_key"] or "")
             for binding in conn.execute(
-                "SELECT structural_key FROM work_source_bindings WHERE work_id = ?",
+                "SELECT b.structural_key FROM work_source_bindings b "
+                "JOIN source_roots sr ON sr.root_id = b.root_id "
+                "WHERE b.work_id = ? AND sr.retired_at = ''",
                 (str(row["work_id"]),),
             ).fetchall()
         }
@@ -1030,6 +1048,9 @@ class V4RevisionService:
         evidence_by_id = {evidence.evidence_id: evidence for evidence, _facts in entries}
         facts_by_evidence_id = {evidence.evidence_id: facts for evidence, facts in entries}
         with (nullcontext(conn) if conn is not None else self.database.connect()) as conn:
+            from app.media_v4.persistence.identity_lifecycle import retired_only_work_ids
+
+            retired_ids = retired_only_work_ids(conn)
             for work in graph.works:
                 existing_work_ids: set[str] = set()
                 related_entries = [
@@ -1066,8 +1087,9 @@ class V4RevisionService:
                         SELECT DISTINCT b.work_id
                         FROM work_source_bindings b
                         JOIN works w ON w.work_id = b.work_id
+                        JOIN source_roots sr ON sr.root_id = b.root_id
                         WHERE b.root_id = ? AND b.structural_key = ?
-                          AND w.status = 'active'
+                          AND w.status = 'active' AND sr.retired_at = ''
                         """,
                         (evidence.root_id, structural_key),
                     ).fetchall()
@@ -1087,12 +1109,14 @@ class V4RevisionService:
                         "WHERE provider = ? AND media_type = ? AND provider_id = ?",
                         (candidate.provider, candidate.media_type, candidate.provider_id),
                     ).fetchone()
-                    if owner is None:
+                    if owner is None or str(owner["work_id"]) in retired_ids:
                         continue
                     owner_keys = {
                         str(binding["structural_key"] or "")
                         for binding in conn.execute(
-                            "SELECT structural_key FROM work_source_bindings WHERE work_id = ?",
+                            "SELECT b.structural_key FROM work_source_bindings b "
+                            "JOIN source_roots sr ON sr.root_id = b.root_id "
+                            "WHERE b.work_id = ? AND sr.retired_at = ''",
                             (str(owner["work_id"]),),
                         ).fetchall()
                     }
@@ -1106,6 +1130,7 @@ class V4RevisionService:
                             ),
                         ))
                         break
+                existing_work_ids -= retired_ids
                 if not existing_work_ids:
                     continue
                 placeholders = ",".join("?" for _ in existing_work_ids)
@@ -1150,6 +1175,9 @@ class V4RevisionService:
         facts_by_evidence_id = {evidence.evidence_id: facts for evidence, facts in entries}
         issues: list[ResolutionIssue] = []
         with (nullcontext(conn) if conn is not None else self.database.connect()) as conn:
+            from app.media_v4.persistence.identity_lifecycle import retired_only_work_ids
+
+            retired_ids = retired_only_work_ids(conn)
             for work in graph.works:
                 work_entries = [
                     (evidence_by_id[evidence_id], facts_by_evidence_id.get(evidence_id))
@@ -1177,8 +1205,9 @@ class V4RevisionService:
                         SELECT DISTINCT b.work_id
                         FROM work_source_bindings b
                         JOIN works w ON w.work_id = b.work_id
+                        JOIN source_roots sr ON sr.root_id = b.root_id
                         WHERE b.root_id = ? AND b.structural_key = ?
-                          AND w.status = 'active'
+                          AND w.status = 'active' AND sr.retired_at = ''
                         """,
                         (next(iter(root_ids)), structural_key),
                     ).fetchall()
@@ -1187,7 +1216,10 @@ class V4RevisionService:
                     "SELECT work_id FROM works WHERE identity_key = ? AND status = 'active'",
                     (work.work_key,),
                 ).fetchone()
+                owner_ids -= retired_ids
                 identity_id = str(identity_row["work_id"]) if identity_row is not None else ""
+                if identity_id in retired_ids:
+                    identity_id = ""
                 if len(owner_ids) <= 1 and (not identity_id or not owner_ids or identity_id in owner_ids):
                     continue
                 evidence_id = next(iter(work.source_evidence_ids), "")
@@ -1433,6 +1465,8 @@ class V4RevisionService:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 if _publish:
+                    from app.media_v4.persistence.identity_lifecycle import release_retired_source_identities
+
                     # 确认发布必须在同一写事务中重新读取事实、覆盖和冻结候选。
                     # confirm() 之前的预览只能作为提示，不能把旧快照直接写入权威表。
                     current_revision = conn.execute(
@@ -1446,6 +1480,23 @@ class V4RevisionService:
                         raise ValueError(f"revision 已经不是可重建草稿: {revision_id}")
                     entries = self._load_revision_entries(revision_id, conn=conn)
                     candidates_by_key = self._load_draft_candidates(revision_id, conn=conn)
+                    current_graph = self.resolver.resolve(entries)
+                    release_retired_source_identities(
+                        conn, root_id, created_at,
+                        work_keys={work.work_key for work in current_graph.works},
+                        titles={
+                            title for work in current_graph.works
+                            for title in _work_identity_titles(work, [
+                                entry for entry in entries
+                                if entry[0].evidence_id in work.source_evidence_ids
+                            ])
+                        },
+                        provider_identities={
+                            (item.provider, item.media_type, item.provider_id)
+                            for items in candidates_by_key.values() for item in items
+                            if item.status == "confirmed"
+                        },
+                    )
                     graph, candidates_by_key = self._evaluate_draft(
                         entries,
                         conn=conn,
@@ -1567,6 +1618,7 @@ class V4RevisionService:
                                 SELECT w.work_id FROM provider_bindings pb
                                 JOIN works w ON w.work_id = pb.work_id
                                 WHERE pb.provider = ? AND pb.media_type = ? AND pb.provider_id = ?
+                                  AND w.status = 'active'
                                 LIMIT 1
                                 """,
                                 (chosen.provider, chosen.media_type, chosen.provider_id),
@@ -1594,6 +1646,7 @@ class V4RevisionService:
                                     JOIN works w ON w.work_id = pb.work_id
                                     WHERE pb.provider = 'tmdb'
                                       AND pb.media_type = ? AND pb.provider_id = ?
+                                      AND w.status = 'active'
                                     """,
                                     (media_type, provider_id),
                                 ).fetchone()
@@ -1813,6 +1866,13 @@ class V4RevisionService:
                         continue
                     work_id = work_ids[work_key]
                     provider_id = str(facts.tmdb_hint_id)
+                    from app.media_v4.persistence.identity_lifecycle import (
+                        release_inactive_provider_identity,
+                    )
+
+                    release_inactive_provider_identity(
+                        conn, "tmdb", facts.tmdb_hint_type, provider_id
+                    )
                     identity_owner = conn.execute(
                         """
                         SELECT work_id FROM provider_bindings

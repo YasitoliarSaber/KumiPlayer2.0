@@ -148,6 +148,11 @@ def retry_task(task_id: str):
             raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
         if row["status"] not in {"failed", "cancelled"}:
             raise HTTPException(status_code=409, detail="只有失败或已取消任务可以重试")
+        if row["work_id"] and conn.execute(
+            "SELECT 1 FROM works WHERE work_id = ? AND status = 'active'",
+            (row["work_id"],),
+        ).fetchone() is None:
+            raise HTTPException(status_code=409, detail="任务对应的作品已退出媒体库，不能重试")
         if conn.execute(
             "SELECT status FROM import_revisions WHERE revision_id = ?",
             (row["revision_id"],),
@@ -163,6 +168,12 @@ def retry_task(task_id: str):
                 SET status = 'queued', cancel_requested = 0, heartbeat_at = '',
                     started_at = '', finished_at = '', last_error = '', updated_at = datetime('now')
                 WHERE revision_id = ? AND status = 'cancelled'
+                  AND (
+                    work_id = '' OR EXISTS (
+                      SELECT 1 FROM works w
+                      WHERE w.work_id = jobs.work_id AND w.status = 'active'
+                    )
+                  )
                 """,
                 (row["revision_id"],),
             )

@@ -1665,7 +1665,9 @@ def enqueue_work_scrape(work_id: str):
             SELECT ir.revision_id FROM import_revisions ir
             JOIN revision_bindings rb ON rb.revision_id = ir.revision_id
             JOIN source_roots sr ON sr.root_id = ir.root_id
-            WHERE rb.work_id = ? AND ir.status = 'confirmed' AND sr.retired_at = ''
+            JOIN works w ON w.work_id = rb.work_id
+            WHERE rb.work_id = ? AND w.status = 'active'
+              AND ir.status = 'confirmed' AND sr.retired_at = ''
             ORDER BY ir.confirmed_at DESC LIMIT 1
             """,
             (work_id,),
@@ -2029,7 +2031,10 @@ def metadata_retry(request: MetadataRetryRequest):
 
     database = get_database()
     with database.connect() as conn:
-        work = conn.execute("SELECT work_id FROM works WHERE work_id = ?", (request.work_id,)).fetchone()
+        work = conn.execute(
+            "SELECT work_id FROM works WHERE work_id = ? AND status = 'active'",
+            (request.work_id,),
+        ).fetchone()
         revision = conn.execute(
             """
             SELECT ir.revision_id
@@ -2051,7 +2056,7 @@ def metadata_retry(request: MetadataRetryRequest):
             (str(revision["revision_id"]) if revision else "", request.work_id),
         ).fetchone() if revision else None
     if work is None:
-        raise HTTPException(status_code=404, detail="作品不存在")
+        raise HTTPException(status_code=409, detail="作品不存在或已退出媒体库")
     if revision is None:
         raise HTTPException(status_code=409, detail="该作品没有已确认的 revision，无法重试刮削")
 

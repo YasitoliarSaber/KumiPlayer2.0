@@ -206,6 +206,8 @@ def test_retrying_a_cancelled_task_restores_its_cancelled_revision_dependents(tm
             VALUES ('scan', 'root', 1, 'completed');
             INSERT INTO import_revisions(revision_id, root_id, scan_id, resolver_version, status, created_at)
             VALUES ('rev', 'root', 'scan', 'fixture', 'confirmed', 'now');
+            INSERT INTO works(work_id, identity_key, work_type, preferred_title, created_at, updated_at)
+            VALUES ('work', 'series:work:tv', 'series', 'Work', 'now', 'now');
             INSERT INTO jobs(
                 job_id, job_type, revision_id, work_id, status, cancel_requested,
                 idempotency_key, created_at, updated_at
@@ -232,3 +234,39 @@ def test_retrying_a_cancelled_task_restores_its_cancelled_revision_dependents(tm
         "scrape": ("queued", 0),
         "projection": ("queued", 0),
     }
+
+
+def test_retired_work_task_cannot_be_retried(tmp_path, monkeypatch):
+    from app.api import media_v4, tasks_v4
+    from app.media_v4.persistence.database import V4Database
+
+    database = V4Database(tmp_path / "retired-task.db")
+    database.initialize()
+    monkeypatch.setattr(media_v4, "_database", database)
+    application = FastAPI()
+    application.include_router(tasks_v4.router)
+    client = TestClient(application)
+    with database.connect() as conn:
+        conn.executescript(
+            """
+            INSERT INTO source_roots(root_id, provider, ingest_method, created_at, updated_at)
+            VALUES ('root', 'local', 'local_scan', 'now', 'now');
+            INSERT INTO source_scans(scan_id, root_id, generation, status)
+            VALUES ('scan', 'root', 1, 'completed');
+            INSERT INTO import_revisions(revision_id, root_id, scan_id, resolver_version, status, created_at)
+            VALUES ('rev', 'root', 'scan', 'fixture', 'confirmed', 'now');
+            INSERT INTO works(work_id, identity_key, work_type, preferred_title, status, created_at, updated_at)
+            VALUES ('work', 'retired:work', 'series', '错误历史作品', 'superseded', 'now', 'now');
+            INSERT INTO jobs(
+                job_id, job_type, revision_id, work_id, status,
+                idempotency_key, created_at, updated_at
+            ) VALUES ('scrape', 'scrape_work', 'rev', 'work', 'failed', 'scrape:rev:work', 'now', 'now');
+            """
+        )
+
+    response = client.post("/api/tasks/scrape/retry")
+
+    assert response.status_code == 409
+    assert "已退出媒体库" in response.json()["detail"]
+    with database.connect() as conn:
+        assert conn.execute("SELECT status FROM jobs WHERE job_id = 'scrape'").fetchone()[0] == "failed"

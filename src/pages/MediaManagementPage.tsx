@@ -1386,6 +1386,7 @@ export default function MediaManagementPage() {
             issues={preview.issues}
             evidenceEntries={scan?.entries ?? []}
             overrideDrafts={overrideDrafts}
+            onOpenMaintenance={() => goManageView('maintenance')}
             busy={busy !== ''}
             onOverrideChange={(evidenceId, draft) => setOverrideDrafts((current) => ({ ...current, [evidenceId]: draft }))}
             onApplyOverride={(evidenceId) => void applyOverride(evidenceId)}
@@ -1410,6 +1411,7 @@ export default function MediaManagementPage() {
                 issues={preview.issues}
                 evidenceEntries={scan?.entries ?? []}
                 overrideDrafts={overrideDrafts}
+                onOpenMaintenance={() => goManageView('maintenance')}
                 busy={busy !== ''}
                 onOverrideChange={(evidenceId, draft) => setOverrideDrafts((current) => ({ ...current, [evidenceId]: draft }))}
                 onApplyOverride={(evidenceId) => void applyOverride(evidenceId)}

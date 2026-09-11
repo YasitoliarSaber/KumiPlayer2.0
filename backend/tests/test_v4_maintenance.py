@@ -81,6 +81,207 @@ def test_preview_lists_affected_roots_works_and_artifacts(tmp_path):
     assert preview["digest"]
 
 
+def test_source_cleanup_releases_orphan_identity_but_keeps_shared_identity(tmp_path):
+    from app.media_v4.maintenance.service import compute_delete_preview, confirm_delete_preview
+
+    database = _fresh_database(tmp_path)
+    _seed_confirmed(database, root_id="root-b", provider="baidu", work_ids=["old", "shared"], scan_id="scan-b", revision_id="rev-b")
+    _seed_confirmed(database, root_id="root-p", provider="pan115", work_ids=["shared"], scan_id="scan-p", revision_id="rev-p")
+    with database.connect() as conn:
+        for work_id, provider_id in [("old", "100"), ("shared", "200")]:
+            conn.execute("INSERT INTO provider_bindings(work_id,provider,media_type,provider_id) VALUES (?,'tmdb','tv',?)", (work_id, provider_id))
+            conn.execute("INSERT INTO work_aliases(work_id,normalized_title,language,alias_type) VALUES (?,?,'','source')", (work_id, work_id))
+            conn.execute("INSERT INTO work_source_bindings(work_id,root_id,structural_key,confidence,binding_source) VALUES (?,'root-b',?,'high','resolver')", (work_id, work_id))
+    preview = compute_delete_preview(database, provider="baidu")
+    confirm_delete_preview(database, preview_id=preview["preview_id"], scope="baidu", digest=preview["digest"])
+    with database.connect() as conn:
+        assert conn.execute("SELECT status FROM works WHERE work_id='old'").fetchone()[0] != "active"
+        assert conn.execute("SELECT 1 FROM works WHERE identity_key='ik-old'").fetchone() is None
+        for table in ("provider_bindings", "work_aliases", "work_source_bindings"):
+            assert conn.execute(f"SELECT 1 FROM {table} WHERE work_id='old'").fetchone() is None
+        assert conn.execute("SELECT provider_id FROM provider_bindings WHERE work_id='shared'").fetchone()[0] == "200"
+        assert conn.execute("SELECT status FROM works WHERE work_id='shared'").fetchone()[0] == "active"
+        assert conn.execute("SELECT COUNT(*) FROM revision_bindings WHERE revision_id='rev-b'").fetchone()[0] == 2
+
+
+def test_legacy_retired_source_is_not_reused_by_preview(tmp_path):
+    from app.media_v4.domain.models import ResolvedMediaGraph, ResolvedWork
+    from app.media_v4.revisions.service import V4RevisionService, _existing_work_matches
+
+    database = _fresh_database(tmp_path)
+    _seed_confirmed(database, root_id="root-old", provider="baidu", work_ids=["old"])
+    with database.connect() as conn:
+        conn.execute("UPDATE works SET identity_key='title:wrong::tv', preferred_title='Wrong' WHERE work_id='old'")
+        conn.execute("UPDATE source_roots SET retired_at='2026-09-10'")
+        conn.execute("INSERT INTO provider_bindings(work_id,provider,media_type,provider_id) VALUES ('old','tmdb','tv','100')")
+        work = ResolvedWork(work_key="title:wrong::tv", preferred_title="Wrong", media_type="tv", year=None)
+        assert _existing_work_matches(conn, work) == []
+        graph = ResolvedMediaGraph(works=(work,))
+        assert V4RevisionService(database)._existing_bindings_by_key(graph, conn=conn)[work.work_key] == []
+        assert conn.execute("SELECT status FROM works WHERE work_id='old'").fetchone()[0] == "active", "预览不能改写历史数据"
+
+
+def test_deleted_work_does_not_keep_identity_authority(tmp_path):
+    from app.media_v4.domain.models import ResolvedWork
+    from app.media_v4.maintenance.service import compute_work_delete_preview, confirm_work_delete
+    from app.media_v4.revisions.service import _existing_work_matches
+
+    database = _fresh_database(tmp_path)
+    _seed_confirmed(database, root_id="root-delete", provider="local", work_ids=["old"])
+    with database.connect() as conn:
+        conn.execute("INSERT INTO provider_bindings(work_id,provider,media_type,provider_id) VALUES ('old','tmdb','tv','100')")
+    preview = compute_work_delete_preview(database, work_id="old", mirror_root=tmp_path / "mirror")
+    confirm_work_delete(database, work_id="old", preview_id=preview["preview_id"], digest=preview["digest"], mirror_root=tmp_path / "mirror")
+    with database.connect() as conn:
+        work = ResolvedWork(work_key="ik-old", preferred_title="作品old", media_type="tv", year=None)
+        assert _existing_work_matches(conn, work) == []
+        assert conn.execute("SELECT 1 FROM provider_bindings WHERE work_id='old'").fetchone() is None
+
+
+@pytest.mark.parametrize("job_status", ["queued", "running"])
+@pytest.mark.parametrize("job_created_before_preview", [False, True])
+def test_work_delete_cannot_release_identity_while_job_can_still_write(
+    tmp_path, job_status, job_created_before_preview
+):
+    from app.media_v4.maintenance.service import compute_work_delete_preview, confirm_work_delete
+
+    database = _fresh_database(tmp_path)
+    _seed_confirmed(database, root_id="root-delete", provider="local", work_ids=["old"])
+    if job_created_before_preview:
+        with database.connect() as conn:
+            conn.execute("INSERT INTO jobs(job_id,job_type,revision_id,work_id,idempotency_key,status,created_at,updated_at) VALUES ('job','scrape_work','rev-s','old','job',?,'now','now')", (job_status,))
+    preview = compute_work_delete_preview(database, work_id="old")
+    assert preview["blocked"] is job_created_before_preview
+    assert preview["blocked_job_count"] == int(job_created_before_preview)
+    if not job_created_before_preview:
+        with database.connect() as conn:
+            conn.execute("INSERT INTO jobs(job_id,job_type,revision_id,work_id,idempotency_key,status,created_at,updated_at) VALUES ('job','scrape_work','rev-s','old','job',?,'now','now')", (job_status,))
+    with pytest.raises(ValueError, match="后台任务"):
+        confirm_work_delete(database, work_id="old", preview_id=preview["preview_id"], digest=preview["digest"])
+    with database.connect() as conn:
+        assert conn.execute("SELECT status FROM works WHERE work_id='old'").fetchone()[0] == "active"
+
+
+def test_deleted_work_scrape_job_cannot_be_requeued(tmp_path):
+    from app.media_v4.jobs.scrape import V4ScrapeService
+    from app.media_v4.maintenance.service import compute_work_delete_preview, confirm_work_delete
+
+    database = _fresh_database(tmp_path)
+    _seed_confirmed(database, root_id="root-delete", provider="local", work_ids=["old"])
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO jobs(job_id,job_type,revision_id,work_id,idempotency_key,status,created_at,updated_at) "
+            "VALUES ('job','scrape_work','rev-s','old','job','failed','now','now')"
+        )
+    preview = compute_work_delete_preview(database, work_id="old")
+    confirm_work_delete(
+        database,
+        work_id="old",
+        preview_id=preview["preview_id"],
+        digest=preview["digest"],
+    )
+
+    with pytest.raises(RuntimeError, match="已退出媒体库"):
+        V4ScrapeService(database).requeue_work("rev-s", "old")
+    with database.connect() as conn:
+        assert conn.execute("SELECT status FROM jobs WHERE job_id='job'").fetchone()[0] == "failed"
+
+
+def test_inactive_historical_binding_cannot_block_reimport(tmp_path):
+    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = _fresh_database(tmp_path)
+    _seed_confirmed(database, root_id="root-old", provider="local", work_ids=["old"])
+    with database.connect() as conn:
+        conn.execute(
+            "UPDATE works SET identity_key='retired:old', preferred_title='错误历史作品', "
+            "status='superseded' WHERE work_id='old'"
+        )
+        conn.execute(
+            "INSERT INTO provider_bindings(work_id,provider,media_type,provider_id) "
+            "VALUES ('old','tmdb','tv','100')"
+        )
+    evidence = SourceEvidence(
+        evidence_id="fresh",
+        scan_id="scan-fresh",
+        root_id="root-fresh",
+        source_key="Correct/01.mkv",
+        relative_path="Correct/01.mkv",
+        entry_kind="video",
+        provider="local",
+        source_locator="C:/fixture/Correct/01.mkv",
+        playback_locator="C:/fixture/Correct/01.mkv",
+    )
+    facts = ParsedFacts(
+        parsed_fact_id="facts-fresh",
+        evidence_id="fresh",
+        parser_version="fixture",
+        work_title="Correct",
+        title_candidates=("Correct",),
+        media_type="tv",
+        group_type="season",
+        season_candidate=1,
+        episode_candidate=1,
+        tmdb_hint_id=100,
+        tmdb_hint_type="tv",
+        confidence="high",
+    )
+    service = V4RevisionService(database)
+
+    graph = service.create_draft("rev-fresh", [(evidence, facts)])
+    assert graph.issues == ()
+    service.confirm("rev-fresh")
+
+    with database.connect() as conn:
+        owner = conn.execute(
+            "SELECT work_id FROM provider_bindings "
+            "WHERE provider='tmdb' AND media_type='tv' AND provider_id='100'"
+        ).fetchone()
+        assert owner is not None and owner["work_id"] != "old"
+        assert conn.execute(
+            "SELECT 1 FROM provider_bindings WHERE work_id='old'"
+        ).fetchone() is None
+
+
+@pytest.mark.parametrize("legacy_cleanup", [False, True, "hidden"])
+@pytest.mark.parametrize("new_provider_id", [100, 200])
+@pytest.mark.parametrize("same_root", [True, False])
+def test_reimport_after_cleanup_does_not_resurrect_wrong_work(tmp_path, legacy_cleanup, new_provider_id, same_root):
+    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+    from app.media_v4.maintenance.service import compute_delete_preview, confirm_delete_preview
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = _fresh_database(tmp_path)
+    _seed_confirmed(database, root_id="root-old", provider="local", work_ids=["old"])
+    with database.connect() as conn:
+        conn.execute("UPDATE works SET identity_key='title:correct::tv', preferred_title='Wrong historical title' WHERE work_id='old'")
+        conn.execute("INSERT INTO work_aliases(work_id,normalized_title,language,alias_type) VALUES ('old','correct','','source')")
+        conn.execute("INSERT INTO provider_bindings(work_id,provider,media_type,provider_id) VALUES ('old','tmdb','tv','100')")
+    if legacy_cleanup == "hidden":
+        with database.connect() as conn:
+            conn.execute("INSERT INTO work_overrides(work_id,override_json,created_at,updated_at) VALUES ('old',?, 'now','now')", (json.dumps({"hidden": True}),))
+    elif legacy_cleanup:
+        with database.connect() as conn:
+            conn.execute("UPDATE source_roots SET retired_at='2026-09-10'")
+    else:
+        preview = compute_delete_preview(database, provider="local")
+        confirm_delete_preview(database, preview_id=preview["preview_id"], scope="local", digest=preview["digest"])
+    evidence = SourceEvidence(evidence_id="new-evidence", scan_id="scan-new", root_id="root-old" if same_root else "root-new", source_key="Correct/01.mkv", relative_path="Correct/01.mkv", entry_kind="video", provider="local", source_locator="C:/fixture/Correct/01.mkv", playback_locator="C:/fixture/Correct/01.mkv")
+    facts = ParsedFacts(parsed_fact_id="new-facts", evidence_id=evidence.evidence_id, parser_version="fixture", work_title="Correct", title_candidates=("Correct",), media_type="tv", group_type="season", season_candidate=1, episode_candidate=1, tmdb_hint_id=new_provider_id, tmdb_hint_type="tv", confidence="high")
+    service = V4RevisionService(database)
+    graph = service.create_draft("rev-new", [(evidence, facts)])
+    assert graph.issues == ()
+    service.confirm("rev-new")
+    with database.connect() as conn:
+        row = conn.execute("SELECT w.work_id,w.preferred_title FROM revision_bindings rb JOIN works w ON w.work_id=rb.work_id WHERE rb.revision_id='rev-new'").fetchone()
+        assert row["work_id"] != "old"
+        assert row["preferred_title"] == "Correct"
+        assert conn.execute("SELECT provider_id FROM provider_bindings WHERE work_id=? AND provider='tmdb'", (row["work_id"],)).fetchone()[0] == str(new_provider_id)
+        assert conn.execute("SELECT status FROM works WHERE work_id='old'").fetchone()[0] != "active"
+        assert conn.execute("SELECT work_id FROM revision_bindings WHERE revision_id='rev-s'").fetchone()[0] == "old"
+
+
 def test_preview_blocks_when_active_jobs_exist(tmp_path):
     from app.media_v4.maintenance.service import compute_delete_preview
 

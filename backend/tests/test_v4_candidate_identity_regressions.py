@@ -166,3 +166,35 @@ def test_verified_heya_camp_path_confirms_the_spinoff_without_online_search():
         (item.provider, item.media_type, item.provider_id, item.status)
         for item in candidates[work.work_key]
     ] == [("tmdb", "tv", "95213", "confirmed")]
+
+
+def test_bonus_filename_cannot_assign_spinoff_identity_to_parent_work():
+    from dataclasses import replace
+
+    from app.media_v4.resolution.candidates import plan_work_candidates
+    from app.media_v4.resolution.resolver import MediaResolver
+
+    main = _entry("main", work_title="Yuru Camp", title_candidates=("Yuru Camp",))
+    bonus = _entry("bonus", work_title="Yuru Camp", title_candidates=("Yuru Camp",))
+    bonus = (replace(bonus[0], relative_path="Yuru Camp/SP/Heya Camp EP00.mkv"), replace(bonus[1], group_type="special", special_candidate=True))
+    side = _entry("side", work_title="Heya Camp", title_candidates=("Heya Camp",), series_group="Yuru Camp", relation_type="spin_off")
+    entries = [main, bonus, side]
+    graph = MediaResolver().resolve(entries)
+    candidates, merge, issues = plan_work_candidates(graph, entries, lambda *_: [])
+    parent = next(work for work in graph.works if work.preferred_title == "Yuru Camp")
+    assert not any(c.provider_id == "95213" and c.status == "confirmed" for c in candidates[parent.work_key])
+    assert not any(issue.code == "work_identity_conflict" for issue in issues)
+    assert len(set(merge.values())) == len(merge)
+
+
+def test_frozen_historical_candidate_cannot_restore_released_binding():
+    from app.media_v4.resolution.candidates import WorkCandidate, plan_work_candidates
+    from app.media_v4.resolution.resolver import MediaResolver
+
+    entry = _entry("fresh", work_title="Correct", title_candidates=("Correct",))
+    graph = MediaResolver().resolve([entry])
+    work = graph.works[0]
+    for evidence in ("existing_provider_binding", "verified_path_binding"):
+        old = WorkCandidate(work_key=work.work_key, provider="tmdb", media_type="tv", provider_id="100", title="Correct", year=None, evidence=evidence, confidence="high", status="confirmed")
+        candidates, _, _ = plan_work_candidates(graph, [entry], lambda *_, candidate=old: [candidate], existing_bindings={}, preserve_candidate_status=True)
+        assert not any(item.status == "confirmed" for item in candidates[work.work_key])
