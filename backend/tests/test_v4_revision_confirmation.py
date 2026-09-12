@@ -664,3 +664,30 @@ def test_confirming_a_newer_revision_requests_stop_for_old_running_jobs(tmp_path
     assert jobs["materialize_mirror"] == {"job_type": "materialize_mirror", "status": "running", "cancel_requested": 1}
     assert jobs["scrape_work"]["status"] == "cancelled"
     assert jobs["refresh_projection"]["status"] == "cancelled"
+
+
+def test_loading_draft_replaces_stale_persisted_issues_with_current_evaluation(tmp_path):
+    """升级识别规则后，旧草稿的红色问题状态必须随预览一并刷新。"""
+
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "stale-draft.db")
+    database.initialize()
+    service = V4RevisionService(database)
+    service.create_draft("rev-stale", [_entry("Show")])
+    with database.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO revision_issues(revision_id, issue_id, code, evidence_id, message)
+            VALUES ('rev-stale', 'stale-issue', 'work_identity_conflict', 'ev-revision', 'old issue')
+            """
+        )
+
+    graph = service.load_draft_graph("rev-stale")
+
+    assert graph.issues == ()
+    with database.connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM revision_issues WHERE revision_id = 'rev-stale'"
+        ).fetchone()[0] == 0

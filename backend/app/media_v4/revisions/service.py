@@ -2186,7 +2186,12 @@ class V4RevisionService:
         return row["status"]
 
     def load_draft_graph(self, revision_id: str) -> ResolvedMediaGraph:
-        """从已持久化事实与冻结候选重建草稿，不再执行在线搜索。"""
+        """从已持久化事实重建草稿，并刷新可再生的候选与问题快照。
+
+        草稿中的 ``revision_issues``/候选是派生状态。识别规则升级后，若只
+        在内存中重算，导入页虽然已无问题，媒体管理来源卡仍会读取旧表而持续
+        显示红色冲突；因此预览成功后必须把当前离线评估结果回写。
+        """
 
         with self.database.connect() as conn:
             revision = conn.execute(
@@ -2199,11 +2204,31 @@ class V4RevisionService:
                 raise RuntimeError("只有 draft revision 可以读取识别预览")
             entries = self._load_revision_entries(revision_id, conn=conn)
             candidates_by_key = self._load_draft_candidates(revision_id, conn=conn)
-            graph, _candidates = self._evaluate_draft(
+            graph, refreshed_candidates = self._evaluate_draft(
                 entries,
                 conn=conn,
                 frozen_candidates=candidates_by_key,
             )
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                _persist_candidates(conn, revision_id, {}, refreshed_candidates, _now())
+                conn.execute("DELETE FROM revision_issues WHERE revision_id = ?", (revision_id,))
+                for index, issue in enumerate(graph.issues):
+                    conn.execute(
+                        """
+                        INSERT INTO revision_issues(revision_id, issue_id, code, evidence_id, message)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (revision_id, f"issue-{index}", issue.code, issue.evidence_id, issue.message),
+                    )
+                conn.execute(
+                    "UPDATE import_revisions SET graph_digest = ? WHERE revision_id = ?",
+                    (self._graph_digest(graph), revision_id),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
             return graph
 
     def apply_override(
