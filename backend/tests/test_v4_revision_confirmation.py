@@ -684,6 +684,16 @@ def test_loading_draft_replaces_stale_persisted_issues_with_current_evaluation(t
             """
         )
 
+    from app.media_v4.projection.source_libraries import list_source_cards
+
+    card = list_source_cards(database)[0]
+    assert card["attention_count"] == 0
+    assert card["work_count"] == 1
+    with database.connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM revision_issues WHERE revision_id = 'rev-stale'"
+        ).fetchone()[0] == 1  # 来源卡只读统计，真正的预览操作才刷新快照。
+
     graph = service.load_draft_graph("rev-stale")
 
     assert graph.issues == ()
@@ -691,3 +701,44 @@ def test_loading_draft_replaces_stale_persisted_issues_with_current_evaluation(t
         assert conn.execute(
             "SELECT COUNT(*) FROM revision_issues WHERE revision_id = 'rev-stale'"
         ).fetchone()[0] == 0
+
+
+def test_preview_refresh_excludes_concurrent_confirmation_writes(tmp_path, monkeypatch):
+    """预览读取与回写之间，另一连接不能抢先确认并发布候选。"""
+
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    path = tmp_path / "preview-race.db"
+    database = V4Database(path)
+    database.initialize()
+    service = V4RevisionService(database)
+    service.create_draft("rev-race", [_entry()])
+    evaluate = service._evaluate_draft
+
+    def competing_confirmation(*args, **kwargs):
+        other = sqlite3.connect(path, timeout=0)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                other.execute(
+                    "UPDATE import_revisions SET status = 'confirmed' WHERE revision_id = 'rev-race'"
+                )
+        finally:
+            other.rollback()
+            other.close()
+        return evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_evaluate_draft", competing_confirmation)
+    service.load_draft_graph("rev-race")
+    monkeypatch.setattr(service, "_evaluate_draft", evaluate)
+    service.confirm("rev-race")
+    with database.connect() as conn:
+        before = tuple(conn.execute(
+            "SELECT status, graph_digest FROM import_revisions WHERE revision_id = 'rev-race'"
+        ).fetchone())
+    with pytest.raises(RuntimeError, match="draft"):
+        service.load_draft_graph("rev-race")
+    with database.connect() as conn:
+        assert tuple(conn.execute(
+            "SELECT status, graph_digest FROM import_revisions WHERE revision_id = 'rev-race'"
+        ).fetchone()) == before

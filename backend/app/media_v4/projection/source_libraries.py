@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import UTC, datetime
+from sqlite3 import Row
 
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.revisions.service import V4RevisionService
@@ -44,9 +45,13 @@ def list_source_cards(database: V4Database) -> list[dict]:
         ).fetchall()
         revisions = conn.execute(
             """
-            SELECT * FROM import_revisions
-            WHERE status IN ('confirmed', 'draft')
-            ORDER BY created_at DESC, revision_id DESC
+            SELECT ir.* FROM import_revisions ir
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            WHERE ir.status IN ('confirmed', 'draft')
+              AND (sr.retired_at = '' OR (
+                  ir.status = 'draft' AND julianday(ir.created_at) > julianday(sr.retired_at)
+              ))
+            ORDER BY ir.created_at DESC, ir.revision_id DESC
             """
         ).fetchall()
         scans = conn.execute(
@@ -57,8 +62,7 @@ def list_source_cards(database: V4Database) -> list[dict]:
         ).fetchall()
 
         revision_ids = [str(row["revision_id"]) for row in revisions]
-        revision_evidence = defaultdict(int)
-        candidate_works = defaultdict(set)
+        revision_evidence: dict[str, int] = defaultdict(int)
         bound_works = defaultdict(set)
         bound_assets = defaultdict(set)
         unresolved_issues = defaultdict(int)
@@ -72,11 +76,6 @@ def list_source_cards(database: V4Database) -> list[dict]:
                     revision_ids,
                 ).fetchall()
             })
-            for row in conn.execute(
-                f"SELECT revision_id, work_id FROM revision_work_candidates WHERE revision_id IN ({placeholders}) AND work_id != ''",
-                revision_ids,
-            ).fetchall():
-                candidate_works[str(row["revision_id"])].add(str(row["work_id"]))
             for row in conn.execute(
                 f"SELECT revision_id, work_id, asset_id FROM revision_bindings WHERE revision_id IN ({placeholders}) AND work_id != ''",
                 revision_ids,
@@ -97,13 +96,13 @@ def list_source_cards(database: V4Database) -> list[dict]:
                 """,
                 revision_ids,
             ).fetchall()
-    revisions_by_root: dict[str, dict[str, object]] = {}
+    revisions_by_root: dict[str, dict[str, Row]] = {}
     for row in revisions:
         root_id = str(row["root_id"])
         status = str(row["status"])
         by_status = revisions_by_root.setdefault(root_id, {})
         by_status.setdefault(status, row)
-    scans_by_root: dict[str, object] = {}
+    scans_by_root: dict[str, Row] = {}
     for row in scans:
         scans_by_root.setdefault(str(row["root_id"]), row)
 
@@ -162,7 +161,21 @@ def list_source_cards(database: V4Database) -> list[dict]:
             None,
         )
 
-        progress = _safe_progress(progress_service, revision_id) if confirmed is not None else {}
+        progress = _safe_progress(progress_service, revision_id) if draft is None and confirmed is not None else {}
+        draft_graph = None
+        if draft is not None:
+            try:
+                draft_graph = progress_service.load_draft_graph(revision_id, refresh_snapshot=False)
+            except (KeyError, RuntimeError):
+                # 并发确认会使已读取的 draft 退出审核态；下一次轮询获取新状态。
+                # 仍是 draft 时代表真正的读取/评估故障，不能静默隐藏来源卡。
+                try:
+                    still_draft = progress_service.get_status(revision_id) == "draft"
+                except KeyError:
+                    still_draft = False
+                if still_draft:
+                    raise
+                continue
         if scan_active:
             overall_status = "queued" if scan_status == "queued" else "running"
             phase = "scan"
@@ -201,7 +214,7 @@ def list_source_cards(database: V4Database) -> list[dict]:
         evidence_count = revision_evidence_count
         if evidence_count == 0 and scan is not None:
             evidence_count = _scan_evidence_count(database, str(scan["scan_id"]))
-        work_count = len(bound_works.get(revision_id, set())) if confirmed is not None else len(candidate_works.get(revision_id, set()))
+        work_count = len(draft_graph.works) if draft_graph is not None else len(bound_works.get(revision_id, set()))
         asset_count = len(bound_assets.get(revision_id, set()))
         if scan_active:
             message = _scan_message(scan, scan_progress)
@@ -237,7 +250,7 @@ def list_source_cards(database: V4Database) -> list[dict]:
                 "percent": None,
                 "message": "上次扫描意外中断，请重新扫描",
             }
-        elif confirmed is not None:
+        elif draft is None and confirmed is not None:
             card_progress = {
                 "state": progress.get("overall_status") or "completed",
                 "stage": _progress_stage(progress),
@@ -306,7 +319,7 @@ def list_source_cards(database: V4Database) -> list[dict]:
             "work_count": work_count,
             "asset_count": asset_count,
             "evidence_count": evidence_count,
-            "attention_count": unresolved_issues.get(revision_id, 0)
+            "attention_count": (len(draft_graph.issues) if draft_graph is not None else unresolved_issues.get(revision_id, 0))
             + (1 if scan_failed or scan_interrupted else 0),
             "last_error": last_error,
             "scan": scan_payload,

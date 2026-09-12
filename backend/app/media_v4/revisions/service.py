@@ -311,7 +311,7 @@ def _safe_detail_text(value: object) -> str:
 
 def _positive_detail_int(value: object) -> int | None:
     try:
-        parsed = int(value)  # type: ignore[arg-type]
+        parsed = int(value)  # type: ignore[call-overload]
     except (TypeError, ValueError):
         return None
     return parsed if parsed >= 0 else None
@@ -1035,7 +1035,7 @@ class V4RevisionService:
             for work in graph.works:
                 existing_work_ids: set[str] = set()
                 related_entries = [
-                    (evidence_by_id[evidence_id], facts_by_evidence_id.get(evidence_id))
+                    (evidence_by_id[evidence_id], facts_by_evidence_id[evidence_id])
                     for evidence_id in work.source_evidence_ids
                     if evidence_id in evidence_by_id
                 ]
@@ -2185,15 +2185,18 @@ class V4RevisionService:
             raise KeyError(revision_id)
         return row["status"]
 
-    def load_draft_graph(self, revision_id: str) -> ResolvedMediaGraph:
+    def load_draft_graph(self, revision_id: str, *, refresh_snapshot: bool = True) -> ResolvedMediaGraph:
         """从已持久化事实重建草稿，并刷新可再生的候选与问题快照。
 
         草稿中的 ``revision_issues``/候选是派生状态。识别规则升级后，若只
         在内存中重算，导入页虽然已无问题，媒体管理来源卡仍会读取旧表而持续
         显示红色冲突；因此预览成功后必须把当前离线评估结果回写。
+        来源卡使用只读模式统计当前草稿，不在轮询期间修改媒体状态。
         """
 
         with self.database.connect() as conn:
+            # 状态检查、评估和回写必须共享事务，防止并发确认后覆盖已发布快照。
+            conn.execute("BEGIN IMMEDIATE" if refresh_snapshot else "BEGIN")
             revision = conn.execute(
                 "SELECT status FROM import_revisions WHERE revision_id = ?",
                 (revision_id,),
@@ -2209,7 +2212,8 @@ class V4RevisionService:
                 conn=conn,
                 frozen_candidates=candidates_by_key,
             )
-            conn.execute("BEGIN IMMEDIATE")
+            if not refresh_snapshot:
+                return graph
             try:
                 _persist_candidates(conn, revision_id, {}, refreshed_candidates, _now())
                 conn.execute("DELETE FROM revision_issues WHERE revision_id = ?", (revision_id,))
@@ -2860,7 +2864,7 @@ class V4RevisionService:
             work = works.get(work_id, {})
             job_pair = jobs_by_work.get(work_id, {})
             mirror = job_pair.get("mirror")
-            metadata = job_pair.get("metadata")
+            metadata_job = job_pair.get("metadata")
             scrape = scrape_rows.get(work_id, {})
             scrape_status = str(scrape.get("metadata_state") or scrape.get("status") or "")
             metadata_policy = metadata_recovery_policy(
@@ -2885,7 +2889,7 @@ class V4RevisionService:
                 ) or 0),
                 "overall_status": _derive_work_status(
                     mirror,
-                    metadata,
+                    metadata_job,
                     scrape_status,
                 ),
                 "metadata_state": scrape_status,
@@ -2894,13 +2898,13 @@ class V4RevisionService:
                 "metadata_recovery_action": metadata_policy["action"],
                 "metadata_recovery_hint": metadata_policy["hint"],
                 "mirror": _job_summary(mirror),
-                "metadata": _job_summary(metadata),
+                "metadata": _job_summary(metadata_job),
                 # 任务状态相同并不代表详情快照不变，例如确认候选会更新
                 # scrape_bindings.metadata_json。用持久更新时间组成版本键，前端
                 # 才能在展开状态下可靠失效旧详情缓存。
                 "detail_version": "|".join((
                     str((mirror or {}).get("updated_at") or ""),
-                    str((metadata or {}).get("updated_at") or ""),
+                    str((metadata_job or {}).get("updated_at") or ""),
                     str(scrape.get("updated_at") or ""),
                 )),
             })

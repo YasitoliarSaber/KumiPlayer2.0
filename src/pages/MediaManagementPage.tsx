@@ -1136,6 +1136,7 @@ export default function MediaManagementPage() {
             const stateLabel = activeTask?.status === 'cancelling' ? '正在终止…'
               : activeTask?.status === 'queued' ? '等待中'
               : activeTask ? '进行中'
+                : card.phase === 'review' && card.attention_count === 0 ? '待确认'
                 : card.overall_status === 'needs_attention' ? '需要处理'
                   : card.overall_status === 'cancelled' ? cancelledLabel : '已完成'
             const progressLabel = activeTask

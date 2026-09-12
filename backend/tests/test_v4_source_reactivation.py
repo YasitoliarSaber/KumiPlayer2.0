@@ -107,6 +107,11 @@ def test_new_draft_after_retirement_remains_reviewable_from_source_card(tmp_path
     assert cards[0]["revision_id"] == "rev-after-retirement"
     assert cards[0]["phase"] == "review"
     assert cards[0]["overall_status"] == "needs_attention"
+    assert cards[0]["has_confirmed_baseline"] is False
+    assert cards[0]["work_count"] == 1
+    assert cards[0]["progress"]["stage"] == "review"
+    assert cards[0]["progress"]["message"] == "识别结果待确认"
+    assert cards[0]["last_error"] == ""
 
 
 def test_cancelled_confirmed_import_is_exposed_as_a_terminated_task(tmp_path):
