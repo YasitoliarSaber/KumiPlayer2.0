@@ -12,6 +12,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.api.media_v4 import get_database
+from app.core.paths import get_mirror_root
+from app.media_v4.jobs.paths import work_directory_name
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -31,22 +33,28 @@ def open_folder(req: OpenFolderRequest):
     only V4 Work/Episode/Asset rows are consulted.
     """
 
-    asset = _find_asset(req.work_id, req.episode_id)
-    if asset is None:
-        raise HTTPException(status_code=404, detail="作品或剧集没有关联 Asset")
+    if req.folder_type == "mirror":
+        if not _work_is_active(req.work_id):
+            raise HTTPException(status_code=404, detail="作品不存在或已从媒体库移除")
+        folder = Path(get_mirror_root()).expanduser() / work_directory_name(req.work_id)
+        source_path = folder
+    else:
+        asset = _find_asset(req.work_id, req.episode_id)
+        if asset is None:
+            raise HTTPException(status_code=404, detail="作品或剧集没有关联 Asset")
 
-    locator = asset["playback_locator"] or asset["source_locator"]
-    if not locator or "://" in locator:
-        return {
-            "ok": True,
-            "opened": False,
-            "exists": False,
-            "folder_path": "",
-            "source_path": locator or "",
-        }
+        locator = asset["playback_locator"] or asset["source_locator"]
+        if not locator or "://" in locator:
+            return {
+                "ok": True,
+                "opened": False,
+                "exists": False,
+                "folder_path": "",
+                "source_path": locator or "",
+            }
 
-    source_path = Path(locator).expanduser()
-    folder = source_path if source_path.is_dir() else source_path.parent
+        source_path = Path(locator).expanduser()
+        folder = source_path if source_path.is_dir() else source_path.parent
     exists = folder.is_dir()
     if req.open and not exists:
         raise HTTPException(status_code=404, detail=f"文件夹不存在: {folder}")
@@ -90,6 +98,15 @@ def _find_asset(work_id: str, episode_id: str) -> dict | None:
                 (work_id,),
             ).fetchone()
     return dict(row) if row is not None else None
+
+
+def _work_is_active(work_id: str) -> bool:
+    with get_database().connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM works WHERE work_id = ? AND status = 'active'",
+            (work_id,),
+        ).fetchone()
+    return row is not None
 
 
 def _open_folder(folder: Path) -> None:
