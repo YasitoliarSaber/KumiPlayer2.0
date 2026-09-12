@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -231,6 +232,104 @@ def test_retry_keeps_successful_details_only_for_same_identity(tmp_path, retry_p
     else:
         assert detail["scrape"]["plot"] == ""
         assert detail["episodes"][0]["scraped_title"] == ""
+
+
+@pytest.mark.parametrize("candidate_found", [False, True])
+def test_confirmed_scrape_receives_regular_alias_but_not_bonus_or_history(tmp_path, monkeypatch, candidate_found):
+    """从确认到真实搜索入口检查标题传递，不能只给 provider 手工塞标题。"""
+
+    from types import SimpleNamespace
+
+    from app.media_v4.jobs import metadata
+    from app.media_v4.jobs.scrape import V4ScrapeService
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "confirmed-alias.db")
+    database.initialize()
+    entries = []
+    for key, alias, special in [("regular", "Original Work", False), ("bonus", "Other Show", True)]:
+        evidence, facts = _entry(key)
+        entries.append((evidence, replace(
+            facts, work_title="本地化名称", title_candidates=("本地化名称", alias),
+            tmdb_hint_id=None, tmdb_hint_type="", group_type="special" if special else "season",
+            special_candidate=special, special_number=1 if special else None,
+        )))
+    service = V4RevisionService(database)
+    service.create_draft("rev-alias-chain", entries)
+    service.confirm("rev-alias-chain")
+    with database.connect() as conn:
+        work_id = conn.execute("SELECT work_id FROM works").fetchone()[0]
+        conn.execute(
+            "INSERT INTO work_aliases(work_id, normalized_title, alias_type) VALUES (?, 'Historical Wrong', 'observed')",
+            (work_id,),
+        )
+
+    queries = []
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def search_tv(self, query, year):
+            queries.append(query)
+            return [{
+                "id": 91234, "name": "Original Work", "original_name": "Original Work",
+                "first_air_date": "2022-01-01", "genre_ids": [16],
+            }] if candidate_found and query == "Original Work" else []
+
+        def get_tv_detail(self, provider_id):
+            assert provider_id == 91234
+            return {
+                "name": "Original Work", "original_name": "Original Work",
+                "first_air_date": "2022-01-01", "poster_path": "/p.jpg", "backdrop_path": "/f.jpg",
+                "genres": [{"id": 16, "name": "Animation"}],
+            }
+
+        def get_tv_season_episodes(self, provider_id, season):
+            assert provider_id == 91234
+            return {"episodes": [{"id": 9000 + season, "episode_number": 1, "name": "Episode"}]}
+
+        @staticmethod
+        def select_best_poster(_images):
+            return ""
+
+        select_best_backdrop = select_best_poster
+        select_best_logo = select_best_poster
+
+        @staticmethod
+        def build_image_url(path, size):
+            return f"https://image.tmdb.org/t/p/{size}{path}"
+
+    monkeypatch.setattr(metadata, "load_config", lambda: SimpleNamespace(tmdb_bearer_token="fixture"))
+    monkeypatch.setattr(metadata, "TMDBClient", Client)
+    scrape = V4ScrapeService(database)
+    job = scrape.enqueue_for_revision("rev-alias-chain")[0]
+    results = []
+
+    def provider(target):
+        result = metadata.default_metadata_provider(target)
+        results.append(result)
+        return result
+
+    scrape.process(job["job_id"], provider, mirror_root=_patch_scrape_env(tmp_path, monkeypatch))
+
+    assert queries == ["本地化名称", "Original Work"]
+    binding = scrape.list_bindings("rev-alias-chain")[0]
+    # 服务确实没有返回候选时仍须如实待处理，不能为了零报错伪造成功。
+    if candidate_found:
+        assert results[0]["candidate_decision"]["decision"] == "auto_adopted"
+        assert results[0]["metadata_state"] == "ready"
+        assert binding["provider_id"] == "91234"
+        assert binding["status"] != "waiting_review"
+    else:
+        assert binding["status"] == "waiting_review"
 
 
 def test_scrape_provider_identity_conflict_becomes_recoverable_review_state(tmp_path, monkeypatch):

@@ -7,11 +7,14 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+from app.media_v4.domain.models import ResolvedWork
 from app.media_v4.jobs.completeness import assess_metadata_completeness
 from app.media_v4.jobs.control import cancel_requested, claim_running, heartbeat, mark_cancelled
 from app.media_v4.jobs.metadata_artifacts import publish_metadata_artifacts
 from app.media_v4.parsing.parser import show_type_from_import_family
 from app.media_v4.persistence.database import V4Database
+from app.media_v4.persistence.repositories import V4Repository
+from app.media_v4.resolution.candidates import work_identity_title_inputs
 
 
 def _now() -> str:
@@ -204,6 +207,19 @@ class V4ScrapeService:
                 raise KeyError(job_id)
             target = dict(work) if work is not None else {"work_id": job["work_id"]}
             target["revision_id"] = job["revision_id"]
+            # 沿 confirmed membership 传递原有标题证据，不能在任务里重新识别路径。
+            facts = V4Repository(self.database).list_confirmed_work_facts(
+                str(job["revision_id"]), str(job["work_id"]), conn=conn,
+            )
+            target["identity_titles"] = work_identity_title_inputs(
+                ResolvedWork(
+                    work_key=str(job["work_id"]),
+                    preferred_title=str(target.get("preferred_title") or ""),
+                    year=target.get("year"),
+                    media_type="movie" if target.get("work_type") == "movie" else "tv",
+                ),
+                facts,
+            )[:8]
             if not str(target.get("show_type") or "").strip():
                 import_families = {
                     str(row["import_family"] or "").strip().casefold()

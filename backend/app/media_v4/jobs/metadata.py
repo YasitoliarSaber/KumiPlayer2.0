@@ -233,13 +233,16 @@ def _target_titles(target: dict) -> list[str]:
     """返回已经由本地解析确认、可用于精确匹配的标题事实。
 
     这里不能从目录名重新猜测，也不接纳父系列名；只使用 Work 已持久化的
-    首选标题和原文标题。这样本地化标题没有被 TMDB 搜到时，仍可用同一 Work
+    首选标题、原文标题与本次 confirmed 成员提供的自身标题。这样本地化标题没有被 TMDB 搜到时，仍可用同一 Work
     的原文标题安全回退，而不会把外传吸收到父系列。
     """
 
     titles: list[str] = []
     seen: set[str] = set()
-    for raw in (target.get("preferred_title"), target.get("original_title")):
+    for raw in (
+        target.get("preferred_title"), target.get("original_title"),
+        *(target.get("identity_titles") or []),
+    ):
         value = str(raw or "").strip()
         normalized = _normalize_title(value)
         if value and normalized and normalized not in seen:

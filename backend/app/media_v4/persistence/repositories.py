@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import nullcontext
+from dataclasses import replace
 
 from app.media_v4.domain.models import ParsedFacts, SourceEvidence
 from app.media_v4.persistence.database import V4Database
@@ -349,3 +350,28 @@ class V4Repository:
         if row is None:
             raise KeyError(parsed_fact_id)
         return self._row_to_parsed_facts(row)
+
+    def list_confirmed_work_facts(self, revision_id: str, work_id: str, *, conn) -> list[ParsedFacts]:
+        """读取本次已确认成员及其确认时覆盖，不重解析，也不复用历史别名。"""
+
+        rows = conn.execute(
+            """
+            SELECT DISTINCT pf.*, rb.override_json AS confirmed_override_json
+            FROM revision_bindings rb
+            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+            JOIN revision_evidence re
+              ON re.revision_id = rb.revision_id AND re.evidence_id = rb.evidence_id
+            JOIN parsed_facts pf ON pf.parsed_fact_id = re.parsed_fact_id
+            WHERE rb.revision_id = ? AND rb.work_id = ? AND ir.status = 'confirmed'
+            ORDER BY pf.evidence_id
+            """,
+            (revision_id, work_id),
+        ).fetchall()
+        facts = []
+        for row in rows:
+            overrides = json.loads(row["confirmed_override_json"] or "{}")
+            for key in ("title_candidates", "edition_tags"):
+                if key in overrides:
+                    overrides[key] = tuple(overrides[key] or ())
+            facts.append(replace(self._row_to_parsed_facts(row), **overrides))
+        return facts
