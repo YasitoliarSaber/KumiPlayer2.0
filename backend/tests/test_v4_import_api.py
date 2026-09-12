@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -120,6 +121,56 @@ def test_source_card_delete_hides_only_the_card_and_keeps_confirmed_media(tmp_pa
         assert conn.execute("SELECT COUNT(*) FROM revision_bindings").fetchone()[0] == 1
     assert root["enabled"] == 0
     assert root["retired_at"] == ""
+
+
+def test_drafts_endpoint_keeps_new_reimport_draft_after_source_retirement(tmp_path, monkeypatch):
+    """退役来源重新扫描后的 draft 仍要进入可恢复的审核队列。"""
+
+    client = _client(tmp_path, monkeypatch)
+    from app.api import media_v4
+    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+    from app.media_v4.revisions.service import V4RevisionService
+
+    def pair(evidence_id: str, scan_id: str, episode: int):
+        evidence = SourceEvidence(
+            evidence_id=evidence_id,
+            scan_id=scan_id,
+            root_id="root-draft-after-retirement",
+            source_key=f"Mini/Mini.S01E{episode:02d}.mkv",
+            relative_path=f"Mini/Mini.S01E{episode:02d}.mkv",
+            entry_kind="video",
+            provider="local",
+        )
+        facts = ParsedFacts(
+            parsed_fact_id=f"facts-{evidence_id}",
+            evidence_id=evidence_id,
+            parser_version="fixture",
+            work_title="Mini",
+            title_candidates=("Mini",),
+            media_type="tv",
+            group_type="season",
+            season_candidate=1,
+            episode_candidate=episode,
+        )
+        return evidence, facts
+
+    database = media_v4.get_database()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-before-retirement-api", [pair("ev-api-old", "scan-api-old", 1)])
+    revisions.confirm("rev-before-retirement-api")
+    with database.connect() as conn:
+        conn.execute(
+            "UPDATE source_roots SET retired_at = ?, retired_reason = ? WHERE root_id = ?",
+            (datetime.now(UTC).isoformat(), "fixture", "root-draft-after-retirement"),
+        )
+    revisions.create_draft("rev-after-retirement-api", [pair("ev-api-new", "scan-api-new", 2)])
+
+    response = client.get("/api/v4/sources/drafts")
+
+    assert response.status_code == 200, response.text
+    assert [item["revision_id"] for item in response.json()["drafts"]] == [
+        "rev-after-retirement-api"
+    ]
 
 
 def test_tree_scan_accepts_utf16_tree_through_both_entries(tmp_path, monkeypatch):

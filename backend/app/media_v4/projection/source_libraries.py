@@ -26,7 +26,21 @@ def list_source_cards(database: V4Database) -> list[dict]:
 
     with database.connect() as conn:
         roots = conn.execute(
-            "SELECT * FROM source_roots WHERE retired_at = '' AND enabled = 1 ORDER BY updated_at DESC, root_id"
+            """
+            SELECT * FROM source_roots
+            WHERE enabled = 1
+              AND (
+                  retired_at = ''
+                  OR EXISTS (
+                      SELECT 1
+                      FROM import_revisions draft_revision
+                      WHERE draft_revision.root_id = source_roots.root_id
+                        AND draft_revision.status = 'draft'
+                        AND julianday(draft_revision.created_at) > julianday(source_roots.retired_at)
+                  )
+              )
+            ORDER BY updated_at DESC, root_id
+            """
         ).fetchall()
         revisions = conn.execute(
             """

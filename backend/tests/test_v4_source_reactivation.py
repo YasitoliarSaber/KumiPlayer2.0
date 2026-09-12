@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import UTC, datetime
+
 
 def _entry(root_id: str = "root-reactivated", episode: int = 1):
     from app.media_v4.domain.models import ParsedFacts, SourceEvidence
@@ -43,7 +46,7 @@ def test_confirm_reactivates_retired_root_and_creates_source_card_immediately(tm
     with database.connect() as conn:
         conn.execute(
             "UPDATE source_roots SET retired_at = ?, retired_reason = ? WHERE root_id = ?",
-            ("2026-08-26T00:00:00+00:00", "fixture", "root-reactivated"),
+            (datetime.now(UTC).isoformat(), "fixture", "root-reactivated"),
         )
 
     assert list_source_cards(database) == []
@@ -63,6 +66,47 @@ def test_confirm_reactivates_retired_root_and_creates_source_card_immediately(tm
         ).fetchone()
     assert root["retired_at"] == ""
     assert root["retired_reason"] == ""
+
+
+def test_new_draft_after_retirement_remains_reviewable_from_source_card(tmp_path):
+    """退役来源重新扫描后，未确认草稿必须仍能从来源卡回到审核页。"""
+
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.projection.source_libraries import list_source_cards
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "reimport-review-card.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-before-retirement", [_entry(episode=1)])
+    revisions.confirm("rev-before-retirement")
+    with database.connect() as conn:
+        conn.execute(
+            "UPDATE source_roots SET retired_at = ?, retired_reason = ? WHERE root_id = ?",
+            (datetime.now(UTC).isoformat(), "fixture", "root-reactivated"),
+        )
+
+    evidence, facts = _entry(episode=2)
+    evidence = replace(
+        evidence,
+        evidence_id="ev-reactivated-new",
+        scan_id="scan-reactivated-new",
+        source_key="Mini/Mini.S01E02.mkv",
+        relative_path="Mini/Mini.S01E02.mkv",
+    )
+    facts = replace(
+        facts,
+        evidence_id=evidence.evidence_id,
+        parsed_fact_id="facts-reactivated-new",
+    )
+    revisions.create_draft("rev-after-retirement", [(evidence, facts)])
+
+    cards = list_source_cards(database)
+
+    assert len(cards) == 1
+    assert cards[0]["revision_id"] == "rev-after-retirement"
+    assert cards[0]["phase"] == "review"
+    assert cards[0]["overall_status"] == "needs_attention"
 
 
 def test_cancelled_confirmed_import_is_exposed_as_a_terminated_task(tmp_path):

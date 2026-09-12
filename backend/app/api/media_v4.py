@@ -1130,7 +1130,11 @@ def list_drafts():
                 ) AS issue_count
             FROM import_revisions ir
             JOIN source_roots sr ON sr.root_id = ir.root_id
-            WHERE ir.status = 'draft' AND sr.retired_at = ''
+            WHERE ir.status = 'draft'
+              AND (
+                  sr.retired_at = ''
+                  OR julianday(ir.created_at) > julianday(sr.retired_at)
+              )
             ORDER BY ir.created_at DESC, ir.revision_id
             """
         ).fetchall()
