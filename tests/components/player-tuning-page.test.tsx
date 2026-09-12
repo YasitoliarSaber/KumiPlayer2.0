@@ -7,6 +7,7 @@ vi.mock('../../src/api/config', () => ({
   configApi: {
     getConfig: vi.fn(),
     patchConfig: vi.fn(),
+    openMpvConfigDir: vi.fn(),
   },
 }));
 
@@ -60,5 +61,34 @@ describe('PlayerTuningPage', () => {
     await waitFor(() => {
       expect(screen.getByText(/保存失败：网络错误/)).toBeTruthy();
     });
+  });
+
+  it('打开受限的 MPV 配置文件夹', async () => {
+    (configApi.getConfig as ReturnType<typeof vi.fn>).mockResolvedValue({
+      mpv_anime4k_mode: 'off',
+      mpv_anime4k_quality: 'balanced',
+    });
+    (configApi.openMpvConfigDir as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true });
+    render(<PlayerTuningPage />);
+
+    await screen.findByText('关闭');
+    fireEvent.click(screen.getByRole('button', { name: '打开 MPV 配置文件夹' }));
+
+    await waitFor(() => expect(configApi.openMpvConfigDir).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('已打开 MPV 配置文件夹')).toBeTruthy();
+  });
+
+  it('在当前主题容器内展开 Anime4K 选项', async () => {
+    (configApi.getConfig as ReturnType<typeof vi.fn>).mockResolvedValue({
+      mpv_anime4k_mode: 'off',
+      mpv_anime4k_quality: 'balanced',
+    });
+    const { container } = render(<PlayerTuningPage />);
+
+    await screen.findByText('关闭');
+    fireEvent.click(screen.getByRole('combobox', { name: '模式' }));
+
+    expect(await screen.findByRole('listbox')).toBeTruthy();
+    expect(container.querySelector('.player-tuning-page')).toContainElement(screen.getByRole('listbox'));
   });
 });

@@ -134,6 +134,18 @@ describe('SettingsPage 信息架构', () => {
     expect(document.getElementById('settings-panel-scrape')).toHaveTextContent('网络代理');
   });
 
+  test('将外观放在账户之后，便于首次进入设置时快速调整主题', async () => {
+    render(<SettingsPage />);
+
+    const navigation = screen.getByRole('navigation', { name: '设置分类' });
+    const labels = within(navigation)
+      .getAllByRole('button')
+      .map((button) => button.textContent || '');
+
+    expect(labels.findIndex((label) => label.includes('账户与同步'))).toBeLessThan(labels.findIndex((label) => label.includes('外观')));
+    expect(labels.findIndex((label) => label.includes('外观'))).toBeLessThan(labels.findIndex((label) => label.includes('媒体来源')));
+  });
+
   test('隐藏构建与赞助信息，并将播放器状态收敛为用户可理解的结果', async () => {
     render(<SettingsPage />);
 

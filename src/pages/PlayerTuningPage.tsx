@@ -6,7 +6,7 @@
 
 import { useEffect, useState } from 'react';
 import { Button, Dropdown, Option, Spinner } from '@fluentui/react-components';
-import { ArrowLeft, CheckCircle2, TriangleAlert } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, FolderOpen, TriangleAlert } from 'lucide-react';
 import { configApi, type PublicConfig } from '../api/config';
 import { useUiStore } from '../stores/ui';
 
@@ -36,8 +36,10 @@ export default function PlayerTuningPage() {
   const [quality, setQuality] = useState<Anime4kQuality>('balanced');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [openingConfigDir, setOpeningConfigDir] = useState(false);
   const [error, setError] = useState('');
   const [saved, setSaved] = useState(false);
+  const [configFolderOpened, setConfigFolderOpened] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -72,24 +74,43 @@ export default function PlayerTuningPage() {
     }
   };
 
+  const openConfigDir = async () => {
+    setOpeningConfigDir(true);
+    setError('');
+    setConfigFolderOpened(false);
+    try {
+      await configApi.openMpvConfigDir();
+      setConfigFolderOpened(true);
+    } catch (err) {
+      setError(`打开 MPV 配置文件夹失败：${(err as Error).message}`);
+    } finally {
+      setOpeningConfigDir(false);
+    }
+  };
+
   return (
     <div className="player-tuning-page">
       <div className="player-tuning-header">
         <Button appearance="subtle" icon={<ArrowLeft size={16} />} onClick={() => goBack()}>返回</Button>
         <div>
-          <span className="media-import-step-label">播放器调节</span>
-          <h2>Anime4K 默认效果</h2>
+          <span className="player-tuning-kicker">Anime4K 默认效果</span>
+          <h2>播放器调节</h2>
         </div>
       </div>
 
       <section className="player-tuning-section">
         <h3>播放器状态</h3>
-        <div className="player-tuning-status">
-          {config ? (
-            <span className="player-tuning-status-ok"><CheckCircle2 size={15} /> 配置已加载</span>
-          ) : (
-            <span className="player-tuning-status-warn"><TriangleAlert size={15} /> 配置不可用</span>
-          )}
+        <div className="player-tuning-status-row">
+          <div className="player-tuning-status">
+            {config ? (
+              <span className="player-tuning-status-ok"><CheckCircle2 size={15} /> 配置已加载</span>
+            ) : (
+              <span className="player-tuning-status-warn"><TriangleAlert size={15} /> 配置不可用</span>
+            )}
+          </div>
+          <Button appearance="secondary" icon={openingConfigDir ? <Spinner size="tiny" /> : <FolderOpen size={16} />} disabled={openingConfigDir} onClick={() => void openConfigDir()}>
+            {openingConfigDir ? '正在打开…' : '打开 MPV 配置文件夹'}
+          </Button>
         </div>
         <p className="player-tuning-note">
           此设置对之后开始播放的新视频生效；右键菜单中的调整只影响当前视频，不会改变这里的默认值。
@@ -103,8 +124,10 @@ export default function PlayerTuningPage() {
         ) : (
           <div className="player-tuning-fields">
             <div className="player-tuning-field">
-              <label>模式</label>
+              <label id="anime4k-mode-label">模式</label>
               <Dropdown
+                aria-labelledby="anime4k-mode-label"
+                inlinePopup
                 value={MODE_OPTIONS.find((item) => item.value === mode)?.label || mode}
                 selectedOptions={[mode]}
                 onOptionSelect={(_, data) => {
@@ -118,8 +141,10 @@ export default function PlayerTuningPage() {
               </Dropdown>
             </div>
             <div className="player-tuning-field">
-              <label>质量</label>
+              <label id="anime4k-quality-label">质量</label>
               <Dropdown
+                aria-labelledby="anime4k-quality-label"
+                inlinePopup
                 value={QUALITY_OPTIONS.find((item) => item.value === quality)?.label || quality}
                 selectedOptions={[quality]}
                 onOptionSelect={(_, data) => {
@@ -147,6 +172,7 @@ export default function PlayerTuningPage() {
 
       {error && <div className="player-tuning-error" role="alert"><TriangleAlert size={15} /> {error}</div>}
       {saved && <div className="player-tuning-saved"><CheckCircle2 size={15} /> 已保存，之后播放的新视频将使用新默认值</div>}
+      {configFolderOpened && <div className="player-tuning-saved"><CheckCircle2 size={15} /> 已打开 MPV 配置文件夹</div>}
 
       <div className="player-tuning-actions">
         <Button appearance="primary" icon={saving ? <Spinner size="tiny" /> : <CheckCircle2 size={15} />} disabled={saving || loading} onClick={() => void save()}>

@@ -3,6 +3,7 @@ import { Button, Spinner } from '@fluentui/react-components';
 import {
   Database,
   ExternalLink,
+  FolderOpen,
   KeyRound,
   Network,
   Palette,
@@ -34,11 +35,11 @@ type OpenListDraft = Pick<OpenListConfigPayload, 'server_url' | 'remote_root' | 
 
 const sectionTabs: Array<{ key: SettingsTab; label: string; summary: string; icon: LucideIcon }> = [
   { key: 'bangumi', label: '账户与同步', summary: 'Bangumi 登录与观看同步', icon: UserRound },
+  { key: 'appearance', label: '外观', summary: '主题、卡片与显示密度', icon: Palette },
   { key: 'sources', label: '媒体来源', summary: '本地、网盘与目录树来源', icon: Database },
   { key: 'openlist', label: 'OpenList 设置', summary: '连接、远端目录与内容路由', icon: Network },
   { key: 'scrape', label: '元数据与图片', summary: 'TMDB、AniList 与刮削', icon: KeyRound },
   { key: 'player', label: '播放', summary: 'mpv 与连续播放', icon: PlaySquare },
-  { key: 'appearance', label: '外观', summary: '主题、卡片与显示密度', icon: Palette },
 ];
 
 const sourceLabels: Record<SourceKey | 'all' | 'openlist', string> = {
@@ -283,6 +284,11 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
   const checkMpvRuntime = () => runAction('检测内置播放器', async () => {
     await loadMpvRuntime();
     report('内置播放器状态已刷新');
+  });
+
+  const openMpvConfigDir = () => runAction('打开 MPV 配置文件夹', async () => {
+    await configApi.openMpvConfigDir();
+    report('已打开 MPV 配置文件夹');
   });
 
   const loadConfig = async () => {
@@ -600,6 +606,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
           </div>
           <div className="settings-actions">
             <GhostButton onClick={() => checkMpvRuntime()} disabled={activeAction !== null}>{activeAction === '检测内置播放器' ? '检测中…' : '重新检测内置播放器'}</GhostButton>
+            <GhostButton onClick={() => openMpvConfigDir()} busy={activeAction === '打开 MPV 配置文件夹'} disabled={activeAction !== null && activeAction !== '打开 MPV 配置文件夹'}><FolderOpen size={16} aria-hidden="true" />打开 MPV 配置文件夹</GhostButton>
             <GhostButton onClick={() => goPlayerTuning()}>播放器调节（Anime4K 默认效果）</GhostButton>
           </div>
         </SettingsSection>
