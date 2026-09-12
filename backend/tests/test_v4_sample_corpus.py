@@ -38,7 +38,7 @@ def test_real_directory_tree_sample_has_complete_non_ambiguous_v4_graph(
         text,
         root_id=f"sample-{filename}",
         scan_id=f"sample-{filename}",
-        provider="baidu",
+        provider="pan115" if filename == "根目录20260703203700_目录树.txt" else "baidu",
     )
     parser = V4Parser()
     parsed = normalize_batch_parsed_facts(
@@ -65,6 +65,19 @@ def test_real_directory_tree_sample_has_complete_non_ambiguous_v4_graph(
     assert assigned_ids == importable_ids
     assert graph.issues == ()
     assert graph.works
+    # 只验证解析图会漏掉本次回归：错误绑定是在第二步离线候选阶段产生的。
+    _candidates, merge_map, candidate_issues = plan_work_candidates(graph, parsed, lambda *_: [])
+    assert candidate_issues == []
+    merged = merge_graph(graph, merge_map)
+    assert {
+        evidence_id
+        for episode in merged.episodes
+        for evidence_id in episode.asset_evidence_ids
+    } | {
+        evidence_id
+        for asset in merged.work_assets
+        for evidence_id in asset.asset_evidence_ids
+    } == importable_ids
 
     works_by_display_identity: dict[tuple[str, int | None, str, str], list[str]] = defaultdict(list)
     for work in graph.works:

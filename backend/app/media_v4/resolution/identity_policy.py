@@ -115,8 +115,10 @@ def provider_identity_conflicts(
                 code="work_identity_conflict",
                 evidence_id=evidence_id,
                 message=(
-                    f"Provider 身份 {identity[0]}:{identity[2]} 同时命中独立作品，"
-                    "不能自动合并；请检查作品身份，不能通过修改单集编号解决"
+                    "、".join(dict.fromkeys(f"《{work.preferred_title}》" for work, _ in identity_members))
+                    + "被匹配到了同一份在线资料，但目录显示它们是不同作品。"
+                    "为避免把正篇、外传或电影混在一起，暂未合并；需要核对作品对应的在线资料，"
+                    "不用修改文件名或集数。"
                 ),
             )
         )

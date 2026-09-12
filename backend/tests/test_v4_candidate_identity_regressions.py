@@ -175,7 +175,8 @@ def test_bonus_filename_cannot_assign_spinoff_identity_to_parent_work():
     from app.media_v4.resolution.resolver import MediaResolver
 
     main = _entry("main", work_title="Yuru Camp", title_candidates=("Yuru Camp",))
-    bonus = _entry("bonus", work_title="Yuru Camp", title_candidates=("Yuru Camp",))
+    # 旧草稿保存的是解析后截断的文件名，不只是原始路径。
+    bonus = _entry("bonus", work_title="Yuru Camp", title_candidates=("Yuru Camp", "Yuru Camp [Heya Camp"))
     bonus = (replace(bonus[0], relative_path="Yuru Camp/SP/Heya Camp EP00.mkv"), replace(bonus[1], group_type="special", special_candidate=True))
     side = _entry("side", work_title="Heya Camp", title_candidates=("Heya Camp",), series_group="Yuru Camp", relation_type="spin_off")
     entries = [main, bonus, side]
@@ -185,6 +186,103 @@ def test_bonus_filename_cannot_assign_spinoff_identity_to_parent_work():
     assert not any(c.provider_id == "95213" and c.status == "confirmed" for c in candidates[parent.work_key])
     assert not any(issue.code == "work_identity_conflict" for issue in issues)
     assert len(set(merge.values())) == len(merge)
+
+
+def test_special_alias_does_not_promote_unrelated_online_candidate():
+    from dataclasses import replace
+
+    from app.media_v4.resolution.candidates import WorkCandidate, plan_work_candidates
+    from app.media_v4.resolution.resolver import MediaResolver
+
+    entry = _entry("bonus", work_title="Parent Show", title_candidates=("Parent Show", "Other Show"))
+    entry = (entry[0], replace(entry[1], group_type="special", special_candidate=True))
+    graph = MediaResolver().resolve([entry])
+    requested = []
+
+    def search(key, queries, _year, _media_type):
+        requested.extend(queries)
+        return [WorkCandidate(key, "tmdb", "200", "tv", "Other Show", None, "online_search", "high")]
+
+    candidates, _, _ = plan_work_candidates(graph, [entry], search)
+    assert "Parent Show" in requested
+    assert "Other Show" not in requested
+    assert all(item.status != "confirmed" for item in candidates[graph.works[0].work_key])
+
+
+def test_work_title_precedes_release_variants_without_losing_regular_episode_alias():
+    from dataclasses import replace
+
+    from app.media_v4.resolution.candidates import build_query_inputs
+    from app.media_v4.resolution.resolver import MediaResolver
+
+    entry = _entry("regular", work_title="本地作品名", title_candidates=("Original Title",))
+    work = replace(MediaResolver().resolve([entry]).works[0], preferred_title="系列作品名")
+    facts = [replace(entry[1], original_title=f"Release variant {index}") for index in range(12)]
+    queries = build_query_inputs(work, [entry], related_facts=facts)
+    assert queries[:3] == ["系列作品名", "本地作品名", "Original Title"]
+    assert len(queries) <= 8
+
+
+def test_real_camp_bundle_rechecks_polluted_frozen_candidate():
+    from app.media_v4.domain.models import SourceEvidence
+    from app.media_v4.parsing.parser import V4Parser
+    from app.media_v4.resolution.candidates import WorkCandidate, plan_work_candidates
+    from app.media_v4.resolution.resolver import MediaResolver
+
+    root = "[VCB-Studio] Yuru Camp"
+    release = "[Airota&Nekomoe kissaten&VCB-Studio]"
+    paths = [
+        f"{root}/{release} Yuru Camp Season 2 [Ma10p_1080p]/{release} Yuru Camp Season 2 [01][Ma10p_1080p].mkv",
+        f"{root}/{release} Yuru Camp [Ma10p_1080p]/{release} Yuru Camp [Heya Camp EP00][Ma10p_1080p].mkv",
+        f"{root}/{release} Heya Camp [Ma10p_1080p]/{release} Heya Camp [01][Ma10p_1080p].mkv",
+        f"{root}/{release} Yuru Camp Movie [Ma10p_1080p]/{release} Yuru Camp Movie [Ma10p_1080p].mkv",
+    ]
+    entries = []
+    for index, path in enumerate(paths):
+        evidence = SourceEvidence(str(index), "scan", "root", str(index), path, "video", provider="local")
+        entries.append((evidence, V4Parser().parse(evidence)))
+    graph = MediaResolver().resolve(entries)
+    assert len(graph.works) == 3
+
+    def frozen(key, *_args):
+        return [WorkCandidate(key, "tmdb", "95213", "tv", "Heya Camp△", None, "verified_path_binding", "high", "rejected")]
+
+    for preserve in (False, True):
+        candidates, merge, issues = plan_work_candidates(graph, entries, frozen, preserve_candidate_status=preserve)
+        assert issues == []
+        assert not merge
+        for work in graph.works:
+            confirmed = [item.provider_id for item in candidates[work.work_key] if item.status == "confirmed"]
+            if work.preferred_title == "Yuru Camp":
+                assert confirmed == []
+            elif work.media_type == "movie":
+                assert confirmed == ["566466"]
+            else:
+                assert confirmed == ["95213"]
+
+
+def test_confirmation_does_not_save_bonus_or_parent_titles_as_work_aliases(tmp_path):
+    from dataclasses import replace
+
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    main = _entry("main", work_title="Parent Show", title_candidates=("Parent Show", "Original Title"))
+    bonus = _entry("bonus", work_title="Parent Show", title_candidates=("Parent Show", "Unrelated Bonus"))
+    bonus = (bonus[0], replace(bonus[1], group_type="special", special_candidate=True, special_number=1))
+    side = _entry("side", work_title="Side Story", title_candidates=("Side Story", "Parent Show"), series_group="Parent Show", relation_type="spin_off")
+    database = V4Database(tmp_path / "aliases.db")
+    database.initialize()
+    service = V4RevisionService(database)
+    service.create_draft("rev-alias", [main, bonus, side])
+    service.confirm("rev-alias")
+    with database.connect() as conn:
+        aliases = {(row[0], row[1]) for row in conn.execute(
+            "SELECT w.preferred_title, a.normalized_title FROM works w JOIN work_aliases a ON a.work_id=w.work_id",
+        )}
+    assert ("Parent Show", "original title") in aliases
+    assert ("Parent Show", "unrelated bonus") not in aliases
+    assert ("Side Story", "parent show") not in aliases
 
 
 def test_frozen_historical_candidate_cannot_restore_released_binding():

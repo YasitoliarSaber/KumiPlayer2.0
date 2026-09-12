@@ -553,7 +553,8 @@ class V4Parser:
                 guess.work_title,
                 resolved_series_group,
                 guess.original_title,
-                filename_series_title,
+                # 单集特典标题只用于剧集展示，不能升级为父作品的身份别名。
+                filename_series_title if group_type in {"season", "movie"} else "",
             )
         )
         episode_title = (guess.title or "").strip()

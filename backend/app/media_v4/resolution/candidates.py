@@ -97,15 +97,12 @@ def build_query_inputs(
     entries: list[tuple[SourceEvidence, ParsedFacts]],
     related_facts: list[ParsedFacts] | None = None,
 ) -> list[str]:
-    """构造候选查询输入，去重并过滤通用容器标题；含 sidecar NFO 标题。
+    """按作品名、正片别名、发布目录名的顺序构造身份查询。
 
     ``related_facts`` 允许调用方传入预构建的 Work 关联事实，避免大库在
     每部作品上重复遍历全部条目。
     """
 
-    from app.media_v4.generic_container import is_generic_container_title
-
-    queries: list[str] = []
     if related_facts is None:
         related = [
             facts
@@ -114,10 +111,35 @@ def build_query_inputs(
         ]
     else:
         related = related_facts
+    return work_identity_title_inputs(work, related)[:8]
+
+
+def work_identity_title_inputs(work: ResolvedWork, related: list[ParsedFacts]) -> list[str]:
+    """检索、历史身份复用与别名落库共用的作品标题边界（不截断别名）。"""
+
+    from app.media_v4.generic_container import is_generic_container_title
+
+    queries: list[str] = []
+    seen: set[str] = set()
+
+    def append_title(value: str) -> None:
+        value = (value or "").strip()
+        normalized = _normalize_title(value)
+        if normalized and normalized not in seen and not is_generic_container_title(value):
+            seen.add(normalized)
+            queries.append(value)
+
+    # 主标题不能被不同压制组/清晰度目录挤出有限的查询额度。
+    append_title(work.preferred_title)
     for facts in related:
-        # series_group 只表达父系列关系，不能作为独立外传/电影子作品的
-        # Provider 身份查询输入；否则 Heya Camp 会被 Yuru Camp 候选吸收。
-        for value in (facts.work_title, facts.original_title, *facts.title_candidates):
+        append_title(facts.work_title)
+    for facts in related:
+        # 特典的文件名可能是单集标题、外传预告或合作短片标题，不能反过来
+        # 给整部作品定身份。保留其作品/目录名；正片文件名的跨语言别名仍可用。
+        # 在此复核而非只改 parser，才能同时处理旧草稿已保存的污染别名。
+        if facts.group_type not in {"season", "movie"} or facts.special_candidate or facts.is_auxiliary:
+            continue
+        for value in facts.title_candidates:
             value = (value or "").strip()
             # title_candidates 由解析层提供给展示与诊断，也会包含父系列标题。
             # 当前 Work 已经是独立子作品时，父系列仅能建立 relation，绝不能
@@ -126,11 +148,17 @@ def build_query_inputs(
             work_norm = _normalize_title(facts.work_title)
             if parent_norm and parent_norm != work_norm and _normalize_title(value) == parent_norm:
                 continue
-            if value and not is_generic_container_title(value) and value not in queries:
-                queries.append(value)
-    if work.preferred_title and work.preferred_title not in queries:
-        queries.append(work.preferred_title)
-    return queries[:8]
+            if _normalize_title(value) == _normalize_title(facts.original_title):
+                continue
+            append_title(value)
+    for facts in related:
+        # 原始目录经常含发布标签，只作补充输入；父系列不能成为外传别名。
+        parent_norm = _normalize_title(facts.series_group)
+        original_norm = _normalize_title(facts.original_title)
+        if parent_norm and parent_norm != _normalize_title(facts.work_title) and original_norm == parent_norm:
+            continue
+        append_title(facts.original_title)
+    return queries
 
 
 def compute_nfo_ownership(
@@ -318,7 +346,8 @@ def plan_work_candidates(
 
         # 规则必须属于解析后的作品本身。整个路径中的父目录/赠品文件名
         # 可能包含另一作品名，不能因此把它的 ID 提升为本作品的权威。
-        for title in build_query_inputs(work, entries, related_facts=[facts for _e, facts in related]):
+        queries = build_query_inputs(work, entries, related_facts=[facts for _e, facts in related])
+        for title in queries:
             binding = match_verified_tmdb_binding(title)
             if binding is None or binding.tmdb_type != work.media_type:
                 continue
@@ -339,7 +368,6 @@ def plan_work_candidates(
             )
         # 3) 在线/测试搜索候选（含 sidecar NFO 标题输入）。
         nfo_facts = nfo_facts_by_owner.get(work.work_key, [])
-        queries = build_query_inputs(work, entries, related_facts=[facts for _e, facts in related])
         nfo_titles, has_nfo = _nfo_related_titles(work, entries, nfo_ownership, nfo_facts=nfo_facts)
         for title in nfo_titles:
             if title not in queries:

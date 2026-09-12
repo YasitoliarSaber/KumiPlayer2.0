@@ -791,32 +791,13 @@ def _work_identity_titles(work, related_entries: list[tuple[SourceEvidence, Pars
     否则 TXT/OpenList 的普通目录会失去唯一离线身份证据。
     """
 
-    titles = {_normalize_title(str(getattr(work, "preferred_title", "") or ""))}
-    titles.discard("")
-    for _evidence, facts in related_entries or []:
-        parent_title = _normalize_title(facts.series_group)
-        child_relation = facts.card_type in {"standalone", "movie"} or facts.relation_type in {
-            "spin_off",
-            "movie",
-            "remake",
-            "sequel",
-            "prequel",
-        } or (
-            bool(parent_title)
-            and _normalize_title(facts.work_title) != parent_title
-            and facts.relation_type != "main"
+    return {
+        _normalize_title(title)
+        for title in candidate_service.work_identity_title_inputs(
+            work, [facts for _evidence, facts in related_entries or []],
         )
-        for value in (facts.work_title, facts.original_title, *facts.title_candidates):
-            normalized = _normalize_title(value)
-            if not normalized:
-                continue
-            if child_relation and normalized == parent_title:
-                continue
-            # 纯容器名/季标记不能单独构成作品身份。
-            if re.fullmatch(r"(?:season\s*\d+|第\s*\d+\s*季|specials?|sp)", normalized, re.IGNORECASE):
-                continue
-            titles.add(normalized)
-    return titles
+        if _normalize_title(title)
+    }
 
 
 def _existing_work_matches(
@@ -1793,17 +1774,17 @@ class V4RevisionService:
                                 """,
                                 (work_id, root_id, structural_key, facts.confidence),
                             )
-                        for title in (facts.work_title, facts.series_group, *facts.title_candidates):
-                            normalized_title = _normalize_title(title)
-                            if normalized_title:
-                                conn.execute(
-                                    """
-                                    INSERT OR IGNORE INTO work_aliases(
-                                        work_id, normalized_title, alias_type
-                                    ) VALUES (?, ?, 'observed')
-                                    """,
-                                    (work_id, normalized_title),
-                                )
+                    # 与候选识别使用同一边界：不能把特典单集名或父系列名
+                    # 写成外传的永久别名，再反向污染后续导入。
+                    for normalized_title in _work_identity_titles(work, related_entries):
+                        conn.execute(
+                            """
+                            INSERT OR IGNORE INTO work_aliases(
+                                work_id, normalized_title, alias_type
+                            ) VALUES (?, ?, 'observed')
+                            """,
+                            (work_id, normalized_title),
+                        )
 
                 # P-001 7.7 R4：持久化作品关系；父 Work 可能只存在于已确认数据库。
                 for relation in graph.relations:
