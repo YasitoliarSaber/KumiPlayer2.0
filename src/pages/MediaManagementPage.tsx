@@ -13,6 +13,7 @@ import {
   ShieldCheckmark24Regular,
   Database24Regular,
   DocumentText24Regular,
+  Edit24Regular,
   Folder24Regular,
   FolderOpen24Regular,
   ScanObject24Regular,
@@ -255,6 +256,10 @@ export default function MediaManagementPage() {
   const [sourceCardsLoading, setSourceCardsLoading] = useState(true)
   const [sourceCardPendingDelete, setSourceCardPendingDelete] = useState<V4SourceLibraryCard | null>(null)
   const [sourceCardDeleting, setSourceCardDeleting] = useState(false)
+  const [sourceCardPendingRename, setSourceCardPendingRename] = useState<V4SourceLibraryCard | null>(null)
+  const [sourceCardRenameValue, setSourceCardRenameValue] = useState('')
+  const [sourceCardRenaming, setSourceCardRenaming] = useState(false)
+  const [sourceCardRenameError, setSourceCardRenameError] = useState('')
   const [revisionId, setRevisionId] = useState('')
   const [workflowStage, setWorkflowStage] = useState<WorkflowStage>('source')
   const [executeProgress, setExecuteProgress] = useState<V4ExecutionProgress | null>(null)
@@ -1092,6 +1097,34 @@ export default function MediaManagementPage() {
     }
   }
 
+  const openSourceCardRename = (card: V4SourceLibraryCard) => {
+    setSourceCardRenameValue(card.display_name)
+    setSourceCardRenameError('')
+    setSourceCardPendingRename(card)
+  }
+
+  const renameSourceCard = async () => {
+    if (!sourceCardPendingRename || sourceCardRenaming) return
+    const displayName = sourceCardRenameValue.trim()
+    if (!displayName) {
+      setSourceCardRenameError('请填写来源名称')
+      return
+    }
+    setSourceCardRenaming(true)
+    setSourceCardRenameError('')
+    try {
+      const result = await mediaV4Api.renameSourceLibraryCard(sourceCardPendingRename.root_id, displayName)
+      setSourceCards((cards) => cards.map((item) => item.root_id === result.root_id
+        ? { ...item, display_name: result.display_name }
+        : item))
+      setSourceCardPendingRename(null)
+    } catch (cause) {
+      setSourceCardRenameError(userFacingPageError(cause, '保存名称失败，请稍后重试'))
+    } finally {
+      setSourceCardRenaming(false)
+    }
+  }
+
   return (
     <div className="media-flow-page media-v4-page">
       <header className="media-flow-header">
@@ -1167,7 +1200,8 @@ export default function MediaManagementPage() {
                   {activeTask?.can_cancel || activeTask?.status === 'cancelling'
                     ? <Button className="media-v4-source-card-action secondary" appearance="secondary" icon={<Dismiss24Regular />} disabled={activeTask?.status === 'cancelling'} onClick={() => void terminateSourceTask(card)}>{activeTask?.status === 'cancelling' ? '正在终止…' : '终止任务'}</Button>
                     : <Button className={`media-v4-source-card-action ${card.can_resume ? 'secondary' : 'primary'}`} appearance={card.can_resume ? 'secondary' : 'primary'} icon={<ArrowSync24Regular />} disabled={active} onClick={() => prepareSourceUpdate(card)}>检查更新</Button>}
-                  {!active && <Button className="media-v4-source-card-action secondary" appearance="secondary" icon={<Delete24Regular />} aria-label={`删除来源卡：${card.display_name}`} onClick={() => setSourceCardPendingDelete(card)}>删除来源卡</Button>}
+                  {!active && <Button className="media-v4-source-card-action secondary" appearance="secondary" icon={<Edit24Regular />} aria-label={`重命名来源卡：${card.display_name}`} onClick={() => openSourceCardRename(card)}>重命名</Button>}
+                  {!active && <Button className="media-v4-source-card-action media-v4-source-card-action-danger" appearance="secondary" icon={<Delete24Regular />} aria-label={`删除来源卡：${card.display_name}`} onClick={() => setSourceCardPendingDelete(card)}>删除来源卡</Button>}
                 </div>
               </div>
             </article>
@@ -1492,6 +1526,26 @@ export default function MediaManagementPage() {
                 <DialogActions>
                   <Button appearance="secondary" disabled={sourceCardDeleting} onClick={() => setSourceCardPendingDelete(null)}>取消</Button>
                   <Button appearance="primary" icon={sourceCardDeleting ? <Spinner size="tiny" /> : <Delete24Regular />} disabled={sourceCardDeleting} onClick={() => void hideSourceCard()}>{sourceCardDeleting ? '正在删除…' : '删除来源卡'}</Button>
+                </DialogActions>
+              </DialogBody>
+            </FluentProvider>
+          </DialogSurface>
+        </Dialog>
+      )}
+      {sourceCardPendingRename && (
+        <Dialog modalType="modal" open onOpenChange={(_, data) => { if (!data.open && !sourceCardRenaming) setSourceCardPendingRename(null) }}>
+          <DialogSurface className="media-v4-source-card-rename-dialog" backdrop={{ className: 'media-v4-source-card-rename-backdrop' }}>
+            <FluentProvider theme={getKumiFluentTheme(appearanceMode)} className="media-v4-source-card-rename-dialog-provider">
+              <DialogBody>
+                <DialogTitle>重命名来源卡</DialogTitle>
+                <DialogContent>
+                  <p>这只会修改媒体库中的显示名称，不会改变文件夹、网盘目录或已有媒体。</p>
+                  <Input aria-label="来源名称" value={sourceCardRenameValue} maxLength={200} autoFocus onChange={(_, data) => setSourceCardRenameValue(data.value)} />
+                  {sourceCardRenameError && <span className="media-v4-source-card-rename-error" role="alert">{sourceCardRenameError}</span>}
+                </DialogContent>
+                <DialogActions>
+                  <Button appearance="secondary" disabled={sourceCardRenaming} onClick={() => setSourceCardPendingRename(null)}>取消</Button>
+                  <Button appearance="primary" icon={sourceCardRenaming ? <Spinner size="tiny" /> : <Edit24Regular />} disabled={sourceCardRenaming} onClick={() => void renameSourceCard()}>{sourceCardRenaming ? '正在保存…' : '保存名称'}</Button>
                 </DialogActions>
               </DialogBody>
             </FluentProvider>

@@ -130,6 +130,10 @@ class SourceScanRequest(BaseModel):
     source_display_name: str = ""
 
 
+class SourceCardRenameRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=200)
+
+
 
 
 class WorkTitleRequest(BaseModel):
@@ -1194,6 +1198,20 @@ def hide_source_library_card(root_id: str):
         raise HTTPException(status_code=404, detail="来源卡不存在或已移除") from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.patch("/sources/libraries/{root_id}")
+def rename_source_library_card(root_id: str, request: SourceCardRenameRequest):
+    """重命名当前可见来源卡，不改变来源路径、媒体库或任务。"""
+
+    from app.media_v4.projection.source_libraries import rename_source_card
+
+    try:
+        return rename_source_card(get_database(), root_id, request.display_name)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="来源卡不存在或已移除") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _local_root_identity(path: str) -> tuple[str, str]:

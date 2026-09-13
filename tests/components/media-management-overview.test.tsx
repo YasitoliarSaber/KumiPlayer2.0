@@ -21,6 +21,7 @@ const api = vi.hoisted(() => ({
   cancelDurableScan: vi.fn(),
   workExecutionDetail: vi.fn(),
   hideSourceLibraryCard: vi.fn(),
+  renameSourceLibraryCard: vi.fn(),
   maintenancePreview: vi.fn(),
   maintenanceConfirm: vi.fn(),
 }))
@@ -73,6 +74,7 @@ beforeEach(() => {
   api.sourceLibraries.mockResolvedValue({ cards: [] })
   api.drafts.mockResolvedValue({ drafts: [] })
   api.hideSourceLibraryCard.mockResolvedValue({ root_id: 'root-115', hidden: true })
+  api.renameSourceLibraryCard.mockResolvedValue({ root_id: 'root-115', display_name: '我的动画库' })
   api.openlistStatus.mockResolvedValue({ root_id: 'r', remote_root: '/', source_mode: '', last_scan_mode: '', has_confirmed_baseline: false })
   api.maintenancePreview.mockResolvedValue({
     preview_id: 'prev-1', scope: 'all', expires_at: '2026-08-25T02:00:00Z',
@@ -186,6 +188,21 @@ test('已完成来源卡可以移除卡片入口，不触碰媒体库数据', as
 
   await waitFor(() => expect(api.hideSourceLibraryCard).toHaveBeenCalledWith('root-115'))
   expect(screen.queryByText('115 动画')).not.toBeInTheDocument()
+})
+
+test('来源卡可以在不影响来源路径的情况下重命名', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
+  render(<MediaManagementPage />)
+
+  await screen.findByText('115 动画')
+  fireEvent.click(screen.getByRole('button', { name: '重命名来源卡：115 动画' }))
+
+  expect(await screen.findByRole('dialog', { name: '重命名来源卡' })).toBeVisible()
+  fireEvent.change(screen.getByLabelText('来源名称'), { target: { value: '我的动画库' } })
+  fireEvent.click(screen.getByRole('button', { name: '保存名称' }))
+
+  await waitFor(() => expect(api.renameSourceLibraryCard).toHaveBeenCalledWith('root-115', '我的动画库'))
+  expect(screen.getByText('我的动画库')).toBeVisible()
 })
 
 test('删除来源卡确认框在 Portal 中保留 Fluent 主题容器', async () => {

@@ -345,11 +345,8 @@ def hide_source_card(database: V4Database, root_id: str) -> dict[str, object]:
         raise KeyError("来源卡不存在或已移除")
     now = datetime.now(UTC).isoformat()
     with database.connect() as conn:
-        root = conn.execute(
-            "SELECT enabled, retired_at FROM source_roots WHERE root_id = ?",
-            (normalized_root_id,),
-        ).fetchone()
-        if root is None or str(root["retired_at"] or "") or not int(root["enabled"]):
+        root = _visible_source_root(conn, normalized_root_id)
+        if root is None:
             raise KeyError("来源卡不存在或已移除")
         active_scan_rows = conn.execute(
             "SELECT status, heartbeat_at, started_at FROM source_scans WHERE root_id = ?",
@@ -382,6 +379,55 @@ def hide_source_card(database: V4Database, root_id: str) -> dict[str, object]:
             (now, normalized_root_id),
         )
     return {"root_id": normalized_root_id, "hidden": True}
+
+
+def rename_source_card(database: V4Database, root_id: str, display_name: str) -> dict[str, str]:
+    """更新可见来源卡的用户名称，不修改来源路径或媒体事实。"""
+
+    normalized_root_id = str(root_id or "").strip()
+    normalized_name = str(display_name or "").strip()
+    if not normalized_root_id:
+        raise KeyError("来源卡不存在或已移除")
+    if not normalized_name:
+        raise ValueError("请填写来源名称")
+
+    now = datetime.now(UTC).isoformat()
+    with database.connect() as conn:
+        if _visible_source_root(conn, normalized_root_id) is None:
+            raise KeyError("来源卡不存在或已移除")
+        conn.execute(
+            "UPDATE source_roots SET display_name = ?, updated_at = ? WHERE root_id = ?",
+            (normalized_name, now, normalized_root_id),
+        )
+    return {"root_id": normalized_root_id, "display_name": normalized_name}
+
+
+def _visible_source_root(conn, root_id: str):
+    """返回仍显示在来源卡列表中的来源根。
+
+    按来源清理后的新草稿仍是用户可见、可继续操作的来源卡；它虽然保留了
+    历史 ``retired_at``，却不能再被删除或重命名接口误判为“不存在”。
+    """
+
+    return conn.execute(
+        """
+        SELECT enabled, retired_at
+        FROM source_roots
+        WHERE root_id = ?
+          AND enabled = 1
+          AND (
+              retired_at = ''
+              OR EXISTS (
+                  SELECT 1
+                  FROM import_revisions draft_revision
+                  WHERE draft_revision.root_id = source_roots.root_id
+                    AND draft_revision.status = 'draft'
+                    AND julianday(draft_revision.created_at) > julianday(source_roots.retired_at)
+              )
+          )
+        """,
+        (root_id,),
+    ).fetchone()
 
 
 def _active_task(scan, job, revision_id: str, progress: dict) -> dict | None:

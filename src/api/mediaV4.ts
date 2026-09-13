@@ -478,6 +478,12 @@ export const mediaV4Api = {
   hideSourceLibraryCard: (rootId: string) =>
     api.delete<{ root_id: string; hidden: boolean }>(`/api/v4/sources/libraries/${encodeURIComponent(rootId)}`),
 
+  renameSourceLibraryCard: (rootId: string, displayName: string) =>
+    api.patch<{ root_id: string; display_name: string }>(
+      `/api/v4/sources/libraries/${encodeURIComponent(rootId)}`,
+      { display_name: displayName },
+    ),
+
   drafts: () => api.get<{ drafts: V4DraftSummary[] }>('/api/v4/sources/drafts'),
 
   maintenancePreview: (scope: string) =>

@@ -123,6 +123,59 @@ def test_source_card_delete_hides_only_the_card_and_keeps_confirmed_media(tmp_pa
     assert root["retired_at"] == ""
 
 
+def test_visible_post_retirement_source_card_can_be_renamed_and_hidden(tmp_path, monkeypatch):
+    """A draft created after retirement is still a visible card and must stay manageable."""
+
+    client = _client(tmp_path, monkeypatch)
+    from app.api import media_v4
+    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+    from app.media_v4.projection.source_libraries import list_source_cards
+    from app.media_v4.revisions.service import V4RevisionService
+
+    def pair(revision: str, scan: str, episode: int):
+        evidence = SourceEvidence(
+            evidence_id=f"ev-{revision}", scan_id=scan, root_id="root-visible-retired",
+            source_key=f"Visible/Visible.S01E{episode:02d}.mkv",
+            relative_path=f"Visible/Visible.S01E{episode:02d}.mkv", entry_kind="video",
+            source_locator="local://visible/Visible.S01E01.mkv",
+            playback_locator="local://visible/Visible.S01E01.mkv",
+        )
+        facts = ParsedFacts(
+            parsed_fact_id=f"facts-{revision}", evidence_id=evidence.evidence_id, parser_version="fixture",
+            work_title="Visible", title_candidates=("Visible",), media_type="tv", group_type="season",
+            season_candidate=1, episode_candidate=episode,
+        )
+        return evidence, facts
+
+    database = media_v4.get_database()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-visible-old", [pair("old", "scan-visible-old", 1)])
+    revisions.confirm("rev-visible-old")
+    with database.connect() as conn:
+        conn.execute(
+            "UPDATE source_roots SET retired_at = ?, retired_reason = ? WHERE root_id = ?",
+            (datetime.now(UTC).isoformat(), "fixture", "root-visible-retired"),
+        )
+    revisions.create_draft("rev-visible-new", [pair("new", "scan-visible-new", 2)])
+    with database.connect() as conn:
+        conn.execute("UPDATE jobs SET status = 'succeeded' WHERE revision_id = ?", ("rev-visible-old",))
+
+    cards = list_source_cards(database)
+    assert [card["root_id"] for card in cards] == ["root-visible-retired"]
+
+    renamed = client.patch(
+        "/api/v4/sources/libraries/root-visible-retired",
+        json={"display_name": "Renamed source"},
+    )
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json() == {"root_id": "root-visible-retired", "display_name": "Renamed source"}
+
+    hidden = client.delete("/api/v4/sources/libraries/root-visible-retired")
+    assert hidden.status_code == 200, hidden.text
+    assert hidden.json() == {"root_id": "root-visible-retired", "hidden": True}
+    assert list_source_cards(database) == []
+
+
 def test_drafts_endpoint_keeps_new_reimport_draft_after_source_retirement(tmp_path, monkeypatch):
     """退役来源重新扫描后的 draft 仍要进入可恢复的审核队列。"""
 
