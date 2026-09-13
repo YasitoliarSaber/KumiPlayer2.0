@@ -24,6 +24,11 @@ def _now() -> str:
 def _retain_successful_details(previous: dict, current: dict, target: dict) -> dict:
     """同批次同身份重试保留已成功资料；本次错误与完成状态仍由 current 决定。"""
     result = dict(current)
+    clear_episode_mapping_ids = {
+        str(item).strip()
+        for item in current.get("clear_episode_mapping_ids") or []
+        if str(item).strip()
+    }
     if current.get("work_metadata_status") == "unavailable" and (
         previous.get("work_metadata_status") == "ready" or previous.get("metadata_state") == "ready"
     ):
@@ -41,11 +46,13 @@ def _retain_successful_details(previous: dict, current: dict, target: dict) -> d
         for mapping in previous.get("episode_mappings") or []
         if isinstance(mapping, dict)
         and str(mapping.get("episode_id") or "") in valid_ids
+        and str(mapping.get("episode_id") or "") not in clear_episode_mapping_ids
         and str(mapping.get("provider_episode_id") or "").strip()
     }
     mappings.update({
         str(mapping.get("episode_id") or ""): mapping
         for mapping in current.get("episode_mappings") or []
+        if str(mapping.get("episode_id") or "") not in clear_episode_mapping_ids
         if str(mapping.get("provider_episode_id") or "").strip()
     })
     if mappings:
@@ -323,6 +330,13 @@ class V4ScrapeService:
                         "reason_code": "mirror_root_missing",
                     }
             valid_episode_ids = {str(item["episode_id"]) for item in target["episodes"]}
+            clear_episode_mapping_ids = {
+                str(item).strip()
+                for item in result.get("clear_episode_mapping_ids") or []
+                if str(item).strip()
+            }
+            if not clear_episode_mapping_ids.issubset(valid_episode_ids):
+                raise ValueError("刮削结果包含不属于当前 revision 的旧映射清理目标")
             for mapping in result.get("episode_mappings") or []:
                 episode_id = str(mapping.get("episode_id") or "")
                 if episode_id not in valid_episode_ids:
@@ -480,6 +494,12 @@ class V4ScrapeService:
                             ),
                         )
                 if identity_ready:
+                    if clear_episode_mapping_ids:
+                        conn.executemany(
+                            "DELETE FROM episode_provider_mappings "
+                            "WHERE provider = ? AND episode_id = ?",
+                            [(provider_name, episode_id) for episode_id in clear_episode_mapping_ids],
+                        )
                     for mapping in result.get("episode_mappings") or []:
                         episode_id = str(mapping.get("episode_id") or "")
                         conn.execute(

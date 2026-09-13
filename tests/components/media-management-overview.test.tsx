@@ -181,13 +181,27 @@ test('已完成来源卡可以移除卡片入口，不触碰媒体库数据', as
   await screen.findByText('115 动画')
   fireEvent.click(screen.getByRole('button', { name: '删除来源卡：115 动画' }))
 
-  expect(await screen.findByRole('dialog', { name: '删除来源卡' })).toBeVisible()
-  expect(screen.getByRole('dialog', { name: '删除来源卡' }).className).toContain('media-v4-source-card-delete-dialog')
+  expect(await screen.findByRole('dialog', { name: '移除来源卡？' })).toBeVisible()
+  expect(screen.getByRole('dialog', { name: '移除来源卡？' }).className).toContain('media-v4-source-card-delete-dialog')
+  expect(screen.getByRole('dialog', { name: '移除来源卡？' }).querySelector('.media-v4-source-card-dialog-actions')).toBeInTheDocument()
   expect(screen.getByText(/不会删除媒体库、镜像、资料或观看状态/)).toBeVisible()
-  fireEvent.click(screen.getByRole('button', { name: '删除来源卡', exact: true }))
+  fireEvent.click(screen.getByRole('button', { name: '移除', exact: true }))
 
   await waitFor(() => expect(api.hideSourceLibraryCard).toHaveBeenCalledWith('root-115'))
   expect(screen.queryByText('115 动画')).not.toBeInTheDocument()
+})
+
+test('来源卡列表过期时，删除接口的 404 按幂等成功处理', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
+  api.hideSourceLibraryCard.mockRejectedValueOnce(new ApiError(404, '来源卡不存在或已移除'))
+  render(<MediaManagementPage />)
+
+  await screen.findByText('115 动画')
+  fireEvent.click(screen.getByRole('button', { name: '删除来源卡：115 动画' }))
+  fireEvent.click(await screen.findByRole('button', { name: '移除', exact: true }))
+
+  await waitFor(() => expect(screen.queryByText('115 动画')).not.toBeInTheDocument())
+  expect(screen.queryByText('来源卡不存在或已移除')).not.toBeInTheDocument()
 })
 
 test('来源卡可以在不影响来源路径的情况下重命名', async () => {
@@ -198,11 +212,27 @@ test('来源卡可以在不影响来源路径的情况下重命名', async () =>
   fireEvent.click(screen.getByRole('button', { name: '重命名来源卡：115 动画' }))
 
   expect(await screen.findByRole('dialog', { name: '重命名来源卡' })).toBeVisible()
+  expect(screen.getByText('来源名称')).toBeVisible()
+  expect(screen.getByText('仅修改来源卡显示名，不会改动实际目录。')).toBeVisible()
+  expect(screen.getByRole('dialog', { name: '重命名来源卡' }).querySelector('.media-v4-source-card-dialog-actions')).toBeInTheDocument()
   fireEvent.change(screen.getByLabelText('来源名称'), { target: { value: '我的动画库' } })
   fireEvent.click(screen.getByRole('button', { name: '保存名称' }))
 
   await waitFor(() => expect(api.renameSourceLibraryCard).toHaveBeenCalledWith('root-115', '我的动画库'))
   expect(screen.getByText('我的动画库')).toBeVisible()
+})
+
+test('来源卡列表过期时，重命名接口的 404 会移除失效卡片', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
+  api.renameSourceLibraryCard.mockRejectedValueOnce(new ApiError(404, '来源卡不存在或已移除'))
+  render(<MediaManagementPage />)
+
+  await screen.findByText('115 动画')
+  fireEvent.click(screen.getByRole('button', { name: '重命名来源卡：115 动画' }))
+  fireEvent.click(await screen.findByRole('button', { name: '保存名称' }))
+
+  await waitFor(() => expect(screen.queryByText('115 动画')).not.toBeInTheDocument())
+  expect(screen.queryByRole('dialog', { name: '重命名来源卡' })).not.toBeInTheDocument()
 })
 
 test('删除来源卡确认框在 Portal 中保留 Fluent 主题容器', async () => {
@@ -212,7 +242,7 @@ test('删除来源卡确认框在 Portal 中保留 Fluent 主题容器', async (
   await screen.findByText('115 动画')
   fireEvent.click(screen.getByRole('button', { name: '删除来源卡：115 动画' }))
 
-  const dialog = await screen.findByRole('dialog', { name: '删除来源卡' })
+  const dialog = await screen.findByRole('dialog', { name: '移除来源卡？' })
   expect(dialog.querySelector('.media-v4-source-card-delete-dialog-provider')).toBeInTheDocument()
 })
 

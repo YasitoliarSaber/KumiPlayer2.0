@@ -1202,7 +1202,7 @@ def hide_source_library_card(root_id: str):
 
 @router.patch("/sources/libraries/{root_id}")
 def rename_source_library_card(root_id: str, request: SourceCardRenameRequest):
-    """重命名当前可见来源卡，不改变来源路径、媒体库或任务。"""
+    """重命名已登记来源卡，不改变来源路径、媒体库或任务。"""
 
     from app.media_v4.projection.source_libraries import rename_source_card
 

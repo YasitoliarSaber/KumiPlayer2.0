@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Button, Checkbox, Dialog, DialogActions, DialogBody, DialogContent, DialogSurface, DialogTitle, FluentProvider, Input, MessageBar, MessageBarBody, ProgressBar, Select, Spinner } from '@fluentui/react-components'
+import { Button, Checkbox, Dialog, DialogActions, DialogBody, DialogContent, DialogSurface, DialogTitle, Field, FluentProvider, Input, MessageBar, MessageBarBody, ProgressBar, Select, Spinner } from '@fluentui/react-components'
 import {
   Add24Regular,
   ArrowLeft24Regular,
@@ -1091,7 +1091,14 @@ export default function MediaManagementPage() {
       setSourceCards((cards) => cards.filter((item) => item.root_id !== card.root_id))
       setSourceCardPendingDelete(null)
     } catch (cause) {
-      setError(userFacingPageError(cause, '删除来源卡失败，请稍后重试'))
+      if (cause instanceof ApiError && cause.status === 404) {
+        // 卡片列表是轮询快照；来源根可能已被维护任务移除。对 DELETE
+        // 来说它已经达到目标状态，直接清掉本地快照，避免用户被 404 卡住。
+        setSourceCards((cards) => cards.filter((item) => item.root_id !== card.root_id))
+        setSourceCardPendingDelete(null)
+        return
+      }
+      setError(userFacingPageError(cause, '移除来源卡失败，请稍后重试'))
     } finally {
       setSourceCardDeleting(false)
     }
@@ -1119,6 +1126,13 @@ export default function MediaManagementPage() {
         : item))
       setSourceCardPendingRename(null)
     } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 404) {
+        // 重命名提交时列表也可能已经过期；根记录不存在时，移除本地快照，
+        // 避免用户继续在一个已经失效的来源卡上反复提交。
+        setSourceCards((cards) => cards.filter((item) => item.root_id !== sourceCardPendingRename.root_id))
+        setSourceCardPendingRename(null)
+        return
+      }
       setSourceCardRenameError(userFacingPageError(cause, '保存名称失败，请稍后重试'))
     } finally {
       setSourceCardRenaming(false)
@@ -1517,15 +1531,15 @@ export default function MediaManagementPage() {
             aria-describedby={undefined}
           >
             <FluentProvider theme={getKumiFluentTheme(appearanceMode)} className="media-v4-source-card-delete-dialog-provider">
-              <DialogBody>
-                <DialogTitle>删除来源卡</DialogTitle>
-                <DialogContent>
-                  <p>从“已导入来源”中移除“{sourceCardPendingDelete.display_name}”吗？</p>
-                  <p>这不会删除媒体库、镜像、资料或观看状态；以后重新扫描同一来源时，卡片会再次出现。</p>
+              <DialogBody className="media-v4-source-card-dialog-body">
+                <DialogTitle className="media-v4-source-card-dialog-title">移除来源卡？</DialogTitle>
+                <DialogContent className="media-v4-source-card-dialog-content">
+                  <p>要从“已导入来源”中移除“{sourceCardPendingDelete.display_name}”吗？</p>
+                  <p>只会隐藏这张来源卡，不会删除媒体库、镜像、资料或观看状态；以后重新扫描同一来源时，卡片会再次出现。</p>
                 </DialogContent>
-                <DialogActions>
-                  <Button appearance="secondary" disabled={sourceCardDeleting} onClick={() => setSourceCardPendingDelete(null)}>取消</Button>
-                  <Button appearance="primary" icon={sourceCardDeleting ? <Spinner size="tiny" /> : <Delete24Regular />} disabled={sourceCardDeleting} onClick={() => void hideSourceCard()}>{sourceCardDeleting ? '正在删除…' : '删除来源卡'}</Button>
+                <DialogActions className="media-v4-source-card-dialog-actions">
+                  <Button className="media-v4-source-card-dialog-cancel" appearance="secondary" disabled={sourceCardDeleting} onClick={() => setSourceCardPendingDelete(null)}>取消</Button>
+                  <Button className="media-v4-source-card-dialog-confirm media-v4-source-card-dialog-danger" appearance="primary" icon={sourceCardDeleting ? <Spinner size="tiny" /> : <Delete24Regular />} disabled={sourceCardDeleting} onClick={() => void hideSourceCard()}>{sourceCardDeleting ? '正在移除…' : '移除'}</Button>
                 </DialogActions>
               </DialogBody>
             </FluentProvider>
@@ -1536,16 +1550,17 @@ export default function MediaManagementPage() {
         <Dialog modalType="modal" open onOpenChange={(_, data) => { if (!data.open && !sourceCardRenaming) setSourceCardPendingRename(null) }}>
           <DialogSurface className="media-v4-source-card-rename-dialog" backdrop={{ className: 'media-v4-source-card-rename-backdrop' }}>
             <FluentProvider theme={getKumiFluentTheme(appearanceMode)} className="media-v4-source-card-rename-dialog-provider">
-              <DialogBody>
-                <DialogTitle>重命名来源卡</DialogTitle>
-                <DialogContent>
+              <DialogBody className="media-v4-source-card-dialog-body">
+                <DialogTitle className="media-v4-source-card-dialog-title">重命名来源卡</DialogTitle>
+                <DialogContent className="media-v4-source-card-dialog-content">
                   <p>这只会修改媒体库中的显示名称，不会改变文件夹、网盘目录或已有媒体。</p>
-                  <Input aria-label="来源名称" value={sourceCardRenameValue} maxLength={200} autoFocus onChange={(_, data) => setSourceCardRenameValue(data.value)} />
-                  {sourceCardRenameError && <span className="media-v4-source-card-rename-error" role="alert">{sourceCardRenameError}</span>}
+                  <Field label="来源名称" hint="仅修改来源卡显示名，不会改动实际目录。" validationMessage={sourceCardRenameError || undefined} validationState={sourceCardRenameError ? 'error' : 'none'}>
+                    <Input aria-label="来源名称" value={sourceCardRenameValue} maxLength={200} autoFocus onChange={(_, data) => setSourceCardRenameValue(data.value)} />
+                  </Field>
                 </DialogContent>
-                <DialogActions>
-                  <Button appearance="secondary" disabled={sourceCardRenaming} onClick={() => setSourceCardPendingRename(null)}>取消</Button>
-                  <Button appearance="primary" icon={sourceCardRenaming ? <Spinner size="tiny" /> : <Edit24Regular />} disabled={sourceCardRenaming} onClick={() => void renameSourceCard()}>{sourceCardRenaming ? '正在保存…' : '保存名称'}</Button>
+                <DialogActions className="media-v4-source-card-dialog-actions">
+                  <Button className="media-v4-source-card-dialog-cancel" appearance="secondary" disabled={sourceCardRenaming} onClick={() => setSourceCardPendingRename(null)}>取消</Button>
+                  <Button className="media-v4-source-card-dialog-confirm" appearance="primary" icon={sourceCardRenaming ? <Spinner size="tiny" /> : <Edit24Regular />} disabled={sourceCardRenaming} onClick={() => void renameSourceCard()}>{sourceCardRenaming ? '正在保存…' : '保存名称'}</Button>
                 </DialogActions>
               </DialogBody>
             </FluentProvider>

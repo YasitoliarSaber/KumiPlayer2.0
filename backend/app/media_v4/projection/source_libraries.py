@@ -345,7 +345,10 @@ def hide_source_card(database: V4Database, root_id: str) -> dict[str, object]:
         raise KeyError("来源卡不存在或已移除")
     now = datetime.now(UTC).isoformat()
     with database.connect() as conn:
-        root = _visible_source_root(conn, normalized_root_id)
+        # DELETE 是卡片入口的幂等隐藏操作。列表轮询与用户点击之间可能
+        # 已经把卡片隐藏或退役，但只要来源根仍在，就应完成同一个目标状态，
+        # 而不是把一个可恢复的操作误报成 404。
+        root = _source_root_for_management(conn, normalized_root_id)
         if root is None:
             raise KeyError("来源卡不存在或已移除")
         active_scan_rows = conn.execute(
@@ -393,7 +396,7 @@ def rename_source_card(database: V4Database, root_id: str, display_name: str) ->
 
     now = datetime.now(UTC).isoformat()
     with database.connect() as conn:
-        if _visible_source_root(conn, normalized_root_id) is None:
+        if _source_root_for_management(conn, normalized_root_id) is None:
             raise KeyError("来源卡不存在或已移除")
         conn.execute(
             "UPDATE source_roots SET display_name = ?, updated_at = ? WHERE root_id = ?",
@@ -402,30 +405,16 @@ def rename_source_card(database: V4Database, root_id: str, display_name: str) ->
     return {"root_id": normalized_root_id, "display_name": normalized_name}
 
 
-def _visible_source_root(conn, root_id: str):
-    """返回仍显示在来源卡列表中的来源根。
+def _source_root_for_management(conn, root_id: str):
+    """返回仍在数据库中的来源根，供卡片操作处理轮询竞态。
 
-    按来源清理后的新草稿仍是用户可见、可继续操作的来源卡；它虽然保留了
-    历史 ``retired_at``，却不能再被删除或重命名接口误判为“不存在”。
+    “列表中可见”是投影条件，不是删除请求的存在条件。来源卡在请求发出
+    后可能被另一轮刷新隐藏，管理操作仍应以根记录的最终状态为准；真正不
+    存在的 root_id 才返回 404。
     """
 
     return conn.execute(
-        """
-        SELECT enabled, retired_at
-        FROM source_roots
-        WHERE root_id = ?
-          AND enabled = 1
-          AND (
-              retired_at = ''
-              OR EXISTS (
-                  SELECT 1
-                  FROM import_revisions draft_revision
-                  WHERE draft_revision.root_id = source_roots.root_id
-                    AND draft_revision.status = 'draft'
-                    AND julianday(draft_revision.created_at) > julianday(source_roots.retired_at)
-              )
-          )
-        """,
+        "SELECT enabled, retired_at FROM source_roots WHERE root_id = ?",
         (root_id,),
     ).fetchone()
 

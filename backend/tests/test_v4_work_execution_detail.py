@@ -241,6 +241,23 @@ def test_recovery_policy_summary_keeps_mapping_failure_after_two_network_failure
     assert "不会修正本地编号" in policy["hint"]
 
 
+def test_recovery_policy_treats_optional_special_gap_as_non_blocking():
+    from app.media_v4.revisions.service import metadata_recovery_policy
+
+    policy = metadata_recovery_policy({
+        "metadata_state": "ready",
+        "reason_code": "special_episode_metadata_incomplete",
+        "metadata_warning": "部分特别篇没有对应的在线资料，已保留本地文件名称，不影响播放。",
+        "season_results": [{
+            "local_season_number": 0,
+            "reason_code": "episode_not_found",
+            "status": "partial",
+        }],
+    }, binding_status="confirmed")
+
+    assert policy == {"reason": "", "action": "none", "hint": ""}
+
+
 def test_detail_projects_one_recovery_policy_and_special_season_failure(tmp_path, monkeypatch):
     client, database = _client(tmp_path, monkeypatch)
     work_id = _seed_confirmed_work(database)

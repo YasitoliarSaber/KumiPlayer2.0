@@ -190,6 +190,11 @@ def metadata_recovery_policy(metadata: dict | None, *, binding_status: str = "")
         reason = _friendly_metadata_reason(state, raw_reason, reason_code)
         return {"reason": reason, "action": action, "hint": _metadata_recovery_hint(action)}
 
+    if reason_code == "special_episode_metadata_incomplete":
+        # 特别篇线上条目是可选补全。作品身份、正片和本地 NFO 已经就绪时，
+        # 不再把“没有对应条目”投影成待处理任务；详细页面另行展示 warning。
+        return {"reason": "", "action": "none", "hint": ""}
+
     if reason_code in {"no_candidates", "ambiguous_candidates"} or state == "waiting_review":
         action = "choose_candidate"
         reason = _friendly_metadata_reason(state, raw_reason, reason_code)
@@ -2712,6 +2717,7 @@ class V4RevisionService:
             "metadata_state": metadata_state,
             "metadata_reason": metadata_policy["reason"],
             "metadata_reason_code": metadata_reason_code,
+            "metadata_warning": _safe_detail_text(metadata.get("metadata_warning")),
             "metadata_recovery_action": metadata_policy["action"],
             "metadata_recovery_hint": metadata_policy["hint"],
             "title": _safe_detail_text(metadata.get("title")),
@@ -2752,6 +2758,7 @@ class V4RevisionService:
                 "metadata_state": metadata_state,
                 "metadata_reason": metadata_policy["reason"],
                 "metadata_reason_code": metadata_reason_code,
+                "metadata_warning": _safe_detail_text(metadata.get("metadata_warning")),
                 "metadata_recovery_action": metadata_policy["action"],
                 "metadata_recovery_hint": metadata_policy["hint"],
             },
@@ -2895,6 +2902,8 @@ class V4RevisionService:
                 "metadata_state": scrape_status,
                 "metadata_reason": metadata_policy["reason"],
                 "metadata_reason_code": str(scrape.get("reason_code") or ""),
+                "metadata_warning": _safe_detail_text(scrape.get("metadata", {}).get("metadata_warning"))
+                if isinstance(scrape.get("metadata"), dict) else "",
                 "metadata_recovery_action": metadata_policy["action"],
                 "metadata_recovery_hint": metadata_policy["hint"],
                 "mirror": _job_summary(mirror),

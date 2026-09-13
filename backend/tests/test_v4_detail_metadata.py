@@ -101,7 +101,7 @@ def test_downloaded_clearlogo_keeps_safe_source_extension():
     assert _artwork_filename("clearlogo", "/transparent-logo.unknown") == "clearlogo.png"
 
 
-def test_default_metadata_provider_maps_specials_with_special_number(monkeypatch):
+def test_default_metadata_provider_maps_specials_by_title_not_local_number(monkeypatch):
     from app.media_v4.jobs import metadata as metadata_module
 
     class FakeTMDBClient:
@@ -164,6 +164,7 @@ def test_default_metadata_provider_maps_specials_with_special_number(monkeypatch
             "local_season_number": 0,
             "local_episode_number": None,
             "special_number": 2,
+            "display_title": "远端特别篇标题",
             "season_kind": "special",
             "episode_kind": "special",
         }],
@@ -179,6 +180,214 @@ def test_default_metadata_provider_maps_specials_with_special_number(monkeypatch
         "runtime": 12,
         "still_url": "https://image.tmdb.org/t/p/w500/special.jpg",
     }]
+
+
+def test_special_mapping_uses_remote_title_and_season_zero_even_with_stale_season_mapping():
+    from app.media_v4.jobs.metadata import _build_tv_episode_mappings
+
+    class FakeClient:
+        def get_tv_season_episodes(self, provider_id, season_number):
+            assert (provider_id, season_number) == (42, 0)
+            # 在线顺序与本地 SP 编号相反，不能按位置绑定。
+            return {"episodes": [
+                {"episode_number": 2, "name": "冬日露营", "id": 9002},
+                {"episode_number": 1, "name": "夏日露营", "id": 9001},
+            ]}
+
+        @staticmethod
+        def build_image_url(path, size):
+            return f"{size}:{path}"
+
+    mappings = _build_tv_episode_mappings(
+        FakeClient(),
+        42,
+        {"episodes": [
+            {
+                "episode_id": "special-winter",
+                "season_id": "season-special",
+                "local_season_number": 0,
+                "provider_season_number": 2,
+                "special_number": 1,
+                "display_title": "冬日露营",
+                "season_kind": "special",
+                "episode_kind": "special",
+            },
+            {
+                "episode_id": "special-summer",
+                "season_id": "season-special",
+                "local_season_number": 0,
+                "provider_season_number": 2,
+                "special_number": 2,
+                "display_title": "夏日露营",
+                "season_kind": "special",
+                "episode_kind": "special",
+            },
+        ]},
+    )
+
+    assert {item["episode_id"]: item["provider_episode_number"] for item in mappings} == {
+        "special-winter": 2,
+        "special-summer": 1,
+    }
+
+
+def test_duplicate_special_titles_stay_unmapped_instead_of_picking_first_entry():
+    from app.media_v4.jobs.metadata import _match_special_episode
+
+    assert _match_special_episode(
+        {"display_title": "同名特别篇"},
+        {
+            1: {"name": "同名特别篇", "id": 9001},
+            2: {"name": "同名特别篇", "id": 9002},
+        },
+    ) is None
+
+
+def test_generic_special_title_does_not_reuse_historical_episode_number():
+    from app.media_v4.jobs.metadata import _match_special_episode
+
+    assert _match_special_episode(
+        {
+            "display_title": "特别篇",
+            "provider_episode_number": 2,
+        },
+        {2: {"name": "另一个特别篇", "id": 9002}},
+    ) is None
+
+
+def test_unmatched_special_metadata_is_optional_and_clears_stale_mapping(monkeypatch):
+    from app.media_v4.jobs import metadata as metadata_module
+
+    class FakeTMDBClient:
+        def __init__(self, bearer_token):
+            assert bearer_token == "token"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get_tv_detail(self, provider_id):
+            assert provider_id == 42
+            return {"name": "Show", "images": {}, "episode_run_time": [24]}
+
+        def get_tv_season_episodes(self, provider_id, season_number):
+            assert (provider_id, season_number) == (42, 0)
+            return {
+                "episodes": [{
+                    "episode_number": 1,
+                    "name": "雨天露营",
+                    "id": 9001,
+                }]
+            }
+
+        @staticmethod
+        def select_best_poster(_images):
+            return ""
+
+        @staticmethod
+        def select_best_backdrop(_images):
+            return ""
+
+        @staticmethod
+        def select_best_logo(_images):
+            return ""
+
+    monkeypatch.setattr(metadata_module, "TMDBClient", FakeTMDBClient)
+    monkeypatch.setattr(
+        metadata_module,
+        "load_config",
+        lambda: SimpleNamespace(tmdb_bearer_token="token"),
+    )
+
+    result = metadata_module.default_metadata_provider({
+        "work_type": "series",
+        "preferred_title": "Show",
+        "provider_bindings": [{"provider": "tmdb", "provider_id": "42", "media_type": "tv"}],
+        "episodes": [{
+            "episode_id": "episode-special-mystery",
+            "season_id": "season-special",
+            "local_season_number": 0,
+            "local_episode_number": None,
+            "special_number": 1,
+            "display_title": "Mystery Camp",
+            "season_kind": "special",
+            "episode_kind": "special",
+        }],
+    })
+
+    assert result["metadata_state"] == "ready"
+    assert result["reason_code"] == "special_episode_metadata_incomplete"
+    assert result["episode_mappings"] == []
+    assert result["clear_episode_mapping_ids"] == ["episode-special-mystery"]
+    assert "不影响播放" in result["metadata_warning"]
+
+
+def test_special_season_service_failure_is_not_downgraded_to_optional_gap(monkeypatch):
+    from app.media_v4.jobs import metadata as metadata_module
+    from app.scrape.tmdb_client import TMDBClientError
+
+    class FakeTMDBClient:
+        def __init__(self, bearer_token):
+            assert bearer_token == "token"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get_tv_detail(self, provider_id):
+            return {"name": "Show", "images": {}, "episode_run_time": [24]}
+
+        def get_tv_season_episodes(self, provider_id, season_number):
+            raise TMDBClientError(
+                "temporary outage",
+                reason_code="source_unavailable",
+                retryable=True,
+                failure_stage="season_detail",
+            )
+
+        @staticmethod
+        def select_best_poster(_images):
+            return ""
+
+        @staticmethod
+        def select_best_backdrop(_images):
+            return ""
+
+        @staticmethod
+        def select_best_logo(_images):
+            return ""
+
+    monkeypatch.setattr(metadata_module, "TMDBClient", FakeTMDBClient)
+    monkeypatch.setattr(
+        metadata_module,
+        "load_config",
+        lambda: SimpleNamespace(tmdb_bearer_token="token"),
+    )
+
+    result = metadata_module.default_metadata_provider({
+        "work_type": "series",
+        "preferred_title": "Show",
+        "provider_bindings": [{"provider": "tmdb", "provider_id": "42", "media_type": "tv"}],
+        "episodes": [{
+            "episode_id": "episode-special-outage",
+            "season_id": "season-special",
+            "local_season_number": 0,
+            "local_episode_number": None,
+            "special_number": 1,
+            "display_title": "Mystery Camp",
+            "season_kind": "special",
+            "episode_kind": "special",
+        }],
+    })
+
+    assert result["metadata_state"] == "source_unavailable"
+    assert result["reason_code"] == "episode_mapping_incomplete"
+    assert "metadata_warning" not in result
+    assert "clear_episode_mapping_ids" not in result
 
 
 def test_regular_season_fetch_failure_prevents_false_ready_metadata(monkeypatch):

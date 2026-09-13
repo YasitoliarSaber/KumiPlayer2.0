@@ -281,6 +281,7 @@ export interface V4WorkProgressUnit {
   metadata_state: string
   metadata_reason: string
   metadata_reason_code?: string
+  metadata_warning?: string
   metadata_recovery_action?: V4MetadataRecoveryAction
   metadata_recovery_hint?: string
   /** 每次本作品任务或刮削快照更新时变化，用于使执行详情缓存失效。 */
@@ -300,6 +301,7 @@ export interface V4WorkExecutionDetail {
     metadata_state: string
     metadata_reason: string
     metadata_reason_code?: string
+    metadata_warning?: string
     metadata_recovery_action?: V4MetadataRecoveryAction
     metadata_recovery_hint?: string
   }
@@ -314,6 +316,7 @@ export interface V4WorkExecutionDetail {
     metadata_state: string
     metadata_reason?: string
     metadata_reason_code?: string
+    metadata_warning?: string
     metadata_recovery_action?: V4MetadataRecoveryAction
     metadata_recovery_hint?: string
     title: string

@@ -190,6 +190,112 @@ def test_partial_metadata_keeps_provider_identity_for_retry(tmp_path):
     assert tuple(mapping) == ("tmdb", "9001")
 
 
+def test_retry_drops_stale_special_mapping_marked_by_metadata_provider():
+    from app.media_v4.jobs.scrape import _retain_successful_details
+
+    previous = {
+        "provider": "tmdb",
+        "provider_id": "42",
+        "work_metadata_status": "ready",
+        "episode_mappings": [
+            {"episode_id": "regular-1", "provider_episode_id": "1001"},
+            {"episode_id": "special-1", "provider_episode_id": "9001"},
+        ],
+    }
+    current = {
+        "provider": "tmdb",
+        "provider_id": "42",
+        "metadata_state": "ready",
+        "work_metadata_status": "ready",
+        "clear_episode_mapping_ids": ["special-1"],
+        "episode_mappings": [],
+    }
+
+    result = _retain_successful_details(
+        previous,
+        current,
+        {"episodes": [{"episode_id": "regular-1"}, {"episode_id": "special-1"}]},
+    )
+
+    assert result["episode_mappings"] == [
+        {"episode_id": "regular-1", "provider_episode_id": "1001"},
+    ]
+
+
+def test_scrape_process_clears_stale_special_mapping_without_touching_regular_mapping(tmp_path, monkeypatch):
+    """成功读到 Season 0 后，旧 SP 顺序映射必须从数据库撤下。"""
+
+    from app.media_v4.jobs.scrape import V4ScrapeService
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "stale-special-mapping.db")
+    database.initialize()
+    regular_evidence, regular_facts = _entry("regular")
+    special_evidence, special_facts = _entry("special")
+    special_evidence = replace(
+        special_evidence,
+        relative_path="Show/Specials/Mystery Camp.mkv",
+        source_key="Show/Specials/Mystery Camp.mkv",
+    )
+    special_facts = replace(
+        special_facts,
+        group_type="special",
+        season_candidate=0,
+        episode_candidate=None,
+        episode_title="Mystery Camp",
+        special_candidate=True,
+        special_number=1,
+    )
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-stale-special", [
+        (regular_evidence, regular_facts),
+        (special_evidence, special_facts),
+    ])
+    revisions.confirm("rev-stale-special")
+    scrape = V4ScrapeService(database)
+    job = scrape.enqueue_for_revision("rev-stale-special")[0]
+    with database.connect() as conn:
+        episode_rows = conn.execute(
+            "SELECT episode_id, episode_kind FROM episodes ORDER BY episode_id"
+        ).fetchall()
+        regular_id = str(next(row["episode_id"] for row in episode_rows if row["episode_kind"] == "regular"))
+        special_id = str(next(row["episode_id"] for row in episode_rows if row["episode_kind"] == "special"))
+        conn.execute(
+            "INSERT INTO episode_provider_mappings(episode_id, provider, provider_season_number, provider_episode_number, provider_episode_id) "
+            "VALUES (?, 'tmdb', 0, 1, 'stale-special-id')",
+            (special_id,),
+        )
+
+    scrape.process(
+        job["job_id"],
+        lambda _target: {
+            **_ready_metadata(),
+            "episode_mappings": [{
+                "episode_id": regular_id,
+                "provider_season_number": 1,
+                "provider_episode_number": 1,
+                "provider_episode_id": "regular-id",
+            }],
+            "clear_episode_mapping_ids": [special_id],
+        },
+        mirror_root=_patch_scrape_env(tmp_path, monkeypatch),
+    )
+
+    with database.connect() as conn:
+        regular_mapping = conn.execute(
+            "SELECT provider_episode_id FROM episode_provider_mappings WHERE episode_id = ? AND provider = 'tmdb'",
+            (regular_id,),
+        ).fetchone()
+        stale_mapping = conn.execute(
+            "SELECT 1 FROM episode_provider_mappings WHERE episode_id = ? AND provider = 'tmdb'",
+            (special_id,),
+        ).fetchone()
+
+    assert regular_mapping["provider_episode_id"] == "regular-id"
+    assert stale_mapping is None
+
+
 @pytest.mark.parametrize("retry_provider_id", ["42", "43"])
 def test_retry_keeps_successful_details_only_for_same_identity(tmp_path, retry_provider_id):
     from app.media_v4.jobs.scrape import V4ScrapeService

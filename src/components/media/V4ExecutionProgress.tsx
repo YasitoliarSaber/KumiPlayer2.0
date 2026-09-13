@@ -129,14 +129,16 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
   const detailSeasons = loadedDetail?.seasons ?? []
   const detailEpisodes = loadedDetail?.episodes ?? []
   const scrape = loadedDetail?.scrape
+  const optionalSpecialGap = scrape?.metadata_reason_code === 'special_episode_metadata_incomplete'
   const seasonFailures = Array.isArray(scrape?.season_results)
-    ? scrape.season_results.filter((result) => Boolean(result.reason_code))
+    ? scrape.season_results.filter((result) => Boolean(result.reason_code) && !(optionalSpecialGap))
     : []
   const scrapeHasContent = Boolean(scrape && (
     scrape.title
     || scrape.original_title
     || scrape.plot
     || scrape.candidate_decision
+    || scrape.metadata_warning
     || scrape.year != null
     || scrape.rating != null
     || scrape.runtime != null
@@ -250,6 +252,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                     {scrape.metadata_state && <span>{metadataStateLabels[scrape.metadata_state] ?? scrape.metadata_state}</span>}
                   </div>
                   {scrape.plot && <p className="media-v4-work-detail-plot">{scrape.plot}</p>}
+                  {scrape.metadata_warning && <div className="media-v4-job-info" role="status">{scrape.metadata_warning}</div>}
                   {(scrape.genres?.length ?? 0) > 0 || (scrape.studios?.length ?? 0) > 0 ? (
                     <div className="media-v4-work-detail-facts">
                       {(scrape.genres?.length ?? 0) > 0 && <span>类型：{scrape.genres.join('、')}</span>}

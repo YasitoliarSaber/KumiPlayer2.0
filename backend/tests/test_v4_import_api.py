@@ -122,6 +122,12 @@ def test_source_card_delete_hides_only_the_card_and_keeps_confirmed_media(tmp_pa
     assert root["enabled"] == 0
     assert root["retired_at"] == ""
 
+    # 列表轮询可能在第一次请求前就已把卡片标记为隐藏；重复 DELETE
+    # 仍应保持幂等成功，不能把用户卡在“来源卡不存在”错误上。
+    repeated = client.delete("/api/v4/sources/libraries/root-delete-card")
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json() == {"root_id": "root-delete-card", "hidden": True}
+
 
 def test_visible_post_retirement_source_card_can_be_renamed_and_hidden(tmp_path, monkeypatch):
     """A draft created after retirement is still a visible card and must stay manageable."""
