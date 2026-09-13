@@ -232,7 +232,8 @@ def _collect_preview(conn: sqlite3.Connection, work_id: str) -> dict:
             for target in target_values
             if metadata_title and metadata_title in {
                 _normalize_title(str(target["title"])),
-                _normalize_title(str(target["work_key"]).split(":", 2)[1]),
+                # 仅去掉固定前缀与类型后缀，名称内部的冒号不是字段边界。
+                _normalize_title(str(target["work_key"]).partition(":")[2].rsplit(":", 1)[0]),
             }
         ]
         if not matches:

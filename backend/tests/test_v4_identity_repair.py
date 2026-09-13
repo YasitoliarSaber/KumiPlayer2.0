@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 
+import pytest
+
 from app.media_v4.domain.models import ParsedFacts, ResolvedWork, SourceEvidence
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.persistence.repositories import V4Repository
@@ -276,7 +278,7 @@ def test_provider_candidate_owned_by_polluted_work_requires_repair(tmp_path):
     assert any(issue.code == "work_identity_conflict" for issue in issues)
 
 
-def _seed_polluted_media(database: V4Database) -> str:
+def _seed_polluted_media(database: V4Database, *, main_title="Yuru Camp", main_series="Yuru Camp") -> str:
     """写入一份最小历史污染库，两个同号资产共用一个旧 Episode。"""
 
     now = datetime.now(UTC).isoformat()
@@ -294,6 +296,8 @@ def _seed_polluted_media(database: V4Database) -> str:
         (replace(evidence, scan_id="scan-repair", root_id="root-repair"), facts)
         for evidence, facts in entries
     ]
+    evidence, facts = entries[0]
+    entries[0] = (evidence, replace(facts, work_title=main_title, series_group=main_series))
     with database.connect() as conn:
         conn.execute(
             "INSERT INTO source_roots(root_id, provider, ingest_method, created_at, updated_at) "
@@ -379,6 +383,30 @@ def _seed_polluted_media(database: V4Database) -> str:
             (now,),
         )
     return "polluted-work"
+
+
+@pytest.mark.parametrize("metadata_title, expected_match", [("Collection", False), ("Collection: Part One", True)])
+def test_repair_matches_complete_series_title_not_colon_prefix(tmp_path, metadata_title, expected_match):
+    """修复预览可以匹配系列别名，但不能把冒号前缀当成完整名称。"""
+    import json
+
+    from app.media_v4.maintenance.identity_repair import build_identity_repair_preview
+
+    database = V4Database(tmp_path / "repair-colon.db")
+    database.initialize()
+    work_id = _seed_polluted_media(database, main_title="Display Name", main_series="Collection: Part One")
+    with database.connect() as conn:
+        conn.execute(
+            "UPDATE scrape_bindings SET metadata_json = ? WHERE provider_id = '76075'",
+            (json.dumps({"title": metadata_title}),),
+        )
+    preview = build_identity_repair_preview(database, work_id=work_id)
+    matches = [item for item in preview["provider_assignments"] if item["provider_id"] == "76075"]
+    assert bool(matches) is expected_match
+    if expected_match:
+        assert matches[0]["target_work_key"] == "series:collection: part one:tv"
+    else:
+        assert any(item.get("provider_id") == "76075" for item in preview["blocked_reasons"])
 
 
 def test_identity_repair_preview_apply_and_resume_are_asset_scoped(tmp_path):
