@@ -9,8 +9,25 @@ from app.media_v4.domain.models import ParsedFacts, ResolvedWork, SourceEvidence
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.persistence.repositories import V4Repository
 from app.media_v4.resolution.candidates import WorkCandidate, plan_work_candidates
+from app.media_v4.resolution.identity_policy import historical_identity_conflict
 from app.media_v4.resolution.resolver import MediaResolver
 from app.media_v4.revisions.service import V4RevisionService, _existing_work_matches
+
+
+def test_movie_subtitle_survives_historical_identity_comparison():
+    # title:<完整片名>:<年份>:movie 中的片名本身也可以含冒号。
+    # 首次导入形成 work:<完整片名>:movie 后，再导入必须仍为同一边界。
+    for subtitle, year in (("序", 2007), ("破", 2009), ("q", 2012)):
+        title = f"福音战士新剧场版:{subtitle}"
+        work = ResolvedWork(
+            work_key=f"title:{title}:{year}:movie",
+            preferred_title=title,
+            year=year,
+            media_type="movie",
+            card_type="standalone",
+        )
+        assert historical_identity_conflict(work, {f"work:{title}:movie"}) is None
+        assert historical_identity_conflict(work, {"work:另一部电影:movie"}) is not None
 
 
 def _entry(
@@ -87,6 +104,33 @@ def test_historical_heya_binding_does_not_merge_with_main_series():
         for item in values
         if item.status == "confirmed"
     } == set()
+
+
+def test_reimport_movie_after_cancelled_jobs_reuses_correct_identity(tmp_path):
+    database = V4Database(tmp_path / "movie-reimport.db")
+    database.initialize()
+    service = V4RevisionService(database)
+    evidence, facts = _entry(
+        "movie-first", "电影/福音战士新剧场版：序 (2007)/序.mkv",
+        work_title="福音战士新剧场版：序", card_type="standalone", relation_type="movie",
+    )
+    facts = replace(
+        facts, title_candidates=(facts.work_title,), series_group="",
+        media_type="movie", group_type="movie", season_candidate=None,
+        episode_candidate=None, year_candidate=2007, tmdb_hint_id=15137, tmdb_hint_type="movie",
+    )
+    service.create_draft("first", [(evidence, facts)])
+    service.confirm("first")
+    with database.connect() as conn:
+        first_ids = [r[0] for r in conn.execute("SELECT work_id FROM works WHERE status = 'active'")]
+        conn.execute("UPDATE jobs SET status = 'cancelled' WHERE revision_id = 'first'")
+    next_evidence = replace(evidence, evidence_id="movie-next", scan_id="scan-next")
+    next_facts = replace(facts, parsed_fact_id="facts-next", evidence_id="movie-next")
+    service.create_draft("next", [(next_evidence, next_facts)])
+    service.confirm("next")
+    assert service.get_status("next") == "confirmed"
+    with database.connect() as conn:
+        assert [r[0] for r in conn.execute("SELECT work_id FROM works WHERE status = 'active'")] == first_ids
 
 
 def test_independent_work_keeps_asset_boundary_when_episode_numbers_match():

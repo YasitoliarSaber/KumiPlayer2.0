@@ -48,7 +48,9 @@ def _boundary_key(value: str) -> tuple[str, str, str] | None:
             title, media_type = body.rsplit(":", 1)
         except ValueError:
             return None
-        return "work", title.split(":", 1)[0], media_type
+        # title:<片名>:<年份>:<类型> 只有最后一段是年份。
+        # 从左切分会把《福音战士新剧场版:序》等副标题丢掉，导致重导入误报冲突。
+        return "work", title.rsplit(":", 1)[0], media_type
     return None
 
 
