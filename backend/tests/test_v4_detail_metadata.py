@@ -324,6 +324,43 @@ def test_unmatched_special_metadata_is_optional_and_clears_stale_mapping(monkeyp
     assert "不影响播放" in result["metadata_warning"]
 
 
+def test_missing_special_season_discards_old_mapping_and_keeps_local_title(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from app.media_v4.jobs import metadata as metadata_module
+    from app.media_v4.jobs.scrape import _retain_successful_details
+    from app.scrape.tmdb_client import TMDBClientError
+
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.get_tv_detail.return_value = {"name": "Show", "images": {}, "episode_run_time": [24]}
+    client.select_best_poster.return_value = ""
+    client.select_best_backdrop.return_value = ""
+    client.select_best_logo.return_value = ""
+    client.get_tv_season_episodes.side_effect = TMDBClientError(
+        "missing season", status_code=404, reason_code="provider_resource_missing",
+        retryable=False, failure_stage="season_detail",
+    )
+    monkeypatch.setattr(metadata_module, "TMDBClient", lambda **_kwargs: client)
+    monkeypatch.setattr(metadata_module, "load_config", lambda: SimpleNamespace(tmdb_bearer_token="token"))
+    target = {
+        "work_type": "series", "preferred_title": "Show",
+        "provider_bindings": [{"provider": "tmdb", "provider_id": "42", "media_type": "tv"}],
+        "episodes": [{
+            "episode_id": "special", "season_id": "s0", "local_season_number": 0,
+            "episode_kind": "special", "display_title": "Mystery Camp",
+        }],
+    }
+    result = metadata_module.default_metadata_provider(target)
+    merged = _retain_successful_details({"episode_mappings": [{
+        "episode_id": "special", "provider_episode_id": "wrong-old-id", "title": "Wrong title",
+    }]}, result, target)
+    assert result["metadata_state"] == "ready"
+    assert result["clear_episode_mapping_ids"] == ["special"]
+    assert merged["episode_mappings"] == []
+    assert target["episodes"][0]["display_title"] == "Mystery Camp"
+
+
 def test_special_season_service_failure_is_not_downgraded_to_optional_gap(monkeypatch):
     from app.media_v4.jobs import metadata as metadata_module
     from app.scrape.tmdb_client import TMDBClientError

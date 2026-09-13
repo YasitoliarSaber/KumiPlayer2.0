@@ -800,8 +800,8 @@ def default_metadata_provider(target: dict) -> dict:
                         "retryable": False,
                     })
                 if mapping_diagnostics["unmatched_special_episode_ids"]:
-                    # 仅记录已成功读取季度但未通过名称校验的特别篇。
-                    # scrape 阶段据此清掉旧版本的顺序映射，网络失败时不误删。
+                    # 包含成功读取但名称不匹配，以及明确不存在的特别篇季度。
+                    # scrape 阶段据此清掉旧顺序映射，临时网络失败不误删。
                     result["clear_episode_mapping_ids"] = list(dict.fromkeys(
                         mapping_diagnostics["unmatched_special_episode_ids"]
                     ))
@@ -902,7 +902,7 @@ def _build_tv_episode_mappings(
 
     result: list[dict] = []
     for provider_season, episodes in sorted(by_provider_season.items()):
-        season_fetch_succeeded = False
+        season_mapping_verified = False
         used_remote_numbers: set[int] = set()
         try:
             season = client.get_tv_season_episodes(provider_id, provider_season)
@@ -911,8 +911,11 @@ def _build_tv_episode_mappings(
                 for item in season.get("episodes") or []
                 if _positive_int(item.get("episode_number")) is not None
             }
-            season_fetch_succeeded = True
+            season_mapping_verified = True
         except TMDBClientError as exc:
+            # 404 已明确该季度没有在线资料，与网络/认证故障不同。
+            # 特别篇继续使用本地名称，并撤销旧映射，防止重试再次补回错名。
+            season_mapping_verified = _tmdb_reason_code(exc) == "provider_resource_missing"
             if season_results is not None:
                 season_results.append({
                     "season_id": str(episodes[0].get("season_id") or ""),
@@ -933,7 +936,7 @@ def _build_tv_episode_mappings(
                     used_remote_numbers=used_remote_numbers,
                 )
                 if matched is None:
-                    if season_fetch_succeeded and diagnostics is not None:
+                    if season_mapping_verified and diagnostics is not None:
                         diagnostics.setdefault("unmatched_special_episode_ids", []).append(
                             str(episode["episode_id"])
                         )
@@ -950,7 +953,7 @@ def _build_tv_episode_mappings(
             if not str(remote.get("id") or "").strip():
                 # 没有远端 Episode ID 时不能把空映射写成“已映射”；保留
                 # 本地剧集，待下次按缺失季度重试。
-                if _is_special_episode(episode) and season_fetch_succeeded and diagnostics is not None:
+                if _is_special_episode(episode) and season_mapping_verified and diagnostics is not None:
                     diagnostics.setdefault("unmatched_special_episode_ids", []).append(
                         str(episode["episode_id"])
                     )
