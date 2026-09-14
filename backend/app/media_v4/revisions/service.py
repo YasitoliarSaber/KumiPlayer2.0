@@ -138,9 +138,9 @@ def _season_failure_reason(item: dict) -> str:
     if code == "provider_rate_limited":
         return f"{label}在线资料请求过于频繁，请稍后重试。"
     if code == "provider_resource_missing":
-        return f"{label}在线资料不可用，请稍后重试或核对季度映射。"
+        return f"{label}在线资料不可用：资料站可能采用不同的分季方式，尚未找到对应条目。"
     if code == "episode_not_found":
-        return f"{label}在线集数未匹配，请核对本地季度/集号；在线资料更新后可重试。"
+        return f"{label}在线集数未匹配，暂时保留本地剧集信息。"
     if code == "invalid_response":
         return f"{label}在线资料响应异常，可以稍后重试。"
     if code == "source_unavailable":
@@ -225,7 +225,7 @@ def metadata_recovery_policy(metadata: dict | None, *, binding_status: str = "")
         ]
         if missing_or_unmapped:
             action = "retry_metadata"
-            hint = "请核对季度映射和集号；在线资料更新后可重试，重复请求不会修正本地编号。"
+            hint = "这不表示资源有问题，无需重命名。可重试获取资料；仍有缺项时需检查在线分季对应关系。"
             if len(missing_or_unmapped) < len(season_results):
                 # 混合失败各取一类，避免前两季的网络错误掩盖后续集号问题。
                 other_failure = next(item for item in season_results if item not in missing_or_unmapped)
@@ -237,8 +237,7 @@ def metadata_recovery_policy(metadata: dict | None, *, binding_status: str = "")
                 for item in missing_or_unmapped
             ):
                 reason = (
-                    f"{_join_season_labels(missing_or_unmapped)}在线集数未匹配，请核对本地季度/集号；"
-                    "在线资料更新后可重试。"
+                    f"{_join_season_labels(missing_or_unmapped)}在线集数未匹配，暂时保留本地剧集信息。"
                 )
             else:
                 reason = "；".join(_season_failure_reason(item) for item in missing_or_unmapped[:2])
@@ -818,6 +817,7 @@ def _existing_work_matches(
     """
 
     from app.media_v4.persistence.identity_lifecycle import retired_only_work_ids
+    from app.media_v4.resolution.ranker import _normalize_title as compare_title
 
     retired_ids = retired_only_work_ids(conn)
     work_type = "series" if str(getattr(work, "media_type", "") or "") == "tv" else "movie"
@@ -845,6 +845,32 @@ def _existing_work_matches(
 
     exact = safe_historical_row(exact) if exact is not None else None
     titles = _work_identity_titles(work, related_entries)
+    comparison_titles = {compare_title(title) for title in titles}
+    verified_title_owners: set[str] = set()
+    # 已确认的在线译名是同一作品的身份事实。按当前 Provider 绑定限定，
+    # 不读取已退役或失败候选，也不让过期刮削记录恢复旧身份。
+    provider_titles: dict[str, set[str]] = {}
+    for scraped in conn.execute(
+        "SELECT sb.work_id, sb.metadata_json FROM scrape_bindings sb "
+        "JOIN provider_bindings pb ON pb.work_id=sb.work_id "
+        "AND pb.provider=sb.provider AND pb.provider_id=sb.provider_id "
+        "JOIN works w ON w.work_id=sb.work_id "
+        "WHERE w.status='active' AND w.work_type=? AND sb.status='confirmed' "
+        "AND pb.media_type=? ORDER BY sb.updated_at DESC",
+        (work_type, 'tv' if work_type == 'series' else 'movie'),
+    ).fetchall():
+        owner_id = str(scraped['work_id'])
+        if owner_id in provider_titles or owner_id in retired_ids:
+            continue
+        try:
+            payload = json.loads(scraped['metadata_json'] or '{}')
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict) or payload.get('metadata_state') != 'ready':
+            continue
+        provider_titles[owner_id] = {
+            compare_title(str(payload.get(key) or '')) for key in ('title', 'original_title')
+        } - {''}
     title_rows: list = []
     if titles:
         rows = conn.execute(
@@ -866,10 +892,13 @@ def _existing_work_matches(
                     (row["work_id"],),
                 ).fetchall()
             )
-            if names & titles:
+            translated_match = bool(provider_titles.get(str(row['work_id']), set()) & comparison_titles)
+            if {compare_title(name) for name in names} & comparison_titles or translated_match:
                 safe_row = safe_historical_row(row)
                 if safe_row is not None:
                     title_rows.append(safe_row)
+                    if translated_match:
+                        verified_title_owners.add(str(row['work_id']))
     # identity_key 是强身份线索，但不能单独覆盖一个已有的唯一 Provider
     # owner：历史上曾先生成空的 series 键、后又留下带 Provider 的 title 键，
     # 正是本次 TXT 批次冲突的来源。只有“首选标题相同”的 Provider owner
@@ -878,7 +907,8 @@ def _existing_work_matches(
         exact_preferred = _normalize_title(str(exact["preferred_title"] or ""))
         preferred_rows = [
             row for row in title_rows
-            if _normalize_title(str(row["preferred_title"] or "")) in titles
+            if compare_title(str(row["preferred_title"] or "")) in comparison_titles
+            or str(row['work_id']) in verified_title_owners
         ]
         preferred_ids = {str(row["work_id"]) for row in preferred_rows}
         owner_rows = conn.execute(

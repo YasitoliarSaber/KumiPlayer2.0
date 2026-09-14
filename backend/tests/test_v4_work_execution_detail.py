@@ -238,7 +238,9 @@ def test_recovery_policy_summary_keeps_mapping_failure_after_two_network_failure
     })
     assert "特别篇在线集数未匹配" in policy["reason"]
     assert "服务暂不可用" in policy["reason"]
-    assert "不会修正本地编号" in policy["hint"]
+    assert "无需重命名" in policy["hint"]
+    assert "在线分季" in policy["hint"]
+    assert "核对本地季度/集号" not in policy["reason"]
 
 
 def test_recovery_policy_treats_optional_special_gap_as_non_blocking():
@@ -295,7 +297,8 @@ def test_detail_projects_one_recovery_policy_and_special_season_failure(tmp_path
     assert progress_unit["metadata_reason"] == body["work"]["metadata_reason"]
     assert body["work"]["metadata_recovery_action"] == "retry_metadata"
     assert "特别篇" in body["work"]["metadata_reason"]
-    assert "核对" in body["work"]["metadata_recovery_hint"]
+    assert "无需重命名" in body["work"]["metadata_recovery_hint"]
+    assert "在线分季" in body["work"]["metadata_recovery_hint"]
     assert body["scrape"]["metadata_recovery_action"] == body["work"]["metadata_recovery_action"]
     assert body["scrape"]["season_results"][0]["local_season_number"] == 0
 

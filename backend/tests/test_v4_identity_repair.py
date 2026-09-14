@@ -135,6 +135,43 @@ def test_reimport_movie_after_cancelled_jobs_reuses_correct_identity(tmp_path):
         assert [r[0] for r in conn.execute("SELECT work_id FROM works WHERE status = 'active'")] == first_ids
 
 
+def test_confirmed_scraped_title_reuses_cross_language_owner_not_empty_duplicate(tmp_path):
+    import json
+
+    database = V4Database(tmp_path / "translated-owner.db")
+    database.initialize()
+    service = V4RevisionService(database)
+    entry = _entry("english", "Yuru Camp/S01E01.mkv", work_title="Yuru Camp")
+    service.create_draft("english", [entry])
+    service.confirm("english")
+    with database.connect() as conn:
+        owner = conn.execute("SELECT work_id FROM works WHERE preferred_title='Yuru Camp'").fetchone()[0]
+        conn.execute("INSERT INTO provider_bindings VALUES (?, 'tmdb', 'tv', '76075')", (owner,))
+        conn.execute(
+            "INSERT INTO scrape_bindings(binding_id,revision_id,work_id,provider,provider_id,metadata_json,status,created_at,updated_at) "
+            "VALUES ('translated','english',?,'tmdb','76075',?,'confirmed','now','now')",
+            (owner, json.dumps({'title': '摇曳露营△', 'original_title': 'ゆるキャン△', 'metadata_state': 'ready'})),
+        )
+        conn.execute(
+            "INSERT INTO works(work_id,identity_key,work_type,preferred_title,created_at,updated_at) "
+            "VALUES ('empty','series:摇曳露营:tv','series','摇曳露营','now','now')",
+        )
+        work = ResolvedWork(work_key="series:摇曳露营:tv", preferred_title="摇曳露营", media_type="tv", year=None)
+        assert [r['work_id'] for r in _existing_work_matches(conn, work)] == [owner]
+        # 失败/待复核资料不能成为跨语言身份依据。
+        conn.execute("UPDATE scrape_bindings SET status='waiting_review'")
+        assert [r['work_id'] for r in _existing_work_matches(conn, work)] == ['empty']
+        conn.execute("UPDATE scrape_bindings SET status='confirmed'")
+    evidence, facts = _entry('chinese', '摇曳露营/Season 1/S01E01.mp4', work_title='摇曳露营')
+    facts = replace(facts, series_group='摇曳露营', title_candidates=('摇曳露营',))
+    service.create_draft('chinese', [(evidence, facts)])
+    service.confirm('chinese')
+    with database.connect() as conn:
+        assert {r[0] for r in conn.execute(
+            "SELECT work_id FROM revision_bindings WHERE revision_id='chinese'",
+        )} == {owner}
+
+
 def test_independent_work_keeps_asset_boundary_when_episode_numbers_match():
     """独立作品同号剧集不能被收口为一个逻辑 Episode。"""
 

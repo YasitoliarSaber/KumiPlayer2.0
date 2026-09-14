@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from datetime import date
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -717,6 +718,7 @@ def default_metadata_provider(target: dict) -> dict:
                     target,
                     season_results=season_results,
                     diagnostics=mapping_diagnostics,
+                    work_detail=detail,
                 )
                 mapped_episode_ids = {
                     str(item.get("episode_id") or "")
@@ -874,6 +876,7 @@ def _build_tv_episode_mappings(
     *,
     season_results: list[dict] | None = None,
     diagnostics: dict[str, list[str]] | None = None,
+    work_detail: dict | None = None,
 ) -> list[dict]:
     """把已确认的本地 Episode 映射到 TMDB 的标题与剧照。
 
@@ -886,6 +889,23 @@ def _build_tv_episode_mappings(
         item for item in target.get("episodes") or []
         if str(item.get("episode_id") or "") and str(item.get("episode_kind") or "regular") != "auxiliary"
     ]
+    season_cache: dict[int, dict] = {}
+    online_seasons = {
+        _positive_int(item.get("season_number"))
+        for item in (work_detail or {}).get("seasons") or []
+        if _positive_int(item.get("season_number")) not in {None, 0}
+    }
+    if online_seasons == {1} and any(
+        not _is_special_episode(item) and (_positive_int(item.get("local_season_number")) or 0) > 1
+        for item in local_episodes
+    ):
+        try:
+            season_cache[1] = client.get_tv_season_episodes(provider_id, 1)
+        except TMDBClientError:
+            # 不凭一次请求失败猜测映射；下面的正常请求路径保留错误分类。
+            pass
+        else:
+            local_episodes = _map_continuous_season(local_episodes, season_cache[1])
     by_provider_season: dict[int, list[dict]] = {}
     for episode in local_episodes:
         # TMDB 的特别篇身份固定在 Season 0。本地旧映射可能把 SP 的
@@ -905,7 +925,9 @@ def _build_tv_episode_mappings(
         season_mapping_verified = False
         used_remote_numbers: set[int] = set()
         try:
-            season = client.get_tv_season_episodes(provider_id, provider_season)
+            season = season_cache.get(provider_season)
+            if season is None:
+                season = client.get_tv_season_episodes(provider_id, provider_season)
             remote_by_number = {
                 int(item["episode_number"]): item
                 for item in season.get("episodes") or []
@@ -972,6 +994,73 @@ def _build_tv_episode_mappings(
             }
             result.append(mapping)
     return result
+
+
+def _map_continuous_season(episodes: list[dict], online_season: dict) -> list[dict]:
+    """只生成线上编号副本，不改本地分季；缺集不按文件数量计算偏移。
+
+    线上仅一季时，用前季最大集号推导连续编号，且每个分界必须得到
+    线上播出日期长间隔的佐证。缺少前季/季末证据时不盲猜 S1E1。
+    """
+    remote = {
+        int(item["episode_number"]): item
+        for item in online_season.get("episodes") or []
+        if _positive_int(item.get("episode_number")) is not None
+    }
+    maxima: dict[int, int] = {}
+    season_episodes: dict[int, list[dict]] = {}
+    for episode in episodes:
+        season = _positive_int(episode.get("local_season_number")) or 0
+        number = _positive_int(episode.get("local_episode_number")) or 0
+        if season and number and not _is_special_episode(episode):
+            maxima[season] = max(maxima.get(season, 0), number)
+            season_episodes.setdefault(season, []).append(episode)
+    offsets = {1: 0}
+    for season in sorted(maxima):
+        if season <= 1:
+            continue
+        local = season_episodes[season]
+        if all((_positive_int(item.get("absolute_episode_number")) or 0) > 0 for item in local):
+            explicit_offsets = {
+                int(item["absolute_episode_number"]) - int(item["local_episode_number"])
+                for item in local
+            }
+            if len(explicit_offsets) == 1 and min(explicit_offsets) >= 0:
+                offsets[season] = next(iter(explicit_offsets))
+                continue
+        if season - 1 not in offsets:
+            continue
+        boundary = offsets[season - 1] + maxima[season - 1]
+        # 可能已经使用全系列集号，也可能是缺集；没有绝对编号证据不能重复加偏移。
+        if min(int(item["local_episode_number"]) for item in local) > boundary:
+            continue
+        try:
+            before = date.fromisoformat(str(remote[boundary].get("air_date") or ""))
+            after = date.fromisoformat(str(remote[boundary + 1].get("air_date") or ""))
+        except (KeyError, ValueError):
+            continue
+        if (after - before).days >= 60:
+            offsets[season] = boundary
+    mapped = []
+    for episode in episodes:
+        season = _positive_int(episode.get("local_season_number")) or 0
+        number = _positive_int(episode.get("local_episode_number")) or 0
+        existing_season = _positive_int(episode.get("provider_season_number"))
+        offset = offsets.get(season)
+        provider_number = _positive_int(episode.get("absolute_episode_number")) or (
+            offset + number if offset is not None else None
+        )
+        if (
+            season > 1 and number and provider_number is not None
+            and not _is_special_episode(episode)
+            and existing_season in {None, 1, season}
+            and episode.get("provider_episode_number") is None
+            and str(remote.get(provider_number, {}).get("id") or "")
+        ):
+            mapped.append({**episode, "provider_season_number": 1, "provider_episode_number": provider_number})
+        else:
+            mapped.append(episode)
+    return mapped
 
 
 def _positive_int(value) -> int | None:

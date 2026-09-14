@@ -146,18 +146,8 @@ def _title_identity_level(target_titles: list[str], candidate: dict) -> tuple[in
             return 2, "完整标题等值"
         return 3, "可信别名链等值"
 
-    # 完整包含等值：一方是另一方的完整包含且短侧足够长（如「房间露营」
-    # ⊆「房间露营△」）；短侧是通用短标题时不构成身份证据。
-    for target_norm in target_norms:
-        if _is_generic_title(target_norm):
-            continue
-        for provider_norm in provider_norms:
-            if _is_generic_title(provider_norm):
-                continue
-            shorter, longer = sorted((target_norm, provider_norm), key=len)
-            if len(shorter) >= 3 and longer.startswith(shorter):
-                return 2, "完整标题等值"
-
+    # 装饰符（如 △）已由 normalize 去除；剩余副标题是作品身份的一部分。
+    # 前缀只能用于展示弱候选，不能和真正的完整标题同分。
     # 足够长前缀/高相似：仅当双方都足够长（≥6 字）且一方是另一方前缀时
     # 给弱证据（如「葬送的芙莉莲」与「葬送的芙莉莲 第一季」）。
     for target_norm in target_norms:
@@ -377,8 +367,7 @@ def auto_adopt(
         return None, best.reasons[0] if best.reasons else "候选被身份门禁阻断"
     best = viable[0]
     if not best.identity_safe:
-        if not best.reasons or "等值" not in "".join(best.reasons) and "前缀" not in "".join(best.reasons):
-            return None, "无完整标题或可信别名等值证据"
+        return None, "无完整标题或可信别名等值证据"
     if best.score < min_score:
         return None, f"最高分候选分数不足（{best.score} < {min_score}）"
     competitors = [

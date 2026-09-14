@@ -39,6 +39,29 @@ def _target(**overrides) -> dict:
     return base
 
 
+def test_main_title_does_not_tie_with_spinoff_prefixes():
+    target = _target(preferred_title="辉夜大小姐想让我告白", show_type="anime")
+    candidates = [
+        _candidate(provider_id=str(index), title=title, genre_ids=[16])
+        for index, title in enumerate((
+            "辉夜大小姐想让我告白", "辉夜大小姐想让我告白：通往大人的阶梯",
+            "辉夜大小姐想让我告白：初吻不会结束",
+        ))
+    ]
+    ranked = CandidateRanker().rank(target, candidates)
+    adopted, _reason = CandidateRanker().auto_adopt(ranked)
+    assert adopted is not None and adopted.provider_id == "0"
+    assert not any(item.identity_safe for item in ranked if item.provider_id != "0")
+
+
+def test_only_spinoff_prefix_is_not_auto_adopted_as_main_work():
+    ranked = CandidateRanker().rank(
+        _target(preferred_title="辉夜大小姐想让我告白", show_type="anime", year=2026),
+        [_candidate(title="辉夜大小姐想让我告白：通往大人的阶梯", genre_ids=[16], year=2026)],
+    )
+    assert CandidateRanker().auto_adopt(ranked)[0] is None
+
+
 # ── 语料：身份安全 + 自动采用 ────────────────────────────────────────────────
 
 
