@@ -59,30 +59,36 @@ def start_mpv(
     start_position: float = 0.0,
     display_title: str = "",
 ) -> subprocess.Popen:
-    """启动 KumiPlayer 内置 MPV 播放 .strm 文件
+    """启动 MPV 播放 .strm 文件。
+
+    播放模式由配置决定：
+    - ``internal``（默认）：KumiPlayer 内置干净 MPV + 自有配置与脚本；
+    - ``external``：用户自备 MPV 整合包，**零注入**——不传 config-dir/include/
+      script/script-opts，整合包的配置、脚本、着色器与界面完全自主。
 
     参数:
         strm_path: .strm 文件路径
-        mpv_path: 仅测试注入用；为 None 时使用 KumiPlayer 内置干净 MPV。
-                  播放永不回退到系统 PATH、旧整合包或用户 mpv_path。
+        mpv_path: 仅测试注入用；为 None 时按播放模式解析可执行文件。
 
     返回:
         subprocess.Popen 实例
 
     异常:
         FileNotFoundError: 内置 mpv 缺失或 .strm 不存在
+        RuntimeError: 内置运行时校验失败，或外部档未配置有效播放器
         OSError: 启动失败
     """
+    external_mode = False
     if mpv_path:
         executable = Path(mpv_path)
     else:
-        executable = get_mpv_executable()
+        executable, external_mode = _resolve_player_executable()
 
     if not Path(strm_path).is_file():
         raise FileNotFoundError(f".strm 文件不存在: {strm_path}")
 
-    # 完整性门控：使用内置 MPV 时，在启动前校验运行时完整性
-    if mpv_path is None:
+    # 完整性门控只针对内置运行时：外部整合包的完整性由用户自己负责。
+    if mpv_path is None and not external_mode:
         status = check_mpv_runtime(verify_files=False)
         if not (status["available"] and status["files_valid"] and status["configuration_available"]):
             # 缓存为空或失效，降级到完整校验
@@ -130,6 +136,7 @@ def start_mpv(
             ipc_server=ipc_server,
             start_position=start_position,
             media_title=media_title,
+            external=external_mode,
         ),
         **kwargs,
     )
@@ -143,6 +150,7 @@ def start_mpv(
                 ipc_server=ipc_server,
                 start_position=start_position,
                 media_title=media_title,
+                external=external_mode,
             ),
             **kwargs,
         )
@@ -159,6 +167,33 @@ def _clean_display_title(title: str) -> str:
     return " ".join(str(title or "").split())
 
 
+def _resolve_player_executable() -> tuple[Path, bool]:
+    """按播放模式解析可执行文件；返回 ``(路径, 是否外部档)``。
+
+    外部档要求用户已选择有效的 MPV 可执行文件：路径缺失或不存在时明确报错，
+    不静默回退到内置播放器（否则用户以为自己用的是整合包，实际不是）。
+    """
+
+    from app.core.config import load_config
+
+    try:
+        config = load_config()
+    except Exception:
+        config = None
+    mode = str(getattr(config, "player_mode", "internal") or "internal").strip().casefold()
+    if mode != "external":
+        return get_mpv_executable(), False
+    # 旧配置兼容：mpv_path 历史上存的就是外部播放器路径。
+    external_path = str(getattr(config, "external_mpv_path", "") or "").strip() or str(
+        getattr(config, "mpv_path", "") or ""
+    ).strip()
+    if not external_path or not Path(external_path).is_file():
+        raise RuntimeError(
+            "外部播放器不可用：请在设置中选择有效的 MPV 可执行文件（当前播放模式为外部整合包）"
+        )
+    return Path(external_path), True
+
+
 def _build_mpv_args(
     mpv_path: Path,
     strm_path: str,
@@ -168,6 +203,7 @@ def _build_mpv_args(
     ipc_server: str = "",
     start_position: float = 0.0,
     media_title: str = "",
+    external: bool = False,
 ) -> list[str]:
     return build_mpv_playback_args(
         mpv_path,
@@ -177,6 +213,7 @@ def _build_mpv_args(
         media_title=media_title or Path(strm_path).stem,
         playlist_paths=playlist_paths,
         first_file=strm_path,
+        external=external,
     )
 
 
@@ -189,6 +226,7 @@ def _build_fallback_mpv_args(
     ipc_server: str = "",
     start_position: float = 0.0,
     media_title: str = "",
+    external: bool = False,
 ) -> list[str]:
     return build_mpv_playback_args(
         mpv_path,
@@ -199,6 +237,7 @@ def _build_fallback_mpv_args(
         playlist_paths=playlist_paths,
         first_file=strm_path,
         fallback=True,
+        external=external,
     )
 
 

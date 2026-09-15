@@ -55,6 +55,8 @@ class ConfigPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mpv_path: str | None = None
+    player_mode: str | None = None
+    external_mpv_path: str | None = None
     server_port: int | None = Field(default=None, ge=1, le=65535)
     mirror_dir: str | None = None
     pan115_root: str | None = None
@@ -212,6 +214,8 @@ def patch_config(req: ConfigPatch):
         raise HTTPException(status_code=400, detail="mpv_anime4k_mode 只能是 off|a|b|c|a+a|b+b|c+a")
     if "mpv_anime4k_quality" in patch_dict and patch_dict["mpv_anime4k_quality"] not in {"light", "balanced", "high"}:
         raise HTTPException(status_code=400, detail="mpv_anime4k_quality 只能是 light|balanced|high")
+    if "player_mode" in patch_dict and patch_dict["player_mode"] not in {"internal", "external"}:
+        raise HTTPException(status_code=400, detail="player_mode 只能是 internal|external")
 
     # 敏感/凭据字段：空字符串表示不修改
     from app.core.config import _CREDENTIAL_FIELDS

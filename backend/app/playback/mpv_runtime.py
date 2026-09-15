@@ -404,12 +404,36 @@ def build_mpv_playback_args(
     playlist_paths: list[str] | None = None,
     first_file: str = "",
     fallback: bool = False,
+    external: bool = False,
 ) -> list[str]:
-    """构造 KumiPlayer 内置 MPV 启动参数。
+    """构造 MPV 启动参数。
 
-    使用 --config-dir 只加载 KumiPlayer 自有配置（MPV 官方手册：指定配置目录会忽略
-    全局、用户与 MPV_HOME 配置），并隔离可写状态到 KumiPlayer 数据目录。
+    internal（默认）：使用 --config-dir 只加载 KumiPlayer 自有配置（MPV 官方手册：
+    指定配置目录会忽略全局、用户与 MPV_HOME 配置），并隔离可写状态到数据目录。
+
+    external：**零注入**。用户自备的 MPV 整合包必须完全自主：不传 --config-dir /
+    --include / --script / --script-opts，只追加本次会话必需的命令行参数（IPC、
+    进度起点、标题、受控播放列表与窗口行为），因此整合包的配置、脚本、着色器
+    与界面都不会被 KumiPlayer 覆盖或改写。
     """
+
+    if external:
+        args = [str(executable)]
+        if ipc_server:
+            args.append(f"--input-ipc-server={ipc_server}")
+        args.append(f"--start={max(0.0, start_position):.3f}")
+        args.extend([
+            f"--title={window_title or 'KumiPlayer'}",
+            f"--force-media-title={media_title or Path(first_file).stem}",
+            "--save-position-on-quit=no",
+            "--no-resume-playback",
+            "--autocreate-playlist=no",
+        ])
+        if not fallback:
+            args.extend(["--force-window=immediate", "--focus-on=all", "--window-minimized=no"])
+        args.extend(playlist_paths or ([first_file] if first_file else []))
+        return args
+
     config_dir = get_mpv_config_dir()
     state_dir = get_mpv_state_dir()
 

@@ -41,6 +41,12 @@ class AppConfig:
 
     # 播放器
     mpv_path: str = ""
+    # 播放模式：internal = KumiPlayer 内置干净 MPV；external = 用户自备 MPV 整合包。
+    # 外部档零注入：不传 --config-dir / --include / --script / --script-opts，
+    # 让 mpv 自行加载整合包的 portable_config 与 scripts，KumiPlayer 不修改其目录。
+    # 旧的 mpv_path 只作为外部路径的读取期兼容值使用，不自动切换模式。
+    player_mode: str = "internal"
+    external_mpv_path: str = ""
 
     # 本地后端服务
     server_port: int = 37821
