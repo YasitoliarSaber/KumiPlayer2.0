@@ -193,7 +193,16 @@ def test_spinoff_series_group_is_not_used_as_candidate_identity_query(tmp_path, 
 # ---------------------------------------------------------------------------
 
 
-def test_manual_confirm_without_mirror_artifacts_must_not_publish(tmp_path, monkeypatch):
+def test_manual_confirm_publishes_work_when_only_artwork_is_missing(tmp_path, monkeypatch):
+    """B1-2：手动确认候选后，若只缺图片产物，作品仍应 confirmed 并进入媒体墙。
+
+    P-001 R3 的原意是“没有可用产物不得冒充成功发布”；B1-2 之后该约束收窄为
+    “缺 Work NFO / 剧集 NFO 等物化产物不发布”，纯图片缺失只降级产物。
+    本用例同时锁定原因必须全部是图片原因，避免把物化失败也放行。
+    """
+
+    import json as _json
+
     client = _client(tmp_path, monkeypatch)
     database = _patch_database(tmp_path, monkeypatch)
     from app.media_v4.revisions.service import V4RevisionService
@@ -233,15 +242,25 @@ def test_manual_confirm_without_mirror_artifacts_must_not_publish(tmp_path, monk
 
     with database.connect() as conn:
         binding = conn.execute(
-            "SELECT provider, provider_id, status FROM scrape_bindings WHERE work_id = ?",
+            "SELECT provider, provider_id, status, metadata_json FROM scrape_bindings WHERE work_id = ?",
             (work_id,),
         ).fetchone()
     assert binding is not None
-    assert binding["status"] != "confirmed"
+    payload = _json.loads(str(binding["metadata_json"] or "{}"))
+    reasons = [str(item) for item in payload.get("artifact_reasons") or []]
+    # 原因必须全部是图片原因，否则说明混入了物化失败，此时不该放行。
+    assert reasons, payload
+    assert all(
+        any(marker in item for marker in ("海报", "背景图", "clearlogo", "poster", "fanart"))
+        for item in reasons
+    )
+    assert payload.get("metadata_state") == "ready"
+    assert payload.get("artifact_state") == "degraded"
+    assert binding["status"] == "confirmed"
 
     library = client.get("/api/library")
     assert library.status_code == 200
-    assert library.json()["works"] == []
+    assert len(library.json()["works"]) == 1
 
 
 # ---------------------------------------------------------------------------

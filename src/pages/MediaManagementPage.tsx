@@ -1014,6 +1014,25 @@ export default function MediaManagementPage() {
     }
   }
 
+  const retryArtifacts = async (workId: string) => {
+    setMetadataRecoveryBusy(workId)
+    setError('')
+    try {
+      await mediaV4Api.metadataArtifactsRetry(workId)
+      const activeRevisionId = executeProgress?.revision_id || revisionId
+      if (activeRevisionId) {
+        const result = await mediaV4Api.status(activeRevisionId)
+        setJobs(result.jobs)
+        if (result.progress) setExecuteProgress(result.progress)
+      }
+      void refreshSourceCards()
+    } catch (cause) {
+      setError(userFacingPageError(cause, '重新下载媒体图片失败'))
+    } finally {
+      setMetadataRecoveryBusy('')
+    }
+  }
+
   const confirmMetadataRecovery = async (candidate: MetadataRecoveryCandidate) => {
     if (!metadataRecovery) return
     setMetadataRecoveryBusy(candidate.candidate_id)
@@ -1483,6 +1502,7 @@ export default function MediaManagementPage() {
             resolvingWorkId={metadataRecoveryBusy}
             onResolveMetadata={(workId: string) => { void searchMetadataRecovery(workId) }}
             onRetryMetadata={(workId: string) => { void retryMetadataRecovery(workId) }}
+            onRetryArtifacts={(workId: string) => { void retryArtifacts(workId) }}
             fetchWorkDetail={mediaV4Api.workExecutionDetail}
           />
         ) : (

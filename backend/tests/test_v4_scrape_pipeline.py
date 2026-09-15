@@ -340,12 +340,11 @@ def test_retry_keeps_successful_details_only_for_same_identity(tmp_path, retry_p
         assert detail["episodes"][0]["scraped_title"] == ""
 
 
-def test_completeness_failure_records_artifact_incomplete_reason_code(tmp_path, monkeypatch):
-    """资料齐全但图片产物缺失时，必须落 artifact_incomplete，而不是没有原因码的 failed。
+def test_missing_artwork_keeps_metadata_ready_and_marks_artifacts_degraded(tmp_path, monkeypatch):
+    """资料齐全但图片产物缺失时：资料保持 ready，只把产物标成 degraded。
 
-    当前故障现象：图片下载失败被完整性地判成 ``metadata_state=failed`` 且
-    ``reason_code`` 为空，界面因此只能显示“媒体信息处理未能完成，请重试”，
-    与用户看到的完整刮削结果直接矛盾。
+    这是 B1-2 的核心解耦：图片属于展示产物，缺图不能让作品变成“媒体信息失败”，
+    否则它既会显示错误文案，也会从媒体墙消失。
     """
 
     from types import SimpleNamespace
@@ -363,7 +362,7 @@ def test_completeness_failure_records_artifact_incomplete_reason_code(tmp_path, 
     monkeypatch.setattr(artifacts_module, "load_config", local_config)
     monkeypatch.setattr(completeness_module, "load_config", local_config)
 
-    database = V4Database(tmp_path / "artifact-incomplete.db")
+    database = V4Database(tmp_path / "artifact-degraded.db")
     database.initialize()
     revisions = V4RevisionService(database)
     revisions.create_draft("rev-artifact", [_entry("a")])
@@ -379,10 +378,112 @@ def test_completeness_failure_records_artifact_incomplete_reason_code(tmp_path, 
     )
 
     detail = revisions.get_work_execution_detail("rev-artifact", job["work_id"])
-    assert detail["work"]["metadata_state"] == "failed"
-    assert detail["work"]["metadata_reason_code"] == "artifact_incomplete"
-    assert "图片" in detail["work"]["metadata_reason"]
-    assert detail["work"]["metadata_recovery_action"] == "retry_metadata"
+    assert detail["work"]["metadata_state"] == "ready"
+    assert detail["work"]["artifact_state"] == "degraded"
+    assert any("海报" in reason for reason in detail["work"]["artifact_reasons"])
+    assert detail["scrape"]["artifact_state"] == "degraded"
+    with database.connect() as conn:
+        binding_status = str(conn.execute(
+            "SELECT status FROM scrape_bindings WHERE revision_id = 'rev-artifact' AND work_id = ?",
+            (job["work_id"],),
+        ).fetchone()[0])
+        stored = json.loads(str(conn.execute(
+            "SELECT metadata_json FROM scrape_bindings WHERE revision_id = 'rev-artifact' AND work_id = ?",
+            (job["work_id"],),
+        ).fetchone()[0]))
+    assert binding_status == "confirmed"
+    assert stored["metadata_state"] == "ready"
+    assert stored["artifact_state"] == "degraded"
+
+
+def test_legacy_artwork_only_failure_reads_as_ready_without_rewriting_data(tmp_path, monkeypatch):
+    """历史“只缺图片”的 failed 记录按只读归一显示，且绝不改写真实数据。"""
+
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "legacy-artifact.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-legacy", [_entry("a")])
+    revisions.confirm("rev-legacy")
+    with database.connect() as conn:
+        work_id = str(conn.execute(
+            "SELECT work_id FROM revision_bindings WHERE revision_id = 'rev-legacy' "
+            "AND work_id != '' LIMIT 1"
+        ).fetchone()[0])
+        legacy_metadata = {
+            "provider": "tmdb", "provider_id": "42", "media_type": "tv", "title": "Show",
+            "metadata_state": "failed", "reason": "海报下载或发布失败",
+            "completeness": ["海报下载或发布失败"],
+        }
+        conn.execute(
+            "INSERT INTO scrape_bindings (binding_id, revision_id, work_id, provider, provider_id, "
+            "metadata_json, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                "binding-legacy", "rev-legacy", work_id, "tmdb", "42",
+                json.dumps(legacy_metadata, ensure_ascii=False), "failed",
+                "2026-09-15T00:00:00", "2026-09-15T00:00:00",
+            ),
+        )
+
+    detail = revisions.get_work_execution_detail("rev-legacy", work_id)
+    assert detail["work"]["metadata_state"] == "ready"
+    assert detail["work"]["artifact_state"] == "degraded"
+    assert detail["work"]["artifact_reasons"] == ["海报下载或发布失败"]
+    # 只读归一：数据库里的历史失败记录保持原样。
+    with database.connect() as conn:
+        raw = str(conn.execute(
+            "SELECT metadata_json FROM scrape_bindings WHERE binding_id = 'binding-legacy'"
+        ).fetchone()[0])
+    assert json.loads(raw)["metadata_state"] == "failed"
+
+
+def test_retry_artifacts_republishes_without_asking_provider_again(tmp_path, monkeypatch):
+    """重下图片必须复用已保存资料：不产生新的在线搜索。"""
+
+    from types import SimpleNamespace
+
+    from app.media_v4.jobs import completeness as completeness_module
+    from app.media_v4.jobs import metadata_artifacts as artifacts_module
+    from app.media_v4.jobs import scrape as scrape_module
+    from app.media_v4.jobs.scrape import V4ScrapeService
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    mirror_root = _patch_scrape_env(tmp_path, monkeypatch)
+    local_config = lambda: SimpleNamespace(  # noqa: E731
+        artwork_storage_mode="local", tmdb_timeout=5, proxy_url=None
+    )
+    monkeypatch.setattr(artifacts_module, "load_config", local_config)
+    monkeypatch.setattr(completeness_module, "load_config", local_config)
+
+    database = V4Database(tmp_path / "artifact-retry.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-retry-artifact", [_entry("a")])
+    revisions.confirm("rev-retry-artifact")
+    scrape = V4ScrapeService(database)
+    job = scrape.enqueue_for_revision("rev-retry-artifact")[0]
+    scrape.process(
+        job["job_id"],
+        lambda _target: {**_ready_metadata(), "poster_url": "", "fanart_url": ""},
+        mirror_root=mirror_root,
+    )
+
+    published: list[dict] = []
+    monkeypatch.setattr(
+        scrape_module, "publish_metadata_artifacts",
+        lambda _db, **kwargs: published.append(kwargs),
+    )
+
+    result = scrape.retry_artifacts("rev-retry-artifact", job["work_id"], mirror_root=mirror_root)
+
+    assert len(published) == 1
+    # 复用已保存的 provider 身份，说明这一轮没有任何在线搜索。
+    assert published[0]["metadata"]["provider_id"] == "42"
+    assert result["metadata_state"] == "ready"
+    assert result["binding_status"] == "confirmed"
 
 
 @pytest.mark.parametrize("candidate_found", [False, True])

@@ -283,6 +283,8 @@ export interface V4WorkProgressUnit {
   metadata_state: string
   metadata_reason: string
   metadata_reason_code?: string
+  artifact_state?: string
+  artifact_reasons?: string[]
   metadata_warning?: string
   metadata_recovery_action?: V4MetadataRecoveryAction
   metadata_recovery_hint?: string
@@ -303,6 +305,8 @@ export interface V4WorkExecutionDetail {
     metadata_state: string
     metadata_reason: string
     metadata_reason_code?: string
+    artifact_state?: string
+    artifact_reasons?: string[]
     metadata_warning?: string
     metadata_recovery_action?: V4MetadataRecoveryAction
     metadata_recovery_hint?: string
@@ -318,6 +322,8 @@ export interface V4WorkExecutionDetail {
     metadata_state: string
     metadata_reason?: string
     metadata_reason_code?: string
+    artifact_state?: string
+    artifact_reasons?: string[]
     metadata_warning?: string
     metadata_recovery_action?: V4MetadataRecoveryAction
     metadata_recovery_hint?: string
@@ -542,6 +548,9 @@ export const mediaV4Api = {
 
   metadataRetry: (workId: string) =>
     api.post<{ work_id: string; revision_id: string; job_id: string; status: string; metadata_recovery_action: V4MetadataRecoveryAction }>('/api/v4/metadata/retry', { work_id: workId }),
+  /** 只重新下载缺失的图片产物，不重新搜索在线资料。 */
+  metadataArtifactsRetry: (workId: string) =>
+    api.post<{ work_id: string; revision_id: string; binding_status: string; metadata_state: string; artifact_state: string; artifact_reasons: string[] }>('/api/v4/metadata/artifacts/retry', { work_id: workId }),
 
   metadataConfirm: (request: { work_id: string; candidate_id: string }) =>
     api.post<{ work_id: string; candidate_id: string; provider: string; provider_id: string; status: string }>('/api/v4/metadata/confirm', request),

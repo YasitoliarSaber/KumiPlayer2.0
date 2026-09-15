@@ -19,6 +19,7 @@ export interface V4ExecutionProgressProps {
   resolvingWorkId: string
   onResolveMetadata: (workId: string) => void
   onRetryMetadata?: (workId: string) => void
+  onRetryArtifacts?: (workId: string) => void
   fetchWorkDetail?: (revisionId: string, workId: string, episodeOffset?: number) => Promise<V4WorkExecutionDetail>
 }
 
@@ -93,7 +94,7 @@ function candidateDecisionLabel(decision: string): string {
   return decision || '未记录候选决策'
 }
 
-function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loadMoreEpisodes, busyRetryId, onRetry, resolvingWorkId, onResolveMetadata, onRetryMetadata }: {
+function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loadMoreEpisodes, busyRetryId, onRetry, resolvingWorkId, onResolveMetadata, onRetryMetadata, onRetryArtifacts }: {
   unit: V4WorkProgressUnit
   getWorkDetail: (workId: string, cacheKey: string) => WorkDetailState | undefined
   requestWorkDetail: (workId: string, cacheKey: string) => void
@@ -104,13 +105,14 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
   resolvingWorkId: string
   onResolveMetadata: (workId: string) => void
   onRetryMetadata?: (workId: string) => void
+  onRetryArtifacts?: (workId: string) => void
 }) {
   // 失败项保留简洁的摘要，避免错误堆满长列表；真正需要用户确认身份的
   // needs_attention 则直接展开，确保“选择正确作品”的恢复入口不会被藏住。
-  const [expanded, setExpanded] = useState(unit.overall_status === 'needs_attention')
+  const [expanded, setExpanded] = useState(unit.overall_status === 'needs_attention' || unit.artifact_state === 'degraded')
   useEffect(() => {
-    if (unit.overall_status === 'needs_attention') setExpanded(true)
-  }, [unit.overall_status])
+    if (unit.overall_status === 'needs_attention' || unit.artifact_state === 'degraded') setExpanded(true)
+  }, [unit.overall_status, unit.artifact_state])
   const failedJob = unit.overall_status === 'failed'
     ? (unit.mirror.status === 'failed' ? unit.mirror : unit.metadata.status === 'failed' ? unit.metadata : null)
     : null
@@ -211,6 +213,16 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
               </Button>
             )}
           </>}
+          {unit.artifact_state === 'degraded' && (
+            <>
+              <div className="media-v4-work-progress-hint" role="status">部分图片未下载成功，可重新下载；不影响浏览和播放。</div>
+              {onRetryArtifacts && (
+                <Button size="small" appearance="secondary" disabled={resolvingWorkId !== ''} onClick={() => onRetryArtifacts(unit.work_id)}>
+                  {resolvingWorkId === unit.work_id ? '正在重新下载…' : '重新下载媒体图片'}
+                </Button>
+              )}
+            </>
+          )}
           {!failedJob && workIsPending && <span className="media-v4-work-progress-hint">任务进行中，完成后自动折叠到“已完成”。</span>}
           {detail?.status === 'loading' && <div className="media-v4-work-detail-loading"><Spinner size="tiny" />正在读取执行详情…</div>}
           {detail?.status === 'error' && (
@@ -245,6 +257,9 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                   </Button>
                 )}
                 </>}
+                {detail.detail.work.artifact_state === 'degraded' && (
+                  <div className="media-v4-work-progress-hint" role="status">部分图片未下载成功，可重新下载；不影响浏览和播放。</div>
+                )}
               </div>
               {scrapeHasContent && scrape && (
                 <div className="media-v4-work-detail-section">
@@ -364,7 +379,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
   )
 }
 
-export function V4ExecutionProgress({ progress, busyRetryId, onRetry, resolvingWorkId, onResolveMetadata, onRetryMetadata, fetchWorkDetail }: V4ExecutionProgressProps) {
+export function V4ExecutionProgress({ progress, busyRetryId, onRetry, resolvingWorkId, onResolveMetadata, onRetryMetadata, onRetryArtifacts, fetchWorkDetail }: V4ExecutionProgressProps) {
   const [completedOpen, setCompletedOpen] = useState(false)
   // 3.1：作品执行详情缓存。键 = workId + 两个任务状态；任务重新执行后
   // 状态变化使旧键失效，下一次展开重新读取。
@@ -464,6 +479,7 @@ export function V4ExecutionProgress({ progress, busyRetryId, onRetry, resolvingW
       resolvingWorkId={resolvingWorkId}
       onResolveMetadata={onResolveMetadata}
       onRetryMetadata={onRetryMetadata}
+      onRetryArtifacts={onRetryArtifacts}
     />
   )
 

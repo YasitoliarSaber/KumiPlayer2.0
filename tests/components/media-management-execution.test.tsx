@@ -412,6 +412,20 @@ test('图片产物缺失时恢复入口改为重新下载媒体图片', () => {
   expect(retry).toHaveBeenCalledWith('w-artifact')
 })
 
+test('图片产物缺失时显示非阻断提示与重新下载入口', () => {
+  const artifacts = vi.fn()
+  const unit = workUnit('w-degraded', '缺图作品', 'completed', { artifact_state: 'degraded' })
+  render(<V4ExecutionProgress
+    progress={makeProgress([unit], { overall_status: 'completed' })}
+    busyRetryId="" onRetry={vi.fn()} resolvingWorkId="" onResolveMetadata={vi.fn()} onRetryArtifacts={artifacts}
+  />)
+
+  expect(screen.getByText('部分图片未下载成功，可重新下载；不影响浏览和播放。')).toBeVisible()
+  const button = screen.getByRole('button', { name: '重新下载媒体图片' })
+  fireEvent.click(button)
+  expect(artifacts).toHaveBeenCalledWith('w-degraded')
+})
+
 test.each(['check_settings', 'retry_metadata', 'review_identity'])('恢复入口在详情加载后保持唯一：%s', async (action) => {
   const retry = vi.fn()
   const resolve = vi.fn()

@@ -2048,6 +2048,48 @@ def metadata_search(request: MetadataSearchRequest):
     return {"work_id": request.work_id, "candidates": stored}
 
 
+@router.post("/metadata/artifacts/retry")
+def metadata_artifacts_retry(request: MetadataRetryRequest):
+    """只重新下载缺失的图片产物，不重新搜索在线资料。
+
+    与 ``/metadata/retry`` 的区别：本端点复用已保存的 provider 资料，只重发
+    poster/fanart/clearlogo，绝不再打 TMDB 搜索或详情接口。
+    """
+
+    database = get_database()
+    with database.connect() as conn:
+        work = conn.execute(
+            "SELECT work_id FROM works WHERE work_id = ? AND status = 'active'",
+            (request.work_id,),
+        ).fetchone()
+        revision = conn.execute(
+            """
+            SELECT ir.revision_id
+            FROM import_revisions ir
+            JOIN revision_bindings rb ON rb.revision_id = ir.revision_id
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            WHERE rb.work_id = ? AND ir.status = 'confirmed' AND sr.retired_at = ''
+            ORDER BY ir.confirmed_at DESC, ir.revision_id DESC LIMIT 1
+            """,
+            (request.work_id,),
+        ).fetchone()
+    if work is None:
+        raise HTTPException(status_code=409, detail="作品不存在或已退出媒体库")
+    if revision is None:
+        raise HTTPException(status_code=409, detail="该作品没有已确认的 revision，无法重试刮削")
+    mirror_root = _configured_mirror_root()
+    if mirror_root is None:
+        raise HTTPException(status_code=409, detail="请先在设置页配置有效的镜像目录")
+    try:
+        return V4ScrapeService(database).retry_artifacts(
+            str(revision["revision_id"]), request.work_id, mirror_root=mirror_root,
+        )
+    except KeyError:
+        raise HTTPException(status_code=409, detail="该作品没有可重试的刮削任务") from None
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.post("/metadata/retry")
 def metadata_retry(request: MetadataRetryRequest):
     """只重排可恢复的资料结果，不把人工候选冲突伪装成普通重试。"""

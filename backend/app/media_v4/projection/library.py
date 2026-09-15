@@ -196,18 +196,44 @@ class V4LibraryProjection:
                     # 等待类状态保持非 ready，不得冒充成功（P-001 7.3.E）。
                     binding_status = str(row["scrape_binding_status"] or "")
                     meta_state = str(metadata.get("metadata_state") or "")
-                    if binding_status == "confirmed" and meta_state == "ready":
-                        # P-001 7.8 R8：投影重建复查 artifact 文件，不信任 JSON。
-                        from app.media_v4.jobs.completeness import assess_persisted_completeness
+                    from app.media_v4.jobs.completeness import artifact_only_failure
 
-                        complete, _reasons = assess_persisted_completeness(
+                    if artifact_only_failure(metadata):
+                        # 历史记录里“只缺图片”的失败只读归一：作品照常进入媒体库，
+                        # 产物标成 degraded 供 UI 提示，不写回真实数据。
+                        state = "ready"
+                        metadata["artifact_state"] = "degraded"
+                        metadata["artifact_reasons"] = [
+                            str(item) for item in (metadata.get("completeness") or [])
+                        ]
+                        metadata["reason"] = "部分图片产物缺失，可重新下载"
+                    elif binding_status == "confirmed" and meta_state == "ready":
+                        # P-001 7.8 R8：投影重建复查 artifact 文件，不信任 JSON。
+                        from app.media_v4.jobs.completeness import (
+                            artwork_only_reasons,
+                            assess_persisted_completeness,
+                        )
+
+                        complete, artifact_reasons = assess_persisted_completeness(
                             self.database,
                             revision_id=str(row["revision_id"]),
                             work_id=str(row["work_id"]),
                             metadata=metadata,
                         )
-                        state = "ready" if complete else "failed"
-                        if not complete:
+                        if complete:
+                            state = "ready"
+                            metadata["artifact_state"] = "ready"
+                        elif artwork_only_reasons(artifact_reasons):
+                            # 只缺图片：作品仍是 ready，只把产物标成 degraded，
+                            # 不再从媒体墙消失。
+                            state = "ready"
+                            metadata["artifact_state"] = "degraded"
+                            metadata["artifact_reasons"] = [str(item) for item in artifact_reasons]
+                            metadata["reason"] = "部分图片产物缺失，可重新下载"
+                        else:
+                            # 缺 NFO 等物化失败仍按原判处理。
+                            state = "failed"
+                            metadata["artifact_state"] = "incomplete"
                             metadata["reason"] = "投影复查发现元数据产物缺失或损坏"
                     elif binding_status in {"waiting_metadata", "waiting_review", "source_unavailable", "failed"}:
                         state = binding_status

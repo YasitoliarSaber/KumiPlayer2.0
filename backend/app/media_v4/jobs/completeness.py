@@ -12,6 +12,41 @@ from pathlib import Path
 
 from app.core.config import load_config
 
+_ARTWORK_REASON_MARKERS = ("海报", "背景图", "clearlogo", "poster", "fanart")
+
+
+def is_artwork_reason(text: str) -> bool:
+    """该完整性原因是否只与图片产物有关（poster/fanart/clearlogo）。"""
+
+    value = str(text or "")
+    return any(marker in value for marker in _ARTWORK_REASON_MARKERS)
+
+
+def artwork_only_reasons(reasons) -> bool:
+    """原因列表是否**全部**是图片问题（空列表不算）。"""
+
+    items = [str(item) for item in reasons] if isinstance(reasons, (list, tuple)) else []
+    return bool(items) and all(is_artwork_reason(item) for item in items)
+
+
+def artifact_only_failure(metadata: dict) -> bool:
+    """判断一次失败是否**只**是本地图片产物问题。
+
+    provider 资料已经拿到（身份、标题、简介、集号映射都在库里），失败原因只指向
+    poster/fanart/clearlogo 的下载或发布。此类历史记录不应继续被当成"在线资料
+    失败"：作品应当照常进入媒体库，只把产物标成 degraded，并提供重新下载入口。
+    缺 Work NFO、缺剧集 NFO 之类不是图片问题，仍按原判处理。只读判断，不改数据。
+    """
+
+    state = str((metadata or {}).get("metadata_state") or "").strip().casefold()
+    if state != "failed":
+        return False
+    if str((metadata or {}).get("reason_code") or "").strip().casefold() == "artifact_incomplete":
+        return True
+    if artwork_only_reasons((metadata or {}).get("completeness")):
+        return True
+    return is_artwork_reason(str((metadata or {}).get("reason") or ""))
+
 
 def assess_metadata_completeness(
     database,

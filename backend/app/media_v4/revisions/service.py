@@ -91,6 +91,29 @@ def _friendly_metadata_reason(status: str, value: str, reason_code: str = "") ->
     return "" if not value else "媒体信息需要处理，请检查后重试"
 
 
+def _artifact_view(metadata: dict | None) -> tuple[str, str, list[str]]:
+    """返回 (metadata_state, artifact_state, artifact_reasons)。
+
+    历史记录里“资料已拿到、只缺本地图片”的失败在这里做只读归一：作品照常算
+    ready，产物标成 degraded；不写回真实数据。
+    """
+
+    from app.media_v4.jobs.completeness import artifact_only_failure
+
+    payload = metadata if isinstance(metadata, dict) else {}
+    state = str(payload.get("metadata_state") or "")
+    artifact_state = str(payload.get("artifact_state") or "")
+    raw_reasons = payload.get("artifact_reasons")
+    reasons = [str(item) for item in raw_reasons] if isinstance(raw_reasons, (list, tuple)) else []
+    if artifact_only_failure(payload):
+        state = "ready"
+        artifact_state = artifact_state or "degraded"
+        if not reasons:
+            fallback = payload.get("completeness")
+            reasons = [str(item) for item in fallback] if isinstance(fallback, (list, tuple)) else []
+    return state, artifact_state, reasons
+
+
 def _metadata_recovery_action(status: str, reason_code: str = "", reason: str = "") -> str:
     """为前端提供稳定的恢复动作枚举，不把按钮逻辑散落到组件。"""
 
@@ -2667,6 +2690,8 @@ class V4RevisionService:
         mappings_by_episode: dict[str, dict] = {}
         metadata_state = ""
         metadata_reason_code = ""
+        artifact_state = ""
+        artifact_reasons: list[str] = []
         provider = ""
         provider_id = ""
         if scrape_row is not None:
@@ -2684,6 +2709,7 @@ class V4RevisionService:
                 # 状态（ready/waiting_review/...）保存在 metadata_json 内。
                 metadata_state = str(metadata.get("metadata_state") or metadata_state)
                 metadata_reason_code = str(metadata.get("reason_code") or "")
+                metadata_state, artifact_state, artifact_reasons = _artifact_view(metadata)
                 for mapping in metadata.get("episode_mappings") or []:
                     if isinstance(mapping, dict) and mapping.get("episode_id"):
                         mappings_by_episode.setdefault(str(mapping["episode_id"]), mapping)
@@ -2749,6 +2775,8 @@ class V4RevisionService:
             "metadata_state": metadata_state,
             "metadata_reason": metadata_policy["reason"],
             "metadata_reason_code": metadata_reason_code,
+            "artifact_state": artifact_state,
+            "artifact_reasons": artifact_reasons,
             "metadata_warning": _safe_detail_text(metadata.get("metadata_warning")),
             "metadata_recovery_action": metadata_policy["action"],
             "metadata_recovery_hint": metadata_policy["hint"],
@@ -2790,6 +2818,8 @@ class V4RevisionService:
                 "metadata_state": metadata_state,
                 "metadata_reason": metadata_policy["reason"],
                 "metadata_reason_code": metadata_reason_code,
+                "artifact_state": artifact_state,
+                "artifact_reasons": artifact_reasons,
                 "metadata_warning": _safe_detail_text(metadata.get("metadata_warning")),
                 "metadata_recovery_action": metadata_policy["action"],
                 "metadata_recovery_hint": metadata_policy["hint"],
@@ -2906,6 +2936,11 @@ class V4RevisionService:
             metadata_job = job_pair.get("metadata")
             scrape = scrape_rows.get(work_id, {})
             scrape_status = str(scrape.get("metadata_state") or scrape.get("status") or "")
+            # 历史“只缺图片”的失败在这里只读归一为 ready + degraded，
+            # 作品不再被算成待处理，也不再从媒体墙消失。
+            normalized_state, artifact_state, artifact_reasons = _artifact_view(scrape.get("metadata"))
+            if normalized_state:
+                scrape_status = normalized_state
             metadata_policy = metadata_recovery_policy(
                 scrape.get("metadata") if isinstance(scrape.get("metadata"), dict) else {
                     "metadata_state": scrape_status,
@@ -2934,6 +2969,8 @@ class V4RevisionService:
                 "metadata_state": scrape_status,
                 "metadata_reason": metadata_policy["reason"],
                 "metadata_reason_code": str(scrape.get("reason_code") or ""),
+                "artifact_state": artifact_state,
+                "artifact_reasons": artifact_reasons,
                 "metadata_warning": _safe_detail_text(scrape.get("metadata", {}).get("metadata_warning"))
                 if isinstance(scrape.get("metadata"), dict) else "",
                 "metadata_recovery_action": metadata_policy["action"],

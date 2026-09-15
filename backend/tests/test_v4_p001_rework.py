@@ -335,8 +335,15 @@ def _scrape_with_metadata(tmp_path, monkeypatch, *, provider_result: dict, mode:
     return database, binding
 
 
-def test_metadata_ready_requires_poster_fanart_work_nfo_and_episode_nfo(tmp_path, monkeypatch):
-    # local 模式：缺 poster/fanart URL → 非 ready
+def test_missing_local_artwork_keeps_metadata_ready_and_marks_artifacts_degraded(tmp_path, monkeypatch):
+    """B1-2：图片产物缺失只降级产物，不再把作品判成“媒体信息失败”。
+
+    Work NFO 与剧集 NFO 已经写出，缺的只是 poster/fanart → 资料保持 ready、
+    产物标为 degraded；绑定仍为 confirmed，作品照常进入媒体库。
+    """
+
+    import json
+
     _database, binding = _scrape_with_metadata(tmp_path, monkeypatch, provider_result={
         "provider": "tmdb",
         "provider_id": "42",
@@ -346,8 +353,11 @@ def test_metadata_ready_requires_poster_fanart_work_nfo_and_episode_nfo(tmp_path
         "poster_url": "",
         "fanart_url": "",
     })
-    assert binding["status"] != "confirmed"
-    assert '"metadata_state": "failed"' in binding["metadata_json"]
+    payload = json.loads(binding["metadata_json"])
+    assert binding["status"] == "confirmed"
+    assert payload["metadata_state"] == "ready"
+    assert payload["artifact_state"] == "degraded"
+    assert payload["artifact_reasons"]
 
 
 def test_metadata_ready_with_complete_remote_artwork_and_episode_nfo(tmp_path, monkeypatch):

@@ -176,6 +176,63 @@ class V4ScrapeService:
             ).fetchone()
         return dict(refreshed)
 
+    def retry_artifacts(self, revision_id: str, work_id: str, *, mirror_root=None) -> dict:
+        """只重下缺失的媒体图片产物，不重新搜索在线资料。
+
+        复用 scrape_work 任务既有的写库路径：把已保存的 metadata_json 当作本轮
+        provider 结果重新发布产物，因此不会产生任何在线请求，也不会改动身份。
+        """
+
+        with self.database.connect() as conn:
+            job = conn.execute(
+                "SELECT job_id FROM jobs WHERE revision_id = ? AND work_id = ? "
+                "AND job_type = 'scrape_work'",
+                (revision_id, work_id),
+            ).fetchone()
+            binding = conn.execute(
+                "SELECT metadata_json FROM scrape_bindings WHERE revision_id = ? AND work_id = ? "
+                "ORDER BY updated_at DESC, binding_id DESC LIMIT 1",
+                (revision_id, work_id),
+            ).fetchone()
+        if job is None:
+            raise RuntimeError("该作品缺少可重试的刮削任务")
+        stored: dict = {}
+        if binding is not None:
+            try:
+                decoded = json.loads(str(binding["metadata_json"] or "{}"))
+                stored = decoded if isinstance(decoded, dict) else {}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                stored = {}
+        if not str(stored.get("provider_id") or "").strip():
+            raise RuntimeError("该作品还没有已保存的在线资料，请先获取媒体信息")
+        requeued = self.requeue_work(revision_id, work_id)
+        self.process(
+            str(requeued["job_id"]),
+            lambda _target: {**stored, "metadata_state": "ready", "reason_code": "", "reason": ""},
+            mirror_root=mirror_root,
+        )
+        with self.database.connect() as conn:
+            row = conn.execute(
+                "SELECT status, metadata_json FROM scrape_bindings WHERE revision_id = ? AND work_id = ? "
+                "ORDER BY updated_at DESC, binding_id DESC LIMIT 1",
+                (revision_id, work_id),
+            ).fetchone()
+        metadata: dict = {}
+        if row is not None:
+            try:
+                decoded = json.loads(str(row["metadata_json"] or "{}"))
+                metadata = decoded if isinstance(decoded, dict) else {}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                metadata = {}
+        return {
+            "work_id": work_id,
+            "revision_id": revision_id,
+            "binding_status": str(row["status"] or "") if row is not None else "",
+            "metadata_state": str(metadata.get("metadata_state") or ""),
+            "artifact_state": str(metadata.get("artifact_state") or ""),
+            "artifact_reasons": [str(item) for item in (metadata.get("artifact_reasons") or [])],
+        }
+
     def process(
         self,
         job_id: str,
@@ -382,17 +439,34 @@ class V4ScrapeService:
                     mirror_root=mirror_root,
                 )
                 if not complete:
-                    # 图片产物缺失是“本地产物未完成”，不是在线资料失败。写入稳定的
-                    # reason_code，让投影层能给出专门文案与“重新下载图片”入口，
-                    # 而不是显示成通用的“媒体信息处理未能完成”。
+                    # 只有“纯图片原因”才降级为产物缺失：资料状态保持 ready，作品
+                    # 照常进入媒体库。缺 Work NFO / 缺剧集 NFO / 没有镜像根属于
+                    # 未完成物化，仍按失败处理，避免把不可播放的作品当成功发布。
+                    from app.media_v4.jobs.completeness import artwork_only_reasons
+
+                    if artwork_only_reasons(reasons):
+                        result = {
+                            **result,
+                            "artifact_state": "degraded",
+                            "artifact_reasons": list(reasons),
+                            "reason": "；".join(reasons),
+                            "completeness": reasons,
+                        }
+                    else:
+                        result = {
+                            **result,
+                            "metadata_state": "failed",
+                            "artifact_state": "incomplete",
+                            "reason": "；".join(reasons),
+                            "completeness": reasons,
+                        }
+                        ready = False
+                else:
                     result = {
                         **result,
-                        "metadata_state": "failed",
-                        "reason_code": "artifact_incomplete",
-                        "reason": "；".join(reasons),
-                        "completeness": reasons,
+                        "artifact_state": "ready",
+                        "artifact_reasons": [],
                     }
-                    ready = False
             now = _now()
             binding_status = "confirmed" if ready else (
                 str(result.get("metadata_state") or "") or "waiting_metadata"
