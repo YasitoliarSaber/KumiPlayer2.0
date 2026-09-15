@@ -177,13 +177,20 @@ cargo clippy --locked --all-targets -- -D warnings
 
 ## 文档
 
+现行文档（以当前源码为事实来源）：
+
 - [用户功能指南](docs/USER_GUIDE.md)
 - [现行架构](docs/PROJECT.md)
 - [项目目录结构](docs/PROJECT_STRUCTURE.md)
+- [长期项目记忆](docs/PROJECT_MEMORY.md)
 - [配置与数据目录](docs/01_项目基准/KumiPlayer_配置与数据目录.md)
-- [Windows 分发说明](docs/DISTRIBUTION.md)
 - [视觉风格与主题规范](docs/01_项目基准/KumiPlayer_视觉风格与主题规范_2026-07-08.md)
+- [UI 组件接入与性能策略](docs/01_项目基准/KumiPlayer_UI组件接入与性能策略_2026-07-09.md)
 - [视频文件命名与识别边界](docs/01_项目基准/视频文件命名与目录组织模式.md)
-- [文档总索引](docs/00_索引/KumiPlayer_文档总索引.md)
+- [115 目录树解析说明](docs/01_项目基准/115目录树解析说明.md)
+- [Windows 分发说明](docs/DISTRIBUTION.md)
+- [第三方许可与声明](docs/THIRD_PARTY_NOTICES.md)
+
+历史交接资料（V4 施工文档、本地规划 AI 施工文档、已完成的审核报告与实现计划）已于 2026-09-15 清理删除；`docs/90_历史归档/` 只保留明确标注的历史归档，不参与施工。
 
 不要把真实 Token、Key、网盘路径或个人媒体目录写入公开文档、日志和问题报告。
