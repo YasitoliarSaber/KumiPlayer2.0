@@ -175,12 +175,27 @@ def _relation_work_key_from_row(row: dict) -> str:
     series_group = str(row.get("series_group") or "")
     if not series_group or is_generic_container_title(series_group):
         return ""
-    # 子作品是电影时，父系列仍常是 TV；关系键保留目录解析到的父系列类型。
-    media_type = str(row.get("relation_media_type") or row.get("media_type") or "unknown").casefold()
+    child_media_type = str(row.get("media_type") or "unknown").casefold()
+    relation_type = str(row.get("relation_type") or "").casefold()
+    # 外传、总集篇和剧场版自身都是 movie Work，但 series_group 指向的是
+    # TV 主系列。若沿用子作品的 movie 类型构造父键，持久化层只会查找一个
+    # 不存在的 ``series:<主系列>:movie``，留下伪“待处理”关系。目录树与
+    # OpenList 都会经过这里，因此在聚合层统一把这类父项收口为 TV。
+    if child_media_type == "movie" and relation_type in {
+        "movie",
+        "spin_off",
+        "recap",
+        "related",
+    }:
+        media_type = "tv"
+    else:
+        media_type = str(
+            row.get("relation_media_type") or child_media_type or "unknown"
+        ).casefold()
     # 同一作品可能使用 title / series / Provider 等不同键，不能仅以键不相等
     # 推断父子关系。普通目录中的 series_group 常常只是作品自身的名字。
     if (_normalize_title(series_group) == _normalize_title(str(row.get("title") or ""))
-            and media_type == str(row.get("media_type") or "unknown").casefold()):
+            and media_type == child_media_type):
         return ""
     return f"series:{_normalize_title(series_group)}:{media_type}"
 
