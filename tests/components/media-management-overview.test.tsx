@@ -63,6 +63,16 @@ function cardFixture(overrides: Record<string, unknown> = {}) {
   }
 }
 
+test('来源卡将关联提示与真实待处理分开，操作按用途分组', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture({ relation_pending_count: 2 })] })
+  render(<MediaManagementPage />)
+  await screen.findByText('115 动画')
+  expect(screen.queryByText(/个待处理事项/)).not.toBeInTheDocument()
+  expect(screen.getByText('2 项关联信息待补全，不影响入库和播放')).toBeVisible()
+  expect(screen.getByRole('group', { name: '导入与更新' })).toContainElement(screen.getByRole('button', { name: '检查更新' }))
+  expect(screen.getByRole('group', { name: '来源卡管理' })).toContainElement(screen.getByRole('button', { name: '重命名来源卡：115 动画' }))
+})
+
 beforeEach(() => {
   localStorage.clear()
   vi.clearAllMocks()

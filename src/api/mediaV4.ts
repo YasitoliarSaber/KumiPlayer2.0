@@ -107,6 +107,8 @@ export interface V4SourceLibraryCard {
     cancel_requested?: boolean
   } | null
   attention_count: number
+  /** 尚未建立的作品关联，不阻断导入或播放，与当前故障数量分开。 */
+  relation_pending_count?: number
   last_error: string
   source_locator: string
   /** 面向来源卡的紧凑路径摘要；原始 locator 仍用于恢复来源配置。 */

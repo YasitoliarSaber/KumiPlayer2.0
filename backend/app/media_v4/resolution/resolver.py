@@ -177,6 +177,11 @@ def _relation_work_key_from_row(row: dict) -> str:
         return ""
     # 子作品是电影时，父系列仍常是 TV；关系键保留目录解析到的父系列类型。
     media_type = str(row.get("relation_media_type") or row.get("media_type") or "unknown").casefold()
+    # 同一作品可能使用 title / series / Provider 等不同键，不能仅以键不相等
+    # 推断父子关系。普通目录中的 series_group 常常只是作品自身的名字。
+    if (_normalize_title(series_group) == _normalize_title(str(row.get("title") or ""))
+            and media_type == str(row.get("media_type") or "unknown").casefold()):
+        return ""
     return f"series:{_normalize_title(series_group)}:{media_type}"
 
 

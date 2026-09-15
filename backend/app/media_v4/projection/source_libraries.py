@@ -7,12 +7,13 @@ revision_bindings，不按标题/路径猜测；退役来源统一过滤。
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from datetime import UTC, datetime
 from sqlite3 import Row
 
 from app.media_v4.persistence.database import V4Database
-from app.media_v4.revisions.service import V4RevisionService
+from app.media_v4.revisions.service import V4RevisionService, _lookup_work_by_key
 from app.media_v4.sources.scan_state import scan_is_stale
 
 
@@ -65,7 +66,7 @@ def list_source_cards(database: V4Database) -> list[dict]:
         revision_evidence: dict[str, int] = defaultdict(int)
         bound_works = defaultdict(set)
         bound_assets = defaultdict(set)
-        unresolved_issues = defaultdict(int)
+        pending_relations = defaultdict(int)
         job_rows = []
         if revision_ids:
             placeholders = ",".join("?" for _ in revision_ids)
@@ -84,13 +85,15 @@ def list_source_cards(database: V4Database) -> list[dict]:
                 if row["asset_id"] is not None:
                     bound_assets[str(row["revision_id"])].add(str(row["asset_id"]))
             for row in conn.execute(
-                f"SELECT revision_id, COUNT(*) AS total FROM revision_issues WHERE revision_id IN ({placeholders}) AND resolved = 0 GROUP BY revision_id",
+                f"SELECT revision_id, evidence_id, message FROM revision_issues WHERE revision_id IN ({placeholders}) "
+                "AND resolved = 0 AND code = 'unresolved_parent_relation'",
                 revision_ids,
             ).fetchall():
-                unresolved_issues[str(row["revision_id"])] = int(row["total"] or 0)
+                if _relation_is_pending(conn, row):
+                    pending_relations[str(row["revision_id"])] += 1
             job_rows = conn.execute(
                 f"""
-                SELECT revision_id, job_id, job_type, status, cancel_requested, heartbeat_at
+                SELECT revision_id, job_id, work_id, job_type, status, cancel_requested, heartbeat_at
                 FROM jobs WHERE revision_id IN ({placeholders})
                 ORDER BY revision_id, CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, job_id
                 """,
@@ -292,6 +295,15 @@ def list_source_cards(database: V4Database) -> list[dict]:
             or job_summary["cancelled"] > 0
         ) or draft is not None
         active_task = None if scan_interrupted else _active_task(scan, active_job, revision_id, card_progress)
+        if phase == "scan":
+            attention_count = int(scan_status == "failed" or scan_interrupted)
+        elif draft_graph is not None:
+            attention_count = len(draft_graph.issues)
+        else:
+            attention_count = _execution_attention_count(progress, jobs_by_revision.get(revision_id, []))
+        if overall_status == "completed" and attention_count:
+            overall_status = "needs_attention"
+            card_progress.update(state=overall_status, message="有任务需要处理")
         cards.append({
             "root_id": root_id,
             "provider": str(root["provider"] or ""),
@@ -319,8 +331,8 @@ def list_source_cards(database: V4Database) -> list[dict]:
             "work_count": work_count,
             "asset_count": asset_count,
             "evidence_count": evidence_count,
-            "attention_count": (len(draft_graph.issues) if draft_graph is not None else unresolved_issues.get(revision_id, 0))
-            + (1 if scan_failed or scan_interrupted else 0),
+            "attention_count": attention_count,
+            "relation_pending_count": pending_relations.get(revision_id, 0) if phase == "execute" else 0,
             "last_error": last_error,
             "scan": scan_payload,
             "progress": card_progress,
@@ -330,6 +342,38 @@ def list_source_cards(database: V4Database) -> list[dict]:
             "job_summary": job_summary,
         })
     return cards
+
+
+def _execution_attention_count(progress: dict, jobs: list) -> int:
+    """按作品去重当前故障；非作品任务单独计数，主动取消不当作报错。"""
+    affected = {
+        str(unit["work_id"]) for unit in progress.get("work_units") or []
+        if unit.get("overall_status") in {"failed", "needs_attention"}
+    }
+    other_jobs = 0
+    for job in jobs:
+        if job["status"] != "failed":
+            continue
+        if job["work_id"]:
+            affected.add(str(job["work_id"]))
+        else:
+            other_jobs += 1
+    return len(affected) + other_jobs
+
+
+def _relation_is_pending(conn, issue) -> bool:
+    """只读重估历史关系提示；保留原记录，不把伪自关联当成当前缺项。"""
+    match = re.fullmatch(r"父系列 (series:.+) 尚未导入，无法建立作品关系", issue["message"])
+    if match is None:
+        return True
+    parent_id = _lookup_work_by_key(conn, match.group(1))
+    child_id = str(issue["evidence_id"])
+    if parent_id == child_id:
+        return False
+    return not (parent_id and conn.execute(
+        "SELECT 1 FROM work_relations WHERE parent_work_id=? AND child_work_id=? LIMIT 1",
+        (parent_id, child_id),
+    ).fetchone())
 
 
 def hide_source_card(database: V4Database, root_id: str) -> dict[str, object]:
@@ -493,6 +537,9 @@ def _display_name(name: str, locator: str, provider: str) -> str:
         "quark": ("夸克网盘", "夸克"),
     }.get(provider, ())
     folded = raw.casefold()
+    if folded in {label.casefold() for label in provider_labels}:
+        compact_path = _display_path(locator, provider)
+        return compact_path.rsplit(" › ", 1)[-1] if compact_path else raw
     for label in provider_labels:
         if not folded.startswith(label.casefold()):
             continue
