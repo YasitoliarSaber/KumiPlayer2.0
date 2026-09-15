@@ -45,6 +45,28 @@ _RE_BRACKET_TOKEN = re.compile(r"\[([^\]]*)\]")
 # 仅在单字母后面接数字标题时清理，避免误伤 A Channel / K-ON! 等真实作品名。
 _RE_SINGLE_LETTER_NUMERIC_PREFIX = re.compile(r"^[A-Za-z]\s+(?=\d)")
 
+# 目录树导出常把画质写在作品名**前面**，例如 ``4k偶像大师 灰姑娘女孩 U149``。
+# 只剥离已知的画质/介质词，且要求后面跟着分隔符或中日韩文字，避免误伤
+# 86、22/7、3月的狮子、91Days 这类真标题。
+_RE_LEADING_QUALITY_PREFIX = re.compile(
+    r"^(?:"
+    r"(?:\d{3,4}p|[248]k|uhd|hdr(?:10\+)?)\s*(?=[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af])"
+    r"|(?:[248]k|uhd|blu[- ]?ray|bd(?:rip|remux)?|web(?:rip|-?dl)?|remux|hdr(?:10\+)?|\d{3,4}p)"
+    r"[\s._\-]+"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def strip_leading_quality_prefix(title: str) -> str:
+    """剥离位于标题最前面的画质/介质前缀；结果为空时保留原值。"""
+
+    value = str(title or "")
+    if not value:
+        return value
+    cleaned = _RE_LEADING_QUALITY_PREFIX.sub("", value, count=1).strip()
+    return cleaned or value
+
 # 技术标签关键词（用于过滤方括号 token）
 _TECH_KEYWORDS = {
     "bdrip", "webrip", "web-dl", "bdmv", "remux",
@@ -188,6 +210,13 @@ def clean_work_title_container(container: str) -> TitleCleanResult:
     original = container
     result = TitleCleanResult(title=container)
     applied = []
+
+    # 0. 先剥离前置画质前缀（``4k偶像大师…``）——它属于发布信息，不属于作品名，
+    #    留着会让在线候选的规范化等值匹配失败，作品永远无法自动采用。
+    prefixed = strip_leading_quality_prefix(container)
+    if prefixed != container:
+        container = prefixed
+        applied.append("去掉前置画质前缀")
 
     # 1. 去掉状态词
     cleaned = container

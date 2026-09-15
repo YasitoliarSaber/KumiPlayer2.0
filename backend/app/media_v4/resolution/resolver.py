@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+# 这些 issue 只是提示：作品身份已经确定，或者关系需要后续补全，不阻断确认。
+# 前端据 blocking_issue_count 决定能否建立媒体库。
+NON_BLOCKING_ISSUE_CODES = frozenset({
+    "parsed_facts_review_hint",
+    "unresolved_parent_relation",
+})
+
 import re
 import unicodedata
 from collections import OrderedDict, defaultdict
@@ -385,16 +392,23 @@ class MediaResolver:
         for evidence, facts in entries:
             if not facts.is_importable or facts.is_auxiliary:
                 continue
-            if facts.needs_review:
-                issues.append(
-                    ResolutionIssue(
-                        code="parsed_facts_need_review",
-                        evidence_id=evidence.evidence_id,
-                        message="解析结果标记为需要人工复核，确认前必须处理",
-                    )
-                )
             identity_title = facts.work_title or (facts.title_candidates or ("",))[0]
             key = _resolved_entry_work_key(evidence, facts, structural_series_identities)
+            if facts.needs_review:
+                # 身份已经解析出来时，“解析过程有不确定信息”不该阻断确认；只有身份
+                # 确实无法确定的条目才是 blocking。两者用不同 code 区分，前端据
+                # blocking_issue_count 决定是否禁用确认。
+                issues.append(
+                    ResolutionIssue(
+                        code="parsed_facts_review_hint" if key else "parsed_facts_need_review",
+                        evidence_id=evidence.evidence_id,
+                        message=(
+                            "解析结果包含不确定信息，不影响确认，可稍后核对"
+                            if key
+                            else "解析结果标记为需要人工复核，确认前必须处理"
+                        ),
+                    )
+                )
             if not key:
                 generic = bool(identity_title.strip()) and is_generic_container_title(identity_title)
                 issues.append(

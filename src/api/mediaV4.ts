@@ -56,6 +56,8 @@ export interface V4Preview {
   episodes: V4ResolvedEpisode[]
   work_assets: V4ResolvedWorkAsset[]
   issues: V4ReviewIssue[]
+  /** 阻断确认的 issue 数（提示类不计入）；旧后端响应缺失时回退到 issues.length。 */
+  blocking_issue_count?: number
 }
 
 export interface V4Job {

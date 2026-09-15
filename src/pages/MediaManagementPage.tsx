@@ -1455,7 +1455,8 @@ export default function MediaManagementPage() {
         {scan.scan_mode === 'tree_baseline' && <MessageBar intent="info"><MessageBarBody>TXT 基线已建立。确认本次导入后，再扫描同一 OpenList 目录时会自动进入风险受控增量核对。</MessageBarBody></MessageBar>}
         {!preview && <div className="media-v4-empty">{scan.evidence_count === 0 ? <Checkbox checked={allowEmpty} onChange={(_, data) => setAllowEmpty(Boolean(data.checked))} label="我确认该来源当前确实为空，并允许移除它先前导入的媒体" /> : '正在生成识别结果…'}</div>}
         {preview && <>
-          {preview.issues.length > 0 && <MessageBar intent="warning"><MessageBarBody>发现 {preview.issues.length} 个需要人工处理的问题；未解决前不能确认。</MessageBarBody></MessageBar>}
+          {(preview.blocking_issue_count ?? preview.issues.length) > 0 && <MessageBar intent="warning"><MessageBarBody>发现 {preview.blocking_issue_count ?? preview.issues.length} 个需要人工处理的问题；未解决前不能确认。</MessageBarBody></MessageBar>}
+          {(preview.blocking_issue_count ?? preview.issues.length) === 0 && preview.issues.length > 0 && <MessageBar intent="info"><MessageBarBody>有 {preview.issues.length} 条不确定信息，不影响建立媒体库，可稍后核对。</MessageBarBody></MessageBar>}
           <V4RecognitionSummary
             preview={preview}
             issues={preview.issues}
@@ -1466,7 +1467,7 @@ export default function MediaManagementPage() {
             onOverrideChange={(evidenceId, draft) => setOverrideDrafts((current) => ({ ...current, [evidenceId]: draft }))}
             onApplyOverride={(evidenceId) => void applyOverride(evidenceId)}
           />
-          <div className="media-v4-command-row media-v4-confirm-row"><div><strong>{preview.issues.length > 0 ? '需要先处理识别问题' : '识别结果可以建立媒体库'}</strong><span>确认后将生成镜像、获取媒体信息并更新媒体库。</span></div><Button className="media-primary-command" appearance="primary" icon={<Database24Regular />} disabled={busy !== '' || preview.issues.length > 0 || preview.status === 'confirmed'} onClick={() => void confirmRevision()}>{busy === 'confirm' ? <><Spinner size="tiny" />正在建立</> : preview.status === 'confirmed' ? '已建立媒体库' : '确认并建立媒体库'}</Button></div>
+          <div className="media-v4-command-row media-v4-confirm-row"><div><strong>{(preview.blocking_issue_count ?? preview.issues.length) > 0 ? '需要先处理识别问题' : '识别结果可以建立媒体库'}</strong><span>确认后将生成镜像、获取媒体信息并更新媒体库。</span></div><Button className="media-primary-command" appearance="primary" icon={<Database24Regular />} disabled={busy !== '' || (preview.blocking_issue_count ?? preview.issues.length) > 0 || preview.status === 'confirmed'} onClick={() => void confirmRevision()}>{busy === 'confirm' ? <><Spinner size="tiny" />正在建立</> : preview.status === 'confirmed' ? '已建立媒体库' : '确认并建立媒体库'}</Button></div>
         </>}
       </section>}
 

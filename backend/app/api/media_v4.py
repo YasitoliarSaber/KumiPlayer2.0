@@ -194,12 +194,20 @@ def get_database() -> V4Database:
 
 
 def _graph_to_dict(graph) -> dict:
+    from app.media_v4.resolution.resolver import NON_BLOCKING_ISSUE_CODES
+
+    issues = [asdict(issue) for issue in graph.issues]
     return {
         "works": [asdict(work) for work in graph.works],
         "episodes": [asdict(episode) for episode in graph.episodes],
         "work_assets": [asdict(asset) for asset in graph.work_assets],
         "relations": [asdict(relation) for relation in graph.relations],
-        "issues": [asdict(issue) for issue in graph.issues],
+        "issues": issues,
+        # 前端只用这个数字决定能否确认：提示类 issue（不确定信息、父系列待补全）
+        # 不阻断导入，避免“一条脏数据卡死整批”。
+        "blocking_issue_count": sum(
+            1 for issue in issues if str(issue.get("code") or "") not in NON_BLOCKING_ISSUE_CODES
+        ),
     }
 
 

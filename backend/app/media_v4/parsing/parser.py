@@ -611,7 +611,10 @@ class V4Parser:
             edition_tags=edition_tags,
             quality_tags=quality_tags,
             confidence=guess.confidence,
-            needs_review=guess.needs_review,
+            # 所选根目录直属的单文件（例如 SP01.mkv）拿不到文件名级作品名，但结构
+            # 系列身份已经从目录层级得到。此时作品身份是已知的，不能再标记复核，
+            # 否则 12 集正常 + 1 个特别篇文件会把整批导入卡死。
+            needs_review=guess.needs_review and not resolved_series_group,
             is_importable=not is_auxiliary,
             is_auxiliary=is_auxiliary,
             reasons=tuple(guess.reasons),

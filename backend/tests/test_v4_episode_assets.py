@@ -121,7 +121,11 @@ def test_parser_review_flag_becomes_a_resolution_issue():
 
     graph = MediaResolver().resolve([(evidence, facts)])
 
-    assert any(issue.code == "parsed_facts_need_review" for issue in graph.issues)
+    codes = [issue.code for issue in graph.issues]
+    # B3：身份可得时，parser 的 review 标记是提示类 issue，不阻断确认；
+    # 身份不可得的情形由 test_v4_recognition_gating.py 锁 blocking 分支。
+    assert "parsed_facts_review_hint" in codes
+    assert "parsed_facts_need_review" not in codes
 
 
 def test_movie_assets_bind_directly_to_work_without_fake_episode(tmp_path):
