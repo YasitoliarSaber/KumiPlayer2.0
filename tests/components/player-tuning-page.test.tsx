@@ -41,10 +41,13 @@ describe('PlayerTuningPage', () => {
 
     fireEvent.click(screen.getByText('保存默认设置'));
     await waitFor(() => {
-      expect(configApi.patchConfig).toHaveBeenCalledWith({
+      // B7-2 起保存会一并写回播放模式与外部路径；这里仍锁定 Anime4K 的取值。
+      expect(configApi.patchConfig).toHaveBeenCalledWith(expect.objectContaining({
         mpv_anime4k_mode: 'off',
         mpv_anime4k_quality: 'balanced',
-      });
+        player_mode: 'internal',
+        external_mpv_path: '',
+      }));
     });
   });
 

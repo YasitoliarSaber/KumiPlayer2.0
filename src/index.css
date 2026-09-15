@@ -13160,6 +13160,7 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
   grid-template-columns: 1fr 1fr;
   gap: 14px;
 }
+.player-tuning-fields-wide { grid-template-columns: minmax(0, 1fr); }
 .player-tuning-field {
   display: flex;
   flex-direction: column;
@@ -13170,6 +13171,22 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
   font-size: 13px;
   font-weight: 600;
 }
+/* 外部播放器路径：长 Windows 路径必须能完整显示，不能被压窄。 */
+.player-tuning-path-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.player-tuning-path-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.player-tuning-path-row input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.player-tuning-mode-note { margin: 0; }
 .player-tuning-help {
   margin: 0;
   padding-left: 18px;

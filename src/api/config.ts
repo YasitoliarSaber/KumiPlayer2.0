@@ -7,6 +7,10 @@ export interface PublicConfig {
   setup_completed: boolean
   setup_version: number
   mpv_path: string
+  /** 播放模式：internal = KumiPlayer 内置干净 MPV；external = 用户自备 MPV 整合包。 */
+  player_mode: 'internal' | 'external'
+  /** 外部整合包的 MPV 可执行文件路径；external 模式下必填。 */
+  external_mpv_path: string
   server_port: number
   mirror_dir: string
   pan115_root: string

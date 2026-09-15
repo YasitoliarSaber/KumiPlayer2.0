@@ -8,10 +8,17 @@ import { useEffect, useState } from 'react';
 import { Button, Dropdown, Option, Spinner } from '@fluentui/react-components';
 import { ArrowLeft, CheckCircle2, FolderOpen, TriangleAlert } from 'lucide-react';
 import { configApi, type PublicConfig } from '../api/config';
+import { pickFile } from '../platform/folderPicker';
 import { useUiStore } from '../stores/ui';
 
 type Anime4kMode = 'off' | 'a' | 'b' | 'c' | 'a+a' | 'b+b' | 'c+a';
 type Anime4kQuality = 'light' | 'balanced' | 'high';
+type PlayerMode = 'internal' | 'external';
+
+const PLAYER_MODE_OPTIONS: Array<{ value: PlayerMode; label: string }> = [
+  { value: 'internal', label: 'KumiPlayer 内置播放器' },
+  { value: 'external', label: '外部 MPV 整合包' },
+];
 
 const MODE_OPTIONS: Array<{ value: Anime4kMode; label: string }> = [
   { value: 'off', label: '关闭' },
@@ -34,6 +41,8 @@ export default function PlayerTuningPage() {
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [mode, setMode] = useState<Anime4kMode>('off');
   const [quality, setQuality] = useState<Anime4kQuality>('balanced');
+  const [playerMode, setPlayerMode] = useState<PlayerMode>('internal');
+  const [externalPath, setExternalPath] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [openingConfigDir, setOpeningConfigDir] = useState(false);
@@ -49,6 +58,8 @@ export default function PlayerTuningPage() {
         setConfig(data);
         setMode(data.mpv_anime4k_mode || 'off');
         setQuality(data.mpv_anime4k_quality || 'balanced');
+        setPlayerMode(data.player_mode === 'external' ? 'external' : 'internal');
+        setExternalPath(data.external_mpv_path || '');
       })
       .catch((err: Error) => {
         if (!cancelled) setError(`读取配置失败：${err.message}`);
@@ -64,7 +75,12 @@ export default function PlayerTuningPage() {
     setError('');
     setSaved(false);
     try {
-      await configApi.patchConfig({ mpv_anime4k_mode: mode, mpv_anime4k_quality: quality });
+      await configApi.patchConfig({
+        mpv_anime4k_mode: mode,
+        mpv_anime4k_quality: quality,
+        player_mode: playerMode,
+        external_mpv_path: externalPath.trim(),
+      });
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (err) {
@@ -85,6 +101,16 @@ export default function PlayerTuningPage() {
       setError(`打开 MPV 配置文件夹失败：${(err as Error).message}`);
     } finally {
       setOpeningConfigDir(false);
+    }
+  };
+
+  const chooseExternalPlayer = async () => {
+    setError('');
+    try {
+      const picked = await pickFile(externalPath || undefined, '选择 MPV 可执行文件');
+      if (picked) setExternalPath(picked);
+    } catch (err) {
+      setError(`选择 MPV 可执行文件失败：${(err as Error).message}`);
     }
   };
 
@@ -114,6 +140,48 @@ export default function PlayerTuningPage() {
         </div>
         <p className="player-tuning-note">
           此设置对之后开始播放的新视频生效；右键菜单中的调整只影响当前视频，不会改变这里的默认值。
+        </p>
+      </section>
+
+      <section className="player-tuning-section">
+        <h3>播放模式</h3>
+        <div className="player-tuning-fields player-tuning-fields-wide">
+          <div className="player-tuning-field">
+            <label id="player-mode-label">使用哪个播放器</label>
+            <Dropdown
+              aria-labelledby="player-mode-label"
+              inlinePopup
+              value={PLAYER_MODE_OPTIONS.find((item) => item.value === playerMode)?.label || playerMode}
+              selectedOptions={[playerMode]}
+              onOptionSelect={(_, data) => {
+                const value = data.optionValue as PlayerMode;
+                if (value) setPlayerMode(value);
+              }}
+            >
+              {PLAYER_MODE_OPTIONS.map((item) => (
+                <Option key={item.value} value={item.value}>{item.label}</Option>
+              ))}
+            </Dropdown>
+          </div>
+          {playerMode === 'external' && (
+            <div className="player-tuning-field">
+              <label htmlFor="external-player-path">整合包 MPV 可执行文件</label>
+              <div className="player-tuning-path-row">
+                <input
+                  id="external-player-path"
+                  value={externalPath}
+                  placeholder="例如：D:\03_ACGN\MPVlite\mpv\mpv.exe"
+                  onChange={(event) => setExternalPath(event.target.value)}
+                />
+                <Button appearance="secondary" icon={<FolderOpen size={16} />} onClick={() => void chooseExternalPlayer()}>选择</Button>
+              </div>
+            </div>
+          )}
+        </div>
+        <p className="player-tuning-note">
+          {playerMode === 'internal'
+            ? '使用 KumiPlayer 自带的干净 MPV 与自有播放配置，不需要你准备任何东西。'
+            : '使用你自己的 MPV 整合包。KumiPlayer 不会修改该目录中的配置或脚本，只在自己播放时追加必要的会话参数（进度记录、标题与受控播放列表）；退出本应用后，该整合包仍然是原来的样子。'}
         </p>
       </section>
 
