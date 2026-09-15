@@ -272,7 +272,7 @@ export default function MediaManagementPage() {
     evidence_count: number
     scan_mode?: 'local' | 'tree_snapshot' | 'tree_baseline' | 'incremental' | 'full'
     source_mode?: string
-    scan_stats?: { requested_directories?: number; rolling_verified?: number; changed_directories?: number }
+    scan_stats?: { requested_directories?: number; rolling_verified?: number; changed_directories?: number; verified_directories?: number; unknown_directories?: number }
     source_metadata: SourceCardMetadata
   } | null>(null)
   const [preview, setPreview] = useState<V4Preview | null>(null)
@@ -1477,7 +1477,7 @@ export default function MediaManagementPage() {
           <div className="media-stage-heading"><span className="media-stage-icon" aria-hidden="true"><DocumentText24Regular /></span><div><span className="media-stage-eyebrow">第 2 步</span><h2>检查识别结果</h2><p>已扫描 {scan.evidence_count} 个媒体条目。默认按作品摘要检查，需要处理的条目会置顶。</p></div></div>
           {!preview && <Button appearance="secondary" disabled={busy !== '' || (scan.evidence_count === 0 && !allowEmpty)} onClick={() => void buildPreview()}>{busy === 'preview' ? <Spinner size="tiny" /> : '生成识别预览'}</Button>}
         </div>
-        {scan.scan_mode === 'incremental' && <MessageBar intent="info"><MessageBarBody>本次使用 OpenList 增量核对：请求 {scan.scan_stats?.requested_directories || 0} 个目录，其中滚动抽查 {scan.scan_stats?.rolling_verified || 0} 个、变化优先核对 {scan.scan_stats?.changed_directories || 0} 个。</MessageBarBody></MessageBar>}
+        {scan.scan_mode === 'incremental' && <MessageBar intent="info"><MessageBarBody>本次使用 OpenList 增量核对：请求 {scan.scan_stats?.requested_directories || 0} 个目录，其中滚动抽查 {scan.scan_stats?.rolling_verified || 0} 个、变化优先核对 {scan.scan_stats?.changed_directories || 0} 个。{(scan.scan_stats?.unknown_directories || 0) > 0 ? `还有 ${scan.scan_stats?.unknown_directories} 个目录尚未远端核实，会在后续增量中逐个补齐。` : '全部目录已完成远端核实。'}</MessageBarBody></MessageBar>}
         {scan.scan_mode === 'tree_baseline' && <MessageBar intent="info"><MessageBarBody>TXT 基线已建立。确认本次导入后，再扫描同一 OpenList 目录时会自动进入风险受控增量核对。</MessageBarBody></MessageBar>}
         {!preview && <div className="media-v4-empty">{scan.evidence_count === 0 ? <Checkbox checked={allowEmpty} onChange={(_, data) => setAllowEmpty(Boolean(data.checked))} label="我确认该来源当前确实为空，并允许移除它先前导入的媒体" /> : '正在生成识别结果…'}</div>}
         {preview && <>

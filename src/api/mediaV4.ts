@@ -454,7 +454,7 @@ export const mediaV4Api = {
     scan_mode?: 'local' | 'tree_snapshot' | 'tree_baseline' | 'incremental' | 'full'
     source_mode?: string
     last_scan_mode?: string
-    scan_stats?: { requested_directories?: number; rolling_verified?: number; changed_directories?: number }
+    scan_stats?: { requested_directories?: number; rolling_verified?: number; changed_directories?: number; verified_directories?: number; unknown_directories?: number }
   }>('/api/v4/sources/scan', request),
 
   preview: (request: {

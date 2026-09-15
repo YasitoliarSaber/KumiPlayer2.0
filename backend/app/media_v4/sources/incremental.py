@@ -47,6 +47,20 @@ def _relative(remote_root: str, remote_path: str) -> str:
     ).as_posix()
 
 
+def _listing_hash(entries) -> str:
+    """对目录直接子项的 name/is_dir/size/modified 求稳定哈希。
+
+    网盘目录的 mtime 不一定可靠（同 mtime 内容被替换、中间层缓存等）。清单哈希
+    变化同样算"目录发生变化"，避免只依赖 mtime 漏掉变化。
+    """
+
+    digest = hashlib.sha256()
+    for item in sorted(entries, key=lambda entry: str(entry.name).casefold()):
+        line = f"{item.name}|{int(bool(item.is_dir))}|{int(item.size or 0)}|{item.modified}\n"
+        digest.update(line.encode("utf-8"))
+    return digest.hexdigest()[:32]
+
+
 def build_tree_baseline_state(
     root_id: str,
     remote_root: str,
@@ -55,13 +69,16 @@ def build_tree_baseline_state(
     """由 TXT 文件路径建立零请求目录基线；时间事实保持 unknown。"""
 
     directories: dict[str, dict[str, float | None]] = {
-        "": {"modified": None, "last_verified_at": 0},
+        "": {"modified": None, "last_verified_at": 0, "verification_state": "unknown", "listing_hash": ""},
     }
     for item in evidence:
         parts = PurePosixPath(item.relative_path).parts[:-1]
         for length in range(1, len(parts) + 1):
             relative = PurePosixPath(*parts[:length]).as_posix()
-            directories.setdefault(relative, {"modified": None, "last_verified_at": 0})
+            directories.setdefault(
+                relative,
+                {"modified": None, "last_verified_at": 0, "verification_state": "unknown", "listing_hash": ""},
+            )
     return {
         "version": STATE_VERSION,
         "root_id": root_id,
@@ -87,7 +104,13 @@ def build_full_scan_state(
         "remote_root": normalize_remote_path(remote_root),
         "remote_verified": True,
         "directories": {
-            path: {"modified": modified, "last_verified_at": timestamp}
+            path: {
+                "modified": modified,
+                "last_verified_at": timestamp,
+                "verification_state": "verified",
+                # 完整扫描只提供 mtime；清单哈希留待下一次增量核对时写入。
+                "listing_hash": "",
+            }
             for path, modified in sorted(directories.items(), key=lambda item: item[0].casefold())
         },
     }
@@ -302,6 +325,12 @@ def scan_openlist_incremental(
             path for path in list(directories)
             if path and _parent(path) == relative_dir
         }
+        # 本目录的直接清单哈希：网盘 mtime 可能没变但内容已变，哈希变化必须
+        # 让子目录重新入队，否则子树变化会被永久漏掉。
+        previous_directory = directories.get(relative_dir) or {}
+        previous_listing_hash = str(previous_directory.get("listing_hash") or "")
+        listing_hash = _listing_hash(entries)
+        directory_content_changed = bool(previous_listing_hash) and previous_listing_hash != listing_hash
         if relative_dir == "":
             known_direct_files = {path for path in files if _parent(path) == ""}
             remote_names = {
@@ -332,13 +361,18 @@ def scan_openlist_incremental(
             previous_modified = previous.get("modified") if previous else None
             current_modified = item.modified
             is_new = previous is None
-            directories.setdefault(child_path, {"modified": current_modified, "last_verified_at": 0})
+            directories.setdefault(child_path, {
+                "modified": current_modified,
+                "last_verified_at": 0,
+                "verification_state": "unknown",
+                "listing_hash": "",
+            })
             directories[child_path]["modified"] = current_modified
             changed = (
                 previous_modified is not None
                 and current_modified is not None
                 and previous_modified != current_modified
-            )
+            ) or directory_content_changed
             if (is_new or changed) and child_path not in queued:
                 queue.append(child_path)
                 queued.add(child_path)
@@ -380,6 +414,9 @@ def scan_openlist_incremental(
             # 让 durable scan 的读取阶段可见，最终总数在扫描返回后由统一
             # 持久化边界确定，避免把基线数量伪装成远端总量。
             on_progress(processed_count=len(files), total_count=0)
+        # 本次已核对：记住状态、mtime 与清单哈希；unknown → verified。
+        directories[relative_dir]["verification_state"] = "verified"
+        directories[relative_dir]["listing_hash"] = listing_hash
         directories[relative_dir]["last_verified_at"] = timestamp
 
     if first_root_entries is None:
@@ -387,9 +424,17 @@ def scan_openlist_incremental(
     if pending and on_evidence_batch is not None:
         on_evidence_batch(pending)
     next_state["remote_verified"] = True
+    verified_directories = sum(
+        1 for entry in directories.values()
+        if str(entry.get("verification_state") or "") == "verified"
+    )
     stats = {
         "requested_directories": len(processed),
         "rolling_verified": sum(1 for path in rolling if path in processed),
         "changed_directories": len(changed_queued),
+        # TXT 基线只能给出"存在过这些目录"，远端时间事实要逐轮核对补齐：
+        # 这两个数字让用户看到"还有多少目录没被远端核实过"。
+        "verified_directories": verified_directories,
+        "unknown_directories": len(directories) - verified_directories,
     }
     return actual_scan_id, [files[path] for path in sorted(files, key=str.casefold)], next_state, stats

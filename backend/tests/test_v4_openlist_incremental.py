@@ -116,8 +116,84 @@ def test_incremental_scan_uses_txt_baseline_and_a_bounded_rolling_sample():
     assert len(evidence) == 6
     assert "Show000/Show000.S01E02.mkv" in {item.relative_path for item in evidence}
     assert all(item.source_key.startswith("/Anime/") for item in evidence)
-    assert stats == {"requested_directories": 3, "rolling_verified": 2, "changed_directories": 0}
+    assert stats["requested_directories"] == 3
+    assert stats["rolling_verified"] == 2
+    assert stats["changed_directories"] == 0
+    # TXT 基线只有"目录存在过"的证据：核对过的目录变 verified，其余仍是 unknown。
+    assert stats["verified_directories"] == 3
+    assert stats["unknown_directories"] == 3
     assert next_state["directories"]["Show000"]["last_verified_at"] == 1000
+    assert next_state["directories"]["Show000"]["verification_state"] == "verified"
+    assert next_state["directories"]["Show000"]["listing_hash"]
+    assert next_state["directories"]["Show004"]["verification_state"] == "unknown"
+
+
+def test_unknown_directories_are_all_unknown_right_after_txt_baseline():
+    from app.media_v4.sources.incremental import build_tree_baseline_state
+
+    state = build_tree_baseline_state("root-hybrid", "/Anime", _baseline())
+
+    assert state["directories"]
+    assert all(
+        entry["verification_state"] == "unknown" and entry["listing_hash"] == ""
+        for entry in state["directories"].values()
+    )
+
+
+def test_listing_hash_change_is_detected_even_when_mtime_is_unchanged():
+    """网盘 mtime 没变但目录内容变了，也必须判定为变化并重新入队子目录。"""
+
+    from app.integrations.openlist.models import OpenListDirPage, OpenListEntry
+    from app.media_v4.sources.incremental import build_tree_baseline_state, scan_openlist_incremental
+
+    baseline = _baseline()
+    state = build_tree_baseline_state("root-hybrid", "/Anime", baseline)
+
+    # 第一次核对：根目录被列出并记住清单哈希。
+    first_client = _FakeClient()
+    _scan_id, _evidence, verified_state, first_stats = scan_openlist_incremental(
+        first_client,
+        baseline=baseline,
+        state=state,
+        mapping_root="/",
+        mount_root="",
+        default_provider="pan115",
+        verification_budget=1,
+        now=1000,
+    )
+    assert first_stats["changed_directories"] == 0
+    assert verified_state["directories"][""]["listing_hash"]
+
+    # 第二次：根目录多了一个子目录，但所有 mtime 保持不变。
+    second_client = _FakeClient()
+    second_client.pages["/Anime"] = OpenListDirPage(
+        entries=[
+            *second_client.pages["/Anime"].entries,
+            OpenListEntry(
+                name="Show999",
+                is_dir=True,
+                modified=None,
+                remote_path="/Anime/Show999",
+            ),
+        ],
+        total=6,
+    )
+    # 新子目录需要可列出（变化检测成功时扫描会真的下钻到它）。
+    second_client.pages["/Anime/Show999"] = OpenListDirPage(entries=[], total=0)
+
+    _scan_id, _evidence, _state, second_stats = scan_openlist_incremental(
+        second_client,
+        baseline=baseline,
+        state=verified_state,
+        mapping_root="/",
+        mount_root="",
+        default_provider="pan115",
+        verification_budget=1,
+        now=2000,
+    )
+
+    # mtime 全是 None/不变，只能靠清单哈希发现变化。
+    assert second_stats["changed_directories"] >= 1
 
 
 def test_incremental_scan_emits_live_batches_and_heartbeats_before_return():
