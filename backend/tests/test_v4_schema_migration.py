@@ -280,3 +280,79 @@ def test_validation_helpers_detect_expiry_and_unreachable_samples(tmp_path):
     media.unlink()
     assert samples_currently_reachable(validation) is False
     assert is_tree_validation_expired({"validated_at": "2020-01-01T00:00:00+00:00"}) is True
+
+
+def _build_v18_database(path) -> None:
+    """构造一个物理 v18 数据库：当前完整结构减去 v19 的扫描目录 frontier。"""
+
+    from app.media_v4.persistence.schema_v4 import (
+        create_v8_structures,
+        create_v9_structures,
+        create_v10_structures,
+        create_v13_structures,
+        create_v15_structures,
+        create_v16_structures,
+        create_v17_structures,
+        create_v18_structures,
+    )
+
+    conn = sqlite3.connect(path)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN IMMEDIATE")
+        create_schema_v4(conn)
+        create_v6_structures(conn)
+        create_v8_structures(conn)
+        create_v9_structures(conn)
+        create_v10_structures(conn)
+        create_v13_structures(conn)
+        create_v15_structures(conn)
+        create_v16_structures(conn)
+        create_v17_structures(conn)
+        create_v18_structures(conn)
+        conn.execute("PRAGMA user_version = 18")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_v18_database_is_migrated_to_v19_without_touching_media_facts(tmp_path):
+    """v18 真实库必须能升到 v19（新增扫描目录 frontier），不能被判成需要重置。"""
+
+    db_path = tmp_path / "legacy-v18.db"
+    _build_v18_database(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO source_roots(root_id, provider, ingest_method, source_locator, "
+            "playback_locator, route_id, display_name, created_at, updated_at) "
+            "VALUES ('root-keep', 'baidu', 'directory_tree', 'K:/百度网盘/01动画', '', '', "
+            "'01动画', '2026-09-15T00:00:00+00:00', '2026-09-15T00:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO source_scans(scan_id, root_id, generation, status) "
+            "VALUES ('scan-keep', 'root-keep', 1, 'completed')"
+        )
+
+    V4Database(db_path).initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        tables = {
+            str(row["name"])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        root = conn.execute(
+            "SELECT display_name FROM source_roots WHERE root_id = 'root-keep'"
+        ).fetchone()
+        scan = conn.execute(
+            "SELECT status FROM source_scans WHERE scan_id = 'scan-keep'"
+        ).fetchone()
+
+    assert version == V4_SCHEMA_VERSION == 19
+    assert "source_scan_directories" in tables
+    assert V4Database.REQUIRED_TABLES >= {"source_scan_directories"}
+    # 既有媒体事实与来源记录不能被迁移改写。
+    assert str(root["display_name"]) == "01动画"
+    assert str(scan["status"]) == "completed"
+

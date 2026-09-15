@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 18
+V4_SCHEMA_VERSION = 19
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -1205,6 +1205,39 @@ def migrate_schema_v17_to_v18(conn: sqlite3.Connection) -> None:
     """v17 → v18 增量迁移：候选排序与解释证据列，不改写既有候选。"""
 
     create_v18_structures(conn)
+
+
+def create_v19_structures(conn: sqlite3.Connection) -> None:
+    """v19：OpenList 扫描的目录级 frontier（断点续扫状态）。
+
+    读取阶段无法预知总量，进程重启或风控中断后内存队列必丢；把"下一个要列的
+    远端目录"与每页游标落库，才能从断点继续，而不是从根目录重扫。
+    """
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS source_scan_directories (
+            scan_id TEXT NOT NULL,
+            remote_path TEXT NOT NULL,
+            depth INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'queued',
+            next_page INTEGER NOT NULL DEFAULT 1,
+            discovered_at TEXT NOT NULL DEFAULT '',
+            completed_at TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (scan_id, remote_path)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_source_scan_directories_pending "
+        "ON source_scan_directories (scan_id, status, depth, remote_path)"
+    )
+
+
+def migrate_schema_v18_to_v19(conn: sqlite3.Connection) -> None:
+    """v18 → v19 增量迁移：新增扫描目录 frontier，不改写任何媒体事实。"""
+
+    create_v19_structures(conn)
 
 
 def migrate_schema_v15_to_v16(conn: sqlite3.Connection) -> None:

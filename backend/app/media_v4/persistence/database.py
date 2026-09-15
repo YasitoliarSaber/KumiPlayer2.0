@@ -20,6 +20,7 @@ from app.media_v4.persistence.schema_v4 import (
     create_v16_structures,
     create_v17_structures,
     create_v18_structures,
+    create_v19_structures,
     migrate_schema_v4_to_v5,
     migrate_schema_v5_to_v6,
     migrate_schema_v6_to_v7,
@@ -34,6 +35,7 @@ from app.media_v4.persistence.schema_v4 import (
     migrate_schema_v15_to_v16,
     migrate_schema_v16_to_v17,
     migrate_schema_v17_to_v18,
+    migrate_schema_v18_to_v19,
 )
 
 
@@ -62,6 +64,7 @@ class V4Database:
             "v4_meta",
             "source_roots",
             "source_scans",
+            "source_scan_directories",
             "source_evidence",
             "parsed_facts",
             "works",
@@ -143,7 +146,7 @@ class V4Database:
         使用字面量；写回后立即读回校验，版本升级时若字面量未同步会立即失败。
         """
 
-        conn.execute("PRAGMA user_version = 18")
+        conn.execute("PRAGMA user_version = 19")
         written = int(conn.execute("PRAGMA user_version").fetchone()[0])
         if written != V4_SCHEMA_VERSION:
             raise RuntimeError(
@@ -223,6 +226,23 @@ class V4Database:
                     conn.rollback()
                     raise V4ResetRequiredError(
                         "数据库声明为 V4 但任务结构不完整，需要一次性重置；" + str(exc)
+                    ) from exc
+                except Exception:
+                    conn.rollback()
+                    raise
+                version = self.CURRENT_SCHEMA_VERSION
+            if version == 18 and self._has_user_tables(conn):
+                # v18 → v19：新增扫描目录 frontier（断点续扫状态）；加法迁移，
+                # 不改写任何媒体事实。缺这条分支会让既有 v18 库被判成旧架构重置。
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    migrate_schema_v18_to_v19(conn)
+                    self._set_user_version(conn)
+                    conn.commit()
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    raise V4ResetRequiredError(
+                        "数据库声明为 V4 但扫描目录结构不完整，需要一次性重置；" + str(exc)
                     ) from exc
                 except Exception:
                     conn.rollback()
@@ -471,6 +491,7 @@ class V4Database:
                     migrate_schema_v15_to_v16(conn)
                     migrate_schema_v16_to_v17(conn)
                     migrate_schema_v17_to_v18(conn)
+                    migrate_schema_v18_to_v19(conn)
                     conn.commit()
                 except sqlite3.OperationalError as exc:
                     conn.rollback()
@@ -487,6 +508,7 @@ class V4Database:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 create_schema_v4(conn)
+                create_v19_structures(conn)
                 self._set_user_version(conn)
                 conn.commit()
             except Exception:
@@ -568,6 +590,7 @@ class V4Database:
             create_v16_structures(expected)
             create_v17_structures(expected)
             create_v18_structures(expected)
+            create_v19_structures(expected)
             for table in sorted(self.REQUIRED_TABLES):
                 actual_cols = self._table_contract(conn, table)
                 expected_cols = self._table_contract(expected, table)
