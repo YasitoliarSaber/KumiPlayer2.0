@@ -364,14 +364,43 @@ def _execution_attention_count(progress: dict, jobs: list) -> int:
     return len(affected) + other_jobs
 
 
+def _relation_parent_is_self(conn, parent_key: str, child_id: str) -> bool:
+    """父键的标题部分是否就是子作品自己的标题。
+
+    历史记录里存在 ``series:<作品自身标题>:tv`` 这类伪父系列（由已被修掉的
+    "先强制 movie→tv、再判自名"顺序产生）。它的父键永远不会解析到任何 Work，
+    于是永远 pending。这里只读地把它判定为"不是当前缺项"，**不修改真实数据**。
+    """
+
+    row = conn.execute(
+        "SELECT identity_key FROM works WHERE work_id = ?", (child_id,)
+    ).fetchone()
+    if row is None:
+        return False
+    identity_key = str(row["identity_key"] or "")
+    if not identity_key.startswith("title:"):
+        return False
+    # 键形如 series:<归一化标题>:<media_type>；标题本身可能含冒号，从右侧拆类型。
+    parts = str(parent_key or "").split(":")
+    if len(parts) < 3 or parts[0] != "series":
+        return False
+    parent_title = ":".join(parts[1:-1]).strip()
+    if not parent_title:
+        return False
+    return identity_key.startswith(f"title:{parent_title}:")
+
+
 def _relation_is_pending(conn, issue) -> bool:
     """只读重估历史关系提示；保留原记录，不把伪自关联当成当前缺项。"""
     match = re.fullmatch(r"父系列 (series:.+) 尚未导入，无法建立作品关系", issue["message"])
     if match is None:
         return True
-    parent_id = _lookup_work_by_key(conn, match.group(1))
+    parent_key = match.group(1)
+    parent_id = _lookup_work_by_key(conn, parent_key)
     child_id = str(issue["evidence_id"])
     if parent_id == child_id:
+        return False
+    if _relation_parent_is_self(conn, parent_key, child_id):
         return False
     return not (parent_id and conn.execute(
         "SELECT 1 FROM work_relations WHERE parent_work_id=? AND child_work_id=? LIMIT 1",

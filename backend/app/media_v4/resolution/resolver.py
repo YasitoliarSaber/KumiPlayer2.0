@@ -188,21 +188,25 @@ def _relation_work_key_from_row(row: dict) -> str:
     # TV 主系列。若沿用子作品的 movie 类型构造父键，持久化层只会查找一个
     # 不存在的 ``series:<主系列>:movie``，留下伪“待处理”关系。目录树与
     # OpenList 都会经过这里，因此在聚合层统一把这类父项收口为 TV。
-    if child_media_type == "movie" and relation_type in {
+    forced_tv_parent = child_media_type == "movie" and relation_type in {
         "movie",
         "spin_off",
         "recap",
         "related",
-    }:
+    }
+    if forced_tv_parent:
         media_type = "tv"
     else:
         media_type = str(
             row.get("relation_media_type") or child_media_type or "unknown"
         ).casefold()
-    # 同一作品可能使用 title / series / Provider 等不同键，不能仅以键不相等
-    # 推断父子关系。普通目录中的 series_group 常常只是作品自身的名字。
+    # 自名抑制：series_group 常常只是作品自身的名字，此时不能当父系列。
+    # 关键在于"被 movie 关系规则强制成 tv"也算自名——否则 media_type 已经
+    # 不等于子类型，抑制失效，会造出永远查不到的 series:<自己>:tv。
+    # 而显式给出不同 relation_media_type（例如同名电影确实有 TV 主系列）时
+    # 仍然保留父子关系。
     if (_normalize_title(series_group) == _normalize_title(str(row.get("title") or ""))
-            and media_type == child_media_type):
+            and (media_type == child_media_type or forced_tv_parent)):
         return ""
     return f"series:{_normalize_title(series_group)}:{media_type}"
 
