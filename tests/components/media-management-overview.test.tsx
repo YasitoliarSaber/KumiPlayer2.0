@@ -345,6 +345,45 @@ test('失联扫描任务显示中断文案且不渲染转圈，仍可重新扫�
   expect(screen.getByRole('button', { name: '删除来源卡：115 动画' })).toBeVisible()
 })
 
+test('预算暂停的来源卡提供继续扫描并复用同一 scan_id', async () => {
+  api.sourceLibraries.mockResolvedValue({
+    cards: [cardFixture({
+      last_scan_mode: 'full',
+      overall_status: 'needs_attention',
+      phase: 'scan',
+      scan: {
+        scan_id: 'scan-paused', status: 'paused', stage: 'paused',
+        stage_label: '本次巡检已达请求预算，可继续扫描',
+        processed_count: 400, total_count: 400, progress: 1,
+        resumable: true, heartbeat_at: new Date().toISOString(), cancel_requested: 0,
+      },
+      active_task: null,
+      attention_count: 1,
+      available_actions: ['inspect', 'resume'],
+      can_resume: true,
+    })],
+  })
+  api.startDurableScan.mockResolvedValue({
+    scan_id: 'scan-paused', root_id: 'root-115', scan_mode: 'full', status: 'running',
+  })
+  api.durableScan.mockResolvedValue({
+    scan_id: 'scan-paused', root_id: 'root-115', status: 'completed', stage: 'ready',
+    stage_label: '识别结果已就绪', evidence_count: 400, processed_count: 400,
+    total_count: 400, error: '', entries: [],
+  })
+  api.drafts.mockResolvedValue({ drafts: [] })
+
+  render(<MediaManagementPage />)
+  await screen.findByText('115 动画')
+
+  fireEvent.click(screen.getByRole('button', { name: '继续扫描' }))
+
+  // 必须复用同一 scan_id：换新 id 会从根目录重扫，已花的请求全部作废。
+  await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(
+    expect.objectContaining({ resume_scan_id: 'scan-paused', scan_mode: 'full' }),
+  ))
+})
+
 test('排队中的扫描任务提供可用的终止按钮', async () => {
   api.sourceLibraries.mockResolvedValue({
     cards: [cardFixture({

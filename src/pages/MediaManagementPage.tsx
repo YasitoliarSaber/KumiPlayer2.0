@@ -839,10 +839,25 @@ export default function MediaManagementPage() {
       const runId = ++scanRunRef.current
       const isCurrentRun = () => scanRunRef.current === runId
       const sourceMetadata = sourceMetadataFromCard(card)
+      const resumingPausedScan = card.scan.status === 'paused'
       setBusy('scan')
       setScanTask({ ...card.scan })
       try {
+        if (resumingPausedScan) {
+          // 请求预算暂停：复用同一 scan_id 继续，后端从目录级 frontier 断点接着扫。
+          // 用新 scan_id 会从根目录重扫，等于把已花的请求全部作废。
+          await mediaV4Api.startDurableScan({
+            source: 'openlist',
+            root_path: card.source_locator,
+            provider: card.provider,
+            source_root: '',
+            scan_mode: card.last_scan_mode === 'incremental' ? 'incremental' : 'full',
+            source_display_name: card.display_name,
+            resume_scan_id: card.scan.scan_id,
+          })
+        }
         let completedState: DurableScanState | null = null
+        let polls = 0
         while (true) {
           await new Promise((resolve) => window.setTimeout(resolve, 900))
           if (!isCurrentRun()) return
@@ -855,6 +870,13 @@ export default function MediaManagementPage() {
           }
           if (state.status === 'failed' || state.status === 'cancelled') {
             throw new Error(state.error || (state.status === 'cancelled' ? '扫描已取消' : '来源扫描失败'))
+          }
+          if (state.status === 'paused') {
+            // 刚提交续扫时后端可能还没领取，先容忍几次；之后仍暂停说明又用完预算。
+            polls += 1
+            if (polls > 5) {
+              throw new Error(state.stage_label || '本次巡检已达请求预算，可稍后继续扫描')
+            }
           }
         }
         if (!completedState || !isCurrentRun()) return
@@ -1216,7 +1238,7 @@ export default function MediaManagementPage() {
                     ? card.progress.message
                       : card.overall_status === 'needs_attention' ? '有任务需要处理'
                         : '上次导入已处理完毕'
-            const resumeLabel = activeTask ? '查看进度' : card.overall_status === 'cancelled' ? (executionTerminated ? '查看执行结果' : '重新扫描') : card.overall_status === 'needs_attention' && card.phase === 'scan' ? '重新扫描' : card.phase === 'review' ? '查看识别结果' : card.can_resume ? '查看进度' : '查看上次导入'
+            const resumeLabel = activeTask ? '查看进度' : card.scan?.status === 'paused' ? '继续扫描' : card.overall_status === 'cancelled' ? (executionTerminated ? '查看执行结果' : '重新扫描') : card.overall_status === 'needs_attention' && card.phase === 'scan' ? '重新扫描' : card.phase === 'review' ? '查看识别结果' : card.can_resume ? '查看进度' : '查看上次导入'
             const resumeIcon = activeTask?.kind === 'scan' || card.phase === 'review' ? <DocumentText24Regular /> : <Database24Regular />
             return <article className={`media-v4-library-source-card ${active ? 'active' : 'settled'}`} key={card.root_id}>
               <div className="media-v4-source-card-identity">
