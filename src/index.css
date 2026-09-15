@@ -13640,13 +13640,18 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-path-row .fui-Button { flex: 0 0 auto; min-width: 108px; }
 .media-v4-switch-control { display: flex; align-items: center; justify-content: flex-end; }
 .media-v4-command-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 66px; padding: 11px 14px 11px 16px; border-top: 1px solid color-mix(in srgb, var(--border) 62%, transparent); background: color-mix(in srgb, var(--surface-raised) 48%, transparent); }
-.media-v4-command-row > div { display: grid; gap: 2px; min-width: 0; }
+.media-v4-command-row > div:not(.media-v4-command-buttons) { display: grid; gap: 4px; min-width: 0; }
 .media-v4-command-row strong { font-size: 13px; font-weight: 650; }
 .media-v4-command-row span { color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
 .media-v4-command-row .media-primary-command.fui-Button { flex: 0 0 auto; min-height: 38px; }
 
 .media-v4-workspace-body { display: grid; }
 .media-v4-inline-scan-status { margin-top: 12px; }
+/* 进度行原本嵌在 MessageBar 自身的 4 列网格里，导致“Spinner+标题 / 百分比 /
+   进度条”三条基线各走各的。这里把消息体收成单列，排版交给
+   .media-v4-scan-progress 自己的网格。 */
+.media-v4-inline-scan-status .fui-MessageBarBody { display: block; min-width: 0; }
+.media-v4-inline-scan-status .media-v4-scan-progress { width: 100%; }
 .media-v4-field-block {
   display: grid;
   gap: 12px;
@@ -13901,6 +13906,21 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-recognition-dialog .fui-DialogContent { min-width: 0; overflow-wrap: anywhere; }
 .media-v4-recognition-dialog .media-v4-override-dialog-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .media-v4-recognition-dialog .fui-DialogActions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+/* 弹窗表单的竖向节奏：Fluent 默认 label/hint 只有 2px 级间距，在 17px 根字号下
+   标签会与控件贴在一起（观感像“作品标题作品标题”）。这里统一 label→控件→hint
+   三段间距，并给控件统一最小高度。 */
+.media-v4-recognition-dialog .fui-Field { display: grid; row-gap: 6px; align-items: start; }
+.media-v4-recognition-dialog .fui-Field__label { margin: 0; line-height: 1.4; }
+.media-v4-recognition-dialog .fui-Field__hint { margin-top: 0; line-height: 1.45; }
+.media-v4-recognition-dialog .fui-Input,
+.media-v4-recognition-dialog .fui-Select { min-height: 38px; width: 100%; }
+/* 标题与关闭按钮必须始终同行：不再只依赖 Fluent 默认的 DialogTitle action 网格。 */
+.media-v4-recognition-dialog .fui-DialogTitle {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 12px;
+}
 .media-v4-identity-help { display: grid; gap: 12px; line-height: 1.6; }
 .media-v4-identity-help p { margin: 0; }
 /* 来源卡删除是破坏性但不删除媒体数据的确认操作。遮罩和实体表面都在
@@ -13944,7 +13964,7 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
   padding: 24px;
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: var(--surface-raised) !important;
+  background: var(--surface-solid) !important;
   box-shadow: var(--shadow-flyout) !important;
   color: var(--text);
 }
@@ -14032,11 +14052,18 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-source-card-rename-dialog .fui-Input {
   width: 100%;
 }
+/* 与识别弹窗同一套竖向节奏：label → 控件 → hint，避免说明文字压在输入框下边界。 */
+.media-v4-source-card-rename-dialog .fui-Field { display: grid; row-gap: 6px; align-items: start; }
+.media-v4-source-card-rename-dialog .fui-Input { min-height: 38px; }
 .media-v4-source-card-rename-dialog .fui-Field__label {
+  margin: 0;
+  line-height: 1.4;
   color: var(--text);
   font-weight: 600;
 }
 .media-v4-source-card-rename-dialog .fui-Field__hint {
+  margin-top: 0;
+  line-height: 1.45;
   color: var(--text-tertiary);
   font-size: 12px;
 }

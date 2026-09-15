@@ -138,7 +138,7 @@ function WorkCard({
                   <Input
                     aria-label="修正作品标题"
                     value={activeDraft?.title ?? ''}
-                    placeholder="作品标题"
+                    placeholder="例如：偶像大师 灰姑娘女孩 U149"
                     onChange={(_, data) => onOverrideChange(activeIssue.evidence_id, { ...(activeDraft ?? { title: '', mediaType: 'tv', season: '1', episode: '1' }), title: data.value })}
                   />
                   </Field>
