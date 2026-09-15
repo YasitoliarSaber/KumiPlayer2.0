@@ -128,6 +128,11 @@ VIDEO_SUFFIXES = frozenset({
     ".mkv",
     ".mov",
     ".mp4",
+    ".mpeg",
+    ".mpg",
+    ".mts",
+    ".rm",
+    ".rmvb",
     ".ts",
     ".webm",
     ".wmv",
@@ -268,27 +273,71 @@ def read_directory_tree_text(file_path: str | Path) -> str:
     return _decode_tree_bytes(_read_tree_bytes(path))
 
 
-def tree_media_relative_paths(text: str) -> list[str]:
+def tree_media_relative_paths(text: str, *, provider: str = "") -> list[str]:
     """从解码后的目录树文本提取媒体相对路径；不写数据库、不做身份判断。"""
 
-    return [path for path, _kind in _tree_relative_paths(text) if _kind == "video"]
+    return [
+        path
+        for path, _kind in _tree_relative_paths(text, provider=provider)
+        if _kind == "video"
+    ]
 
 
-def _tree_relative_paths(text: str) -> list[tuple[str, str]]:
+def detect_tree_provider(text: str) -> str:
+    """按正文语法判断目录树来源：pan115 / baidu / unknown / ambiguous。
+
+    两种格式的语法互斥：115 用 ``|——`` 与 ``|-``，百度/Windows tree 用 ``├──``
+    配 ``│`` 缩进。用户选错来源标签时，解析规则仍应按正文实际格式工作。
+    """
+
+    pan115 = 0
+    baidu = 0
+    for line in text.splitlines():
+        stripped = line.rstrip("\r\n")
+        if _PAN115_ROOT_LINE.match(stripped) or _PAN115_TREE_LINE.match(stripped):
+            pan115 += 1
+        elif _UNICODE_TREE_LINE.match(stripped):
+            baidu += 1
+    if pan115 and baidu:
+        return "ambiguous"
+    if pan115:
+        return "pan115"
+    if baidu:
+        return "baidu"
+    return "unknown"
+
+
+def _skip_shell_root(provider: str, detected: str) -> bool:
+    """是否需要裁掉 115 导出的外壳层（``根目录``）。
+
+    **正文语法优先**：目录树内容已经能唯一判定格式时，按正文实际格式解析，
+    用户选错来源标签也不会解析错。只有正文无法判定（空文件、纯路径清单）
+    时才退回来源标签。绝不因为“混入了一行 115 风格文本”就把整棵百度树裁掉
+    一层——那种跨文件粘性状态正是旧实现的脆弱点。
+    """
+
+    if detected == "pan115":
+        return True
+    if detected == "baidu":
+        return False
+    mode = (provider or "").strip().casefold()
+    return mode in {"pan115", "115"}
+
+
+def _tree_relative_paths(text: str, *, provider: str = "") -> list[tuple[str, str]]:
     """提取视频相对路径；NFO 等 metadata 在 TXT 链路整体忽略。
 
     TXT 只是目录结构证据：先更新目录栈保持缩进层级，再按资源类型过滤，
     保证过滤不会破坏后续条目的层级。NFO 不读取、不入身份候选，也不把
-    文件名 tvshow 变成作品。"""
+    文件名 tvshow 变成作品。外壳根裁剪按 provider 决定，不做跨文件粘性判断。"""
 
     results: list[tuple[str, str]] = []
     stack: list[str] = []
-    skip_tree_root = False
+    skip_tree_root = _skip_shell_root(provider, detect_tree_provider(text))
     for line in text.splitlines():
         node = _tree_node(line)
         if node is not None:
-            depth, name, node_skips_root = node
-            skip_tree_root = skip_tree_root or node_skips_root
+            depth, name, _node_skips_root = node
             if len(stack) > depth:
                 stack = stack[:depth]
             while len(stack) < depth:
@@ -333,7 +382,7 @@ def build_directory_tree_evidence(
     actual_scan_id = scan_id or ("scan_" + uuid.uuid4().hex)
     evidence = []
     pending: list = []
-    entries = _tree_relative_paths(text)
+    entries = _tree_relative_paths(text, provider=provider)
     effective_batch_size = max(1, int(batch_size))
     for index, (relative, kind) in enumerate(entries, start=1):
         if should_cancel is not None and should_cancel():
