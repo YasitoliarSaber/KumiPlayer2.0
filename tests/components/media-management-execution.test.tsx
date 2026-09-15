@@ -388,6 +388,30 @@ test('已终止的第三步执行显示终态而不是准备中', () => {
   expect(screen.queryByText('正在准备任务')).not.toBeInTheDocument()
 })
 
+test('图片产物缺失时恢复入口改为重新下载媒体图片', () => {
+  const retry = vi.fn()
+  const work = {
+    title: '缺图作品',
+    provider: 'tmdb',
+    provider_id: '42',
+    media_type: 'movie',
+    metadata_state: 'failed',
+    metadata_reason: '媒体资料已获取，但部分图片下载或发布失败。',
+    metadata_reason_code: 'artifact_incomplete',
+    metadata_recovery_action: 'retry_metadata',
+  }
+  render(<V4ExecutionProgress
+    progress={makeProgress([workUnit('w-artifact', '缺图作品', 'needs_attention', work)])}
+    busyRetryId="" onRetry={vi.fn()} resolvingWorkId="" onResolveMetadata={vi.fn()} onRetryMetadata={retry}
+  />)
+
+  // 图片缺失不能被说成“重新获取媒体信息”，否则用户会以为整条在线资料都要重跑。
+  expect(screen.queryByRole('button', { name: '重新获取媒体信息' })).not.toBeInTheDocument()
+  const button = screen.getByRole('button', { name: '重新下载媒体图片' })
+  fireEvent.click(button)
+  expect(retry).toHaveBeenCalledWith('w-artifact')
+})
+
 test.each(['check_settings', 'retry_metadata', 'review_identity'])('恢复入口在详情加载后保持唯一：%s', async (action) => {
   const retry = vi.fn()
   const resolve = vi.fn()

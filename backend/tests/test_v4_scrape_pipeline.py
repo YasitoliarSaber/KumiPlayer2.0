@@ -340,6 +340,51 @@ def test_retry_keeps_successful_details_only_for_same_identity(tmp_path, retry_p
         assert detail["episodes"][0]["scraped_title"] == ""
 
 
+def test_completeness_failure_records_artifact_incomplete_reason_code(tmp_path, monkeypatch):
+    """资料齐全但图片产物缺失时，必须落 artifact_incomplete，而不是没有原因码的 failed。
+
+    当前故障现象：图片下载失败被完整性地判成 ``metadata_state=failed`` 且
+    ``reason_code`` 为空，界面因此只能显示“媒体信息处理未能完成，请重试”，
+    与用户看到的完整刮削结果直接矛盾。
+    """
+
+    from types import SimpleNamespace
+
+    from app.media_v4.jobs import completeness as completeness_module
+    from app.media_v4.jobs import metadata_artifacts as artifacts_module
+    from app.media_v4.jobs.scrape import V4ScrapeService
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    mirror_root = _patch_scrape_env(tmp_path, monkeypatch)
+    local_config = lambda: SimpleNamespace(  # noqa: E731 - 测试夹具保持简短
+        artwork_storage_mode="local", tmdb_timeout=5, proxy_url=None
+    )
+    monkeypatch.setattr(artifacts_module, "load_config", local_config)
+    monkeypatch.setattr(completeness_module, "load_config", local_config)
+
+    database = V4Database(tmp_path / "artifact-incomplete.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-artifact", [_entry("a")])
+    revisions.confirm("rev-artifact")
+    scrape = V4ScrapeService(database)
+    job = scrape.enqueue_for_revision("rev-artifact")[0]
+
+    # provider 资料完整，只是远端没有可用图片地址 → 本地产物完整性必然失败。
+    scrape.process(
+        job["job_id"],
+        lambda _target: {**_ready_metadata(), "poster_url": "", "fanart_url": ""},
+        mirror_root=mirror_root,
+    )
+
+    detail = revisions.get_work_execution_detail("rev-artifact", job["work_id"])
+    assert detail["work"]["metadata_state"] == "failed"
+    assert detail["work"]["metadata_reason_code"] == "artifact_incomplete"
+    assert "图片" in detail["work"]["metadata_reason"]
+    assert detail["work"]["metadata_recovery_action"] == "retry_metadata"
+
+
 @pytest.mark.parametrize("candidate_found", [False, True])
 def test_confirmed_scrape_receives_regular_alias_but_not_bonus_or_history(tmp_path, monkeypatch, candidate_found):
     """从确认到真实搜索入口检查标题传递，不能只给 provider 手工塞标题。"""

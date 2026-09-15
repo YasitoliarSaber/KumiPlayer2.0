@@ -382,9 +382,13 @@ class V4ScrapeService:
                     mirror_root=mirror_root,
                 )
                 if not complete:
+                    # 图片产物缺失是“本地产物未完成”，不是在线资料失败。写入稳定的
+                    # reason_code，让投影层能给出专门文案与“重新下载图片”入口，
+                    # 而不是显示成通用的“媒体信息处理未能完成”。
                     result = {
                         **result,
                         "metadata_state": "failed",
+                        "reason_code": "artifact_incomplete",
                         "reason": "；".join(reasons),
                         "completeness": reasons,
                     }

@@ -32,6 +32,13 @@ const EXECUTION_STATUS_LABELS: Record<V4ExecutionProgress['overall_status'], str
   cancelled: '任务已终止',
 }
 
+/** 图片产物缺失属于“本地产物没补齐”，按钮文案必须与“在线资料失败”区分。 */
+function retryMetadataLabel(reasonCode: string | undefined, busy: boolean): string {
+  const artworkOnly = reasonCode === 'artifact_incomplete'
+  if (busy) return artworkOnly ? '正在重新下载…' : '正在重新获取…'
+  return artworkOnly ? '重新下载媒体图片' : '重新获取媒体信息'
+}
+
 function StageSummary({ stageKey, progress }: { stageKey: (typeof STAGE_KEYS)[number]; progress: V4ExecutionProgress }) {
   const summary = progress.stage_summary[stageKey]
   const done = summary.succeeded + summary.failed + summary.cancelled
@@ -195,7 +202,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
             {unit.metadata_recovery_hint && <div className="media-v4-work-progress-hint">{unit.metadata_recovery_hint}</div>}
             {['retry_metadata', 'check_settings'].includes(unit.metadata_recovery_action ?? '') && onRetryMetadata && (
               <Button size="small" appearance="secondary" disabled={resolvingWorkId !== ''} onClick={() => onRetryMetadata(unit.work_id)}>
-                {resolvingWorkId === unit.work_id ? '正在重新获取…' : '重新获取媒体信息'}
+                {retryMetadataLabel(unit.metadata_reason_code, resolvingWorkId === unit.work_id)}
               </Button>
             )}
             {(unit.metadata_state === 'waiting_review' || unit.metadata_recovery_action === 'review_identity' || unit.metadata_recovery_action === 'choose_candidate') && (
@@ -229,7 +236,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                 {detail.detail.work.metadata_recovery_hint && <div className="media-v4-work-progress-hint">{detail.detail.work.metadata_recovery_hint}</div>}
                 {['retry_metadata', 'check_settings'].includes(detail.detail.work.metadata_recovery_action ?? '') && onRetryMetadata && (
                   <Button size="small" appearance="secondary" disabled={resolvingWorkId !== ''} onClick={() => onRetryMetadata(unit.work_id)}>
-                    {resolvingWorkId === unit.work_id ? '正在重新获取…' : '重新获取媒体信息'}
+                    {retryMetadataLabel(detail.detail.work.metadata_reason_code, resolvingWorkId === unit.work_id)}
                   </Button>
                 )}
                 {(detail.detail.work.metadata_recovery_action === 'review_identity' || detail.detail.work.metadata_recovery_action === 'choose_candidate' || detail.detail.work.metadata_state === 'waiting_review') && (

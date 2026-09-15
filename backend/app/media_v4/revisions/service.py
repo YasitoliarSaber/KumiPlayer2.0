@@ -76,6 +76,8 @@ def _friendly_metadata_reason(status: str, value: str, reason_code: str = "") ->
         return "在线资料请求过于频繁，请稍后重试。"
     if normalized_code == "episode_mapping_incomplete":
         return "部分剧集资料暂不可用，作品信息已保留，可稍后重试。"
+    if normalized_code == "artifact_incomplete":
+        return "媒体资料已获取，但部分图片下载或发布失败。"
     if normalized_code == "mirror_root_missing":
         return "镜像目录未配置，无法生成元数据文件。"
     if status == "waiting_review":

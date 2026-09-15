@@ -200,6 +200,12 @@ def _seed_confirmed_work(database, *, revision_id: str = "rev-detail", work_id: 
             "retry_metadata",
             ("资料不可用",),
         ),
+        (
+            # 图片产物缺失必须有专用原因码与人话文案，不能被当成通用“媒体信息失败”。
+            {"metadata_state": "failed", "reason_code": "artifact_incomplete"},
+            "retry_metadata",
+            ("图片",),
+        ),
     ],
 )
 def test_metadata_recovery_policy_uses_nested_failure_context(metadata, action, reason_fragments):
