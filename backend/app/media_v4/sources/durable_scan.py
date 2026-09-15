@@ -388,6 +388,10 @@ def get_durable_scan(
     else:
         stage, processed_count, total_count = "preparing_preview", evidence_count, evidence_count
     stage_label = _STAGE_LABELS.get(stage, "处理中")
+    if stage == "reading_source" and total_count == 0 and processed_count > 0:
+        # 全量/增量读取阶段无法预知总量（预先递归统计会让请求量翻倍）。给出实时
+        # 计数，让用户看到扫描仍在推进，而不是一个不动的百分比。
+        stage_label = f"正在读取媒体来源（已发现 {processed_count} 个媒体文件）"
     if status == "cancelling":
         stage_label = "正在取消扫描"
     from app.media_v4.sources.scan_state import INTERRUPTED_STAGE_LABEL, scan_is_stale
@@ -418,6 +422,8 @@ def get_durable_scan(
         "stage_label": stage_label,
         "processed_count": processed_count,
         "total_count": total_count,
+        # 读取阶段的“已发现媒体文件数”，前端在总量未知时用它替代假百分比。
+        "discovered_count": processed_count,
         "progress": progress,
         "entries": entries,
     }

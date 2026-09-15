@@ -68,13 +68,15 @@ type DurableScanState = {
   stage_label?: string
   processed_count?: number
   total_count?: number
+  /** 读取阶段已发现的媒体文件数；总量未知时用它替代假百分比。 */
+  discovered_count?: number
   progress?: number | null
   heartbeat_at?: string
   cancel_requested?: boolean
   entries?: V4SourceEvidence[]
 }
 
-type DurableScanTask = Pick<DurableScanState, 'scan_id' | 'status' | 'stage' | 'stage_label' | 'processed_count' | 'total_count' | 'progress' | 'heartbeat_at' | 'cancel_requested'>
+type DurableScanTask = Pick<DurableScanState, 'scan_id' | 'status' | 'stage' | 'stage_label' | 'processed_count' | 'total_count' | 'discovered_count' | 'progress' | 'heartbeat_at' | 'cancel_requested'>
 
 const ACTIVE_REVISION_KEY = 'kumiplayer.media-v4.active-revision'
 const TRANSIENT_BACKEND_RETRY_DELAY_MS = 300
@@ -1434,7 +1436,9 @@ export default function MediaManagementPage() {
             <MessageBarBody>
               <div className="media-v4-scan-progress">
                 <span><Spinner size="tiny" />{scanTask.stage_label || '正在扫描媒体来源'}</span>
-                <span>{scanTask.progress == null ? '正在建立来源清单…' : `已完成 ${scanTask.progress}%`}</span>
+                <span>{scanTask.progress == null
+                  ? ((scanTask.discovered_count || scanTask.processed_count) ? `已发现 ${scanTask.discovered_count || scanTask.processed_count} 个媒体文件` : '正在建立来源清单…')
+                  : `已完成 ${scanTask.progress}%`}</span>
                 <ProgressBar
                   value={scanTask.total_count ? Math.min(1, (scanTask.processed_count || 0) / scanTask.total_count) : undefined}
                   max={1}
