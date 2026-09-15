@@ -159,6 +159,7 @@ def scan_openlist_full_source(database, task, runtime):
     from app.api.media_v4 import scan_openlist_directory
     from app.api.openlist_v4 import _client, _remote_root
     from app.core.config import load_config
+    from app.media_v4.sources import scan_frontier
     from app.media_v4.sources.incremental import build_full_scan_state, stage_scan_state
 
     request = task.request
@@ -174,9 +175,22 @@ def scan_openlist_full_source(database, task, runtime):
         default_provider=str(request.get("provider") or ""),
         routes=_routes_from(request),
         directory_observations=directory_observations,
+        # 目录级 frontier：完成一页写回游标、完成目录置 completed；中断（进程退出、
+        # 风控 5xx、用户取消）后重新执行同一 scan_id 即可从断点继续。
+        frontier_next=lambda: scan_frontier.next_pending_directory(
+            database, scan_id=task.scan_id,
+        ),
+        frontier_mark=lambda **kwargs: scan_frontier.mark_directory(
+            database, scan_id=task.scan_id, **kwargs,
+        ),
+        frontier_add=lambda **kwargs: scan_frontier.ensure_directories(
+            database, scan_id=task.scan_id, **kwargs,
+        ),
         **_callbacks(runtime),
     )
     _assert_scan_identity(task, _scan_id, evidence)
+    # 扫描完整走完才清理 frontier；异常路径保留断点供续扫。
+    scan_frontier.clear(database, scan_id=task.scan_id)
     stage_scan_state(
         task.scan_id,
         build_full_scan_state(task.root_id, str(request.get("remote_root") or ""), directory_observations),

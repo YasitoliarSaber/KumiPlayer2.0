@@ -562,18 +562,34 @@ def scan_openlist_directory(
     max_entries: int = 20_000,
     max_depth: int = 32,
     directory_observations: dict[str, float | None] | None = None,
+    frontier_next: Callable[[], dict | None] | None = None,
+    frontier_mark: Callable[..., None] | None = None,
+    frontier_add: Callable[..., int] | None = None,
     should_cancel=None,
     on_evidence_batch: Callable | None = None,
     on_progress: Callable | None = None,
     batch_size: int = 128,
 ) -> tuple[str, list]:
-    """递归枚举 OpenList，并只输出统一的不可变 SourceEvidence。"""
+    """递归枚举 OpenList，并只输出统一的不可变 SourceEvidence。
+
+    传入 ``frontier_next`` / ``frontier_mark`` / ``frontier_add`` 时，遍历由
+    目录级 frontier 驱动：每列完一页写回 ``next_page``，目录完成置 ``completed``，
+    因此进程重启、风控中断或用户取消后都能从断点继续，而不是从根目录重扫。
+    不传时保持原有的内存队列行为。
+    """
 
     selected_root = normalize_remote_path(remote_root)
     mapping_root = normalize_remote_path(mapping_root)
     actual_scan_id = scan_id or ("scan_" + uuid.uuid4().hex)
     evidence = []
-    queue: deque[tuple[str, int]] = deque([(selected_root, 0)])
+    frontier_driven = (
+        frontier_next is not None and frontier_mark is not None and frontier_add is not None
+    )
+    queue: deque[tuple[str, int]] | None = None
+    if frontier_driven:
+        frontier_add(remote_paths=[selected_root], depth=0)
+    else:
+        queue = deque([(selected_root, 0)])
     seen_directories: set[str] = set()
     observed_entries = 0
     route_configs = routes or []
@@ -582,20 +598,42 @@ def scan_openlist_directory(
     if directory_observations is not None:
         directory_observations[""] = None
 
-    while queue:
+    while True:
         if should_cancel is not None and should_cancel():
             raise SourceScanCancelled()
-        directory, depth = queue.popleft()
-        if directory in seen_directories:
-            continue
+        if frontier_driven:
+            frontier_item = frontier_next()
+            if frontier_item is None:
+                break
+            directory = str(frontier_item.get("remote_path") or "")
+            depth = int(frontier_item.get("depth") or 0)
+            page = max(1, int(frontier_item.get("next_page") or 1))
+        else:
+            if not queue:
+                break
+            directory, depth = queue.popleft()
+            if directory in seen_directories:
+                continue
+            seen_directories.add(directory)
+            page = 1
         if depth > max_depth:
             raise OpenListScanLimitExceeded("OpenList 目录层级超过安全上限，请选择更精确的目录")
-        seen_directories.add(directory)
-        page = 1
         while True:
             if should_cancel is not None and should_cancel():
+                if frontier_driven:
+                    frontier_mark(
+                        remote_path=directory, status="scanning", next_page=page,
+                    )
                 raise SourceScanCancelled()
-            result = client.list_dir(directory, page=page, per_page=100, refresh=False)
+            try:
+                result = client.list_dir(directory, page=page, per_page=100, refresh=False)
+            except Exception:
+                if frontier_driven:
+                    # 保留当前页游标：恢复时从这一页继续，已完成目录不会被重列。
+                    frontier_mark(
+                        remote_path=directory, status="scanning", next_page=page,
+                    )
+                raise
             for item in result.entries:
                 observed_entries += 1
                 if observed_entries > max_entries:
@@ -606,7 +644,10 @@ def scan_openlist_directory(
                         directory_observations[
                             PurePosixPath(remote_path).relative_to(PurePosixPath(selected_root)).as_posix()
                         ] = item.modified
-                    queue.append((remote_path, depth + 1))
+                    if frontier_driven:
+                        frontier_add(remote_paths=[remote_path], depth=depth + 1)
+                    else:
+                        queue.append((remote_path, depth + 1))
                     continue
                 if Path(item.name).suffix.casefold() not in VIDEO_SUFFIXES:
                     continue
@@ -650,6 +691,18 @@ def scan_openlist_directory(
             if len(result.entries) < 100 or (total and page * 100 >= total):
                 break
             page += 1
+            if frontier_driven:
+                # 断点边界必须先交付已收集证据：否则恢复时从下一页开始，
+                # 上一页的证据会永久丢失（目录状态已推进）。
+                _emit_evidence_batch(on_evidence_batch, pending)
+                pending = []
+                frontier_mark(remote_path=directory, status="scanning", next_page=page)
+        if frontier_driven:
+            # 目录完成同样是一个断点边界：先把证据交付，再置 completed，
+            # 保证"标记完成的目录"其证据一定已经落库。
+            _emit_evidence_batch(on_evidence_batch, pending)
+            pending = []
+            frontier_mark(remote_path=directory, status="completed", next_page=page)
 
     _emit_evidence_batch(on_evidence_batch, pending)
     if pending:
