@@ -70,6 +70,7 @@ _STAGE_LABELS = {
     "normalizing": "整理识别结果",
     "preparing_preview": "生成识别预览",
     "ready": "识别结果已就绪",
+    "paused": "本次巡检已达请求预算，可继续扫描",
     "failed": "扫描失败",
     "cancelled": "扫描已取消",
 }
@@ -374,6 +375,11 @@ def get_durable_scan(
         stage = "cancelled"
         processed_count = max(stored_processed, parsed_count)
         total_count = max(stored_total, evidence_count)
+    elif status == "paused":
+        # 达到请求预算：进度保留，可继续扫描；不得当作完整成功。
+        stage = "paused"
+        processed_count = max(stored_processed, parsed_count)
+        total_count = max(stored_total, evidence_count)
     elif stored_stage not in {"", "queued"}:
         stage = stored_stage
         processed_count = stored_processed
@@ -411,6 +417,8 @@ def get_durable_scan(
         "root_id": str(row["root_id"]),
         "status": status,
         "interrupted": interrupted,
+        # 只有 paused 的扫描可以带着 frontier 断点继续；它是"部分进度"，不是成功。
+        "resumable": status == "paused",
         "started_at": str(row["started_at"] or ""),
         "finished_at": str(row["finished_at"] or ""),
         "heartbeat_at": str(row["heartbeat_at"] or ""),

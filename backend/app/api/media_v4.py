@@ -128,6 +128,8 @@ class SourceScanRequest(BaseModel):
     scan_mode: Literal["auto", "full", "incremental"] = "auto"
     revision_id: str = ""
     source_display_name: str = ""
+    # 继续一次因请求预算暂停的扫描：复用同一 scan_id，frontier 断点才有效。
+    resume_scan_id: str = ""
 
 
 class SourceCardRenameRequest(BaseModel):
@@ -1499,6 +1501,25 @@ def start_durable_scan(request: SourceScanRequest):
         get_source_scan_runner(database).wake()
         return {"scan_id": scan_id, "root_id": root_id, "scan_mode": "incremental", "status": "queued"}
     scan_id = "scan_" + uuid.uuid4().hex
+    resume_scan_id = str(getattr(request, "resume_scan_id", "") or "").strip()
+    if resume_scan_id:
+        # 继续一次被请求预算暂停的扫描：必须复用同一 scan_id，目录级 frontier
+        # 断点才有效；换成新 scan_id 等于从头重扫。
+        with database.connect() as conn:
+            resume_row = conn.execute(
+                "SELECT root_id, status FROM source_scans WHERE scan_id = ?",
+                (resume_scan_id,),
+            ).fetchone()
+        if (
+            resume_row is None
+            or str(resume_row["root_id"]) != root_id
+            or str(resume_row["status"]) != "paused"
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="该扫描不可继续：任务不存在、来源不匹配或当前不是暂停状态",
+            )
+        scan_id = resume_scan_id
     _register_durable_source_scan(
         database,
         root={

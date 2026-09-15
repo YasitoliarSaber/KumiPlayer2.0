@@ -161,10 +161,15 @@ def scan_openlist_full_source(database, task, runtime):
     from app.core.config import load_config
     from app.media_v4.sources import scan_frontier
     from app.media_v4.sources.incremental import build_full_scan_state, stage_scan_state
+    from app.media_v4.sources.scanner import (
+        DEFAULT_FULL_SCAN_DIRECTORY_BUDGET,
+        SourceScanPaused,
+    )
 
     request = task.request
     config = load_config()
     directory_observations: dict[str, float | None] = {}
+    scan_stats: dict = {}
     _scan_id, evidence = scan_openlist_directory(
         _client(config),
         remote_root=str(request.get("remote_root") or ""),
@@ -175,6 +180,10 @@ def scan_openlist_full_source(database, task, runtime):
         default_provider=str(request.get("provider") or ""),
         routes=_routes_from(request),
         directory_observations=directory_observations,
+        directory_budget=int(
+            request.get("directory_budget") or DEFAULT_FULL_SCAN_DIRECTORY_BUDGET
+        ),
+        scan_stats=scan_stats,
         # 目录级 frontier：完成一页写回游标、完成目录置 completed；中断（进程退出、
         # 风控 5xx、用户取消）后重新执行同一 scan_id 即可从断点继续。
         frontier_next=lambda: scan_frontier.next_pending_directory(
@@ -188,6 +197,13 @@ def scan_openlist_full_source(database, task, runtime):
         ),
         **_callbacks(runtime),
     )
+    if scan_stats.get("budget_exhausted"):
+        # 达到请求预算：不清理 frontier，交由 runner 收口为 paused/resumable；
+        # 绝不能当作完整扫描去建立基线。
+        raise SourceScanPaused(
+            f"本次巡检已达到请求预算（已读取 {scan_stats.get('directories_listed', 0)} 个目录），"
+            "进度已保留，可稍后继续扫描"
+        )
     _assert_scan_identity(task, _scan_id, evidence)
     # 扫描完整走完才清理 frontier；异常路径保留断点供续扫。
     scan_frontier.clear(database, scan_id=task.scan_id)

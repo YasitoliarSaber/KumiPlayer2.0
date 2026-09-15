@@ -80,3 +80,36 @@ def test_reading_stage_without_evidence_yet_keeps_plain_label(tmp_path):
 
     assert payload["stage_label"] == "读取媒体来源"
     assert payload["discovered_count"] == 0
+
+
+def test_paused_scan_is_resumable_and_never_looks_completed(tmp_path):
+    """预算耗尽的扫描必须是 paused + resumable，不能表现为完整成功。"""
+
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.sources.durable_scan import get_durable_scan
+
+    database = V4Database(tmp_path / "progress-paused.db")
+    database.initialize()
+    _seed_scan(database, stage="paused", processed=400, total=400, status="paused")
+
+    payload = get_durable_scan(database, "scan-progress", include_entries=False)
+
+    assert payload["status"] == "paused"
+    assert payload["resumable"] is True
+    assert "继续" in payload["stage_label"]
+    assert payload["interrupted"] is False
+
+
+def test_completed_scan_is_not_resumable(tmp_path):
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.sources.durable_scan import get_durable_scan
+
+    database = V4Database(tmp_path / "progress-done.db")
+    database.initialize()
+    _seed_scan(database, stage="ready", processed=12, total=12, status="completed")
+
+    payload = get_durable_scan(database, "scan-progress", include_entries=False)
+
+    assert payload["status"] == "completed"
+    assert payload["resumable"] is False
+    assert payload["stage_label"] == "识别结果已就绪"

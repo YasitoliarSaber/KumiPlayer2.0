@@ -25,6 +25,19 @@ from app.media_v4.sources.adapters import SourceEntry, to_source_evidence
 class SourceScanCancelled(Exception):
     """用户在扫描读取过程中取消；后台任务应落为 cancelled 终态。"""
 
+
+class SourceScanPaused(Exception):
+    """本次巡检达到请求硬预算，进度已保留，可稍后继续。
+
+    这不是成功也不是失败：frontier 与已交付证据都保留，但**不得**据此建立
+    confirmed 基线——"部分进度可持久化"不等于"部分扫描算完整成功"。
+    """
+
+
+# OpenList 全量扫描的默认目录请求预算：超过即暂停并保留断点，避免为了跑完
+# 一个大库而持续打满上游请求（风控风险与耗时都不可控）。
+DEFAULT_FULL_SCAN_DIRECTORY_BUDGET = 400
+
 _UNICODE_TREE_LINE = re.compile(
     r"^(?P<prefix>(?:(?:│ {2,3})|(?: {3,4}))*)"
     r"(?:├──\s?|└──\s?|├─\s?|└─\s?)"
@@ -562,6 +575,8 @@ def scan_openlist_directory(
     max_entries: int = 20_000,
     max_depth: int = 32,
     directory_observations: dict[str, float | None] | None = None,
+    directory_budget: int | None = None,
+    scan_stats: dict | None = None,
     frontier_next: Callable[[], dict | None] | None = None,
     frontier_mark: Callable[..., None] | None = None,
     frontier_add: Callable[..., int] | None = None,
@@ -592,6 +607,8 @@ def scan_openlist_directory(
         queue = deque([(selected_root, 0)])
     seen_directories: set[str] = set()
     observed_entries = 0
+    listed_directories = 0
+    budget_exhausted = False
     route_configs = routes or []
     pending: list = []
     effective_batch_size = max(1, int(batch_size))
@@ -601,6 +618,11 @@ def scan_openlist_directory(
     while True:
         if should_cancel is not None and should_cancel():
             raise SourceScanCancelled()
+        if directory_budget is not None and listed_directories >= max(1, int(directory_budget)):
+            # 达到硬预算：干净停下（不抛异常），由调用方把这次扫描收口为
+            # paused/resumable。未列目录仍留在 frontier 里，续扫接着跑。
+            budget_exhausted = True
+            break
         if frontier_driven:
             frontier_item = frontier_next()
             if frontier_item is None:
@@ -618,6 +640,7 @@ def scan_openlist_directory(
             page = 1
         if depth > max_depth:
             raise OpenListScanLimitExceeded("OpenList 目录层级超过安全上限，请选择更精确的目录")
+        listed_directories += 1
         while True:
             if should_cancel is not None and should_cancel():
                 if frontier_driven:
@@ -712,4 +735,8 @@ def scan_openlist_directory(
             total_count=len(evidence),
         )
     evidence.sort(key=lambda item: item.source_key.casefold())
+    if scan_stats is not None:
+        scan_stats["budget_exhausted"] = budget_exhausted
+        scan_stats["directories_listed"] = listed_directories
+        scan_stats["evidence_count"] = len(evidence)
     return actual_scan_id, evidence

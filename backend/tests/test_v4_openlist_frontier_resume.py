@@ -76,7 +76,7 @@ def _frontier_callbacks(database, scan_id: str):
     }
 
 
-def _scan(client, callbacks, batches: list | None = None):
+def _scan(client, callbacks, batches: list | None = None, *, stats: dict | None = None, budget=None):
     from app.media_v4.sources.scanner import scan_openlist_directory
 
     def _collect(items):
@@ -91,6 +91,8 @@ def _scan(client, callbacks, batches: list | None = None):
         root_id="root-frontier",
         scan_id="scan-frontier",
         default_provider="quark",
+        directory_budget=budget,
+        scan_stats=stats,
         on_evidence_batch=_collect if batches is not None else None,
         **callbacks,
     )
@@ -160,6 +162,35 @@ def test_resume_continues_from_recorded_page(tmp_path):
     assert healthy.calls == [("/动画/Big", 2)]
     assert len(evidence) == 50
     assert len(delivered) == 150
+
+
+def test_directory_budget_pauses_cleanly_and_keeps_pending_frontier(tmp_path):
+    """达到请求预算时干净停下（不抛异常），未列目录留在 frontier 供续扫。"""
+
+    from app.media_v4.sources import scan_frontier
+
+    database = _database(tmp_path)
+    callbacks = _frontier_callbacks(database, "scan-frontier")
+
+    client = _FakeOpenListClient(_TREE)
+    stats: dict = {}
+    _scan(client, callbacks, stats=stats, budget=1)
+
+    assert stats["budget_exhausted"] is True
+    assert stats["directories_listed"] == 1
+    # 只列了根目录，子目录根本没碰（预算就是请求上限）。
+    assert [path for path, _page in client.calls] == ["/动画"]
+    counts = scan_frontier.directory_counts(database, scan_id="scan-frontier")
+    assert counts == {"total": 3, "completed": 1, "pending": 2}
+
+    # 提高预算后继续：剩余目录被列完，且不重新列已完成的根目录。
+    resumed_client = _FakeOpenListClient(_TREE)
+    resumed_stats: dict = {}
+    _scan(resumed_client, callbacks, stats=resumed_stats, budget=10)
+
+    assert resumed_stats["budget_exhausted"] is False
+    assert [path for path, _page in resumed_client.calls] == ["/动画/ShowA", "/动画/ShowB"]
+    assert scan_frontier.directory_counts(database, scan_id="scan-frontier")["pending"] == 0
 
 
 def test_resume_does_not_relist_when_root_was_completed(tmp_path):

@@ -35,7 +35,7 @@ from app.media_v4.sources.scan_state import (
     STALE_SCAN_AFTER_SECONDS,
     scan_is_stale,
 )
-from app.media_v4.sources.scanner import SourceScanCancelled
+from app.media_v4.sources.scanner import SourceScanCancelled, SourceScanPaused
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -455,6 +455,10 @@ class SourceScanRunner:
                 _finish_scan(self.database, task.scan_id, status="cancelled", error="用户已取消扫描")
         except (SourceScanCancelled, _CancelledScan):
             _finish_scan(self.database, task.scan_id, status="cancelled", error="用户已取消扫描")
+        except SourceScanPaused as exc:
+            # 达到请求预算：既不是成功也不是失败。frontier 与已交付证据保留，
+            # 界面据此显示"可继续扫描"，绝不允许据此建立 confirmed 基线。
+            _finish_scan(self.database, task.scan_id, status="paused", error=str(exc)[:400])
         except Exception as exc:  # noqa: BLE001 - 执行器必须写明确终态
             _finish_scan(self.database, task.scan_id, status="failed", error=str(exc)[:400])
         finally:

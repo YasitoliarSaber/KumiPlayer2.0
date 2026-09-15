@@ -155,6 +155,9 @@ def list_source_cards(database: V4Database) -> list[dict]:
         )
         scan_active = scan_status in {"running", "queued", "cancelling"} and not scan_interrupted
         scan_failed = scan_status in {"failed", "cancelled"}
+        # 达到请求预算的扫描：进度保留、可继续，界面上按"需要处理"呈现，
+        # 但不能算完整成功。
+        scan_paused = scan_status == "paused"
         has_confirmed = confirmed is not None
         job_summary = dict(summaries.get(revision_id, {
             "total": 0, "queued": 0, "running": 0, "succeeded": 0, "failed": 0, "cancelled": 0,
@@ -276,7 +279,7 @@ def list_source_cards(database: V4Database) -> list[dict]:
                 "message": "识别结果待确认",
             }
         last_error = _friendly_error(
-            str(scan["error"] or "") if scan_failed and scan is not None else _first_error(progress)
+            str(scan["error"] or "") if (scan_failed or scan_paused) and scan is not None else _first_error(progress)
         )
         started_at = str(scan["started_at"] or "") if scan is not None else ""
         confirmed_at = str(confirmed["confirmed_at"] or "") if confirmed is not None else ""
@@ -287,7 +290,7 @@ def list_source_cards(database: V4Database) -> list[dict]:
             if scan is not None
             else confirmed_at or draft_created_at or str(root["updated_at"] or "")
         )
-        resume_by_scan = scan_active or scan_failed or scan_interrupted
+        resume_by_scan = scan_active or scan_failed or scan_interrupted or scan_paused
         can_resume = resume_by_scan or _can_resume(progress) or (
             job_summary["queued"] > 0
             or job_summary["running"] > 0
@@ -296,7 +299,7 @@ def list_source_cards(database: V4Database) -> list[dict]:
         ) or draft is not None
         active_task = None if scan_interrupted else _active_task(scan, active_job, revision_id, card_progress)
         if phase == "scan":
-            attention_count = int(scan_status == "failed" or scan_interrupted)
+            attention_count = int(scan_status == "failed" or scan_interrupted or scan_paused)
         elif draft_graph is not None:
             attention_count = len(draft_graph.issues)
         else:
