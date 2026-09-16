@@ -186,8 +186,15 @@ def _materialize_local_artwork(
     episode_metadata: dict[str, dict],
     artifacts: list[tuple[str, Path, str]],
     published: dict[tuple[str, str], str] | None = None,
+    on_progress=None,
 ) -> None:
     published = published or {}
+
+    def tick() -> None:
+        """每张图前后报一次心跳：下载阶段可能持续数分钟，不能让它看起来像失联。"""
+
+        if on_progress is not None:
+            on_progress()
 
     def take_existing(artifact_type: str, path: Path) -> bool:
         """已有可用产物时直接登记既有 digest，跳过下载。"""
@@ -211,6 +218,7 @@ def _materialize_local_artwork(
                 if take_existing("episode_thumb", thumb_path):
                     scraped["local_thumb_path"] = str(thumb_path)
                     continue
+                tick()
                 try:
                     digest = _download_artwork(still_url, thumb_path, client=client)
                 except (OSError, httpx.HTTPError):
@@ -232,6 +240,7 @@ def _materialize_local_artwork(
             if take_existing(artifact_type, artwork_path):
                 metadata[f"local_{artifact_type}_path"] = str(artwork_path)
                 continue
+            tick()
             try:
                 digest = _download_artwork(url, artwork_path, client=client)
             except (OSError, httpx.HTTPError):
@@ -249,6 +258,7 @@ def publish_metadata_artifacts(
     target: dict,
     metadata: dict,
     mirror_root: str | Path,
+    on_progress=None,
 ) -> None:
     work_dir = Path(mirror_root) / work_directory_name(work_id)
     is_series = target.get("work_type") == "series"
@@ -303,6 +313,7 @@ def publish_metadata_artifacts(
             episode_metadata=episode_metadata,
             artifacts=artifacts,
             published=published,
+            on_progress=on_progress,
         )
 
     now = _now()

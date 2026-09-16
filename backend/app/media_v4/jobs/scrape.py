@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -15,6 +16,8 @@ from app.media_v4.parsing.parser import show_type_from_import_family
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.persistence.repositories import V4Repository
 from app.media_v4.resolution.candidates import work_identity_title_inputs
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
@@ -162,15 +165,20 @@ class V4ScrapeService:
             if job["status"] == "running":
                 raise RuntimeError("该作品正在获取媒体信息")
             now = _now()
-            conn.execute(
+            # 守卫必须写进 UPDATE 本身：先 SELECT 判 running 再 UPDATE 是读后写，
+            # 并发两次重试时后到的会把已被执行器领取的 running 改回 queued，
+            # 于是同一个 work 被两个执行器同时跑（重复请求 + 交叉覆盖绑定与产物）。
+            updated = conn.execute(
                 """
                 UPDATE jobs
                 SET status = 'queued', cancel_requested = 0, last_error = '',
                     heartbeat_at = '', started_at = '', finished_at = '', updated_at = ?
-                WHERE job_id = ?
+                WHERE job_id = ? AND status != 'running'
                 """,
                 (now, job["job_id"]),
             )
+            if updated.rowcount != 1:
+                raise RuntimeError("该作品正在获取媒体信息")
             refreshed = conn.execute(
                 "SELECT * FROM jobs WHERE job_id = ?", (job["job_id"],)
             ).fetchone()
@@ -428,6 +436,9 @@ class V4ScrapeService:
                     target=target,
                     metadata=result,
                     mirror_root=mirror_root,
+                    # 图片下载可能持续数分钟：必须持续心跳，否则会被失联回收判为
+                    # failed（随后又被本函数的终态写入覆盖成 succeeded，状态自相矛盾）。
+                    on_progress=lambda: heartbeat(self.database, job_id),
                 )
                 # P-001 7.7 R3：完整性是 ready 的硬门控。
                 complete, reasons = assess_metadata_completeness(
@@ -617,10 +628,17 @@ class V4ScrapeService:
                                 str(mapping.get("provider_season_id") or ""),
                             ),
                         )
-                conn.execute(
-                    "UPDATE jobs SET status = 'succeeded', updated_at = ?, heartbeat_at = ?, finished_at = ?, last_error = '' WHERE job_id = ?",
+                updated = conn.execute(
+                    "UPDATE jobs SET status = 'succeeded', updated_at = ?, heartbeat_at = ?, finished_at = ?, last_error = '' "
+                    "WHERE job_id = ? AND status = 'running'",
                     (now, now, now, job_id),
                 )
+                if updated.rowcount != 1:
+                    # 守卫必需：图片下载可能长达数分钟，期间任务会被"失联回收"判为
+                    # failed，或被用户重试领取。此时把终态改回 succeeded 会让界面与
+                    # 实际执行结果矛盾（而且掩盖了回收判断本身）。产物与绑定已经写下，
+                    # 因此这里只跳过终态写入，不打断 worker。
+                    logger.warning("刮削任务已完成但状态已不是 running，保留现有终态: %s", job_id)
                 # 每个 Work 刮削结果落库后都使投影失效。前端轮询会按需合并重建，
                 # 因而已成功的作品无需等待整批任务结束即可进入对应作品页。
                 conn.execute(
@@ -632,8 +650,10 @@ class V4ScrapeService:
                 )
         except Exception as exc:
             with self.database.connect() as conn:
+                # 同样加 running 守卫：不要把用户刚重试（queued）或已取消的任务改回 failed。
                 conn.execute(
-                    "UPDATE jobs SET status = 'failed', last_error = ?, updated_at = ?, heartbeat_at = ?, finished_at = ? WHERE job_id = ?",
+                    "UPDATE jobs SET status = 'failed', last_error = ?, updated_at = ?, heartbeat_at = ?, finished_at = ? "
+                    "WHERE job_id = ? AND status = 'running'",
                     (str(exc), _now(), _now(), _now(), job_id),
                 )
             raise
