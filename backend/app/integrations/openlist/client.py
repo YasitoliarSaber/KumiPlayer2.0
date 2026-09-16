@@ -31,7 +31,6 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-
 from app.integrations.openlist.governor import (
     OpenListRequestGovernor,
     get_governor,
@@ -688,10 +687,18 @@ class OpenListClient:
         data = body.get("data") or {}
         content = data.get("content") or []
         entries: list[OpenListEntry] = []
+        skipped = 0
         for item in content:
             if not isinstance(item, dict):
                 continue
-            name = validate_entry_name(str(item.get("name") or ""))
+            # 单个非法条目名不能 abort 整个目录列举：网盘侧完全合法的名字
+            # （例如 `Show: Extra 01.mkv`）在 Windows 上不可用，但同目录其它
+            # 条目仍然应该正常导入。跳过并计数，交给上层统计展示。
+            try:
+                name = validate_entry_name(str(item.get("name") or ""))
+            except OpenListValidationError:
+                skipped += 1
+                continue
             entries.append(
                 OpenListEntry(
                     name=name,
@@ -702,7 +709,7 @@ class OpenListClient:
                 )
             )
         total = _safe_int(data.get("total")) or 0
-        return OpenListDirPage(entries=entries, total=total)
+        return OpenListDirPage(entries=entries, total=total, skipped_entries=skipped)
 
 
 def _client_pool_key(server_url: str, username: str) -> str:

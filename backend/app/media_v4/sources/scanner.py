@@ -607,6 +607,7 @@ def scan_openlist_directory(
         queue = deque([(selected_root, 0)])
     seen_directories: set[str] = set()
     observed_entries = 0
+    skipped_entries = 0
     listed_directories = 0
     budget_exhausted = False
     # 单页请求条目数：终止判据与请求必须用同一个值，否则"短页=末页"的误判会
@@ -653,6 +654,9 @@ def scan_openlist_directory(
                 raise SourceScanCancelled()
             try:
                 result = client.list_dir(directory, page=page, per_page=per_page, refresh=False)
+                # 条目名非法被客户端跳过的数量（例如 `Show: Extra 01.mkv`）：这些
+                # 文件不会入库，但必须让用户看见，不能静默丢弃。
+                skipped_entries += int(getattr(result, "skipped_entries", 0) or 0)
             except Exception:
                 if frontier_driven:
                     # 保留当前页游标：恢复时从这一页继续，已完成目录不会被重列。
@@ -749,4 +753,5 @@ def scan_openlist_directory(
         scan_stats["budget_exhausted"] = budget_exhausted
         scan_stats["directories_listed"] = listed_directories
         scan_stats["evidence_count"] = len(evidence)
+        scan_stats["skipped_entries"] = skipped_entries
     return actual_scan_id, evidence

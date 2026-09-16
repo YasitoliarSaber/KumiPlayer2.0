@@ -136,3 +136,6 @@ class OpenListDirPage:
 
     entries: list[OpenListEntry] = field(default_factory=list)
     total: int = 0  # 服务端报告的当前目录条目总数
+    # 因条目名非法（空名、`.`/`..`、Windows 非法字符、点结尾）被跳过的条数。
+    # 这些条目不会被导入，但必须可见——静默丢弃和整轮失败都不可接受。
+    skipped_entries: int = 0

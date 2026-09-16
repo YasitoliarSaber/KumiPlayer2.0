@@ -183,19 +183,26 @@ def _list_all(
     counter: list[int],
     max_entries: int,
     should_cancel=None,
+    skipped: list[int] | None = None,
 ) -> list[OpenListEntry]:
     entries: list[OpenListEntry] = []
     page = 1
+    # 请求与终止判据必须用同一个 per_page；短页在 total 缺失时不是末页。
+    per_page = 100
     while True:
         if should_cancel is not None and should_cancel():
             raise SourceScanCancelled()
-        result = client.list_dir(remote_path, page=page, per_page=100, refresh=False)
+        result = client.list_dir(remote_path, page=page, per_page=per_page, refresh=False)
         counter[0] += len(result.entries)
+        if skipped is not None:
+            skipped[0] += int(getattr(result, "skipped_entries", 0) or 0)
         if counter[0] > max_entries:
             raise OpenListScanLimitExceeded()
         entries.extend(result.entries)
         total = int(result.total or 0)
-        if len(result.entries) < 100 or (total and page * 100 >= total):
+        if not result.entries:
+            return entries
+        if total and page * per_page >= total:
             return entries
         page += 1
 
@@ -287,6 +294,7 @@ def scan_openlist_incremental(
     processed: set[str] = set()
     changed_queued: set[str] = set()
     observed_counter = [0]
+    skipped_counter = [0]
     route_configs = routes or []
     first_root_entries: list[OpenListEntry] | None = None
     pending: list[SourceEvidence] = []
@@ -307,6 +315,7 @@ def scan_openlist_incremental(
             counter=observed_counter,
             max_entries=max_entries,
             should_cancel=should_cancel,
+            skipped=skipped_counter,
         )
         processed.add(relative_dir)
         if relative_dir == "":
@@ -446,5 +455,7 @@ def scan_openlist_incremental(
         "unknown_directories": len(directories) - verified_directories,
         # 只有本轮真正核对过的"变化目录"才算数：入队但被预算挡下的不算。
         "changed_directories": len([path for path in changed_queued if path in processed]),
+        # 条目名非法被跳过的数量：这些文件不会入库，但必须可见（不静默丢弃）。
+        "skipped_entries": skipped_counter[0],
     }
     return actual_scan_id, [files[path] for path in sorted(files, key=str.casefold)], next_state, stats

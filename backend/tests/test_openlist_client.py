@@ -10,7 +10,6 @@ import threading
 
 import httpx
 import pytest
-
 from app.integrations.openlist.client import (
     OpenListClient,
     get_openlist_client,
@@ -534,14 +533,24 @@ class TestListDir:
         assert not hasattr(entry, "sign")
         assert not hasattr(entry, "hashinfo")
 
-    def test_malicious_entry_name_raises(self):
+    def test_malicious_entry_name_is_rejected_without_aborting_the_listing(self):
+        """路径穿越条目必须被拒绝，但不能因此拖垮整次列举。
+
+        安全属性由"被拒条目根本不进入结果"保证：条目路径只由**校验后的 name** 与
+        父目录拼接（`join_remote_path`），服务端提供的 path 从不参与。会 abort 整轮
+        列举的旧行为反而让一个坏名字毁掉同目录全部正常媒体。
+        """
+
         def handler(request: httpx.Request) -> httpx.Response:
-            return _json_response(200, _fs_list_payload("/", [_entry("../escape")]))
+            return _json_response(200, _fs_list_payload("/", [_entry("../escape"), _entry("正常.mkv")]))
 
         client = make_client(handler)
         client._token = "t"
-        with pytest.raises(OpenListValidationError):
-            client.list_dir("/")
+        page = client.list_dir("/")
+
+        assert [entry.name for entry in page.entries] == ["正常.mkv"]
+        assert page.skipped_entries == 1
+        assert all(".." not in entry.remote_path for entry in page.entries)
 
     def test_401_triggers_single_relogin_retry(self):
         """Token 失效时进程内单次重登后重试一次，不写磁盘。"""
