@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import unicodedata
 import uuid
 from contextlib import nullcontext
 from dataclasses import asdict, replace
@@ -23,6 +22,7 @@ from app.media_v4.resolution import candidates as candidate_service
 from app.media_v4.resolution.candidates import CandidateSearch
 from app.media_v4.resolution.identity_policy import historical_identity_conflict
 from app.media_v4.resolution.resolver import MediaResolver
+from app.media_v4.resolution.title_norm import normalize_identity_title
 
 
 def _now() -> str:
@@ -577,9 +577,9 @@ def _revision_overall_status(work_units: list[dict], stage: dict[str, list[dict]
 
 
 def _normalize_title(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", value or "").casefold()
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    return normalized.strip(" ._-·:：/\\()（）【】[]{}<>《》「」『』\"'")
+    """身份语义：唯一实现在 `title_norm.normalize_identity_title`。"""
+
+    return normalize_identity_title(value)
 
 
 _SEASON_SPECIFIC_TITLE = re.compile(

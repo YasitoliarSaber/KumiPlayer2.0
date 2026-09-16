@@ -24,6 +24,7 @@ from app.media_v4.domain.models import (
     SourceEvidence,
 )
 from app.media_v4.parsing.parser import _normalize_filename_stem
+from app.media_v4.resolution.title_norm import normalize_identity_title, normalize_match_title
 
 _SUPPORTED_PROVIDERS = frozenset({"tmdb", "anilist", "bangumi"})
 
@@ -47,12 +48,13 @@ CandidateSearch = Callable[[str, list[str], int | None, str], list[WorkCandidate
 
 
 def _normalize_title(value: str) -> str:
-    import re
-    import unicodedata
+    """身份语义（会进入身份键）：唯一实现在 `title_norm.normalize_identity_title`。
 
-    normalized = unicodedata.normalize("NFKC", value or "").casefold()
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    return normalized.strip(" ._-·:：/\\()（）【】[]{}<>《》「」『』\"'")
+    注意与 `normalize_match_title` 的区别：比较"是否同名"必须用后者，否则会与
+    刮削排名得出相反结论。
+    """
+
+    return normalize_identity_title(value)
 
 
 def _confidence_rank(confidence: str) -> int:
@@ -66,16 +68,21 @@ def _score_candidate(
     nfo_titles: list[str],
 ) -> WorkCandidate:
     """可解释候选评分：本地标题集与 provider primary/original/可信 alias
-    完整规范化等值匹配且年份不冲突才 high；禁止前缀/模糊自动匹配。"""
+    完整规范化等值匹配且年份不冲突才 high；禁止前缀/模糊自动匹配。
 
-    query_norms = {_normalize_title(q) for q in queries}
+    "是否同名"必须用**匹配语义**（忽略标点与空格），与刮削排名（`ranker`）同源：
+    否则同一对标题会在草稿评分里判不等、在刮削里判等值，用户看到"预览没把握但
+    刮削自动采用了"。身份键仍走更严格的 `normalize_identity_title`。
+    """
+
+    query_norms = {normalize_match_title(q) for q in queries}
     query_norms.discard("")
-    local_norms = {_normalize_title(work.preferred_title)} | query_norms
+    local_norms = {normalize_match_title(work.preferred_title)} | query_norms
     local_norms.discard("")
     provider_norms = {
-        _normalize_title(candidate.title),
-        _normalize_title(candidate.original_title),
-        *(_normalize_title(alias) for alias in candidate.aliases),
+        normalize_match_title(candidate.title),
+        normalize_match_title(candidate.original_title),
+        *(normalize_match_title(alias) for alias in candidate.aliases),
     }
     provider_norms.discard("")
     # 身份自动确认只接受规范化后的完整标题相等。前缀关系（Show/Showdown）

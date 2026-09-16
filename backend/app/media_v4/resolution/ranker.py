@@ -15,8 +15,9 @@ reasons；popularity 只作同分排序信号，绝不覆盖身份冲突。
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass, field, replace
+
+from app.media_v4.resolution.title_norm import normalize_match_title
 
 # 自动采用门槛（由人工确认语料回放校准：recall ≥ 95%、precision ≥ 98%）。
 AUTO_ADOPT_MIN_SCORE = 55.0
@@ -55,14 +56,13 @@ class RankedCandidate:
 
 
 def _normalize_title(value: str | None) -> str:
-    """完整规范化标题：统一全角并去除全部装饰标点，不截断正文。"""
+    """匹配语义：统一全角、忽略全部标点与空白，不截断正文。
 
-    text = unicodedata.normalize("NFKC", str(value or "")).strip().casefold()
-    if not text:
-        return ""
-    # 不能枚举标点：网盘标题会同时出现中英文逗号、顿号、书名号和发行组
-    # 分隔符。只保留 Unicode 字母与数字，避免同一标题因一个全角逗号失配。
-    return "".join(char for char in text if char.isalnum())
+    实现唯一在 `title_norm.normalize_match_title`——草稿候选评分与刮削排名必须同源，
+    否则同一对标题会在两边得出相反结论。身份键用的是另一套更严格的语义，见该模块。
+    """
+
+    return normalize_match_title(value)
 
 
 def _animation_state(candidate: dict) -> bool | None:

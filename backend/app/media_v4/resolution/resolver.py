@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from collections import OrderedDict, defaultdict
 from pathlib import PurePosixPath
 
@@ -19,6 +18,7 @@ from app.media_v4.domain.models import (
 )
 from app.media_v4.generic_container import is_generic_container_title
 from app.media_v4.parsing.episode_titles import ensure_special_title_number
+from app.media_v4.resolution.title_norm import normalize_identity_title
 from app.media_v4.sources.adapters import provider_to_source
 from app.recognition.media import (
     _extract_work_container,
@@ -34,11 +34,14 @@ NON_BLOCKING_ISSUE_CODES = frozenset({
     "unresolved_parent_relation",
 })
 
-
 def _normalize_title(value: str) -> str:
-    value = unicodedata.normalize("NFKC", value or "").casefold()
-    value = re.sub(r"\s+", " ", value).strip()
-    return value.strip(" ._-·:：/\\()（）【】[]{}<>《》「」『』\"'")
+    """身份语义：唯一实现在 `title_norm.normalize_identity_title`。
+
+    它参与持久化身份键（`title:<标题>:<年份>:<类型>`），因此只能收紧、不能放宽；
+    比较"是否同名"请用 `title_norm.normalize_match_title`。
+    """
+
+    return normalize_identity_title(value)
 
 
 def _is_placeholder_title(value: str) -> bool:
