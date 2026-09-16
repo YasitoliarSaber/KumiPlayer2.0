@@ -63,6 +63,53 @@ class InputArchive:
     original_filename: str
 
 
+def resume_paused_scan(database: V4Database, *, scan_id: str) -> bool:
+    """把一次 `paused` 的扫描**原地**重置为 queued，返回是否确实重置。
+
+    不需要（也不能）重新登记：`register_source_scan` 把重复 scan_id 视为编程错误，
+    而"继续扫描"必须复用同一 scan_id 才能沿用目录级 frontier 断点。因此这里只做
+    状态回置：保留 generation 与 source_scan_requests（请求参数不变），清掉上次
+    收口的 finished_at/error，并把 cancel_requested 复位。
+
+    ``started_at`` 特意保留原值：它表示这次巡检**第一次**开始的时间；续扫是同一次
+    巡检的继续，不是新任务。
+    """
+
+    now = _now()
+    with database.connect() as conn:
+        updated = conn.execute(
+            """
+            UPDATE source_scans
+            SET status = 'queued', stage = 'queued', cancel_requested = 0,
+                finished_at = '', error = '', heartbeat_at = ?
+            WHERE scan_id = ? AND status = 'paused'
+            """,
+            (now, scan_id),
+        )
+    return updated.rowcount == 1
+
+
+def cancel_paused_scan(database: V4Database, *, scan_id: str) -> bool:
+    """把一次 `paused` 的扫描就地收口为 cancelled，返回是否确实收口。
+
+    paused 时没有任何执行器在跑，因此不需要 cancel_requested 的两段式取消：
+    直接落终态，避免用户既不能续扫、也不能取消、来源卡永久停在"可继续扫描"。
+    """
+
+    now = _now()
+    with database.connect() as conn:
+        updated = conn.execute(
+            """
+            UPDATE source_scans
+            SET status = 'cancelled', stage = 'cancelled', cancel_requested = 0,
+                finished_at = ?, heartbeat_at = ?, error = '用户已取消扫描'
+            WHERE scan_id = ? AND status = 'paused'
+            """,
+            (now, now, scan_id),
+        )
+    return updated.rowcount == 1
+
+
 def register_source_scan(
     database: V4Database,
     *,

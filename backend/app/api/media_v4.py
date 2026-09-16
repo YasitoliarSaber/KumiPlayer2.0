@@ -1519,7 +1519,14 @@ def start_durable_scan(request: SourceScanRequest):
                 status_code=409,
                 detail="该扫描不可继续：任务不存在、来源不匹配或当前不是暂停状态",
             )
-        scan_id = resume_scan_id
+        from app.media_v4.sources.source_scan_runner import resume_paused_scan
+
+        # 原地回置为 queued：重复登记同一个 scan_id 会被 register_source_scan
+        # 判为编程错误并抛 ValueError（此前这里正是 100% 500 的原因）。
+        if not resume_paused_scan(database, scan_id=resume_scan_id):
+            raise HTTPException(status_code=409, detail="该扫描状态已变化，请刷新后重试")
+        get_source_scan_runner(database).wake()
+        return {"scan_id": resume_scan_id, "root_id": root_id, "scan_mode": "full", "status": "queued"}
     _register_durable_source_scan(
         database,
         root={
@@ -1568,8 +1575,17 @@ def cancel_durable_scan(scan_id: str):
         current = get_durable_scan(get_database(), scan_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"扫描任务不存在: {scan_id}") from exc
-    if current["status"] not in {"running", "queued"}:
+    if current["status"] not in {"running", "queued", "paused"}:
         return {"scan_id": scan_id, "status": current["status"]}
+    if current["status"] == "paused":
+        # 暂停态没有执行器在跑，直接落 cancelled 终态并清掉 frontier 断点：
+        # 用户明确放弃这次巡检，留着断点只会让来源卡一直显示"可继续扫描"。
+        from app.media_v4.sources import scan_frontier
+        from app.media_v4.sources.source_scan_runner import cancel_paused_scan
+
+        cancel_paused_scan(get_database(), scan_id=scan_id)
+        scan_frontier.clear(get_database(), scan_id=scan_id)
+        return {"scan_id": scan_id, "status": "cancelled"}
     cancel_durable_scan(scan_id, database=get_database())
     return {"scan_id": scan_id, "status": "cancelling"}
 
