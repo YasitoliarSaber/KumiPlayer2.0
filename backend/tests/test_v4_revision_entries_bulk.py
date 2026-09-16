@@ -118,14 +118,15 @@ def test_entry_loading_statements_do_not_scale_with_entry_count(tmp_path, monkey
     counts: dict[int, int] = {}
     for count in (6, 60):
         statements: list[str] = []
-        _track_statements(monkeypatch, statements)
-        _database, revisions = _draft(tmp_path, count)
-        # 先跑一次预热（建库/登记已经结束），只统计随后这次读取。
-        revisions._load_revision_entries("rev-1")
-        statements.clear()
-        revisions._load_revision_entries("rev-1")
-        counts[count] = len([sql for sql in statements if sql.strip().upper().startswith("SELECT")])
-        monkeypatch.undo()
+        # 用 context() 只撤销本次补丁：早先这里用 monkeypatch.undo()，会把 autouse
+        # 夹具（数据目录隔离）的补丁一并撤销，于是单独跑通过、全量跑失败（测试污染）。
+        with monkeypatch.context() as patched:
+            _track_statements(patched, statements)
+            _database, revisions = _draft(tmp_path, count)
+            revisions._load_revision_entries("rev-1")
+            statements.clear()
+            revisions._load_revision_entries("rev-1")
+            counts[count] = len([sql for sql in statements if sql.strip().upper().startswith("SELECT")])
 
     assert counts[60] == counts[6], (
         f"语句数必须与条目数无关（6 条 {counts[6]} 次 vs 60 条 {counts[60]} 次）"
