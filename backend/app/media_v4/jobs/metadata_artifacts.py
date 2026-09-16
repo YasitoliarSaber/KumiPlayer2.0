@@ -128,6 +128,55 @@ def _episode_thumb_filename(season: int, number: int, source_url: str) -> str:
     return f"S{season:02d}E{number:02d}-thumb{suffix}"
 
 
+def _published_artifacts(database, revision_id: str, work_id: str) -> dict[tuple[str, str], str]:
+    """已发布产物的 ``{(类型, 目标路径): digest}``，用于跳过重复下载与重复写盘。
+
+    `retry_artifacts` 的承诺是"只重新下载**缺失**的图片产物"，而下载是整轮里最贵、
+    最容易被网络抖动影响的部分（24 集作品一次重试约 27 个 HTTPS 请求 + 25 次 NFO
+    重写）。已有产物且磁盘文件非空时无需再动。
+    """
+
+    with database.connect() as conn:
+        return {
+            (str(row["artifact_type"]), str(row["target_path"])): str(row["digest"] or "")
+            for row in conn.execute(
+                "SELECT artifact_type, target_path, digest FROM artifacts "
+                "WHERE revision_id = ? AND work_id = ? AND status = 'published'",
+                (revision_id, work_id),
+            )
+        }
+
+
+def _is_current(path: Path, published: dict[tuple[str, str], str], artifact_type: str) -> bool:
+    """该产物已发布、且磁盘文件仍然存在且非空 → 本轮无需重下/重写。"""
+
+    if (artifact_type, str(path)) not in published:
+        return False
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _artifact_digest(
+    path: Path,
+    payload: bytes,
+    *,
+    artifact_type: str,
+    published: dict[tuple[str, str], str],
+) -> str:
+    """内容未变就不重写文件（原子的写入也没必要动盘，且会刷新 updated_at）。"""
+
+    digest = hashlib.sha256(payload).hexdigest()
+    if _is_current(path, published, artifact_type):
+        try:
+            if path.read_bytes() == payload:
+                return digest
+        except OSError:
+            pass
+    return _write_atomic(path, payload)
+
+
 def _materialize_local_artwork(
     *,
     config,
@@ -136,7 +185,18 @@ def _materialize_local_artwork(
     metadata: dict,
     episode_metadata: dict[str, dict],
     artifacts: list[tuple[str, Path, str]],
+    published: dict[tuple[str, str], str] | None = None,
 ) -> None:
+    published = published or {}
+
+    def take_existing(artifact_type: str, path: Path) -> bool:
+        """已有可用产物时直接登记既有 digest，跳过下载。"""
+
+        if not _is_current(path, published, artifact_type):
+            return False
+        artifacts.append((artifact_type, path, published[(artifact_type, str(path))]))
+        return True
+
     with _artwork_client(config) as client:
         if target.get("work_type") == "series":
             for episode in target.get("episodes") or []:
@@ -148,6 +208,9 @@ def _materialize_local_artwork(
                 number = int(episode.get("local_episode_number") or episode.get("special_number") or 0)
                 season_dir = "Specials" if season == 0 or episode.get("season_kind") == "special" else f"Season {season:02d}"
                 thumb_path = work_dir / season_dir / _episode_thumb_filename(season, number, still_url)
+                if take_existing("episode_thumb", thumb_path):
+                    scraped["local_thumb_path"] = str(thumb_path)
+                    continue
                 try:
                     digest = _download_artwork(still_url, thumb_path, client=client)
                 except (OSError, httpx.HTTPError):
@@ -165,13 +228,17 @@ def _materialize_local_artwork(
             if not url:
                 continue
             filename = _artwork_filename(artifact_type, str(metadata.get(f"{artifact_type}_file_path") or ""))
+            artwork_path = work_dir / filename
+            if take_existing(artifact_type, artwork_path):
+                metadata[f"local_{artifact_type}_path"] = str(artwork_path)
+                continue
             try:
-                digest = _download_artwork(url, work_dir / filename, client=client)
+                digest = _download_artwork(url, artwork_path, client=client)
             except (OSError, httpx.HTTPError):
                 digest = ""
             if digest:
-                artifacts.append((artifact_type, work_dir / filename, digest))
-                metadata[f"local_{artifact_type}_path"] = str(work_dir / filename)
+                artifacts.append((artifact_type, artwork_path, digest))
+                metadata[f"local_{artifact_type}_path"] = str(artwork_path)
 
 
 def publish_metadata_artifacts(
@@ -186,7 +253,18 @@ def publish_metadata_artifacts(
     work_dir = Path(mirror_root) / work_directory_name(work_id)
     is_series = target.get("work_type") == "series"
     nfo_path = work_dir / ("tvshow.nfo" if is_series else "movie.nfo")
-    artifacts = [("nfo", nfo_path, _write_atomic(nfo_path, _work_nfo(target, metadata)))]
+    # 已发布产物集合：重试路径据此跳过"没必要再动"的下载与写盘。
+    published = _published_artifacts(database, revision_id, work_id)
+    artifacts = [(
+        "nfo",
+        nfo_path,
+        _artifact_digest(
+            nfo_path,
+            _work_nfo(target, metadata),
+            artifact_type="nfo",
+            published=published,
+        ),
+    )]
     episode_metadata = {
         str(item.get("episode_id")): item
         for item in metadata.get("episode_mappings") or []
@@ -204,7 +282,17 @@ def publish_metadata_artifacts(
                 season_dir = f"Season {season:02d}"
             episode_path = work_dir / season_dir / f"S{season:02d}E{number:02d}.nfo"
             scraped = episode_metadata.get(str(episode.get("episode_id")), {})
-            artifacts.append(("episode_nfo", episode_path, _write_atomic(episode_path, _episode_nfo({**episode, **scraped}))))
+            episode_payload = _episode_nfo({**episode, **scraped})
+            artifacts.append((
+                "episode_nfo",
+                episode_path,
+                _artifact_digest(
+                    episode_path,
+                    episode_payload,
+                    artifact_type="episode_nfo",
+                    published=published,
+                ),
+            ))
 
     if download_local_artwork:
         _materialize_local_artwork(
@@ -214,6 +302,7 @@ def publish_metadata_artifacts(
             metadata=metadata,
             episode_metadata=episode_metadata,
             artifacts=artifacts,
+            published=published,
         )
 
     now = _now()
