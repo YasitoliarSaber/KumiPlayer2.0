@@ -14,10 +14,9 @@ from fastapi.testclient import TestClient
 
 
 def _client(tmp_path, monkeypatch):
-    from fastapi import FastAPI
-
     from app.api import media_v4
     from app.media_v4.persistence.database import V4Database
+    from fastapi import FastAPI
 
     database = V4Database(tmp_path / "detail.db")
     database.initialize()
@@ -118,6 +117,41 @@ def _seed_confirmed_work(database, *, revision_id: str = "rev-detail", work_id: 
                 (local_episode_ids[index], index, f"90{index}"),
             )
     return work_id
+
+
+def test_detail_falls_back_to_binding_status_when_metadata_lacks_state(tmp_path, monkeypatch):
+    """历史快照的 `metadata_json` 可能没有 `metadata_state`：必须用绑定行状态兜底。
+
+    同一份数据在进度列表显示 `confirmed`、在执行详情显示空状态，是评审发现的
+    投影不一致（详情投影里刚补的兜底被 `_artifact_view` 的空返回覆盖）。
+    """
+
+    client, database = _client(tmp_path, monkeypatch)
+    work_id = _seed_confirmed_work(database)
+    with database.connect() as conn:
+        conn.execute(
+            "UPDATE scrape_bindings SET metadata_json = ? WHERE binding_id = 'sb-1'",
+            (json.dumps({"provider": "tmdb", "provider_id": "12345", "title": "Show"}, ensure_ascii=False),),
+        )
+
+    body = client.get(
+        f"/api/v4/revisions/rev-detail/works/{work_id}/execution-detail"
+    ).json()
+
+    assert body["work"]["metadata_state"] == "confirmed", "缺状态时必须退回绑定行状态，而不是空值"
+
+
+def test_detail_prefers_metadata_state_over_binding_status(tmp_path, monkeypatch):
+    """有明确状态时仍以 `metadata_json` 为准（订阅状态不能盖过资料状态）。"""
+
+    client, database = _client(tmp_path, monkeypatch)
+    work_id = _seed_confirmed_work(database)
+
+    body = client.get(
+        f"/api/v4/revisions/rev-detail/works/{work_id}/execution-detail"
+    ).json()
+
+    assert body["work"]["metadata_state"] == "ready"
 
 
 @pytest.mark.parametrize(

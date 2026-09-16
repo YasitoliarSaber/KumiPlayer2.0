@@ -91,17 +91,21 @@ def _friendly_metadata_reason(status: str, value: str, reason_code: str = "") ->
     return "" if not value else "媒体信息需要处理，请检查后重试"
 
 
-def _artifact_view(metadata: dict | None) -> tuple[str, str, list[str]]:
+def _artifact_view(metadata: dict | None, *, fallback_state: str = "") -> tuple[str, str, list[str]]:
     """返回 (metadata_state, artifact_state, artifact_reasons)。
 
     历史记录里“资料已拿到、只缺本地图片”的失败在这里做只读归一：作品照常算
     ready，产物标成 degraded；不写回真实数据。
+
+    ``fallback_state`` 供调用方传入绑定行状态（confirmed 等）：`metadata_json`
+    里没有明确状态时用它兜底；调用方**不能**用空值覆盖已有状态，否则同一份数据
+    会在进度列表显示 confirmed、在执行详情显示空（历史缺陷）。
     """
 
     from app.media_v4.jobs.completeness import artifact_only_failure
 
     payload = metadata if isinstance(metadata, dict) else {}
-    state = str(payload.get("metadata_state") or "")
+    state = str(payload.get("metadata_state") or fallback_state or "")
     artifact_state = str(payload.get("artifact_state") or "")
     raw_reasons = payload.get("artifact_reasons")
     reasons = [str(item) for item in raw_reasons] if isinstance(raw_reasons, (list, tuple)) else []
@@ -2733,11 +2737,14 @@ class V4RevisionService:
             if isinstance(decoded_metadata, dict):
                 metadata = decoded_metadata
             if isinstance(metadata, dict):
-                # 绑定行的 status 是 confirmed 等订阅状态；面向用户的元数据
-                # 状态（ready/waiting_review/...）保存在 metadata_json 内。
-                metadata_state = str(metadata.get("metadata_state") or metadata_state)
                 metadata_reason_code = str(metadata.get("reason_code") or "")
-                metadata_state, artifact_state, artifact_reasons = _artifact_view(metadata)
+                # 绑定行的 status 是订阅状态（confirmed 等）；metadata_json 缺状态时
+                # 用它兜底。这里必须把兜底交给 `_artifact_view` 并在其为空时保留原值，
+                # 否则同一份数据会在进度列表显示 confirmed、在执行详情显示空状态。
+                viewed_state, artifact_state, artifact_reasons = _artifact_view(
+                    metadata, fallback_state=str(scrape_row["status"] or "")
+                )
+                metadata_state = viewed_state or metadata_state
                 for mapping in metadata.get("episode_mappings") or []:
                     if isinstance(mapping, dict) and mapping.get("episode_id"):
                         mappings_by_episode.setdefault(str(mapping["episode_id"]), mapping)
