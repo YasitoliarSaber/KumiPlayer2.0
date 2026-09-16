@@ -97,24 +97,32 @@ class V4LibraryProjection:
             try:
                 rows = conn.execute(
                     """
-                    WITH latest_scrapes AS (
-                        SELECT work_id, revision_id, status, metadata_json
-                        FROM (
-                            SELECT
-                                sb.work_id,
-                                sb.revision_id,
-                                sb.status,
-                                sb.metadata_json,
-                                ROW_NUMBER() OVER (
-                                    PARTITION BY sb.work_id
-                                    ORDER BY sb.updated_at DESC, sb.binding_id DESC
-                                ) AS row_number
-                            FROM scrape_bindings sb
-                            JOIN import_revisions sir ON sir.revision_id = sb.revision_id
-                            JOIN source_roots srs ON srs.root_id = sir.root_id
-                            WHERE sir.status = 'confirmed' AND srs.retired_at = ''
-                        )
-                        WHERE row_number = 1
+                    WITH scrape_rows AS (
+                        SELECT
+                            sb.work_id,
+                            sb.revision_id,
+                            sb.status,
+                            sb.metadata_json,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY sb.work_id
+                                ORDER BY sb.updated_at DESC, sb.binding_id DESC
+                            ) AS latest_rank,
+                            -- 同一 work 中"最近一次 confirmed 结果"。最新一次刷新失败时用它
+                            -- 回退，而不是把已经发布过的作品整条移出媒体墙。
+                            ROW_NUMBER() OVER (
+                                PARTITION BY sb.work_id, CASE WHEN sb.status = 'confirmed' THEN 1 ELSE 0 END
+                                ORDER BY sb.updated_at DESC, sb.binding_id DESC
+                            ) AS confirmed_rank
+                        FROM scrape_bindings sb
+                        JOIN import_revisions sir ON sir.revision_id = sb.revision_id
+                        JOIN source_roots srs ON srs.root_id = sir.root_id
+                        WHERE sir.status = 'confirmed' AND srs.retired_at = ''
+                    ),
+                    latest_scrapes AS (
+                        SELECT * FROM scrape_rows WHERE latest_rank = 1
+                    ),
+                    latest_confirmed AS (
+                        SELECT * FROM scrape_rows WHERE confirmed_rank = 1 AND status = 'confirmed'
                     )
                     SELECT
                         w.work_id,
@@ -148,6 +156,8 @@ class V4LibraryProjection:
                         ) AS asset_count,
                         COALESCE(latest_scrapes.metadata_json, '{}') AS scraped_metadata_json,
                         COALESCE(latest_scrapes.status, '') AS scrape_binding_status,
+                        latest_confirmed.revision_id AS previous_ready_revision_id,
+                        COALESCE(latest_confirmed.metadata_json, '{}') AS previous_ready_metadata_json,
                         COALESCE((
                             SELECT GROUP_CONCAT(DISTINCT provider) FROM (
                                 SELECT se.provider
@@ -191,6 +201,8 @@ class V4LibraryProjection:
                     FROM works w
                     LEFT JOIN latest_scrapes
                       ON latest_scrapes.work_id = w.work_id
+                    LEFT JOIN latest_confirmed
+                      ON latest_confirmed.work_id = w.work_id
                     WHERE EXISTS (
                         SELECT 1 FROM revision_bindings rb
                         JOIN import_revisions ir ON ir.revision_id = rb.revision_id
@@ -257,7 +269,11 @@ class V4LibraryProjection:
                             metadata["artifact_state"] = "incomplete"
                             metadata["reason"] = "投影复查发现元数据产物缺失或损坏"
                     elif binding_status in {"waiting_metadata", "waiting_review", "source_unavailable", "failed"}:
-                        state = binding_status
+                        recovered = self._recover_previous_ready(row, metadata)
+                        if recovered is None:
+                            state = binding_status
+                        else:
+                            state, metadata = recovered
                     elif binding_status == "confirmed":
                         state = meta_state or "waiting_metadata"
                     else:
@@ -327,6 +343,48 @@ class V4LibraryProjection:
             except Exception:
                 conn.rollback()
                 raise
+
+    def _recover_previous_ready(self, row, current_metadata: dict) -> tuple[str, dict] | None:
+        """最新一次资料刷新失败时，回退到同一作品上一次成功且产物完整的快照。
+
+        已发布作品不能因为一次瞬时失败（限流、超时、服务端 5xx）就从媒体墙消失、
+        连标题与海报一起丢——这与 `_retain_successful_details` / `_artifact_view`
+        的既有意图一致。上次结果不是 ready、或复查发现产物已损坏时不回退，
+        避免把真正坏掉的作品伪装成正常（只读判断，不写回任何事实）。
+        """
+
+        previous_revision = str(row["previous_ready_revision_id"] or "")
+        if not previous_revision:
+            return None
+        try:
+            previous_metadata = json.loads(row["previous_ready_metadata_json"] or "{}")
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(previous_metadata, dict):
+            return None
+        if str(previous_metadata.get("metadata_state") or "") != "ready":
+            return None
+        from app.media_v4.jobs.completeness import assess_persisted_completeness
+
+        complete, _reasons = assess_persisted_completeness(
+            self.database,
+            revision_id=previous_revision,
+            work_id=str(row["work_id"]),
+            metadata=previous_metadata,
+        )
+        if not complete:
+            return None
+        refresh_error = str(current_metadata.get("reason") or "").strip() or (
+            str(current_metadata.get("reason_code") or "").strip() or "最近一次资料刷新失败"
+        )
+        merged = dict(previous_metadata)
+        merged["sources"] = current_metadata.get("sources") or []
+        merged["regular_season_count"] = current_metadata.get("regular_season_count") or 0
+        merged["special_season_count"] = current_metadata.get("special_season_count") or 0
+        merged["metadata_state"] = "ready"
+        # 明确标注"当前显示的是上一次成功结果"，避免用户误以为这是最新资料。
+        merged["metadata_refresh_error"] = refresh_error
+        return "ready", merged
 
     @staticmethod
     def _decode_card(card: dict) -> dict:

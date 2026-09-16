@@ -276,6 +276,146 @@ def test_projection_checks_completeness_against_selected_scrape_revision(tmp_pat
     assert checked == ["rev-a"]
 
 
+def test_transient_refresh_failure_keeps_the_last_published_result(tmp_path, monkeypatch):
+    """一次瞬时刷新失败不能让已发布作品从媒体墙消失：回退到上一次成功且产物完整的快照。"""
+
+    from app.media_v4.projection.library import V4LibraryProjection
+
+    database = _two_bindings(tmp_path, failure_newer=True)
+    checked: list[str] = []
+
+    def capture(_database, *, revision_id, work_id, metadata):
+        del work_id, metadata
+        checked.append(revision_id)
+        return True, []
+
+    monkeypatch.setattr(
+        "app.media_v4.jobs.completeness.assess_persisted_completeness",
+        capture,
+    )
+
+    card = V4LibraryProjection(database).rebuild().cards[0]
+
+    assert card["metadata"]["metadata_state"] == "ready", "刷新失败不应把已发布作品移出媒体墙"
+    assert card["metadata"]["title"] == "A", "应显示上一次成功结果的资料"
+    assert card["metadata"]["metadata_refresh_error"], "必须标注当前显示的是上一次成功结果"
+    assert checked == ["rev-a"], "产物复查针对上一次成功的 revision"
+
+
+def test_refresh_failure_still_hides_a_work_whose_previous_artifacts_are_broken(tmp_path, monkeypatch):
+    """反证：上一次结果的产物已损坏时不回退，不能把真正坏掉的作品伪装成正常。"""
+
+    from app.media_v4.projection.library import V4LibraryProjection
+
+    database = _two_bindings(tmp_path, failure_newer=True)
+    monkeypatch.setattr(
+        "app.media_v4.jobs.completeness.assess_persisted_completeness",
+        lambda *_args, **_kwargs: (False, ["缺少或损坏 1 个剧集 NFO"]),
+    )
+
+    card = V4LibraryProjection(database).rebuild().cards[0]
+
+    assert card["metadata"]["metadata_state"] == "failed"
+    assert "metadata_refresh_error" not in card["metadata"]
+
+
+def test_older_failure_does_not_override_a_newer_success(tmp_path, monkeypatch):
+    """反向顺序：失败行更旧时，最新成功结果照常生效（既有语义不变）。"""
+
+    from app.media_v4.projection.library import V4LibraryProjection
+
+    database = _two_bindings(tmp_path, failure_newer=False)
+    monkeypatch.setattr(
+        "app.media_v4.jobs.completeness.assess_persisted_completeness",
+        lambda *_args, **_kwargs: (True, []),
+    )
+
+    card = V4LibraryProjection(database).rebuild().cards[0]
+
+    assert card["metadata"]["metadata_state"] == "ready"
+    assert card["metadata"]["title"] == "A"
+    assert "metadata_refresh_error" not in card["metadata"]
+
+
+def _two_bindings(tmp_path, *, failure_newer: bool):
+    """构造同一作品的两条 confirmed revision 绑定：一条 ready、一条 failed。"""
+
+    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / ("refresh-newer-failure.db" if failure_newer else "refresh-older-failure.db"))
+    database.initialize()
+    revisions = V4RevisionService(database)
+
+    def entry(root_id: str, scan_id: str, suffix: str):
+        evidence = SourceEvidence(
+            evidence_id=f"ev-{suffix}",
+            scan_id=scan_id,
+            root_id=root_id,
+            source_key=f"Show/{suffix}.mkv",
+            relative_path=f"Show/{suffix}.mkv",
+            entry_kind="video",
+            provider="local",
+            source_locator=f"local://{suffix}",
+            fingerprint=f"sha256:{suffix}",
+        )
+        facts = ParsedFacts(
+            parsed_fact_id=f"facts-{suffix}",
+            evidence_id=evidence.evidence_id,
+            parser_version="fixture",
+            work_title="Show",
+            title_candidates=("Show",),
+            year_candidate=2024,
+            media_type="tv",
+            group_type="season",
+            season_candidate=1,
+            episode_candidate=1,
+        )
+        return evidence, facts
+
+    revisions.create_draft("rev-a", [entry("root-a", "scan-a", "a")])
+    revisions.confirm("rev-a")
+    revisions.create_draft("rev-b", [entry("root-b", "scan-b", "b")])
+    revisions.confirm("rev-b")
+
+    if failure_newer:
+        ready_at, failed_at = "2026-09-09T03:00:00+00:00", "2026-09-09T04:00:00+00:00"
+    else:
+        ready_at, failed_at = "2026-09-09T04:00:00+00:00", "2026-09-09T03:00:00+00:00"
+    with database.connect() as conn:
+        work_id = str(conn.execute("SELECT work_id FROM works").fetchone()[0])
+        conn.execute(
+            """
+            INSERT INTO scrape_bindings(
+                binding_id, revision_id, work_id, provider, provider_id,
+                metadata_json, status, created_at, updated_at
+            ) VALUES ('binding-a', 'rev-a', ?, 'tmdb', '1', ?, 'confirmed', ?, ?)
+            """,
+            (
+                work_id,
+                '{"title":"A","metadata_state":"ready","poster_url":"https://image.tmdb.org/t/p/w500/a.jpg"}',
+                "2026-09-09T00:00:00+00:00",
+                ready_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO scrape_bindings(
+                binding_id, revision_id, work_id, provider, provider_id,
+                metadata_json, status, created_at, updated_at
+            ) VALUES ('binding-b', 'rev-b', ?, 'tmdb', '2', ?, 'failed', ?, ?)
+            """,
+            (
+                work_id,
+                '{"metadata_state":"failed","reason":"在线资料服务暂不可用，请稍后重试","reason_code":"source_unavailable"}',
+                "2026-09-09T00:30:00+00:00",
+                failed_at,
+            ),
+        )
+    return database
+
+
 def test_current_reads_generation_and_cards_from_one_snapshot(tmp_path, monkeypatch):
     """读 generation 与读 cards 之间发生并发 rebuild 时，不能返回空媒体墙。
 
