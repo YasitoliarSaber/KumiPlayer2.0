@@ -1275,7 +1275,13 @@ def migrate_schema_v19_to_v20(conn: sqlite3.Connection) -> None:
 
 
 def migrate_schema_v15_to_v16(conn: sqlite3.Connection) -> None:
-    """v15 → v16：为既有 V4 后台任务补齐终止与恢复状态。"""
+    """v15 → v16：为既有 V4 后台任务补齐终止与恢复状态。
+
+    这条 UPDATE 在**每次启动**都会执行（幂等链的一部分），因此必须只命中真正需要
+    补齐的行：SET 里的三个 CASE 只在对应字段为空时才改写，WHERE 就是它们的反条件。
+    没有 WHERE 时，每次启动都会对整张 jobs 表产生一次覆盖写事务，而 jobs 只增不减，
+    WAL 放量随导入次数线性增长。
+    """
 
     create_v16_structures(conn)
     conn.execute(
@@ -1293,6 +1299,9 @@ def migrate_schema_v15_to_v16(conn: sqlite3.Connection) -> None:
                 WHEN status IN ('succeeded', 'failed', 'cancelled') AND finished_at = '' THEN updated_at
                 ELSE finished_at
             END
+        WHERE heartbeat_at = ''
+           OR (status = 'running' AND started_at = '')
+           OR (status IN ('succeeded', 'failed', 'cancelled') AND finished_at = '')
         """
     )
 

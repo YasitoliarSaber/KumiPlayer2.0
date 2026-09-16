@@ -5,7 +5,6 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
-
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.persistence.schema_v4 import (
     V4_SCHEMA_VERSION,
@@ -357,12 +356,65 @@ def test_v18_database_is_migrated_to_v19_without_touching_media_facts(tmp_path):
     assert str(scan["status"]) == "completed"
 
 
+def test_startup_backfill_only_touches_rows_that_need_it(tmp_path):
+    """幂等迁移在每次启动都会跑：UPDATE 必须只命中真正需要补齐的行。
+
+    没有 WHERE 时，每次启动都会对整张 jobs 表产生一次覆盖写事务；jobs 只增不减
+    （每作品每 revision 至少两条），WAL 放量随导入次数线性增长。
+    """
+
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.persistence.schema_v4 import migrate_schema_v15_to_v16
+
+    database = V4Database(tmp_path / "backfill.db")
+    database.initialize()
+    with database.connect() as conn:
+        # jobs.revision_id / work_id 有外键，先建最小来源与 revision。
+        conn.execute(
+            "INSERT INTO source_roots(root_id, provider, ingest_method, created_at, updated_at) "
+            "VALUES ('root-backfill', 'baidu', 'directory_tree', 'now', 'now')"
+        )
+        conn.execute(
+            "INSERT INTO source_scans(scan_id, root_id, generation, status, stage, heartbeat_at, started_at) "
+            "VALUES ('scan-backfill', 'root-backfill', 1, 'completed', 'ready', 'now', 'now')"
+        )
+        conn.execute(
+            "INSERT INTO import_revisions(revision_id, root_id, scan_id, resolver_version, status, created_at) "
+            "VALUES ('rev-1', 'root-backfill', 'scan-backfill', 'fixture', 'confirmed', 'now')"
+        )
+        for index in range(5):
+            needs_backfill = index == 0
+            conn.execute(
+                "INSERT INTO jobs(job_id, job_type, revision_id, work_id, idempotency_key, status, "
+                "heartbeat_at, started_at, finished_at, created_at, updated_at) "
+                "VALUES (?, 'scrape_work', 'rev-1', ?, ?, 'succeeded', ?, 'started', ?, 'now', 'now')",
+                (
+                    f"job-{index}",
+                    f"w-{index}",
+                    f"key-{index}",
+                    "" if needs_backfill else "beat",
+                    "" if needs_backfill else "done",
+                ),
+            )
+        before = conn.total_changes
+        migrate_schema_v15_to_v16(conn)
+        changed = conn.total_changes - before
+        row = conn.execute(
+            "SELECT heartbeat_at, finished_at FROM jobs WHERE job_id = 'job-0'"
+        ).fetchone()
+
+    assert changed == 1, f"只应补齐 1 行，实际改动 {changed} 行"
+    assert row["heartbeat_at"] and row["finished_at"], "需要补齐的行仍然要被补上"
+
+
 def test_v19_database_gains_query_indices_without_touching_media_facts(tmp_path):
     """v19 真实库必须能升到 v20（新增三个查询索引），且媒体事实不变。"""
 
     import sqlite3 as _sqlite3
 
     from app.media_v4.persistence.schema_v4 import (
+        create_v8_structures,
+        create_v9_structures,
         create_v10_structures,
         create_v13_structures,
         create_v15_structures,
@@ -370,8 +422,6 @@ def test_v19_database_gains_query_indices_without_touching_media_facts(tmp_path)
         create_v17_structures,
         create_v18_structures,
         create_v19_structures,
-        create_v8_structures,
-        create_v9_structures,
     )
 
     db_path = tmp_path / "legacy-v19.db"
