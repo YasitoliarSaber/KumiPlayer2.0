@@ -297,6 +297,22 @@ class V4Repository:
         if not facts:
             return
         with self.database.connect() as conn:
+            # 只对"已经存在的 id"做不可变校验：
+            # INSERT OR IGNORE 插入的新行必然等于入参，回读它们纯属浪费——3 万条
+            # facts 的全量回读 + 逐行 6 次 json.loads 是导入期的秒级纯开销。
+            # 先只取 id（不解析 JSON），插入后仅回读冲突候选。
+            ids = [item.parsed_fact_id for item in facts]
+            existing_ids: set[str] = set()
+            for offset in range(0, len(ids), _BULK_BATCH_SIZE):
+                batch = ids[offset : offset + _BULK_BATCH_SIZE]
+                placeholders = ",".join("?" for _ in batch)
+                existing_ids.update(
+                    str(row[0])
+                    for row in conn.execute(
+                        f"SELECT parsed_fact_id FROM parsed_facts WHERE parsed_fact_id IN ({placeholders})",
+                        batch,
+                    ).fetchall()
+                )
             conn.executemany(
                 """
                 INSERT OR IGNORE INTO parsed_facts(
@@ -316,17 +332,18 @@ class V4Repository:
                 [self._parsed_facts_values(item) for item in facts],
             )
 
+            conflicts = [item for item in facts if item.parsed_fact_id in existing_ids]
             persisted: dict[str, ParsedFacts] = {}
-            ids = [item.parsed_fact_id for item in facts]
-            for offset in range(0, len(ids), 400):
-                batch = ids[offset : offset + 400]
+            conflict_ids = [item.parsed_fact_id for item in conflicts]
+            for offset in range(0, len(conflict_ids), _BULK_BATCH_SIZE):
+                batch = conflict_ids[offset : offset + _BULK_BATCH_SIZE]
                 placeholders = ",".join("?" for _ in batch)
                 rows = conn.execute(
                     f"SELECT * FROM parsed_facts WHERE parsed_fact_id IN ({placeholders})",
                     batch,
                 ).fetchall()
                 persisted.update({row["parsed_fact_id"]: self._row_to_parsed_facts(row) for row in rows})
-        for item in facts:
+        for item in conflicts:
             if persisted.get(item.parsed_fact_id) != item:
                 raise ValueError(f"不可变 ParsedFacts 冲突: {item.parsed_fact_id}")
 

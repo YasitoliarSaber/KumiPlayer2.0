@@ -55,18 +55,36 @@ def list_source_cards(database: V4Database) -> list[dict]:
             ORDER BY ir.created_at DESC, ir.revision_id DESC
             """
         ).fetchall()
-        scans = conn.execute(
-            """
-            SELECT * FROM source_scans
-            ORDER BY generation DESC, started_at DESC, scan_id DESC
-            """
-        ).fetchall()
+        # 每个 root 只取"最新一次扫描"：source_scans 每次扫描 +1 行且从不清理，
+        # 全表扫描 + Python 端分组会随扫描次数线性变差；这里只针对**本次要出卡的
+        # 活跃 root** 过滤（注意要按 roots 而不是 revisions：有扫描但还没 revision
+        # 的来源同样要出卡，否则"正在扫描"的来源会丢失扫描状态），并用
+        # UNIQUE(root_id, generation) 索引配合窗口函数直接选出最新一行。
+        scan_root_ids = sorted({str(row["root_id"]) for row in roots})
+        if scan_root_ids:
+            scan_placeholders = ",".join("?" for _ in scan_root_ids)
+            scans = conn.execute(
+                f"""
+                SELECT * FROM (
+                    SELECT ss.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY ss.root_id
+                               ORDER BY ss.generation DESC, ss.started_at DESC, ss.scan_id DESC
+                           ) AS scan_rank
+                    FROM source_scans ss
+                    WHERE ss.root_id IN ({scan_placeholders})
+                ) WHERE scan_rank = 1
+                """,
+                scan_root_ids,
+            ).fetchall()
+        else:
+            scans = []
 
         revision_ids = [str(row["revision_id"]) for row in revisions]
         revision_evidence: dict[str, int] = defaultdict(int)
         bound_works = defaultdict(set)
         bound_assets = defaultdict(set)
-        pending_relations = defaultdict(int)
+        pending_relations: dict[str, int] = defaultdict(int)
         job_rows = []
         if revision_ids:
             placeholders = ",".join("?" for _ in revision_ids)
@@ -219,6 +237,10 @@ def list_source_cards(database: V4Database) -> list[dict]:
         revision_evidence_count = revision_evidence.get(revision_id, 0)
         evidence_count = revision_evidence_count
         if evidence_count == 0 and scan is not None:
+            # 这里必须用**权威计数**（库内证据行数）：扫描行的 processed_count/total_count
+            # 是进度值，读取期由内存计数推进、可能领先于真实落库行数，拿它当证据数会让
+            # 来源卡显示比实际更多的文件（既有测试 test_zombie_scan_is_not_projected_as_active
+            # 等正是在断言这一点）。每张卡片一次 COUNT 走索引，代价远小于报错数。
             evidence_count = _scan_evidence_count(database, str(scan["scan_id"]))
         work_count = len(draft_graph.works) if draft_graph is not None else len(bound_works.get(revision_id, set()))
         asset_count = len(bound_assets.get(revision_id, set()))
