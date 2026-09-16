@@ -68,11 +68,13 @@ def build_tree_baseline_state(
 ) -> dict:
     """由 TXT 文件路径建立零请求目录基线；时间事实保持 unknown。"""
 
-    directories: dict[str, dict[str, float | None]] = {
+    # 值里既有时间/浮点（modified、last_verified_at），也有字符串（verification_state、
+    # listing_hash），因此按 object 声明；此前写 float | None 与新增字段冲突。
+    directories: dict[str, dict[str, object]] = {
         "": {"modified": None, "last_verified_at": 0, "verification_state": "unknown", "listing_hash": ""},
     }
-    for item in evidence:
-        parts = PurePosixPath(item.relative_path).parts[:-1]
+    for baseline_item in evidence:
+        parts = PurePosixPath(baseline_item.relative_path).parts[:-1]
         for length in range(1, len(parts) + 1):
             relative = PurePosixPath(*parts[:length]).as_posix()
             directories.setdefault(
@@ -176,6 +178,18 @@ def activate_scan_state(scan_id: str) -> bool:
     return True
 
 
+def discard_scan_state(scan_id: str) -> None:
+    """删除某次扫描的暂存检查点；文件不存在时无操作（终态清理用）。
+
+    终态（failed / cancelled）的扫描不会再被确认，暂存文件留着只会随每次失败增长。
+    这不会污染后续增量：发布基线用的是 `active/<root_id>.json`。
+    """
+
+    path = _staged_path(scan_id)
+    with DATA_WRITE_LOCK:
+        path.unlink(missing_ok=True)
+
+
 def _list_all(
     client,
     remote_path: str,
@@ -272,14 +286,14 @@ def scan_openlist_incremental(
     next_state = copy.deepcopy(state)
     directories: dict[str, dict] = next_state["directories"]
     files = {}
-    for item in baseline:
-        remote_path = _join_remote(remote_root, item.relative_path)
+    for baseline_item in baseline:
+        remote_path = _join_remote(remote_root, baseline_item.relative_path)
         playback_locator = (
             derive_local_path(mount_root, mapping_root, remote_path)
-            if mount_root else item.playback_locator
+            if mount_root else baseline_item.playback_locator
         )
-        files[item.relative_path] = _clone_for_scan(
-            item,
+        files[baseline_item.relative_path] = _clone_for_scan(
+            baseline_item,
             actual_scan_id,
             source_key=remote_path,
             source_locator=remote_path,

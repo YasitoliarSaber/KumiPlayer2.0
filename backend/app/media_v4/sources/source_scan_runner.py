@@ -204,6 +204,23 @@ def _load_task(database: V4Database, scan_id: str) -> ScanTask | None:
     )
 
 
+def _discard_scan_checkpoints(database: V4Database, scan_id: str) -> None:
+    """终态（failed / cancelled）扫描不再可续：清掉目录级 frontier 与暂存检查点。
+
+    两者都是"进行中的断点"而不是事实：`paused` 必须保留（续扫要用），终态保留则只会
+    随每次失败/取消单调增长——frontier 行按目录数增长，staged JSON 每个 scan 一个文件
+    （`openlist_incremental/staged/<scan_id>.json`，只有确认成功才会被 activate 消费）。
+    清理幂等，且不影响后续增量：确认后发布的是 `active/<root_id>.json`，缺失检查点只会让
+    下一轮把目录当成"未核实过"多核对几个，不会用错基线。
+    """
+
+    from app.media_v4.sources import scan_frontier
+    from app.media_v4.sources.incremental import discard_scan_state
+
+    scan_frontier.clear(database, scan_id=scan_id)
+    discard_scan_state(scan_id)
+
+
 def _finish_scan(
     database: V4Database,
     scan_id: str,
@@ -225,6 +242,9 @@ def _finish_scan(
             """,
             (status, status, cancel_flag, stamp, stamp, error, scan_id),
         )
+    if status in {"failed", "cancelled"}:
+        # 迟到的心跳/进度不会再改回运行态，因此这里清断点是安全的。
+        _discard_scan_checkpoints(database, scan_id)
 
 
 def _complete_scan(database: V4Database, scan_id: str) -> bool:
