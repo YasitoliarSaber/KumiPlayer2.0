@@ -29,31 +29,52 @@ class V4LibraryProjection:
         self.database = database
 
     def current(self) -> LibrarySnapshot | None:
-        """读取已发布 generation；没有 generation 时返回空。"""
+        """读取已发布 generation；没有 generation 时返回空。
+
+        三条 SELECT 必须在**同一个读事务**里完成：并发 rebuild 的收尾会
+        `DELETE FROM library_generations WHERE generation_id != ?`，而 library_cards
+        是 `ON DELETE CASCADE`。没有读事务时（sqlite3 默认 autocommit，SELECT 各自
+        看一次最新提交），若 rebuild 在"读到 generation"与"读 cards"之间提交，
+        cards 查询会返回空集，于是媒体墙在一切正常的情况下瞬间清空——而脏标记已被
+        对方清掉，`ensure_current()` 也不会补重建。WAL 下读事务会稳定持有快照。
+        """
 
         with self.database.connect() as conn:
-            generation_id_row = conn.execute(
-                "SELECT value FROM v4_meta WHERE key = 'current_library_generation'"
-            ).fetchone()
-            if generation_id_row is None:
-                return None
-            generation_id = str(generation_id_row["value"])
-            generation = conn.execute(
-                "SELECT digest FROM library_generations WHERE generation_id = ? AND status = 'published'",
+            conn.execute("BEGIN")
+            try:
+                snapshot = self._read_current(conn)
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            conn.execute("COMMIT")
+        return snapshot
+
+    @staticmethod
+    def _read_current(conn) -> LibrarySnapshot | None:
+        """在同一读事务内读取 generation 与它的 cards。"""
+
+        generation_id_row = conn.execute(
+            "SELECT value FROM v4_meta WHERE key = 'current_library_generation'"
+        ).fetchone()
+        if generation_id_row is None:
+            return None
+        generation_id = str(generation_id_row["value"])
+        generation = conn.execute(
+            "SELECT digest FROM library_generations WHERE generation_id = ? AND status = 'published'",
+            (generation_id,),
+        ).fetchone()
+        if generation is None:
+            return None
+        cards = tuple(
+            V4LibraryProjection._decode_card(dict(row))
+            for row in conn.execute(
+                """
+                SELECT work_id, title, year, media_type, episode_count, asset_count, metadata_json
+                FROM library_cards WHERE generation_id = ? ORDER BY title COLLATE NOCASE, work_id
+                """,
                 (generation_id,),
-            ).fetchone()
-            if generation is None:
-                return None
-            cards = tuple(
-                self._decode_card(dict(row))
-                for row in conn.execute(
-                    """
-                    SELECT work_id, title, year, media_type, episode_count, asset_count, metadata_json
-                    FROM library_cards WHERE generation_id = ? ORDER BY title COLLATE NOCASE, work_id
-                    """,
-                    (generation_id,),
-                ).fetchall()
-            )
+            ).fetchall()
+        )
         return LibrarySnapshot(generation_id, str(generation["digest"]), cards)
 
     def ensure_current(self) -> LibrarySnapshot:

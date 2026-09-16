@@ -21,6 +21,7 @@ from app.media_v4.persistence.schema_v4 import (
     create_v17_structures,
     create_v18_structures,
     create_v19_structures,
+    create_v20_structures,
     migrate_schema_v4_to_v5,
     migrate_schema_v5_to_v6,
     migrate_schema_v6_to_v7,
@@ -36,6 +37,7 @@ from app.media_v4.persistence.schema_v4 import (
     migrate_schema_v16_to_v17,
     migrate_schema_v17_to_v18,
     migrate_schema_v18_to_v19,
+    migrate_schema_v19_to_v20,
 )
 
 
@@ -146,7 +148,7 @@ class V4Database:
         使用字面量；写回后立即读回校验，版本升级时若字面量未同步会立即失败。
         """
 
-        conn.execute("PRAGMA user_version = 19")
+        conn.execute("PRAGMA user_version = 20")
         written = int(conn.execute("PRAGMA user_version").fetchone()[0])
         if written != V4_SCHEMA_VERSION:
             raise RuntimeError(
@@ -226,6 +228,22 @@ class V4Database:
                     conn.rollback()
                     raise V4ResetRequiredError(
                         "数据库声明为 V4 但任务结构不完整，需要一次性重置；" + str(exc)
+                    ) from exc
+                except Exception:
+                    conn.rollback()
+                    raise
+                version = self.CURRENT_SCHEMA_VERSION
+            if version == 19 and self._has_user_tables(conn):
+                # v19 → v20：补齐查询索引；加法迁移，不改写任何媒体事实。
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    migrate_schema_v19_to_v20(conn)
+                    self._set_user_version(conn)
+                    conn.commit()
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    raise V4ResetRequiredError(
+                        "数据库声明为 V4 但索引结构不完整，需要一次性重置；" + str(exc)
                     ) from exc
                 except Exception:
                     conn.rollback()
@@ -492,6 +510,7 @@ class V4Database:
                     migrate_schema_v16_to_v17(conn)
                     migrate_schema_v17_to_v18(conn)
                     migrate_schema_v18_to_v19(conn)
+                    migrate_schema_v19_to_v20(conn)
                     conn.commit()
                 except sqlite3.OperationalError as exc:
                     conn.rollback()
@@ -508,7 +527,11 @@ class V4Database:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 create_schema_v4(conn)
+                # 空库创建路径必须补齐"未被 create_schema_v4 收编"的新结构，
+                # 否则新装的库会缺表/缺索引，而版本号已经是当前值（B5-2a 与 v20
+                # 的索引都踩过这个坑）。
                 create_v19_structures(conn)
+                create_v20_structures(conn)
                 self._set_user_version(conn)
                 conn.commit()
             except Exception:
@@ -591,6 +614,7 @@ class V4Database:
             create_v17_structures(expected)
             create_v18_structures(expected)
             create_v19_structures(expected)
+            create_v20_structures(expected)
             for table in sorted(self.REQUIRED_TABLES):
                 actual_cols = self._table_contract(conn, table)
                 expected_cols = self._table_contract(expected, table)

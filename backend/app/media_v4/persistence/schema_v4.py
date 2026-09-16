@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 19
+V4_SCHEMA_VERSION = 20
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -1238,6 +1238,40 @@ def migrate_schema_v18_to_v19(conn: sqlite3.Connection) -> None:
     """v18 → v19 增量迁移：新增扫描目录 frontier，不改写任何媒体事实。"""
 
     create_v19_structures(conn)
+
+
+def create_v20_structures(conn: sqlite3.Connection) -> None:
+    """v20：补齐"查询形状与索引形状不匹配"造成的三处全表扫描。
+
+    - ``revision_bindings`` 原先只有 ``(revision_id)`` 索引，而投影的多个相关子查询
+      与全量刮削都是 ``WHERE work_id = ?``：执行计划退化为"遍历当前所有 confirmed
+      revision 的全部绑定行再按 work_id 过滤"，即 O(作品数 × 绑定数)。
+    - ``artifacts`` 的自动索引前缀是 ``(revision_id, artifact_type)``，逐作品做产物
+      完整性复查时 ``work_id`` 只是后置过滤，等于每个作品重扫该 revision 的全部 NFO。
+    - ``jobs`` 完全没有 ``revision_id`` 索引，来源卡每 1.5 秒的轮询是全表扫 + 排序；
+      jobs 只增不减（每作品每 revision 至少两条），代价随导入次数线性增长。
+
+    三个索引都是纯加法迁移，不改写任何媒体事实。
+    """
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_v4_bindings_work "
+        "ON revision_bindings(work_id, revision_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_v4_artifacts_work "
+        "ON artifacts(revision_id, work_id, artifact_type)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_v4_jobs_revision "
+        "ON jobs(revision_id, job_type, job_id)"
+    )
+
+
+def migrate_schema_v19_to_v20(conn: sqlite3.Connection) -> None:
+    """v19 → v20 增量迁移：新增三个查询索引，不改写任何媒体事实。"""
+
+    create_v20_structures(conn)
 
 
 def migrate_schema_v15_to_v16(conn: sqlite3.Connection) -> None:

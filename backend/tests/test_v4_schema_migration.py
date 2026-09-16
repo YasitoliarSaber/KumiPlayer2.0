@@ -349,10 +349,80 @@ def test_v18_database_is_migrated_to_v19_without_touching_media_facts(tmp_path):
             "SELECT status FROM source_scans WHERE scan_id = 'scan-keep'"
         ).fetchone()
 
-    assert version == V4_SCHEMA_VERSION == 19
+    assert version == V4_SCHEMA_VERSION == 20
     assert "source_scan_directories" in tables
     assert V4Database.REQUIRED_TABLES >= {"source_scan_directories"}
     # 既有媒体事实与来源记录不能被迁移改写。
     assert str(root["display_name"]) == "01动画"
     assert str(scan["status"]) == "completed"
+
+
+def test_v19_database_gains_query_indices_without_touching_media_facts(tmp_path):
+    """v19 真实库必须能升到 v20（新增三个查询索引），且媒体事实不变。"""
+
+    import sqlite3 as _sqlite3
+
+    from app.media_v4.persistence.schema_v4 import (
+        create_v10_structures,
+        create_v13_structures,
+        create_v15_structures,
+        create_v16_structures,
+        create_v17_structures,
+        create_v18_structures,
+        create_v19_structures,
+        create_v8_structures,
+        create_v9_structures,
+    )
+
+    db_path = tmp_path / "legacy-v19.db"
+    conn = _sqlite3.connect(db_path)
+    try:
+        conn.row_factory = _sqlite3.Row
+        conn.execute("BEGIN IMMEDIATE")
+        create_schema_v4(conn)
+        create_v6_structures(conn)
+        create_v8_structures(conn)
+        create_v9_structures(conn)
+        create_v10_structures(conn)
+        create_v13_structures(conn)
+        create_v15_structures(conn)
+        create_v16_structures(conn)
+        create_v17_structures(conn)
+        create_v18_structures(conn)
+        create_v19_structures(conn)
+        conn.execute("PRAGMA user_version = 19")
+        conn.execute(
+            "INSERT INTO source_roots(root_id, provider, ingest_method, source_locator, "
+            "playback_locator, route_id, display_name, created_at, updated_at) "
+            "VALUES ('root-keep', 'baidu', 'directory_tree', 'K:/百度网盘/01动画', '', '', "
+            "'01动画', '2026-09-15T00:00:00+00:00', '2026-09-15T00:00:00+00:00')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # v19 上还没有这三个索引（否则本用例就无法证明迁移新增了它们）。
+    with _sqlite3.connect(db_path) as probe:
+        before = {
+            str(row[0])
+            for row in probe.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+        }
+    assert not {"idx_v4_bindings_work", "idx_v4_artifacts_work", "idx_v4_jobs_revision"} & before
+
+    V4Database(db_path).initialize()
+
+    with _sqlite3.connect(db_path) as conn:
+        conn.row_factory = _sqlite3.Row
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        indices = {
+            str(row["name"])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+        }
+        root = conn.execute(
+            "SELECT display_name FROM source_roots WHERE root_id = 'root-keep'"
+        ).fetchone()
+
+    assert version == V4_SCHEMA_VERSION == 20
+    assert {"idx_v4_bindings_work", "idx_v4_artifacts_work", "idx_v4_jobs_revision"} <= indices
+    assert str(root["display_name"]) == "01动画"
 

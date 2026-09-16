@@ -274,3 +274,65 @@ def test_projection_checks_completeness_against_selected_scrape_revision(tmp_pat
 
     assert card["metadata"]["title"] == "A"
     assert checked == ["rev-a"]
+
+
+def test_current_reads_generation_and_cards_from_one_snapshot(tmp_path, monkeypatch):
+    """读 generation 与读 cards 之间发生并发 rebuild 时，不能返回空媒体墙。
+
+    并发 rebuild 的收尾是 `DELETE FROM library_generations WHERE generation_id != ?`，
+    而 `library_cards` 是 ON DELETE CASCADE。没有读事务时（sqlite3 默认 autocommit，
+    每条 SELECT 各看一次最新提交），cards 查询会落在旧 generation 已被删除之后，
+    返回空集 —— `/api/library` 的 works 直接来自 cards，于是媒体墙在一切正常的情况下
+    瞬间清空，而脏标记已被对方清掉，`ensure_current()` 也不会补重建。
+    """
+
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.projection.library import V4LibraryProjection
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "snapshot.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-1", [_entry("1080p")])
+    revisions.confirm("rev-1")
+    projection = V4LibraryProjection(database)
+    assert projection.rebuild().cards, "前置条件：至少有一张已发布的卡"
+    assert projection.current().cards
+
+    real_open_connection = V4Database.open_connection
+    state = {"armed": True}
+
+    class _RacingConnection:
+        """读到 cards 之前先让另一个连接提交一次 rebuild（模拟并发收尾）。"""
+
+        def __init__(self, real):
+            self._real = real
+
+        def execute(self, sql, *args, **kwargs):
+            if state["armed"] and "FROM library_cards" in str(sql):
+                state["armed"] = False
+                V4LibraryProjection(database).rebuild()
+            return self._real.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    monkeypatch.setattr(
+        V4Database,
+        "open_connection",
+        lambda self: _RacingConnection(real_open_connection(self)),
+    )
+
+    snapshot = projection.current()
+
+    assert snapshot is not None
+    assert snapshot.cards, "读事务必须保证 generation 与 cards 来自同一快照"
+
+    # 反证：同样的竞态下**不**包读事务会返回空 cards——说明本用例确实在检验该修复，
+    # 而不是靠运气通过。
+    state["armed"] = True
+    with database.connect() as conn:
+        bare = V4LibraryProjection._read_current(conn)
+
+    assert bare is not None
+    assert bare.cards == ()
