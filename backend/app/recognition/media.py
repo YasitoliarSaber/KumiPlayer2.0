@@ -493,18 +493,11 @@ def _extract_year_from_subwork(subwork_dir: str) -> int | None:
     """
     if not subwork_dir:
         return None
-    patterns = [
-        re.compile(r"[.．](\d{4})"),           # .2008
-        re.compile(r"[(\（](\d{4})[)\）]"),    # (2008)
-        re.compile(r"\s(\d{4})(?:\s|$)"),       # 空格2008
-    ]
-    for pat in patterns:
-        m = pat.search(subwork_dir)
-        if m:
-            year = int(m.group(1))
-            if 1900 <= year <= 2099:
-                return year
-    return None
+    return _first_plausible_year(subwork_dir, patterns=(
+        (re.compile(r"[.．](\d{4})"), False),           # .2008
+        (re.compile(r"[(\（](\d{4})[)\）]"), False),    # (2008)
+        (re.compile(r"\s(\d{4})(?:\s|$)"), True),       # 空格2008（裸数字需合理性判据）
+    ))
 
 
 def _clean_work_title(raw: str) -> str:
@@ -542,17 +535,31 @@ def _extract_year(text: str) -> int | None:
     if not text:
         return None
     text = text.strip()
-    patterns = [
-        re.compile(r"[.．](\d{4})"),             # .2005
-        re.compile(r"[(\（](\d{4})[)\）]"),      # (2005) or （2005）
-        re.compile(r"(?:^|\s)(\d{4})(?:\s|$)"),  # 开头或空格2005
-    ]
-    for pat in patterns:
-        m = pat.search(text)
-        if m:
-            year = int(m.group(1))
-            if 1900 <= year <= 2099:
-                return year
+    return _first_plausible_year(text, patterns=(
+        (re.compile(r"[.．](\d{4})"), False),                 # .2005
+        (re.compile(r"[(\（](\d{4})[)\）]"), False),          # (2005) or （2005）
+        (re.compile(r"(?:^|\s)(\d{4})(?:\s|$)"), True),  # 开头或空格2005（裸数字需判据）
+    ))
+
+
+def _first_plausible_year(text: str, *, patterns) -> int | None:
+    """按模式顺序返回**第一个合理**的四位年份。
+
+    每个模式用 ``finditer`` 而不是 ``search``：``作品.2160p.2019`` 里第一个
+    ``.2160`` 不是年份，但同一模式的下一个匹配 ``.2019`` 才是——原先"首个匹配越界
+    就换下一个模式"会让真实年份被整段丢掉。裸数字模式额外要求年份合理性。
+    """
+
+    from app.recognition.title_cleaner import is_plausible_year
+
+    for pattern, needs_plausible in patterns:
+        for matched in pattern.finditer(text):
+            year = int(matched.group(1))
+            if not 1900 <= year <= 2099:
+                continue
+            if needs_plausible and not is_plausible_year(year):
+                continue
+            return year
     return None
 
 

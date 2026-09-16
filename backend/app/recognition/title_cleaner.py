@@ -6,9 +6,35 @@
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 
 # 状态词
 _STATUS_WORDS = ["（将更新）", "(将更新)", "（更新中）", "(更新中)"]
+
+#: 裸四位数字当年份的合理性判据（仅用于"空格+数字"这类无明确年份标记的写法）。
+#:
+#: 真实片名常以孤立数字结尾——``Blade Runner 2049``、``2012``、``银翼杀手 2049``——
+#: 把这类数字当年份会同时改错三处：标题被删成 ``Blade Runner``、年份记成 2049、
+#: 而年份会进入身份键，使刮削评分把正确候选判为"年份差 ≥2"直接阻断，作品永远
+#: 停在人工确认。允许到"当前年 + 2"，以容纳次年新番预告。
+_MIN_YEAR = 1900
+_MAX_YEAR = 2099
+_FUTURE_YEAR_TOLERANCE = 2
+
+
+def is_plausible_year(value: int, *, current_year: int | None = None) -> bool:
+    """裸四位数字是否有资格当年份。
+
+    ``.2005`` / ``(2005)`` 这类带明确年份标记的写法不适用此判据（标记本身就说明
+    它是年份），只有"空格 + 四位数字"这种裸数字才需要合理性上界。
+    """
+
+    year = int(value)
+    if not _MIN_YEAR <= year <= _MAX_YEAR:
+        return False
+    reference = datetime.now().year if current_year is None else int(current_year)
+    return year <= reference + _FUTURE_YEAR_TOLERANCE
+
 
 # 系列容器结构词正则：.S1-S2、.S1~S3 等范围结构
 # 只处理明确的 S\d+-S\d+ 范围，不处理单独 .S1 避免误伤
@@ -295,12 +321,19 @@ def clean_work_title_container(container: str) -> TitleCleanResult:
         applied.append("去掉末尾画质与介质信息")
 
     # 4. 去掉末尾年份（.2005、(2005)、（2005）等）
-    _year_patterns = [
-        re.compile(r"[.．]\d{4}$"),
-        re.compile(r"[(\（]\d{4}[)\）]$"),
-        re.compile(r"\s\d{4}$"),
-    ]
-    for pat in _year_patterns:
+    #    "空格 + 四位数字"必须先确认像年份：真实片名常以孤立数字结尾
+    #    （Blade Runner 2049），删掉会同时改错标题与身份键。
+    _year_patterns = (
+        (re.compile(r"[.．](\d{4})$"), False),
+        (re.compile(r"[(\（](\d{4})[)\）]$"), False),
+        (re.compile(r"\s(\d{4})$"), True),
+    )
+    for pat, needs_plausible in _year_patterns:
+        matched = pat.search(cleaned)
+        if matched is None:
+            continue
+        if needs_plausible and not is_plausible_year(int(matched.group(1))):
+            continue
         new_cleaned = pat.sub("", cleaned).strip()
         if new_cleaned != cleaned:
             cleaned = new_cleaned

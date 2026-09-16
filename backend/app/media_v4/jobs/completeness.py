@@ -43,8 +43,13 @@ def artifact_only_failure(metadata: dict) -> bool:
         return False
     if str((metadata or {}).get("reason_code") or "").strip().casefold() == "artifact_incomplete":
         return True
-    if artwork_only_reasons((metadata or {}).get("completeness")):
-        return True
+    completeness = (metadata or {}).get("completeness")
+    if isinstance(completeness, (list, tuple)) and completeness:
+        # 有结构化原因列表时**只信它**：`reason` 字段是所有原因的拼接串，对它做子串
+        # 匹配会把"图片失败 + NFO 失败"的混合失败误判成"只缺图片"，于是缺 NFO 的
+        # 作品被放行为 ready 进入媒体墙——与"非图片产物失败仍算 failed"直接矛盾。
+        return artwork_only_reasons(completeness)
+    # 老记录没有 completeness 列表：只能退回单条 reason 文本判断。
     return is_artwork_reason(str((metadata or {}).get("reason") or ""))
 
 
