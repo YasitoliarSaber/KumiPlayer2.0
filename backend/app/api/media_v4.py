@@ -1156,12 +1156,19 @@ def list_drafts():
 
 
 @router.get("/imports/{revision_id}/evidence")
-def get_revision_evidence(revision_id: str):
-    """返回 draft revision 的完整证据快照，供前端重建识别预览。
+def get_revision_evidence(revision_id: str, limit: int = 0, offset: int = 0):
+    """返回 draft revision 的证据快照，供前端重建识别预览。
 
     只读 authoritative tables；不改变 ParsedFacts 或 revision 状态。
+
+    默认返回全部条目（识别预览需要完整列表）。程序化调用方可用 ``limit`` /
+    ``offset`` 分页，响应里的 ``total`` 始终是完整条数，便于判断"是否还有更多"。
+    大库（3 万条证据）一次序列化的代价可观，但截断会让识别预览不完整，因此
+    默认行为保持不变，分页是显式选择。
     """
 
+    page_limit = max(0, int(limit))
+    page_offset = max(0, int(offset))
     with get_database().connect() as conn:
         row = conn.execute(
             "SELECT status FROM import_revisions WHERE revision_id = ?",
@@ -1169,17 +1176,31 @@ def get_revision_evidence(revision_id: str):
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail=f"revision 不存在: {revision_id}")
-        rows = conn.execute(
-            """
+        total = int(conn.execute(
+            "SELECT COUNT(*) FROM revision_evidence WHERE revision_id = ?",
+            (revision_id,),
+        ).fetchone()[0])
+        sql = """
             SELECT se.*
             FROM revision_evidence re
             JOIN source_evidence se ON se.evidence_id = re.evidence_id
             WHERE re.revision_id = ?
             ORDER BY se.relative_path COLLATE NOCASE, se.evidence_id
-            """,
-            (revision_id,),
-        ).fetchall()
-    return {"revision_id": revision_id, "status": row["status"], "entries": [asdict(_source_evidence_from_row(item)) for item in rows]}
+            """
+        params: list = [revision_id]
+        if page_limit:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([page_limit, page_offset])
+        rows = conn.execute(sql, params).fetchall()
+    entries = [asdict(_source_evidence_from_row(item)) for item in rows]
+    return {
+        "revision_id": revision_id,
+        "status": row["status"],
+        "entries": entries,
+        "total": total,
+        "returned": len(entries),
+        "offset": page_offset,
+    }
 
 
 @router.get("/sources/libraries")
@@ -1553,7 +1574,12 @@ def start_durable_scan(request: SourceScanRequest):
 
 
 @router.get("/sources/scans/{scan_id}")
-def get_durable_scan(scan_id: str, include_entries: bool = True):
+def get_durable_scan(scan_id: str, include_entries: bool = False):
+    """读取扫描状态；默认**不**带证据条目。
+
+    证据条目在大库上可达数万条（数十 MB JSON），只有明确需要时才传
+    ``include_entries=true``。默认关闭可以避免任何新调用方"顺手"拉到全量证据。
+    """
     from app.media_v4.sources.durable_scan import get_durable_scan
 
     try:

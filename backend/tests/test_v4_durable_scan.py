@@ -208,7 +208,8 @@ def test_durable_scan_api_contract(tmp_path, monkeypatch):
     scan_id = body["scan_id"]
 
     _wait_until(lambda: client.get(f"/api/v4/sources/scans/{scan_id}").json()["status"] == "completed")
-    result = client.get(f"/api/v4/sources/scans/{scan_id}").json()
+    # 默认不带证据条目（见 O15），本用例要验证证据投递，因此显式请求。
+    result = client.get(f"/api/v4/sources/scans/{scan_id}?include_entries=true").json()
     assert result["root_id"] == openlist_root_id("https://openlist.example.test", "kumi", "/Anime")
     assert len(result["entries"]) == 1
     assert result["entries"][0]["relative_path"] == "Show/Show.S01E01.mkv"
