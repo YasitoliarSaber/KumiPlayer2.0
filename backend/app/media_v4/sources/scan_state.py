@@ -20,40 +20,7 @@ SCAN_HEARTBEAT_INTERVAL_SECONDS = 5
 SCAN_PROGRESS_MIN_INTERVAL_SECONDS = 0.25
 SCAN_PROGRESS_MIN_ITEMS = 128
 
-ACTIVE_SCAN_STATUSES = frozenset({"queued", "running", "cancelling"})
-TERMINAL_SCAN_STATUSES = frozenset({"completed", "failed", "cancelled"})
-
-_STAGE_ORDER = {
-    "queued": 0,
-    "reading_source": 1,
-    # recognizing 是 v14 及更早扫描行的兼容读数；新任务使用更细的
-    # parsing/normalizing 阶段，但旧任务不能因为新增列而倒退或改名。
-    "recognizing": 2,
-    "parsing": 3,
-    "normalizing": 4,
-    "preparing_preview": 5,
-    "ready": 6,
-    "failed": 6,
-    "cancelled": 6,
-}
-
-STAGE_LABELS = {
-    "queued": "准备读取媒体来源",
-    "reading_source": "读取媒体来源",
-    "recognizing": "离线识别与整理",
-    "parsing": "解析媒体条目",
-    "normalizing": "整理识别结果",
-    "preparing_preview": "生成识别预览",
-    "ready": "识别结果已就绪",
-    "failed": "扫描失败",
-    "cancelled": "扫描已取消",
-}
-
 INTERRUPTED_STAGE_LABEL = "上次扫描意外中断，请重新扫描"
-
-
-def stage_order(stage: str) -> int:
-    return _STAGE_ORDER.get(str(stage or ""), 0)
 
 
 def parse_scan_timestamp(raw: str | None) -> datetime | None:

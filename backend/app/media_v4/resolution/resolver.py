@@ -2,13 +2,6 @@
 
 from __future__ import annotations
 
-# 这些 issue 只是提示：作品身份已经确定，或者关系需要后续补全，不阻断确认。
-# 前端据 blocking_issue_count 决定能否建立媒体库。
-NON_BLOCKING_ISSUE_CODES = frozenset({
-    "parsed_facts_review_hint",
-    "unresolved_parent_relation",
-})
-
 import re
 import unicodedata
 from collections import OrderedDict, defaultdict
@@ -33,6 +26,13 @@ from app.recognition.media import (
     _is_series_container,
     _parse_work_title_and_year,
 )
+
+# 这些 issue 只是提示：作品身份已经确定，或者关系需要后续补全，不阻断确认。
+# 前端据 blocking_issue_count 决定能否建立媒体库。
+NON_BLOCKING_ISSUE_CODES = frozenset({
+    "parsed_facts_review_hint",
+    "unresolved_parent_relation",
+})
 
 
 def _normalize_title(value: str) -> str:
@@ -165,15 +165,6 @@ def _work_key(facts: ParsedFacts, evidence: SourceEvidence | None = None) -> str
     media_type = _effective_media_type(facts)
     year = str(facts.year_candidate or "")
     return f"title:{title}:{year}:{media_type}"
-
-
-def _relation_work_key(facts: ParsedFacts) -> str:
-    """由 series_group 推导父系列 Work key；与 _work_key 的 title 规则一致。"""
-
-    if not facts.series_group or is_generic_container_title(facts.series_group):
-        return ""
-    media_type = (facts.media_type or facts.group_type or "unknown").casefold()
-    return f"series:{_normalize_title(facts.series_group)}:{media_type}"
 
 
 def _relation_work_key_from_row(row: dict) -> str:
@@ -343,7 +334,7 @@ class MediaResolver:
                 identities,
                 key=lambda value: (value[0], value[1], -1 if value[2] is None else value[2]),
             )
-            number_frequency = defaultdict(int)
+            number_frequency: dict[int, int] = defaultdict(int)
             for _context, number, _subnumber in ordered:
                 number_frequency[number] += 1
             # 单一、非复合 SP08 等保留原编号，便于后续 Provider 映射；
@@ -383,13 +374,15 @@ class MediaResolver:
             title_identity = _normalize_title(facts.episode_title) or _normalize_title(
                 evidence.relative_path
             )
-            allocation_key = (key, title_identity)
-            if allocation_key in allocated_unnumbered_specials:
+            # 与上面的 (key, identity) 三元组分配键不同维度：这里按"标题身份"分配
+            # 无编号特别篇的编号，因此用独立变量名，避免两种元组形状互相污染。
+            title_allocation_key = (key, title_identity)
+            if title_allocation_key in allocated_unnumbered_specials:
                 continue
             special_number = next_special_number.get(key, 1)
             while special_number in explicit_special_numbers.get(key, set()):
                 special_number += 1
-            allocated_unnumbered_specials[allocation_key] = special_number
+            allocated_unnumbered_specials[title_allocation_key] = special_number
             explicit_special_numbers[key].add(special_number)
             next_special_number[key] = special_number + 1
 

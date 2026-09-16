@@ -284,9 +284,6 @@ class _ExecutionRuntime:
             self._cancel_event.set()
         return self._cancel_event.is_set()
 
-    def request_cancel(self) -> None:
-        self._cancel_event.set()
-
     def report_progress(
         self,
         *,

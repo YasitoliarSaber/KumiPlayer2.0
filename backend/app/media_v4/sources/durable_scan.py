@@ -17,7 +17,6 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 
-from app.core.paths import get_data_dir
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.persistence.repositories import V4Repository
 from app.media_v4.sources.incremental import stage_scan_state
@@ -146,15 +145,6 @@ def _scan_evidence_count(database: V4Database, scan_id: str) -> int:
         )
 
 
-def _scan_root(database: V4Database, scan_id: str) -> str | None:
-    with database.connect() as conn:
-        row = conn.execute(
-            "SELECT root_id FROM source_scans WHERE scan_id = ?",
-            (scan_id,),
-        ).fetchone()
-    return str(row["root_id"]) if row else None
-
-
 def create_durable_scan(
     database: V4Database,
     *,
@@ -239,7 +229,9 @@ def create_durable_scan(
 
         try:
             _update_scan_progress(database, scan_id, stage="reading_source")
-            scan_kwargs = {}
+            # 显式标注：空字典会被 mypy 从首次赋值推断成 Callable[[], bool]，
+            # 随后写入 on_progress（函数）与 scan_id（字符串）都会被判类型错误。
+            scan_kwargs: dict[str, object] = {}
             if _accepts_parameter(scan_fn, "should_cancel"):
                 scan_kwargs["should_cancel"] = cancellation_requested
             if _accepts_parameter(scan_fn, "on_evidence_batch"):
@@ -278,7 +270,7 @@ def create_durable_scan(
             # 检查，草稿一旦开始创建就让扫描自然完成，避免出现
             # "cancelled 状态却挂着 draft" 的矛盾态。
             if finalize_fn is not None:
-                finalize_kwargs = {}
+                finalize_kwargs: dict[str, object] = {}
                 if _accepts_parameter(finalize_fn, "should_cancel"):
                     finalize_kwargs["should_cancel"] = cancellation_requested
                 if _accepts_parameter(finalize_fn, "on_progress"):
@@ -481,7 +473,3 @@ def _evidence_dict(item) -> dict:
     from dataclasses import asdict
 
     return asdict(item)
-
-
-def scans_data_root() -> str:
-    return str(get_data_dir() / "openlist_incremental")

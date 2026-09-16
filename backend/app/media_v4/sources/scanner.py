@@ -151,9 +151,6 @@ VIDEO_SUFFIXES = frozenset({
     ".wmv",
 })
 
-# 目录树可能携带 sidecar NFO；保留为只读 metadata 证据，不覆盖本地编号。
-METADATA_SUFFIXES = frozenset({".nfo"})
-
 # 目录树文件上限，与旧版 media_presets 64 MB 边界一致。
 MAX_TREE_FILE_BYTES = 64 * 1024 * 1024
 
@@ -480,7 +477,7 @@ def scan_local_directory(
         raise NotADirectoryError(str(root))
     root_id = _root_id(root)
     actual_scan_id = scan_id or ("scan_" + uuid.uuid4().hex)
-    evidence = []
+    evidence: list = []
     pending: list = []
     effective_batch_size = max(1, int(batch_size))
     visited = 0
@@ -596,12 +593,12 @@ def scan_openlist_directory(
     selected_root = normalize_remote_path(remote_root)
     mapping_root = normalize_remote_path(mapping_root)
     actual_scan_id = scan_id or ("scan_" + uuid.uuid4().hex)
-    evidence = []
+    evidence: list = []
     frontier_driven = (
         frontier_next is not None and frontier_mark is not None and frontier_add is not None
     )
     queue: deque[tuple[str, int]] | None = None
-    if frontier_driven:
+    if frontier_driven and frontier_add is not None:
         frontier_add(remote_paths=[selected_root], depth=0)
     else:
         queue = deque([(selected_root, 0)])
@@ -627,7 +624,7 @@ def scan_openlist_directory(
             # paused/resumable。未列目录仍留在 frontier 里，续扫接着跑。
             budget_exhausted = True
             break
-        if frontier_driven:
+        if frontier_driven and frontier_next is not None:
             frontier_item = frontier_next()
             if frontier_item is None:
                 break
@@ -647,7 +644,7 @@ def scan_openlist_directory(
         listed_directories += 1
         while True:
             if should_cancel is not None and should_cancel():
-                if frontier_driven:
+                if frontier_driven and frontier_mark is not None:
                     frontier_mark(
                         remote_path=directory, status="scanning", next_page=page,
                     )
@@ -658,7 +655,7 @@ def scan_openlist_directory(
                 # 文件不会入库，但必须让用户看见，不能静默丢弃。
                 skipped_entries += int(getattr(result, "skipped_entries", 0) or 0)
             except Exception:
-                if frontier_driven:
+                if frontier_driven and frontier_mark is not None:
                     # 保留当前页游标：恢复时从这一页继续，已完成目录不会被重列。
                     frontier_mark(
                         remote_path=directory, status="scanning", next_page=page,
@@ -674,9 +671,10 @@ def scan_openlist_directory(
                         directory_observations[
                             PurePosixPath(remote_path).relative_to(PurePosixPath(selected_root)).as_posix()
                         ] = item.modified
-                    if frontier_driven:
+                    if frontier_driven and frontier_add is not None:
                         frontier_add(remote_paths=[remote_path], depth=depth + 1)
                     else:
+                        assert queue is not None
                         queue.append((remote_path, depth + 1))
                     continue
                 if Path(item.name).suffix.casefold() not in VIDEO_SUFFIXES:
@@ -728,13 +726,13 @@ def scan_openlist_directory(
             if total and page * per_page >= total:
                 break
             page += 1
-            if frontier_driven:
+            if frontier_driven and frontier_mark is not None:
                 # 断点边界必须先交付已收集证据：否则恢复时从下一页开始，
                 # 上一页的证据会永久丢失（目录状态已推进）。
                 _emit_evidence_batch(on_evidence_batch, pending)
                 pending = []
                 frontier_mark(remote_path=directory, status="scanning", next_page=page)
-        if frontier_driven:
+        if frontier_driven and frontier_mark is not None:
             # 目录完成同样是一个断点边界：先把证据交付，再置 completed，
             # 保证"标记完成的目录"其证据一定已经落库。
             _emit_evidence_batch(on_evidence_batch, pending)

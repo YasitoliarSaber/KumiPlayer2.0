@@ -45,11 +45,6 @@ def connection_key(server_url: str, username: str, remote_root: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def _path_key(remote_path: str) -> str:
-    """(兼容保留) 规范化远端路径哈希；page-aware 缓存实际使用 _page_key。"""
-    return hashlib.sha256(normalize_remote_path(remote_path).encode("utf-8")).hexdigest()[:16]
-
-
 def _page_key(remote_path: str, page: int, per_page: int) -> str:
     """页维度缓存 key：规范化路径 + 页码 + 每页数量。
 
