@@ -459,8 +459,15 @@ def build_mpv_playback_args(
     args.append(f"--watch-later-directory={state_dir / 'watch_later'}")
     args.append(f"--demuxer-cache-dir={state_dir / 'cache'}")
     args.append(f"--log-file={state_dir / 'mpv.log'}")
-    # thumbfast 缩略图缓存只写入 KumiPlayer 状态目录，不写用户/视频目录
-    args.append(f"--script-opts=thumbfast.thumbnail={state_dir / 'thumbfast'}")
+    # thumbfast 缩略图缓存只写入 KumiPlayer 状态目录，不写用户/视频目录。
+    #
+    # 必须使用追加式 `--script-opt`（= `--script-opts-append`）：`--script-opts` 是
+    # **覆盖**语义，命令行上出现多次时只有最后一次生效，前面的键会被静默丢弃。
+    # 实测（第三方干净 MPV v0.41.0，`--script-opts=a=1 --script-opts=b=2` 的生效值）：
+    #     --script-opts=...  →  [b=2]        （a=1 丢失）
+    #     --script-opt=...   →  [a=1,b=2]    （追加）
+    # 这正是"Anime4K 默认模式与 thumbfast 缓存目录都不生效"的根因。
+    args.append(f"--script-opt=thumbfast.thumbnail={state_dir / 'thumbfast'}")
     # Anime4K 永久默认值：启动时注入，右键临时切换不影响
     try:
         from app.core.config import load_config
@@ -471,8 +478,8 @@ def build_mpv_playback_args(
             _mode = "off"
         if _quality not in {"light", "balanced", "high"}:
             _quality = "balanced"
-        args.append(f"--script-opts=kumiplayer_anime4k.default_mode={_mode}")
-        args.append(f"--script-opts=kumiplayer_anime4k.default_quality={_quality}")
+        args.append(f"--script-opt=kumiplayer_anime4k.default_mode={_mode}")
+        args.append(f"--script-opt=kumiplayer_anime4k.default_quality={_quality}")
     except Exception:
         # 配置读取失败不影响播放启动，使用默认值
         pass

@@ -141,8 +141,31 @@ def test_builtin_mpv_uses_config_dir_and_auto_loads_scripts_without_scripts_appe
     assert any(arg.startswith("--watch-later-directory=") for arg in args)
     assert any(arg.startswith("--demuxer-cache-dir=") for arg in args)
     assert any(arg.startswith("--log-file=") for arg in args)
-    # thumbfast 缩略图缓存也必须隔离到 KumiPlayer 状态目录
-    assert any(arg.startswith("--script-opts=thumbfast.thumbnail=") for arg in args)
+    # thumbfast 缩略图缓存也必须隔离到 KumiPlayer 状态目录（追加式注入）
+    assert any(arg.startswith("--script-opt=thumbfast.thumbnail=") for arg in args)
+
+
+def test_never_use_the_overwriting_script_opts_flag():
+    """`--script-opts` 是覆盖语义：命令行上出现多次时只有最后一次生效。
+
+    实测 `--script-opts=a=1 --script-opts=b=2` 的生效值是 `b=2`（前一项被静默丢弃），
+    而 `--script-opt`（别名 `--script-opts-append`）是追加。曾经因此导致
+    Anime4K 默认模式与 thumbfast 缓存目录双双失效：它们排在被最后写入的
+    `default_quality` 之前，整条被覆盖掉。
+    """
+
+    from app.playback import mpv
+
+    args = mpv._build_mpv_args(Path("mpv.exe"), "episode.strm")
+
+    assert not any(arg.startswith("--script-opts=") for arg in args), (
+        "禁止使用覆盖式 --script-opts：会丢掉同一命令行上更早注入的键"
+    )
+    append_form = [arg for arg in args if arg.startswith("--script-opt=")]
+    assert any(arg.startswith("--script-opt=thumbfast.thumbnail=") for arg in append_form)
+    # 同一个键不能被注入两次（否则说明仍有人在用覆盖式写法叠加）
+    keys = [arg.split("=", 1)[1].split("=", 1)[0] for arg in append_form]
+    assert len(keys) == len(set(keys))
 
 
 def test_builtin_mpv_playback_args_preserve_window_and_media_title():

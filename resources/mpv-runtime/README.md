@@ -21,7 +21,7 @@ mpv-runtime/
    ├─ input.conf          KumiPlayer 默认播放键位（SPACE/方向键/音量/画质等）
    ├─ scripts/            第三方组件：uosc / thumbfast / mpv-stats-zh（中文版）/ uosc_danmaku
    ├─ script-opts/        第三方组件配置（含 KumiPlayer 自有 Anime4K 静态默认值
-   │                      kumiplayer_anime4k.conf，后端启动时经 --script-opts 注入覆盖）
+   │                      kumiplayer_anime4k.conf，后端启动时经 --script-opt 追加注入覆盖）
    ├─ shaders/            Anime4K v4.0.1 官方着色器
    └─ fonts/              uosc 字体
 ```
@@ -40,9 +40,16 @@ mpv-runtime/
 mpv.exe
   --config-dir=<portable_config>        # 整合包层（用户可替换）
   --include=<kumiplayer/mpv.conf>       # KumiPlayer 强制配置追加
-  --script=<kumiplayer/scripts/*.lua>   # KumiPlayer 自有脚本（与整合包 scripts/ 并行）
-  --script-opts=...                     # 现有注入（thumbfast 缓存 / Anime4K 默认值）
+  --script=<kumiplayer/scripts/*.lua>   # KumiPlayer 自有脚本（与整合包 scripts/ 并行；可重复）
+  --script-opt=thumbfast.thumbnail=...  # 追加式注入，务必用 --script-opt
+  --script-opt=kumiplayer_anime4k.default_mode=...
+  --script-opt=kumiplayer_anime4k.default_quality=...
 ```
+
+> ⚠️ 不要用 `--script-opts=` 注入多个键：它是**覆盖**语义，同一命令行上出现多次时
+> 只有最后一次生效，前面的键会被静默丢弃（实测 `--script-opts=a=1 --script-opts=b=2`
+> 的生效值是 `b=2`）。`--script-opt` 是 `--script-opts-append` 的别名，逐条追加。
+> `--script` 则是追加语义，可安全重复。
 
 ## 与其他目录的关系
 
