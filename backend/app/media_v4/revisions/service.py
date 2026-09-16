@@ -2448,13 +2448,18 @@ class V4RevisionService:
             ).fetchall()
             entries = []
             tuple_fields = {"title_candidates", "edition_tags"}
+            # 批量读取：逐条 get_source_evidence/get_parsed_facts 会让 revision 级评估
+            # 退化成 N+1（3 万条证据 ≈ 6 万次单条 SELECT），而来源卡在有活动任务时
+            # 每 1.5 秒就要做一次只读评估。对象与单条读取完全一致。
+            evidence_by_id = self.repository.get_source_evidence_bulk(
+                [row["evidence_id"] for row in rows], conn=connection
+            )
+            facts_by_id = self.repository.get_parsed_facts_bulk(
+                [row["parsed_fact_id"] for row in rows], conn=connection
+            )
             for row in rows:
-                evidence = self.repository.get_source_evidence(
-                    row["evidence_id"], conn=connection
-                )
-                facts = self.repository.get_parsed_facts(
-                    row["parsed_fact_id"], conn=connection
-                )
+                evidence = evidence_by_id[str(row["evidence_id"])]
+                facts = facts_by_id[str(row["parsed_fact_id"])]
                 overrides = json.loads(row["overrides_json"] or "{}")
                 for key in tuple_fields:
                     if key in overrides:

@@ -9,6 +9,10 @@ from dataclasses import replace
 from app.media_v4.domain.models import ParsedFacts, SourceEvidence
 from app.media_v4.persistence.database import V4Database
 
+#: 批量读写的单批 id 数（与既有 `save_*_bulk` 的 400 保持一致）：
+#: 用 IN(...) 批量替代逐条 SELECT，避免 revision 级读取退化成 N+1。
+_BULK_BATCH_SIZE = 400
+
 
 class V4Repository:
     """只负责事实 round-trip，不在这里执行解析或身份推断。"""
@@ -203,6 +207,31 @@ class V4Repository:
             raise KeyError(evidence_id)
         return self._row_to_source_evidence(row)
 
+    def get_source_evidence_bulk(self, evidence_ids, *, conn) -> dict[str, SourceEvidence]:
+        """按 id 批量读取证据，返回 ``{evidence_id: SourceEvidence}``。
+
+        逐条 ``get_source_evidence`` 在 revision 级读取（识别预览、来源卡只读评估）里
+        会退化成 N+1：3 万条证据就是 6 万次单条 SELECT（还要加上同样数量的 parsed_facts
+        读取）。这里按 ``_BULK_BATCH_SIZE`` 一批，返回对象与单条读取完全一致；缺失的 id
+        同样抛 ``KeyError``，调用方语义不变。
+        """
+
+        unique = list(dict.fromkeys(str(item) for item in evidence_ids if str(item)))
+        found: dict[str, SourceEvidence] = {}
+        for offset in range(0, len(unique), _BULK_BATCH_SIZE):
+            batch = unique[offset : offset + _BULK_BATCH_SIZE]
+            placeholders = ",".join("?" for _ in batch)
+            rows = conn.execute(
+                f"SELECT * FROM source_evidence WHERE evidence_id IN ({placeholders})",
+                batch,
+            ).fetchall()
+            for row in rows:
+                found[str(row["evidence_id"])] = self._row_to_source_evidence(row)
+        for evidence_id in unique:
+            if evidence_id not in found:
+                raise KeyError(evidence_id)
+        return found
+
     def list_confirmed_source_evidence(self, root_id: str) -> list[SourceEvidence]:
         """一次查询读取来源根当前唯一 confirmed revision 的完整证据。"""
 
@@ -350,6 +379,25 @@ class V4Repository:
         if row is None:
             raise KeyError(parsed_fact_id)
         return self._row_to_parsed_facts(row)
+
+    def get_parsed_facts_bulk(self, parsed_fact_ids, *, conn) -> dict[str, ParsedFacts]:
+        """按 id 批量读取解析事实；语义与 ``get_parsed_facts`` 一致（缺失抛 KeyError）。"""
+
+        unique = list(dict.fromkeys(str(item) for item in parsed_fact_ids if str(item)))
+        found: dict[str, ParsedFacts] = {}
+        for offset in range(0, len(unique), _BULK_BATCH_SIZE):
+            batch = unique[offset : offset + _BULK_BATCH_SIZE]
+            placeholders = ",".join("?" for _ in batch)
+            rows = conn.execute(
+                f"SELECT * FROM parsed_facts WHERE parsed_fact_id IN ({placeholders})",
+                batch,
+            ).fetchall()
+            for row in rows:
+                found[str(row["parsed_fact_id"])] = self._row_to_parsed_facts(row)
+        for parsed_fact_id in unique:
+            if parsed_fact_id not in found:
+                raise KeyError(parsed_fact_id)
+        return found
 
     def list_confirmed_work_facts(self, revision_id: str, work_id: str, *, conn) -> list[ParsedFacts]:
         """读取本次已确认成员及其确认时覆盖，不重解析，也不复用历史别名。"""
