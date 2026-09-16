@@ -448,18 +448,45 @@ def _select_enriched_candidate(candidates: list[dict], target: dict, media_type:
     return matched[0] if len(unique_ids) == 1 else None
 
 
-def search_tmdb_candidates(query: str, media_type: str, year: int | None = None) -> list[dict] | None:
-    """手动元数据恢复：按标题搜索 TMDB 候选；未配置 Token 时返回 None。"""
+def open_tmdb_client() -> TMDBClient | None:
+    """按当前配置打开 TMDB 客户端；未配置 Token 时返回 None。
+
+    一次候选搜索要跑多个 query 并补全别名。调用方必须复用一个客户端，否则每次
+    请求都会重新握手 TCP/TLS，并且 `_response_cache`、连接池与限速状态全部作废。
+    客户端构造集中在这里，调用方（如 `resolution.candidates`）不需要知道怎么建。
+    """
+
+    config = load_config()
+    if not config.tmdb_bearer_token:
+        return None
+    return TMDBClient(bearer_token=config.tmdb_bearer_token)
+
+
+def search_tmdb_candidates(
+    query: str,
+    media_type: str,
+    year: int | None = None,
+    *,
+    client: TMDBClient | None = None,
+) -> list[dict] | None:
+    """手动元数据恢复：按标题搜索 TMDB 候选；未配置 Token 时返回 None。
+
+    传入 ``client`` 时复用它（一次候选搜索会跑最多 8 个 query，逐个新建客户端等于
+    每次重新握手 TCP/TLS，且 `_response_cache` 与连接池全部作废）。
+    """
 
     config = load_config()
     if not config.tmdb_bearer_token:
         return None
     media_type = "tv" if media_type in {"tv", "series"} else "movie"
-    with TMDBClient(bearer_token=config.tmdb_bearer_token) as client:
-        # 本地年份可能来自压制目录、季度目录或发行年份，并不一定等于
-        # Provider 的首播/上映年份。年份过滤无结果时必须回退到纯标题搜索，
-        # 这是旧版候选链的关键兜底，否则正确作品会被误报为“搜索不到”。
+    if client is not None:
         results = _search_with_year_fallback(client, query, media_type, year)
+    else:
+        with TMDBClient(bearer_token=config.tmdb_bearer_token) as owned:
+            # 本地年份可能来自压制目录、季度目录或发行年份，并不一定等于
+            # Provider 的首播/上映年份。年份过滤无结果时必须回退到纯标题搜索，
+            # 这是旧版候选链的关键兜底，否则正确作品会被误报为“搜索不到”。
+            results = _search_with_year_fallback(owned, query, media_type, year)
     return [_candidate_summary(item) for item in results[:8]]
 
 
@@ -911,7 +938,9 @@ def _build_tv_episode_mappings(
         # TMDB 的特别篇身份固定在 Season 0。本地旧映射可能把 SP 的
         # provider season 写成正片季号，但它不能继续决定本次请求的季度。
         if _is_special_episode(episode):
-            provider_season = 0
+            # 显式声明可空：另一分支来自 _positive_int（返回 int | None），
+            # 只在这一支写 int 会让 mypy 把变量定型成 int 再报冲突。
+            provider_season: int | None = 0
         else:
             provider_season = _positive_int(episode.get("provider_season_number"))
             if provider_season is None:
@@ -951,6 +980,7 @@ def _build_tv_episode_mappings(
             remote_by_number = {}
 
         for episode in episodes:
+            provider_episode: int | None
             if _is_special_episode(episode):
                 matched = _match_special_episode(
                     episode,

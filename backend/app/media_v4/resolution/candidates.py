@@ -20,6 +20,7 @@ from app.media_v4.domain.models import (
     ResolvedMediaGraph,
     ResolvedWork,
     ResolvedWorkAsset,
+    ResolvedWorkRelation,
     SourceEvidence,
 )
 from app.media_v4.parsing.parser import _normalize_filename_stem
@@ -533,17 +534,20 @@ def merge_graph(graph: ResolvedMediaGraph, merge_map: dict[str, str]) -> Resolve
     works_by_key: dict[str, ResolvedWork] = {}
     for work in graph.works:
         key = target(work.work_key)
-        existing = works_by_key.get(key)
-        if existing is None:
+        # 变量按对象类型命名：同一函数里三段循环都叫 existing/identity 会让
+        # mypy 按首次绑定推断类型，后续不同实体（Work/Episode/Asset/Relation）
+        # 全部报类型冲突，读代码时也分不清当前处理的是哪一类。
+        existing_work = works_by_key.get(key)
+        if existing_work is None:
             works_by_key[key] = replace(work, work_key=key)
             continue
         source_evidence_ids = tuple(
-            dict.fromkeys((*existing.source_evidence_ids, *work.source_evidence_ids))
+            dict.fromkeys((*existing_work.source_evidence_ids, *work.source_evidence_ids))
         )
         # target 指向的 Work 是上一步按权威候选标题挑出的代表。即使它在
         # 原图中的遍历顺序晚于 child，也必须保留代表的标题、年份和类型。
         merged = replace(
-            work if work.work_key == key else existing,
+            work if work.work_key == key else existing_work,
             work_key=key,
             source_evidence_ids=source_evidence_ids,
         )
@@ -559,7 +563,7 @@ def merge_graph(graph: ResolvedMediaGraph, merge_map: dict[str, str]) -> Resolve
             if episode.local_episode_number is None
             else None
         )
-        identity = (
+        episode_identity = (
             work_key,
             episode.local_season_number,
             episode.local_episode_number,
@@ -567,8 +571,8 @@ def merge_graph(graph: ResolvedMediaGraph, merge_map: dict[str, str]) -> Resolve
             episode.special_number,
             episode.edition_key,
         )
-        existing = episodes_by_identity.get(identity)
-        if existing is None:
+        existing_episode = episodes_by_identity.get(episode_identity)
+        if existing_episode is None:
             episode_key = "|".join(
                 str(value)
                 for value in (
@@ -579,31 +583,31 @@ def merge_graph(graph: ResolvedMediaGraph, merge_map: dict[str, str]) -> Resolve
                     episode.special_number,
                 )
             )
-            episodes_by_identity[identity] = replace(
+            episodes_by_identity[episode_identity] = replace(
                 episode,
                 episode_key=episode_key,
                 work_key=work_key,
             )
             continue
-        episodes_by_identity[identity] = replace(
-            existing,
+        episodes_by_identity[episode_identity] = replace(
+            existing_episode,
             absolute_episode_number=(
-                existing.absolute_episode_number
-                if existing.absolute_episode_number is not None
+                existing_episode.absolute_episode_number
+                if existing_episode.absolute_episode_number is not None
                 else episode.absolute_episode_number
             ),
-            display_title=existing.display_title or episode.display_title,
+            display_title=existing_episode.display_title or episode.display_title,
             asset_evidence_ids=tuple(
-                dict.fromkeys((*existing.asset_evidence_ids, *episode.asset_evidence_ids))
+                dict.fromkeys((*existing_episode.asset_evidence_ids, *episode.asset_evidence_ids))
             ),
             provider_season_number=(
-                existing.provider_season_number
-                if existing.provider_season_number is not None
+                existing_episode.provider_season_number
+                if existing_episode.provider_season_number is not None
                 else episode.provider_season_number
             ),
             provider_episode_number=(
-                existing.provider_episode_number
-                if existing.provider_episode_number is not None
+                existing_episode.provider_episode_number
+                if existing_episode.provider_episode_number is not None
                 else episode.provider_episode_number
             ),
         )
@@ -611,27 +615,27 @@ def merge_graph(graph: ResolvedMediaGraph, merge_map: dict[str, str]) -> Resolve
     work_assets_by_identity: dict[tuple[str, str], ResolvedWorkAsset] = {}
     for asset in graph.work_assets:
         work_key = target(asset.work_key)
-        identity = (work_key, asset.edition_key)
-        existing = work_assets_by_identity.get(identity)
-        if existing is None:
-            work_assets_by_identity[identity] = replace(asset, work_key=work_key)
+        asset_identity = (work_key, asset.edition_key)
+        existing_asset = work_assets_by_identity.get(asset_identity)
+        if existing_asset is None:
+            work_assets_by_identity[asset_identity] = replace(asset, work_key=work_key)
         else:
-            work_assets_by_identity[identity] = replace(
-                existing,
+            work_assets_by_identity[asset_identity] = replace(
+                existing_asset,
                 asset_evidence_ids=tuple(
-                    dict.fromkeys((*existing.asset_evidence_ids, *asset.asset_evidence_ids))
+                    dict.fromkeys((*existing_asset.asset_evidence_ids, *asset.asset_evidence_ids))
                 ),
             )
 
-    relations_by_identity = {}
+    relations_by_identity: dict[tuple[str, str, str], ResolvedWorkRelation] = {}
     for relation in graph.relations:
         parent = target(relation.parent_work_key)
         child = target(relation.child_work_key)
         if parent == child:
             continue
-        identity = (parent, child, relation.relation_type)
+        relation_identity = (parent, child, relation.relation_type)
         relations_by_identity.setdefault(
-            identity,
+            relation_identity,
             replace(relation, parent_work_key=parent, child_work_key=child),
         )
     return replace(
@@ -658,28 +662,36 @@ def default_candidate_search(
     （alternative_titles/translations），有共享缓存与预算上限。
     """
 
-    from app.core.config import load_config
-    from app.media_v4.jobs.metadata import enrich_candidate_aliases, search_tmdb_candidates
+    from app.media_v4.jobs.metadata import (
+        enrich_candidate_aliases,
+        open_tmdb_client,
+        search_tmdb_candidates,
+    )
 
-    config = load_config()
-    if not config.tmdb_bearer_token:
+    # 一次候选搜索只开一个客户端（构造与配置判断集中在 metadata）：
+    # 逐个 query 新建客户端会让每次请求重新握手 TCP/TLS，`_response_cache`、
+    # 连接池与限速状态全部作废（叠加全局串行限流后成本被放大成 N 份）。
+    client = open_tmdb_client()
+    if client is None:
         return []
     raw: list[dict] = []
     seen: set[tuple[str, str]] = set()
-    for query in queries:
-        for item in search_tmdb_candidates(query, media_type, year) or []:
-            key = (str(item.get("media_type") or media_type), str(item.get("provider_id") or ""))
-            if key in seen:
-                continue
-            seen.add(key)
-            raw.append(item)
-    enriched = enrich_candidate_aliases(
-        raw,
-        queries,
-        max_details=8,
-        detail_cache=detail_cache,
-        detail_budget=detail_budget,
-    )
+    with client:
+        for query in queries:
+            for item in search_tmdb_candidates(query, media_type, year, client=client) or []:
+                key = (str(item.get("media_type") or media_type), str(item.get("provider_id") or ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                raw.append(item)
+        enriched = enrich_candidate_aliases(
+            raw,
+            queries,
+            max_details=8,
+            detail_cache=detail_cache,
+            detail_budget=detail_budget,
+            client=client,
+        )
     results: list[WorkCandidate] = []
     for item in enriched:
         results.append(WorkCandidate(
