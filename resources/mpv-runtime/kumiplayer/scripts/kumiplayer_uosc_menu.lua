@@ -19,20 +19,33 @@ local script_name = "kumiplayer_uosc_menu"
 -- 分层架构降级保护：本脚本依赖 uosc（整合包层可能不包含）。
 -- uosc 未加载时跳过右键菜单注册，不影响其他 KumiPlayer 自有功能；
 -- 菜单入口脚本消息（open-anime4k-menu）保留但无动作，后端调用不报错。
+--
+-- 可用性探测有两条通道，**不得**再使用 `script-names`：
+--   `script-names` 属性在 mpv v0.41.0 里根本不存在（`mpv --list-properties`
+--   只列出 scripts / input-bindings / script-opts），读取结果恒为 nil，
+--   会让本脚本永远判定"uosc 未加载"——右键菜单被无条件跳过（已复现的故障）。
+--   ① uosc 加载后会主动广播 `uosc-version`（无需请求），据此置位；
+--   ② 同步兜底：uosc 会注册自己的键位段，input-bindings 里的 owner 即脚本名。
+-- 失败结果**不缓存**：右键可能发生在 uosc 注册键位之前，缓存 false 会让整个
+-- 会话都打不开菜单。
 local uosc_available = false
+
 local function check_uosc_available()
     if uosc_available then
         return true
     end
-    local clients = mp.get_property_native("script-names") or {}
-    for _, name in ipairs(clients) do
-        if tostring(name) == "uosc" then
+    for _, binding in ipairs(mp.get_property_native("input-bindings") or {}) do
+        if tostring(binding["owner"] or "") == "uosc" then
             uosc_available = true
             return true
         end
     end
     return false
 end
+
+mp.register_script_message("uosc-version", function()
+    uosc_available = true
+end)
 
 local MODES = {
     { value = "off", title = "关闭" },

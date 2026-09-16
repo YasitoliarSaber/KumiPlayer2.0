@@ -23,7 +23,7 @@
       ],
       "distribution_notes": "禁止 uosc 自更新；菜单/文件/URL/队列入口由 KumiPlayer 受控层屏蔽",
       "configuration_sha256": {
-        "script-opts/uosc.conf": "94232842a395dc851545852cd6604b90131e177b95e2d480975511d95291e918"
+        "script-opts/uosc.conf": "107b4eb60a5f1fc88e574cacf3161400a64a76e2f086017af17983b8a4e1233b"
       }
     },
     {
@@ -101,7 +101,7 @@
       },
       "distribution_notes": "仅随包 S/M/L/VL 变体；UL 不进首发常规档位；链顺序以官方模板为准",
       "configuration_sha256": {
-        "scripts/kumiplayer_uosc_menu.lua": "EA735F3C2BB6FC07CCF7AD4EF60B39A93034046110858690BEAA5FD3CD466135"
+        "scripts/kumiplayer_uosc_menu.lua": "602CE9FF8B269E17C1080879525830CFA70BE3F7EA2A1FD5F3EC8C2234CABFE2"
       }
     },
     {
