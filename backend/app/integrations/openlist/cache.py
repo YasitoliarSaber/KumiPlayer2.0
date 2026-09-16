@@ -30,6 +30,11 @@ MAX_CACHE_PATHS = 2000
 #: 每个连接缓存总字节上限（近似按文件大小统计）
 MAX_CACHE_BYTES = 64 * 1024 * 1024
 
+#: LRU 访问时间的落盘间隔（秒）。缓存命中是高频操作（每次翻页一次），
+#: 每次命中都读+重写整份索引（2000 条时约数百 KB）在热路径上代价过高；
+#: LRU 只需要分钟级精度，因此按此间隔节流写回。
+INDEX_WRITE_MIN_INTERVAL_SECONDS = 60.0
+
 #: 缓存条目白名单字段（其余字段一律不落盘）
 _ENTRY_FIELDS = ("name", "is_dir", "size", "modified", "remote_path")
 
@@ -123,25 +128,28 @@ def content_hash(entries: list[dict]) -> str:
 
 
 def _evict_locked(conn_key: str, index: dict) -> None:
-    """容量淘汰：按 last_accessed_at 升序删除，直到低于路径数/字节上限。"""
-    if len(index) <= MAX_CACHE_PATHS:
-        total = sum(int(item.get("size_bytes") or 0) for item in index.values())
-        if total <= MAX_CACHE_BYTES:
-            return
+    """容量淘汰：按 last_accessed_at 升序删除，直到低于路径数/字节上限。
+
+    总量只在这里算一次，删除时按条目自身 size 递减——原实现在循环内每轮都
+    `sum()` 全量重算，最坏是 O(n²)（2000 条 ≈ 400 万次字典遍历）。
+    """
+
+    total = sum(int(item.get("size_bytes") or 0) for item in index.values())
+    if len(index) <= MAX_CACHE_PATHS and total <= MAX_CACHE_BYTES:
+        return
     ordered = sorted(
         index.items(),
         key=lambda item: (item[1].get("last_accessed_at") or 0, item[0]),
     )
-    for path_key, _meta in ordered:
-        if len(index) <= MAX_CACHE_PATHS:
-            total = sum(int(item.get("size_bytes") or 0) for item in index.values())
-            if total <= MAX_CACHE_BYTES:
-                break
+    for path_key, meta in ordered:
+        if len(index) <= MAX_CACHE_PATHS and total <= MAX_CACHE_BYTES:
+            break
         try:
             (_cache_root(conn_key) / f"{path_key}.json").unlink(missing_ok=True)
         except OSError:
             pass
         index.pop(path_key, None)
+        total -= int(meta.get("size_bytes") or 0)
 
 
 def read_cache(
@@ -174,9 +182,26 @@ def read_cache(
         index = _read_index(conn_key)
         path_key = _page_key(remote_path, page, per_page)
         meta = index.get(path_key)
-        if meta is not None:
-            meta["last_accessed_at"] = now
+        if meta is None:
+            # 缓存文件在、索引项缺失：补登记（并落盘一次），否则永远不进 LRU。
+            try:
+                size_bytes = file_path.stat().st_size
+            except OSError:
+                size_bytes = 0
+            index[path_key] = {
+                "path": str(payload.get("path") or normalize_remote_path(remote_path)),
+                "fetched_at": fetched_at,
+                "last_accessed_at": now,
+                "size_bytes": size_bytes,
+            }
+            _evict_locked(conn_key, index)
             _write_index(conn_key, index)
+        else:
+            previous_access = float(meta.get("last_accessed_at") or 0)
+            meta["last_accessed_at"] = now
+            # 命中即重写整份索引在浏览热路径上代价过高；LRU 按分钟级精度足够。
+            if now - previous_access >= INDEX_WRITE_MIN_INTERVAL_SECONDS:
+                _write_index(conn_key, index)
     return {
         "path": str(payload.get("path") or normalize_remote_path(remote_path)),
         "entries": entries,
