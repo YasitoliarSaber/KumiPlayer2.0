@@ -10,10 +10,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from fastapi.testclient import TestClient
-
 from app.core.config import invalidate_config_cache
 from app.main import app
+from fastapi.testclient import TestClient
 
 
 @pytest.fixture
@@ -1005,3 +1004,80 @@ def test_real_mpv_anime4k_menu_click_forwards_set_session(tmp_path):
         "菜单点击未转发到 Anime4K set-session（menu-event → set-session 链路断开）；"
         "mpv 日志：" + chr(10) + log[-1500:]
     )
+
+
+@pytest.mark.skipif(
+    not _REAL_MPV_EXE.is_file(),
+    reason="内置 MPV 二进制不存在，跳过真实脚本链路冒烟测试",
+)
+def test_real_mpv_right_click_actually_opens_the_uosc_menu(tmp_path):
+    """真实 mpv 上验证右键「打开菜单」链路：必须把 open-menu 发给 uosc。
+
+    防回归：菜单脚本原先用 `script-names` 探测 uosc，而该属性在 mpv v0.41.0 的
+    属性列表里根本不存在（`mpv --list-properties` 只有 scripts / input-bindings），
+    读取恒为 nil → `check_uosc_available()` 永远返回 false → 右键被无条件跳过
+    （用户可见症状：右键没有任何反应）。上一条用例只覆盖"点击菜单项"链路
+    （menu-event 不经过可用性检查），所以没能拦住这个故障。
+    """
+
+    import subprocess as _subprocess
+
+    config_dir = ROOT / "resources/mpv-runtime/portable_config"
+    scripts_dir = ROOT / "resources/mpv-runtime/kumiplayer/scripts"
+    trigger = tmp_path / "trigger_open_menu.lua"
+    trigger.write_text(
+        'mp.register_event("file-loaded", function()\n'
+        "    mp.add_timeout(0.6, function()\n"
+        '        mp.commandv("script-message-to", "kumiplayer_uosc_menu", "open-anime4k-menu")\n'
+        "    end)\n"
+        "end)\n",
+        encoding="utf-8",
+    )
+    log_path = tmp_path / "mpv-open-menu.log"
+
+    proc = _subprocess.Popen(
+        [
+            str(_REAL_MPV_EXE),
+            "--no-terminal",
+            "--force-window=no",
+            "--vo=null",
+            "--no-audio",
+            f"--config-dir={config_dir}",  # 真实 uosc 由 portable_config 自动加载
+            "av://lavfi:testsrc=duration=3",
+            f"--script={scripts_dir / 'kumiplayer_uosc_menu.lua'}",
+            f"--script={scripts_dir / 'kumiplayer_anime4k.lua'}",
+            f"--script={trigger}",
+            f"--log-file={log_path}",
+            "-v",
+        ],
+        stdout=_subprocess.DEVNULL,
+        stderr=_subprocess.DEVNULL,
+        creationflags=getattr(_subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    try:
+        proc.wait(timeout=60)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+    log = log_path.read_text(encoding="utf-8", errors="replace")
+    assert "kumiplayer_uosc_menu] loaded" in log, f"菜单脚本未加载：{chr(10)}{log[-800:]}"
+    assert "uosc 未加载" not in log, (
+        "uosc 明明已加载却被判定为未加载（可用性探测失效）；mpv 日志：" + chr(10) + log[-1500:]
+    )
+    assert 'args="open-menu"' in log, (
+        "右键入口没有把 open-menu 发给 uosc（右键菜单打不开）；mpv 日志：" + chr(10) + log[-1500:]
+    )
+
+
+def test_uosc_pause_indicator_is_disabled_in_controlled_config():
+    """受控 uosc 配置必须关闭暂停指示器。
+
+    uosc 默认（flash）会在每次暂停/恢复时于画面中央闪现大号播放/暂停图标，
+    与时间轴/控制条重复且遮挡画面；本项由用户明确反馈后关闭。
+    """
+
+    config = (ROOT / "resources/mpv-runtime/portable_config/script-opts/uosc.conf").read_text(
+        encoding="utf-8"
+    )
+    assert "pause_indicator=no" in config
