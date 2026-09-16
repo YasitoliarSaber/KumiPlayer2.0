@@ -495,6 +495,20 @@ class SourceScanRunner:
                 raise _CancelledScan()
             evidence = self._settled_evidence(task, returned)
             self._settle_total(task.scan_id, len(evidence))
+            # 读取阶段**真正**结束（证据全部落库并结算）→ 把阶段推进到 parsing。
+            #
+            # 为什么非要推进：恢复分支 B 用"阶段已过读取"来区分"读完了、只差 finalizer"
+            # 与"读到一半就崩了"。而 `total_count` 在读取期间会被同步到 processed_count
+            # （durable_scan._update_scan_progress），所以单看计数无法区分这两种情况——
+            # 若只是把阶段条件删掉，读到一半崩溃的扫描会被误判成"证据完整"，于是用
+            # **残缺证据**建立 draft，比要求重新扫描严重得多。
+            _update_scan_progress(
+                self.database,
+                task.scan_id,
+                stage="parsing",
+                processed_count=len(evidence),
+                total_count=len(evidence),
+            )
             if runtime.cancellation_requested():
                 raise _CancelledScan()
             self._run_finalizer(task, runtime, evidence)
