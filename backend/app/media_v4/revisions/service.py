@@ -242,6 +242,27 @@ def metadata_recovery_policy(metadata: dict | None, *, binding_status: str = "")
         reason = "在线作品资料不可用，请重新选择正确的在线作品。"
         return {"reason": reason, "action": action, "hint": _metadata_recovery_hint(action)}
 
+    if reason_code == "artifact_incomplete":
+        # 只在**确有产物上下文**时才算"只缺本地图片"：`artifact_state=degraded`，或
+        # 完整性原因全部是图片问题（`completeness`）。此时不得提供"重新获取在线资料"
+        # ——那会发起一轮完整联网抓取，与"只重新下载缺失图片"的零网络承诺冲突；
+        # 前端据此不显示联网重试按钮，补全走专门的图片重下入口。
+        #
+        # 没有产物上下文的历史快照保持原行为（retry_metadata）：那些行既没有
+        # degraded 标记、也没有图片补全入口，若一律返回 none，用户将无动作可用。
+        from app.media_v4.jobs.completeness import artwork_only_reasons
+
+        artifact_context = (
+            str(payload.get("artifact_state") or "").strip().casefold() == "degraded"
+            or artwork_only_reasons(payload.get("completeness"))
+        )
+        if artifact_context:
+            return {
+                "reason": _friendly_metadata_reason(state, raw_reason, reason_code),
+                "action": "none",
+                "hint": "可只重新下载缺失的媒体图片，不需要重新获取在线资料。",
+            }
+
     if season_results:
         missing_or_unmapped = [
             item for item in season_results
@@ -305,6 +326,8 @@ def _metadata_recovery_action_fallback(status: str, reason_code: str, reason: st
     if code in _AUTH_CODES:
         return "check_settings"
     if code in {"provider_rate_limited", "source_unavailable", "artifact_incomplete", "invalid_response", "provider_resource_missing"}:
+        # artifact_incomplete 在没有产物上下文时保持"可联网重试"：这是历史快照的
+        # 唯一可用动作；确为"只缺图片"的快照由 metadata_recovery_policy 提前拦下。
         return "retry_metadata"
     if code == "mirror_root_missing":
         return "check_settings"

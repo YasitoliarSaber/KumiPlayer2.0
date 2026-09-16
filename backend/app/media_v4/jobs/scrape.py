@@ -458,6 +458,10 @@ class V4ScrapeService:
                     if artwork_only_reasons(reasons):
                         result = {
                             **result,
+                            # 显式原因码：资料已就绪、只是本地图片有问题。没有它，
+                            # 恢复策略只能靠文本兜底，会给用户"媒体信息需要处理"这种
+                            # 指向在线资料的误导文案（而真正该做的是只重下图片）。
+                            "reason_code": "artifact_incomplete",
                             "artifact_state": "degraded",
                             "artifact_reasons": list(reasons),
                             "reason": "；".join(reasons),
