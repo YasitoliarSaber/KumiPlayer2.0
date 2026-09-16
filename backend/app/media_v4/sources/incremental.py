@@ -372,11 +372,20 @@ def scan_openlist_incremental(
                 previous_modified is not None
                 and current_modified is not None
                 and previous_modified != current_modified
-            ) or directory_content_changed
-            if (is_new or changed) and child_path not in queued:
-                queue.append(child_path)
-                queued.add(child_path)
+            )
+            if is_new or changed:
+                # 新增/修改时间变化都要在本轮核对，且必须计入"变化目录"统计——
+                # 即使它本来就被滚动抽样选中（否则统计会把"变化优先"误报为 0）。
                 changed_queued.add(child_path)
+                if child_path not in queued:
+                    queue.append(child_path)
+                    queued.add(child_path)
+            elif directory_content_changed:
+                # 本目录的直接清单哈希变了（例如同级新增/删除了条目），但该子目录
+                # 自身 mtime 没有变化：不把它拉进本轮（否则一次增删会把所有子目录
+                # 都拉进来，让受控增量膨胀成近全量重列），而是把它的"最近核对时间"
+                # 归零，让下一轮的滚动抽样优先挑中它。子树变化不会被永久漏掉。
+                directories[child_path]["last_verified_at"] = 0
 
         existing_direct_files = {path for path in files if _parent(path) == relative_dir}
         for missing_file in existing_direct_files - set(remote_videos):
@@ -431,10 +440,11 @@ def scan_openlist_incremental(
     stats = {
         "requested_directories": len(processed),
         "rolling_verified": sum(1 for path in rolling if path in processed),
-        "changed_directories": len(changed_queued),
         # TXT 基线只能给出"存在过这些目录"，远端时间事实要逐轮核对补齐：
         # 这两个数字让用户看到"还有多少目录没被远端核实过"。
         "verified_directories": verified_directories,
         "unknown_directories": len(directories) - verified_directories,
+        # 只有本轮真正核对过的"变化目录"才算数：入队但被预算挡下的不算。
+        "changed_directories": len([path for path in changed_queued if path in processed]),
     }
     return actual_scan_id, [files[path] for path in sorted(files, key=str.casefold)], next_state, stats

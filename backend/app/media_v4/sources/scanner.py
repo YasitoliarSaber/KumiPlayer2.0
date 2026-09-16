@@ -609,6 +609,9 @@ def scan_openlist_directory(
     observed_entries = 0
     listed_directories = 0
     budget_exhausted = False
+    # 单页请求条目数：终止判据与请求必须用同一个值，否则"短页=末页"的误判会
+    # 静默丢掉后续条目（详见下方终止判据处的说明）。
+    per_page = 100
     route_configs = routes or []
     pending: list = []
     effective_batch_size = max(1, int(batch_size))
@@ -649,7 +652,7 @@ def scan_openlist_directory(
                     )
                 raise SourceScanCancelled()
             try:
-                result = client.list_dir(directory, page=page, per_page=100, refresh=False)
+                result = client.list_dir(directory, page=page, per_page=per_page, refresh=False)
             except Exception:
                 if frontier_driven:
                     # 保留当前页游标：恢复时从这一页继续，已完成目录不会被重列。
@@ -711,7 +714,14 @@ def scan_openlist_directory(
                 processed_count=len(evidence),
                 total_count=0,
             )
-            if len(result.entries) < 100 or (total and page * 100 >= total):
+            # 终止判据必须基于**实际请求的 per_page**与**服务端是否给出 total**。
+            # 原先写死 `len(entries) < 100`：当驱动把每页截得比请求值短、而 total
+            # 又缺失（浏览链路的 test_openlist_pagination 已承认 total 可能缺失）时，
+            # 短页会被误判成末页，该目录后续条目被静默丢弃且目录仍被标记 completed。
+            # 空页才是确定的末页；有 total 时再按页数封顶。
+            if not result.entries:
+                break
+            if total and page * per_page >= total:
                 break
             page += 1
             if frontier_driven:
