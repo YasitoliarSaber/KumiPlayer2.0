@@ -109,6 +109,29 @@ class OpenListNetworkError(OpenListError):
         super().__init__(message, kind="network")
 
 
+class OpenListUnreachableError(OpenListNetworkError):
+    """连接层失败：服务没启动、端口无人监听、DNS 解析失败。
+
+    与 ``network``（可达但对端异常）语义不同：本错误说明请求**根本没有到达
+    OpenList**，因此它不是远端风控/限流的证据，不应触发来源冷却——否则
+    "用户忘了启动 OpenList" 会被误判成"远端触发访问保护"并锁死来源。
+    ``source_health`` 把该 kind 归入 breaker irrelevant，只记录失败原因。
+
+    继承 ``OpenListNetworkError``：既有 ``except OpenListNetworkError`` 分支与
+    调用方语义保持兼容，只细化 kind。
+    """
+
+    def __init__(self, message: str = "无法连接 OpenList 服务，请确认它已启动且地址可达"):
+        OpenListError.__init__(self, message, kind="unreachable")
+
+
+class OpenListServerError(OpenListNetworkError):
+    """OpenList 服务端错误（重试后仍为 5xx）：对端可达但暂时不可用。"""
+
+    def __init__(self, message: str = "OpenList 服务暂时不可用，请稍后重试"):
+        OpenListError.__init__(self, message, kind="server_error")
+
+
 class OpenListRedirectError(OpenListError):
     """服务器返回重定向；跨主机重定向一律拒绝。"""
 

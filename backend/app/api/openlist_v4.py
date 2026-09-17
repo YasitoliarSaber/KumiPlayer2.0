@@ -358,9 +358,16 @@ def browse(path: str = "", page: int = 1, per_page: int = _DEFAULT_PER_PAGE, ref
     _ensure_within_root(root, normalized)
     username, password = _credentials()
     conn_key = connection_key(config.openlist_server_url, username, root)
-    allowed, _health = source_health.peek_request_allowed(
-        governor_connection_key(config.openlist_server_url, username)
+    # 健康记录/限速用的是**规范化后**的服务地址键（客户端内部即如此计算）；
+    # 这里若用原始配置值，带尾斜杠或 /dav 的地址会读写到另一行记录，
+    # 导致 UI 的重试与浏览器准入判断互相不一致。
+    health_key = governor_connection_key(
+        normalize_openlist_server_url(config.openlist_server_url), username
     )
+    # 浏览是**用户显式操作**：非滥用类冷却先解除并真实尝试一次；只有
+    # risk_control / rate_limit 这类真正的滥用信号才会零请求直接拒绝（423）。
+    source_health.clear_cooldown(health_key)
+    allowed, _health = source_health.peek_request_allowed(health_key, interactive=True)
     cached = read_cache(conn_key, normalized, page=page, per_page=per_page)
     if not refresh and cached is not None and cached["fresh"]:
         return _browse_response(

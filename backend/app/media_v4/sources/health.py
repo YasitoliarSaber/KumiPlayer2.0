@@ -118,7 +118,17 @@ BREAKER_IRRELEVANT_KINDS = {
     "validation",
     "redirect",
     "scan_limit",
+    # 连接层失败（服务没开、连接被拒、DNS 失败）：请求**根本没到达远端**，
+    # 冷却保护不了任何东西，反而是把「用户忘了启动 OpenList」这种本机状态
+    # 误判成"远端风控"并锁死来源。实测症状：忘记开服务 → 浏览失败 3 次 →
+    # 30 分钟冷却 → 即使服务已启动，浏览/刷新/重试全部零请求被拒。
+    # 因此它只如实更新失败原因与时间，允许用户立刻重试。
+    "unreachable",
 }
+
+#: 真正的滥用信号：这些冷却**不允许**被交互操作解除，必须等冷却到期
+#: （risk_control 是远端风控拦截页，rate_limit 是服务端 429）。
+ABUSE_COOLDOWN_KINDS = frozenset({"risk_control", "rate_limit"})
 
 #: 触发立即冷却的失败类型（breaker relevant 子集）
 _IMMEDIATE_COOLDOWN_KINDS = {"risk_control", "rate_limit"}
@@ -488,7 +498,12 @@ def record_failure(source_id: str, kind: str, *, now: float | None = None) -> So
     return _transition(source_id, _fn, now=now)
 
 
-def peek_request_allowed(source_id: str, *, now: float | None = None) -> tuple[bool, SourceHealthRecord]:
+def peek_request_allowed(
+    source_id: str,
+    *,
+    now: float | None = None,
+    interactive: bool = False,
+) -> tuple[bool, SourceHealthRecord]:
     """只读准入预检：**绝不修改任何状态、绝不消费探针**。
 
     返回 (allowed, record)：
@@ -502,11 +517,17 @@ def peek_request_allowed(source_id: str, *, now: float | None = None) -> tuple[b
     用于任务开始前的低成本拦截（discovery handler / API 入口）：冷却中
     直接拒绝、零网络请求；冷却已到期时放行，由唯一的消费入口
     :func:`can_request` 在真正发请求前抢占探针。
+
+    ``interactive=True`` 表示**用户显式操作**（浏览目录 / 点刷新或重试）：
+    非滥用类冷却（transient / network / timeout / …）不再拦截，让用户能立刻
+    看到真实结果；真正的滥用信号（risk_control / rate_limit）仍然拦截。
     """
     now = now if now is not None else time.time()
     record = get_health(source_id)
     if record.state == STATE_COOLING_DOWN:
         if now < record.cooldown_until:
+            if interactive and record.reason_kind not in ABUSE_COOLDOWN_KINDS:
+                return True, record
             return False, record
         return True, record
     if record.state == STATE_PROBE:
@@ -514,7 +535,51 @@ def peek_request_allowed(source_id: str, *, now: float | None = None) -> tuple[b
     return True, record
 
 
-def can_request(source_id: str, *, now: float | None = None) -> tuple[bool, SourceHealthRecord]:
+def clear_cooldown(source_id: str, *, now: float | None = None) -> bool:
+    """手动解除**非滥用类**冷却（用户显式重试 / 浏览前调用）。
+
+    返回是否真的清除了冷却：
+
+    - cooling_down 且原因不在 :data:`ABUSE_COOLDOWN_KINDS` → 置 healthy、
+      consecutive_failures=0、cooldown_until=0、reason_kind 清空，返回 True；
+    - cooling_down 且原因是 risk_control / rate_limit → **不动**，返回 False
+      （远端已明确风控/限流，继续重试只会加深风控，必须等冷却到期）；
+    - 其他状态 → 不动，返回 False。
+
+    与 :func:`record_success` 的区别：后者在冷却中刻意保持冷却（防止并发旧
+    请求的滞后成功解除新触发的风险冷却）；本函数是**用户意图驱动的显式解除**，
+    因此只对非滥用原因生效。
+    """
+
+    now = now if now is not None else time.time()
+    cleared = False
+
+    def _fn(current: SourceHealthRecord) -> dict | None:
+        nonlocal cleared
+        if current.state != STATE_COOLING_DOWN:
+            return None
+        if current.reason_kind in ABUSE_COOLDOWN_KINDS:
+            return None
+        cleared = True
+        return {
+            "state": STATE_HEALTHY,
+            "reason_kind": "",
+            "consecutive_failures": 0,
+            "cooldown_until": 0.0,
+            "last_failure_at": current.last_failure_at,
+            "last_success_at": current.last_success_at,
+        }
+
+    _transition(source_id, _fn, now=now)
+    return cleared
+
+
+def can_request(
+    source_id: str,
+    *,
+    now: float | None = None,
+    interactive: bool = False,
+) -> tuple[bool, SourceHealthRecord]:
     """判断当前是否允许向该来源发请求（**唯一消费探针的入口**）。
 
     **只应在物理 HTTP 请求前调用**；任务开始前的预检一律使用
@@ -546,15 +611,21 @@ def can_request(source_id: str, *, now: float | None = None) -> tuple[bool, Sour
     """
     now = now if now is not None else time.time()
     transitioned_to_probe = False
+    interactive_bypass = False
 
     def _fn(current: SourceHealthRecord) -> dict | None:
-        nonlocal transitioned_to_probe
+        nonlocal transitioned_to_probe, interactive_bypass
         if current.state != STATE_COOLING_DOWN:
             # healthy / 无记录 / probe：不改写（probe 由上次调用者持有，
             # 未上报前不允许再发请求——单探针保护）
             return None
         if now < current.cooldown_until:
-            # 冷却未到期（含并发刚延长的冷却）：不允许
+            # 冷却未到期（含并发刚延长的冷却）：不允许。
+            # 例外：用户显式操作（浏览/刷新/重试）不受非滥用类冷却拦截——
+            # 本地准入不能把"用户想立刻看结果"这件事也挡掉。
+            if interactive and current.reason_kind not in ABUSE_COOLDOWN_KINDS:
+                interactive_bypass = True
+                return None
             return None
         # 冷却期已结束：事务内原子转 probe（唯一消费探针的路径；
         # 串行化保证此判断基于最新已提交值，绝不可能绕过新 cooldown）
@@ -569,6 +640,9 @@ def can_request(source_id: str, *, now: float | None = None) -> tuple[bool, Sour
         }
 
     record = _transition(source_id, _fn, now=now)
+    if interactive_bypass:
+        # 交互放行：不消费探针、不改状态，仅本次请求直接发出去。
+        return True, record
     if record.state == STATE_COOLING_DOWN:
         # 冷却中：本调用者转 probe 提交后可能被并发 risk_control 重新冷却
         # （重读即最新值），未到期则拒绝；防御性保留过期放行分支

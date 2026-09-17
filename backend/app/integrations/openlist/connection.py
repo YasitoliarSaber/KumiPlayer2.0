@@ -37,8 +37,10 @@ from app.integrations.openlist.models import (
     OpenListRateLimitedError,
     OpenListRedirectError,
     OpenListRiskControlError,
+    OpenListServerError,
     OpenListSourceCoolingDownError,
     OpenListTimeoutError,
+    OpenListUnreachableError,
     OpenListValidationError,
 )
 from app.media_v4.sources import health as source_health
@@ -127,12 +129,14 @@ def _classify(exc: OpenListError, *, phase: str) -> OpenListConnectionProbeResul
         return OpenListConnectionProbeResult(
             False, "timeout", phase, "连接 OpenList 超时，请确认服务地址可达"
         )
+    if isinstance(exc, OpenListServerError):
+        # 对端可达但 5xx：与"连不上"严格区分（修复前靠 message 子串判断）。
+        return OpenListConnectionProbeResult(False, "server_unavailable", phase, str(exc))
+    if isinstance(exc, OpenListUnreachableError):
+        # 连接层失败：请求根本没到达 OpenList（服务没启动 / 端口无人监听）。
+        # 这是本机状态，必须如实提示"确认服务已启动"，不能报成远端风控。
+        return OpenListConnectionProbeResult(False, "unreachable", phase, str(exc))
     if isinstance(exc, OpenListNetworkError):
-        message = str(exc)
-        if "服务暂时不可用" in message:
-            return OpenListConnectionProbeResult(
-                False, "server_unavailable", phase, message
-            )
         return OpenListConnectionProbeResult(
             False,
             "network_unavailable",
@@ -236,11 +240,14 @@ def _probe_impl(
             "尚未配置 OpenList 连接，请先到设置页完成配置",
         )
 
-    # 冷却预检（与客户端内部准入同一 SourceHealth 状态）：冷却中主动测试
-    # 也零网络请求，直接返回 cooling_down，绝不尝试登录绕过访问保护。
-    allowed, _health = source_health.peek_request_allowed(
-        governor_connection_key(normalized_url, username)
-    )
+    # 冷却预检（与客户端内部准入同一 SourceHealth 状态）。用户点「检查连接/
+    # 重试」属于**交互操作**：非滥用类冷却（transient / network / timeout 等）
+    # 先解除再做一次真实探测，否则"忘了启动 OpenList"造成的瞬态冷却会让重试
+    # 永远零请求失败、用户无法自救；risk_control / rate_limit 这类真正的滥用
+    # 信号不解除，仍然零请求直接返回 cooling_down。
+    conn_key = governor_connection_key(normalized_url, username)
+    source_health.clear_cooldown(conn_key)
+    allowed, _health = source_health.peek_request_allowed(conn_key, interactive=True)
     if not allowed:
         return OpenListConnectionProbeResult(
             False,

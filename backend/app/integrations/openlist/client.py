@@ -47,8 +47,10 @@ from app.integrations.openlist.models import (
     OpenListRateLimitedError,
     OpenListRedirectError,
     OpenListRiskControlError,
+    OpenListServerError,
     OpenListSourceCoolingDownError,
     OpenListTimeoutError,
+    OpenListUnreachableError,
     OpenListValidationError,
 )
 from app.media_v4.sources import health as source_health
@@ -435,7 +437,9 @@ class OpenListClient:
                     self._sleep(self._retry_delay(attempt))
                 continue
             except httpx.HTTPError:
-                last_error = OpenListNetworkError()
+                # 连接层失败（服务没开/端口无人监听/DNS 失败）：请求根本没到达
+                # 远端，归为 unreachable——source_health 不据此冷却（见 health.py）。
+                last_error = OpenListUnreachableError()
                 if attempt + 1 < self.max_attempts:
                     self._sleep(self._retry_delay(attempt))
                 continue
@@ -461,7 +465,7 @@ class OpenListClient:
                 if attempt + 1 < self.max_attempts:
                     self._sleep(self._retry_delay(attempt))
                     continue
-                raise OpenListNetworkError("OpenList 服务暂时不可用，请稍后重试")
+                raise OpenListServerError()
 
             # 认证失败：进程内单次重登后重试一次。
             #
@@ -606,7 +610,7 @@ class OpenListClient:
             except httpx.TimeoutException:
                 raise OpenListTimeoutError() from None
             except httpx.HTTPError:
-                raise OpenListNetworkError() from None
+                raise OpenListUnreachableError() from None
         if response.status_code in (301, 302, 303, 307, 308):
             raise OpenListRedirectError()
         if self._looks_like_risk_control(response):
@@ -615,7 +619,7 @@ class OpenListClient:
         if response.status_code == 429 or int(body.get("code", 200)) == 429:
             raise OpenListRateLimitedError()
         if response.status_code in (500, 502, 503, 504):
-            raise OpenListNetworkError("OpenList 服务暂时不可用，请稍后重试")
+            raise OpenListServerError()
         if response.status_code != 200 or body.get("code") != 200:
             raise OpenListAuthError(_safe_auth_message(body))
         data = body.get("data")
