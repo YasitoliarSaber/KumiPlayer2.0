@@ -234,7 +234,7 @@ def _configured_routes(config) -> list[OpenListRouteConfig]:
 def test_connection(req: TestConnectionRequest):
     config = load_config()
     server_url = (req.server_url or config.openlist_server_url).strip()
-    saved_username, saved_password, _state = resolve_openlist_credentials()
+    saved_username, saved_password, credential_state = resolve_openlist_credentials()
     username = req.username.strip() or saved_username
     password = req.password or saved_password
     if req.username.strip() and req.username.strip() != saved_username and not req.password:
@@ -243,6 +243,15 @@ def test_connection(req: TestConnectionRequest):
             "code": "invalid_configuration",
             "phase": "validation",
             "message": "请输入新 OpenList 账号对应的密码",
+        }
+    if (not username or not password) and credential_state == "unavailable":
+        # 凭据管理器不可用时**不能**说"尚未配置"：账号可能好好的，只是读不出来。
+        # 该 code 与 connection.py 的文档承诺、前端状态映射一致。
+        return {
+            "ok": False,
+            "code": "credential_store_unavailable",
+            "phase": "credential",
+            "message": "本机凭据管理器暂时不可用，无法读取已保存的 OpenList 账号，请稍后重试",
         }
     if not server_url or not username or not password:
         return {
@@ -303,13 +312,20 @@ def save_connection_config(req: SaveConfigRequest):
     server_url = normalize_openlist_server_url(req.server_url)
     old_server = normalize_openlist_server_url(config.openlist_server_url) if config.openlist_server_url else ""
     old_root = _remote_root(config)
-    remote_changed = (
-        server_url != old_server
-        or remote_root != old_root
-        or username != old_username
-        or bool(req.password and req.password != old_password)
+    # **两个变更要分开**：
+    # - endpoint_changed（地址/远端根）才需要作废内容路由——路由是"远端前缀 →
+    #   内容提供商"的映射，跟着远端走；
+    # - credentials_changed（用户名/密码）与路由无关，但它仍需要重新验证并清空
+    #   客户端池（池按 地址+用户名 缓存旧 Token）。
+    # 原实现把凭据也算进 remote_changed，于是"只改密码"会**静默清空用户的
+    # openlist_routes**（前端还不同步显示），后续注册扫描直接 409。
+    endpoint_changed = server_url != old_server or remote_root != old_root
+    credentials_changed = (
+        username != old_username or bool(req.password and req.password != old_password)
     )
+    remote_changed = endpoint_changed or credentials_changed
 
+    verified = False
     if remote_changed and not req.skip_verification:
         probe = probe_openlist_connection(
             server_url=server_url,
@@ -320,6 +336,7 @@ def save_connection_config(req: SaveConfigRequest):
         )
         if not probe.ok:
             raise HTTPException(status_code=400, detail=probe.message)
+        verified = True
 
     candidate = copy.deepcopy(config)
     candidate.openlist_server_url = server_url
@@ -331,7 +348,7 @@ def save_connection_config(req: SaveConfigRequest):
         candidate.openlist_cache_ttl_minutes = max(1, min(int(req.cache_ttl_minutes), 60 * 24 * 30))
     if req.prefetch_limit is not None:
         candidate.openlist_prefetch_limit = max(0, min(int(req.prefetch_limit), _MAX_PREFETCH))
-    if remote_changed:
+    if endpoint_changed:
         candidate.openlist_routes = []
     try:
         save_config(candidate)
@@ -340,9 +357,19 @@ def save_connection_config(req: SaveConfigRequest):
     if remote_changed:
         clear_openlist_client_pool()
     message = "OpenList 连接配置已保存"
+    if endpoint_changed:
+        message += "（远端地址或根目录已变更，内容来源路由已重置，请重新配置）"
     if req.skip_verification and remote_changed:
         message += "（未验证，请稍后点击检查连接）"
-    return {"ok": True, "message": message}
+    # verified 让前端只在**真的探测过并成功**时才显示"连接正常"：
+    # 后端按规范化值判断变更，前端按原始字符串判断，两者不等价时（例如把地址从
+    # http://host 改成 http://host/dav/）后端会跳过探测，前端却显示已连接。
+    return {
+        "ok": True,
+        "message": message,
+        "verified": verified,
+        "routes_reset": endpoint_changed,
+    }
 
 
 @router.get("/browse")

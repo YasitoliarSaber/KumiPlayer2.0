@@ -8,6 +8,7 @@ POST  /api/config/test/deepseek 测试 DeepSeek 连通性
 POST  /api/config/test/media-paths 轻量验证网盘挂载与视频样本
 """
 
+import copy
 import json
 import subprocess
 import sys
@@ -228,26 +229,67 @@ def patch_config(req: ConfigPatch):
         and not patch_dict.get("openlist_password")
     ):
         raise HTTPException(status_code=400, detail="请输入新 OpenList 账号对应的密码")
+    # 先在副本上应用，**持久化成功后才让缓存指向新值**：原实现直接 setattr 到
+    # load_config() 返回的缓存单例上，持久化失败时内存已改、磁盘没改，后续
+    # GET /api/config 会把从未落盘的值回给前端（实测：桩持久化抛错后，
+    # 内存已是新地址而磁盘仍是旧地址）。
+    candidate = copy.deepcopy(config)
     for key in _CREDENTIAL_FIELDS:
         if key in patch_dict and patch_dict[key] == "":
             # 空字符串表示不修改，跳过
             continue
         if key in patch_dict:
-            setattr(config, key, patch_dict[key])
+            setattr(candidate, key, patch_dict[key])
 
     # 非敏感字段直接更新
     for key, value in patch_dict.items():
         if key in _CREDENTIAL_FIELDS:
             continue
-        setattr(config, key, value)
+        setattr(candidate, key, value)
 
-    save_config(config)
+    # OpenList 字段：通用 PATCH 仍然可以改（既有契约与测试如此），但必须补上
+    # 专用端点拥有的核心不变量，否则这条通道会留下真实危害：
+    # - 未规范化的地址会让 openlist_root_id / 遥测键与客户端连接键分叉；
+    # - 改了地址/凭据却不失效客户端池 → 继续用旧 Token 打旧地址；
+    # - 改了远端地址/根目录却不作废内容路由 → 路由与实际远端不再匹配。
+    openlist_keys = {key for key in patch_dict if key.startswith("openlist_")}
+    if openlist_keys:
+        from app.integrations.openlist.client import (
+            normalize_openlist_server_url,
+            validate_server_url,
+        )
+
+        if "openlist_server_url" in patch_dict:
+            raw_url = str(patch_dict.get("openlist_server_url") or "").strip()
+            if raw_url:
+                ok_url, reason = validate_server_url(raw_url)
+                if not ok_url:
+                    raise HTTPException(status_code=400, detail=reason)
+                candidate.openlist_server_url = normalize_openlist_server_url(raw_url)
+        if "openlist_remote_root" in patch_dict:
+            from app.integrations.openlist.client import normalize_remote_path
+
+            candidate.openlist_remote_root = normalize_remote_path(
+                str(patch_dict.get("openlist_remote_root") or "/")
+            )
+        endpoint_changed = (
+            candidate.openlist_server_url != config.openlist_server_url
+            or candidate.openlist_remote_root != config.openlist_remote_root
+        )
+        if endpoint_changed:
+            candidate.openlist_routes = []
+        if endpoint_changed or {"openlist_username", "openlist_password"} & openlist_keys:
+            from app.integrations.openlist.client import clear_openlist_client_pool
+
+            clear_openlist_client_pool()
+
+    save_config(candidate)
 
     # Anime4K 默认值变更时，向运行中的 MPV 同步“下一视频默认值”（不改变当前视频）
     if "mpv_anime4k_mode" in patch_dict or "mpv_anime4k_quality" in patch_dict:
-        _sync_anime4k_default_to_active_mpv(config)
+        _sync_anime4k_default_to_active_mpv(candidate)
 
-    return config.to_public_dict()
+    return candidate.to_public_dict()
 
 
 def _sync_anime4k_default_to_active_mpv(config: AppConfig) -> None:
