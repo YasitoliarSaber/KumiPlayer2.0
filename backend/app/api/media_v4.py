@@ -587,7 +587,7 @@ def scan_source(request: SourceScanRequest):
     try:
         effective_scan_mode: str = request.source
         root_source_mode: str = ""
-        scan_stats: dict[str, int] = {}
+        scan_stats: dict[str, object] = {}
         resolution: TreeRootResolution = TreeRootResolution("", True, "", 0, 0, ())
         effective_playback_root = ""
         content_provider = (
