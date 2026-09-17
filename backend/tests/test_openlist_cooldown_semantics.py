@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import httpx
 import pytest
-
 from app.integrations.openlist.client import OpenListClient
 from app.integrations.openlist.governor import OpenListRequestGovernor
 from app.integrations.openlist.models import (
