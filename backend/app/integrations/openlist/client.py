@@ -355,6 +355,26 @@ class OpenListClient:
         return min(0.5 * (2 ** attempt), self.max_retry_after)
 
     @staticmethod
+    def _looks_like_missing_object(body: dict) -> bool:
+        """判断 code=5xx 的响应其实是**路径级**"对象不存在"。
+
+        OpenList 把驱动错误统一包成 ``code: 500``，其中相当一部分是路径问题：
+        父目录列表里仍有该条目，但上游已经移动/改名/删除（实测
+        ``/夸克网盘/动画/4k 京阿尼合集/冰菓`` →
+        ``failed get objs: failed get dir: object not found``）。
+        这类错误重试无用、更不是"服务端不可用"，必须归到 not_found，
+        否则一次路径问题会被当成远端故障并打死整轮扫描。
+
+        只匹配明确的缺失语义，避免把真正的服务端故障误判成 404。
+        """
+
+        message = str(body.get("message") or "").lower()
+        return any(
+            marker in message
+            for marker in ("object not found", "failed get dir", "no such file", "does not exist")
+        )
+
+    @staticmethod
     def _looks_like_risk_control(response: httpx.Response) -> bool:
         """判断响应是否为风控拦截 HTML 页（仅检测特征，不保存正文）。"""
         if response.status_code != 405:
@@ -504,12 +524,12 @@ class OpenListClient:
             if code == 404 or status == 404:
                 raise OpenListNotFoundError()
             if code != 200 and code >= 500:
-                # OpenList 常用「HTTP 200 + body.code=5xx」表达上游网盘驱动失败
-                # （夸克/百度等驱动上游抖动时很常见）。它与 HTTP 5xx 同语义：
-                # 应当有限重试，失败后归 server_error 并给出可行动文案——
-                # 修复前它落进下面的通用分支，变成不透明的"请求失败（500）"、
-                # kind=error → 被 health 归一化为 unknown → **计入熔断**，
-                # 于是反复浏览就会被冻结 30 分钟（实测用户主诉的"老是卡住"）。
+                # OpenList 常用「HTTP 200 + body.code=5xx」表达上游失败，语义有两类：
+                # ① 路径级"对象不存在"（幽灵条目）→ not_found：重试无用、
+                #    不计入熔断，由扫描逐目录跳过；
+                # ② 其余 5xx（含夸克驱动上游抖动）→ 有限重试 + server_error。
+                if self._looks_like_missing_object(body):
+                    raise OpenListNotFoundError()
                 if attempt + 1 < self.max_attempts:
                     self._sleep(self._retry_delay(attempt))
                     continue

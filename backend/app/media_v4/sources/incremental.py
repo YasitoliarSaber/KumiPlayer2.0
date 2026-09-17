@@ -21,28 +21,21 @@ from app.core.paths import get_data_dir
 from app.integrations.openlist.client import normalize_remote_path
 from app.integrations.openlist.models import (
     OpenListEntry,
-    OpenListError,
+    OpenListNotFoundError,
     OpenListScanLimitExceeded,
 )
 from app.integrations.openlist.providers import OpenListRouteConfig, derive_local_path, provider_for_remote
 from app.media_v4.domain.models import SourceEvidence
 from app.media_v4.sources.adapters import SourceEntry, to_source_evidence
-from app.media_v4.sources.scanner import VIDEO_SUFFIXES, SourceScanCancelled
+from app.media_v4.sources.scanner import (
+    VIDEO_SUFFIXES,
+    SourceScanCancelled,
+    list_dir_with_retry,
+)
 
 STATE_VERSION = 1
 DEFAULT_VERIFICATION_BUDGET = 12
 MAX_VERIFICATION_BUDGET = 50
-
-#: 目录列表遇到**瞬时上游错误**时的重试节奏（秒）。
-#: 远端网盘驱动（夸克等）会偶发 5xx/超时：实测一次抖动就把已经扫到 763 个目录的
-#: 扫描整轮打死，进度虽在但界面只能从头再来。这些都值得原地重试。
-_LIST_RETRY_DELAYS = (1.0, 4.0, 10.0)
-
-#: 可原地重试的失败类型（远端临时故障）。其余一律立即抛出：
-#: 风控/限流重试只会加剧，本地准入拒绝、认证/权限/路径问题重试也没有意义。
-_RETRYABLE_LIST_KINDS = frozenset(
-    {"server_error", "timeout", "network", "unknown", "page_consistency"}
-)
 
 
 def _parent(relative_path: str) -> str:
@@ -205,32 +198,6 @@ def discard_scan_state(scan_id: str) -> None:
         path.unlink(missing_ok=True)
 
 
-def _list_dir_with_retry(
-    client,
-    remote_path: str,
-    *,
-    page: int,
-    per_page: int,
-    should_cancel=None,
-):
-    """列目录；瞬时上游故障原地重试，不可重试的错误立即抛出。
-
-    取消检查放在等待之前：用户点了取消就不该再睡 10 秒才响应。
-    """
-
-    attempt = 0
-    while True:
-        try:
-            return client.list_dir(remote_path, page=page, per_page=per_page, refresh=False)
-        except OpenListError as exc:
-            if exc.kind not in _RETRYABLE_LIST_KINDS or attempt >= len(_LIST_RETRY_DELAYS):
-                raise
-            if should_cancel is not None and should_cancel():
-                raise SourceScanCancelled() from exc
-            time.sleep(_LIST_RETRY_DELAYS[attempt])
-            attempt += 1
-
-
 def _list_all(
     client,
     remote_path: str,
@@ -247,7 +214,7 @@ def _list_all(
     while True:
         if should_cancel is not None and should_cancel():
             raise SourceScanCancelled()
-        result = _list_dir_with_retry(
+        result = list_dir_with_retry(
             client,
             remote_path,
             page=page,
@@ -317,7 +284,7 @@ def scan_openlist_incremental(
     on_evidence_batch=None,
     on_progress=None,
     batch_size: int = 128,
-) -> tuple[str, list[SourceEvidence], dict, dict[str, int]]:
+) -> tuple[str, list[SourceEvidence], dict, dict[str, object]]:
     """在 confirmed revision 文件全集上合并一轮受控 OpenList 核对。"""
 
     if not baseline:
@@ -356,6 +323,8 @@ def scan_openlist_incremental(
     changed_queued: set[str] = set()
     observed_counter = [0]
     skipped_counter = [0]
+    #: 上游已不存在的"幽灵目录"（父目录仍列出它，但 fs/list 返回 object not found）
+    missing_directories: list[str] = []
     route_configs = routes or []
     first_root_entries: list[OpenListEntry] | None = None
     pending: list[SourceEvidence] = []
@@ -370,14 +339,27 @@ def scan_openlist_incremental(
         if len(PurePosixPath(relative_dir).parts) > max_depth:
             raise OpenListScanLimitExceeded("OpenList 目录层级超过安全上限，请选择更精确的目录")
         remote_dir = _join_remote(remote_root, relative_dir)
-        entries = _list_all(
-            client,
-            remote_dir,
-            counter=observed_counter,
-            max_entries=max_entries,
-            should_cancel=should_cancel,
-            skipped=skipped_counter,
-        )
+        try:
+            entries = _list_all(
+                client,
+                remote_dir,
+                counter=observed_counter,
+                max_entries=max_entries,
+                should_cancel=should_cancel,
+                skipped=skipped_counter,
+            )
+        except OpenListNotFoundError:
+            # 幽灵目录：父目录列表里仍有它，但上游已经移动/改名/删除
+            # （实测 /夸克网盘/动画/4k 京阿尼合集/冰菓 返回
+            #  "failed get objs: failed get dir: object not found"，OpenList 把它
+            #  包成 code=500）。目录不存在，其子树不可能含文件：跳过并记录。
+            # 修复前这里会把整个扫描判失败——763 个目录的进度全部作废。
+            # 根目录缺失是另一回事（用户选的源就不存在），必须如实报错。
+            if relative_dir == "":
+                raise
+            processed.add(relative_dir)
+            missing_directories.append(remote_dir)
+            continue
         processed.add(relative_dir)
         if relative_dir == "":
             first_root_entries = entries
@@ -518,5 +500,9 @@ def scan_openlist_incremental(
         "changed_directories": len([path for path in changed_queued if path in processed]),
         # 条目名非法被跳过的数量：这些文件不会入库，但必须可见（不静默丢弃）。
         "skipped_entries": skipped_counter[0],
+        # 上游已不存在的"幽灵目录"（详见扫描循环里的跳过逻辑）：必须可见，
+        # 否则用户会以为目录内容都进来了。
+        "missing_directories": missing_directories[:20],
+        "missing_directory_count": len(missing_directories),
     }
     return actual_scan_id, [files[path] for path in sorted(files, key=str.casefold)], next_state, stats
