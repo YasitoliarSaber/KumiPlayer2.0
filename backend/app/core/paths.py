@@ -94,6 +94,37 @@ def get_data_dir() -> Path:
     return data_dir
 
 
+def assert_test_process_does_not_touch_real_data(target: Path | str) -> None:
+    """进程级兜底：测试进程绝不允许写真实数据目录。
+
+    事故背景（2026-09-17）：在系统临时目录里用绝对路径跑 pytest 时**不会加载**
+    ``backend/tests/conftest.py``，隔离夹具失效，测试请求打到真实 ``data/``，
+    覆盖了用户的 ``config.json``（OpenList 服务地址与内容路由因此丢失，只能靠
+    缓存目录哈希与数据库证据反推恢复）。
+
+    conftest 的隔离只在"从 tests 目录跑"时生效，所以这里补一道与调用方式无关的
+    保险：只要当前处于 pytest，且目标落在真实数据目录内，直接拒绝写入。
+    """
+
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    try:
+        resolved = Path(target).resolve()
+    except OSError:
+        return
+    candidates = [get_project_root() / "data", get_default_data_dir()]
+    for candidate in candidates:
+        try:
+            real = Path(candidate).resolve()
+        except OSError:
+            continue
+        if resolved == real or real in resolved.parents:
+            raise RuntimeError(
+                "拒绝在测试进程中写入真实数据目录（请在 backend/tests 内运行 pytest，"
+                f"或用 KUMIPLAYER_DATA_DIR 指向临时目录）：{resolved}"
+            )
+
+
 def get_mirror_root(mirror_root: str | None = None) -> Path:
     """获取镜像根目录
 

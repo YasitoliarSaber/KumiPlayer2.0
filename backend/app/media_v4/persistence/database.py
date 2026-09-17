@@ -126,6 +126,10 @@ class V4Database:
     )
 
     def __init__(self, path: str | Path):
+        # 最后一道保险：测试进程绝不允许操作真实数据目录（2026-09-17 误覆盖事故）。
+        from app.core.paths import assert_test_process_does_not_touch_real_data
+
+        assert_test_process_does_not_touch_real_data(path)
         self.path = Path(path)
 
     def open_connection(self) -> sqlite3.Connection:

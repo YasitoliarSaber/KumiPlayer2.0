@@ -223,6 +223,10 @@ def _persist_config_payload(config: AppConfig, *, cleared_keys: set[str] | None 
     - **空值语义 = KEEP**：空值且未显式清除 → 既不写也不删（防止 stale
       blank cache 误删真实凭据）；config.json 中凭据字段始终置空，绝不落明文。
     """
+    # 最后一道保险：测试进程绝不允许写真实数据目录（见 paths 模块里的说明）。
+    from app.core.paths import assert_test_process_does_not_touch_real_data
+
+    assert_test_process_does_not_touch_real_data(get_config_file())
     with DATA_WRITE_LOCK:
         payload = asdict(config)
         written: list[tuple[str, str]] = []  # (key, 旧值)
