@@ -19,7 +19,11 @@ from app.core.atomic_json import write_json_atomic
 from app.core.data_lock import DATA_WRITE_LOCK
 from app.core.paths import get_data_dir
 from app.integrations.openlist.client import normalize_remote_path
-from app.integrations.openlist.models import OpenListEntry, OpenListScanLimitExceeded
+from app.integrations.openlist.models import (
+    OpenListEntry,
+    OpenListError,
+    OpenListScanLimitExceeded,
+)
 from app.integrations.openlist.providers import OpenListRouteConfig, derive_local_path, provider_for_remote
 from app.media_v4.domain.models import SourceEvidence
 from app.media_v4.sources.adapters import SourceEntry, to_source_evidence
@@ -28,6 +32,17 @@ from app.media_v4.sources.scanner import VIDEO_SUFFIXES, SourceScanCancelled
 STATE_VERSION = 1
 DEFAULT_VERIFICATION_BUDGET = 12
 MAX_VERIFICATION_BUDGET = 50
+
+#: 目录列表遇到**瞬时上游错误**时的重试节奏（秒）。
+#: 远端网盘驱动（夸克等）会偶发 5xx/超时：实测一次抖动就把已经扫到 763 个目录的
+#: 扫描整轮打死，进度虽在但界面只能从头再来。这些都值得原地重试。
+_LIST_RETRY_DELAYS = (1.0, 4.0, 10.0)
+
+#: 可原地重试的失败类型（远端临时故障）。其余一律立即抛出：
+#: 风控/限流重试只会加剧，本地准入拒绝、认证/权限/路径问题重试也没有意义。
+_RETRYABLE_LIST_KINDS = frozenset(
+    {"server_error", "timeout", "network", "unknown", "page_consistency"}
+)
 
 
 def _parent(relative_path: str) -> str:
@@ -190,6 +205,32 @@ def discard_scan_state(scan_id: str) -> None:
         path.unlink(missing_ok=True)
 
 
+def _list_dir_with_retry(
+    client,
+    remote_path: str,
+    *,
+    page: int,
+    per_page: int,
+    should_cancel=None,
+):
+    """列目录；瞬时上游故障原地重试，不可重试的错误立即抛出。
+
+    取消检查放在等待之前：用户点了取消就不该再睡 10 秒才响应。
+    """
+
+    attempt = 0
+    while True:
+        try:
+            return client.list_dir(remote_path, page=page, per_page=per_page, refresh=False)
+        except OpenListError as exc:
+            if exc.kind not in _RETRYABLE_LIST_KINDS or attempt >= len(_LIST_RETRY_DELAYS):
+                raise
+            if should_cancel is not None and should_cancel():
+                raise SourceScanCancelled() from exc
+            time.sleep(_LIST_RETRY_DELAYS[attempt])
+            attempt += 1
+
+
 def _list_all(
     client,
     remote_path: str,
@@ -206,7 +247,13 @@ def _list_all(
     while True:
         if should_cancel is not None and should_cancel():
             raise SourceScanCancelled()
-        result = client.list_dir(remote_path, page=page, per_page=per_page, refresh=False)
+        result = _list_dir_with_retry(
+            client,
+            remote_path,
+            page=page,
+            per_page=per_page,
+            should_cancel=should_cancel,
+        )
         counter[0] += len(result.entries)
         if skipped is not None:
             skipped[0] += int(getattr(result, "skipped_entries", 0) or 0)

@@ -221,6 +221,25 @@ def _discard_scan_checkpoints(database: V4Database, scan_id: str) -> None:
     discard_scan_state(scan_id)
 
 
+def _resumable_transient_message(exc: BaseException) -> str | None:
+    """瞬时上游故障 → "已保留进度、可继续扫描"的文案；其余情况返回 None。
+
+    远端网盘驱动偶发 5xx/超时/连接失败时，证据与 frontier 都已经落库，用户点
+    "继续扫描"即可从断点续跑。把它当 failed 会让人以为整轮白扫、只能从头再来
+    （实测：扫到 763 个目录后被一次上游 5xx 判成 failed）。
+
+    真正的安全事件（风控/限流/本地准入拒绝）与配置/数据错误不在此列，仍按失败处理。
+    """
+
+    from app.integrations.openlist.models import OpenListError
+
+    if not isinstance(exc, OpenListError):
+        return None
+    if exc.kind not in {"server_error", "timeout", "network", "unreachable", "unknown"}:
+        return None
+    return f"远端 OpenList 暂时不可用，已保留扫描进度，稍后可继续扫描（{exc}）"
+
+
 def _finish_scan(
     database: V4Database,
     scan_id: str,
@@ -538,7 +557,17 @@ class SourceScanRunner:
             # 界面据此显示"可继续扫描"，绝不允许据此建立 confirmed 基线。
             _finish_scan(self.database, task.scan_id, status="paused", error=str(exc)[:400])
         except Exception as exc:  # noqa: BLE001 - 执行器必须写明确终态
-            _finish_scan(self.database, task.scan_id, status="failed", error=str(exc)[:400])
+            resumable_message = _resumable_transient_message(exc)
+            if resumable_message is not None:
+                # 瞬时上游故障：进度与证据都保留，标 paused 让界面给出"继续扫描"。
+                _finish_scan(
+                    self.database,
+                    task.scan_id,
+                    status="paused",
+                    error=resumable_message[:400],
+                )
+            else:
+                _finish_scan(self.database, task.scan_id, status="failed", error=str(exc)[:400])
         finally:
             runtime.close()
             if self._active_scan_id == task.scan_id:
