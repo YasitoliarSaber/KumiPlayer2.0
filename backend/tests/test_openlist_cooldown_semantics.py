@@ -129,3 +129,43 @@ def test_5xx_is_server_error_and_still_counts_toward_breaker():
 
     assert excinfo.value.kind == "server_error"
     assert isinstance(excinfo.value, OpenListNetworkError)
+
+
+def test_body_level_5xx_is_retried_and_reported_as_server_error():
+    """OpenList 用 HTTP 200 + body.code=5xx 表达上游驱动失败（夸克常见）。
+
+    修复前它落进通用分支：不重试、kind=error（被 health 归一化成 unknown 计入
+    熔断）、文案是无法行动的"请求失败（500）"——反复浏览就会被冻结 30 分钟。
+    现在按 HTTP 5xx 同语义处理：有限重试 + server_error + 可行动文案。
+    """
+
+    calls: list[int] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(200, json={"code": 500, "message": "quark upstream error"})
+
+    client = _make_client(handler, max_attempts=2)
+
+    with pytest.raises(OpenListServerError) as excinfo:
+        client.list_dir("/")
+
+    assert len(calls) == 2, "body.code=5xx 必须重试一次（与 HTTP 5xx 同语义）"
+    assert excinfo.value.kind == "server_error"
+    assert "quark upstream error" not in str(excinfo.value), "上游原始 message 不得外泄"
+
+
+def test_any_5xx_body_code_is_server_error_without_leaking_upstream_message():
+    """任意 >=500 的业务码都按服务端错误处理，且绝不泄漏上游 message。"""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": 999, "message": "internal detail: token=abc"})
+
+    client = _make_client(handler, max_attempts=1)
+
+    with pytest.raises(OpenListServerError) as excinfo:
+        client.list_dir("/")
+
+    assert excinfo.value.kind == "server_error"
+    assert str(excinfo.value) == "OpenList 服务暂时不可用，请稍后重试"
+    assert "token=abc" not in str(excinfo.value)

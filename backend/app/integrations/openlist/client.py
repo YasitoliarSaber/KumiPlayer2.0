@@ -503,6 +503,17 @@ class OpenListClient:
                 raise OpenListPermissionError()
             if code == 404 or status == 404:
                 raise OpenListNotFoundError()
+            if code != 200 and code >= 500:
+                # OpenList 常用「HTTP 200 + body.code=5xx」表达上游网盘驱动失败
+                # （夸克/百度等驱动上游抖动时很常见）。它与 HTTP 5xx 同语义：
+                # 应当有限重试，失败后归 server_error 并给出可行动文案——
+                # 修复前它落进下面的通用分支，变成不透明的"请求失败（500）"、
+                # kind=error → 被 health 归一化为 unknown → **计入熔断**，
+                # 于是反复浏览就会被冻结 30 分钟（实测用户主诉的"老是卡住"）。
+                if attempt + 1 < self.max_attempts:
+                    self._sleep(self._retry_delay(attempt))
+                    continue
+                raise OpenListServerError()
             if code != 200 or status != 200:
                 # 归一化为安全消息；服务端原始 message 不进入任何输出
                 raise OpenListError(f"OpenList 请求失败（{code}）", status_code=code)
