@@ -230,7 +230,11 @@ def _list_all(
         total = int(result.total or 0)
         if not result.entries:
             return entries
-        if total and page * per_page >= total:
+        # 终止判据必须基于**实际收到的条目数**，而不是 `page * per_page`：
+        # 驱动可能把每页截得比请求值短（scanner 里同样的注释已承认这一点），
+        # 此时按请求值推算会在第一页就判定"已到末页"→ 后续条目被静默丢弃，
+        # 而增量路径会把"没观察到的基线文件"当成已删除 pop 掉（库内丢文件）。
+        if total and len(entries) >= total:
             return entries
         page += 1
 

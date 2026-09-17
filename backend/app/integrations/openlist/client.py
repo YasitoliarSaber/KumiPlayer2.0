@@ -321,9 +321,9 @@ class OpenListClient:
         except Exception:
             _logger.warning("source_health 记录成功状态失败（不影响请求语义）")
 
-    def _report_failure(self, kind: str) -> None:
+    def _report_failure(self, kind: str, *, retry_after: float = 0.0) -> None:
         try:
-            source_health.record_failure(self._conn_key, kind)
+            source_health.record_failure(self._conn_key, kind, retry_after=retry_after)
         except Exception:
             _logger.warning("source_health 记录失败状态失败（不影响请求语义）")
 
@@ -371,7 +371,7 @@ class OpenListClient:
         message = str(body.get("message") or "").lower()
         return any(
             marker in message
-            for marker in ("object not found", "failed get dir", "no such file", "does not exist")
+            for marker in ("failed get dir: object not found", "object not found")
         )
 
     @staticmethod
@@ -535,6 +535,14 @@ class OpenListClient:
                     continue
                 raise OpenListServerError()
             if code != 200 or status != 200:
+                if isinstance(code, int) and 400 <= code < 500:
+                    raise OpenListError(
+                        f"OpenList 请求失败（{code}）", status_code=code, kind="validation"
+                    )
+                if 400 <= status < 500:
+                    raise OpenListError(
+                        f"OpenList 请求失败（{status}）", status_code=status, kind="validation"
+                    )
                 # 归一化为安全消息；服务端原始 message 不进入任何输出
                 raise OpenListError(f"OpenList 请求失败（{code}）", status_code=code)
             return status, body

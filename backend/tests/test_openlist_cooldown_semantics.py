@@ -20,6 +20,7 @@ import pytest
 from app.integrations.openlist.client import OpenListClient
 from app.integrations.openlist.governor import OpenListRequestGovernor
 from app.integrations.openlist.models import (
+    OpenListError,
     OpenListNetworkError,
     OpenListServerError,
     OpenListUnreachableError,
@@ -129,6 +130,94 @@ def test_5xx_is_server_error_and_still_counts_toward_breaker():
 
     assert excinfo.value.kind == "server_error"
     assert isinstance(excinfo.value, OpenListNetworkError)
+
+
+def test_stuck_probe_is_reclaimable_after_timeout():
+    """探针状态必须有超时兜底，否则来源会被永久锁死。
+
+    复现路径：冷却到期 → 某次请求抢到唯一探针（state=probe）→ 该请求的进程/线程
+    在回报结果前退出（崩溃、强杀、关应用、扫描线程异常）→ 这一行永远停在 probe，
+    之后**所有**请求（含后台扫描与用户刷新）一律被拒，而且没有任何通道解除。
+    """
+
+    source_id = "conn-stuck-probe"
+    source_health.enter_cooldown(source_id, reason_kind="network", cooldown_seconds=1, now=1000.0)
+
+    allowed, record = source_health.can_request(source_id, now=2000.0)
+    assert allowed is True and record.state == source_health.STATE_PROBE, "到期冷却应被抢占为探针"
+
+    # 模拟"探针请求再也没回来"
+    later = 2000.0 + 24 * 3600
+    assert source_health.peek_request_allowed(source_id, now=later)[0] is True, (
+        "探针超时后必须重新放行，否则来源被永久锁死"
+    )
+    assert source_health.can_request(source_id, now=later)[0] is True
+
+
+def test_clear_cooldown_also_releases_a_stale_probe():
+    """用户显式重试也要能解除卡住的探针（否则只能等超时）。"""
+
+    source_id = "conn-stale-probe-clear"
+    source_health.enter_cooldown(source_id, reason_kind="network", cooldown_seconds=1, now=1000.0)
+    source_health.can_request(source_id, now=2000.0)
+
+    assert source_health.clear_cooldown(source_id, now=2000.0 + 24 * 3600) is True
+    record = source_health.get_health(source_id)
+    assert record.state == source_health.STATE_HEALTHY
+
+
+def test_rate_limit_cooldown_honours_retry_after():
+    """服务端给了 Retry-After 就必须尊重，而不是写死 1 小时。"""
+
+    honored = "conn-retry-after"
+    source_health.record_failure(honored, "rate_limit", now=1000.0, retry_after=45.0)
+    record = source_health.get_health(honored)
+    assert record.state == source_health.STATE_COOLING_DOWN
+    assert abs(record.cooldown_until - 1045.0) < 1.0, "应按 Retry-After=45s 冷却"
+
+    default = "conn-retry-after-default"
+    source_health.record_failure(default, "rate_limit", now=1000.0)
+    assert abs(source_health.get_health(default).cooldown_until - 4600.0) < 1.0, "未给值时仍是 1h"
+
+    capped = "conn-retry-after-huge"
+    source_health.record_failure(capped, "rate_limit", now=1000.0, retry_after=10 ** 9)
+    assert source_health.get_health(capped).cooldown_until <= 1000.0 + 6 * 3600, "异常巨大值要封顶"
+
+
+def test_unhandled_4xx_is_not_retried_and_not_breaker_relevant():
+    """未显式归属的 4xx：不重试，也不该被当成 unknown 计入熔断。"""
+
+    calls: list[int] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(400, json={"code": 400, "message": "bad request"})
+
+    client = _make_client(handler, max_attempts=3)
+
+    with pytest.raises(OpenListError) as excinfo:
+        client.list_dir("/x")
+
+    assert len(calls) == 1, "4xx 是客户端错误，重试没有意义"
+    assert excinfo.value.kind == "validation", "必须显式归属，不能落成 kind=error→unknown"
+
+    for _ in range(5):
+        with pytest.raises(OpenListError):
+            client.list_dir("/x")
+    record = source_health.get_health(client._conn_key)
+    assert record.state != source_health.STATE_COOLING_DOWN, "4xx 不该触发来源冷却"
+
+
+def test_missing_object_heuristic_ignores_storage_level_failures():
+    """文案判定必须限定在目录列表语境，别把存储级故障误判成幽灵目录。"""
+
+    assert OpenListClient._looks_like_missing_object(
+        {"message": "failed get objs: failed get dir: object not found"}
+    )
+    assert not OpenListClient._looks_like_missing_object(
+        {"message": "storage [quark] does not exist"}
+    )
+    assert not OpenListClient._looks_like_missing_object({"message": "no such file or directory"})
 
 
 def test_body_level_5xx_is_retried_and_reported_as_server_error():

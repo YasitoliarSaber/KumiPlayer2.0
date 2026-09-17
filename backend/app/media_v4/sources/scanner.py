@@ -686,6 +686,8 @@ def scan_openlist_directory(
         if depth > max_depth:
             raise OpenListScanLimitExceeded("OpenList 目录层级超过安全上限，请选择更精确的目录")
         listed_directories += 1
+        directory_entries = 0
+        start_page = page
         while True:
             if should_cancel is not None and should_cancel():
                 if frontier_driven and frontier_mark is not None:
@@ -785,7 +787,14 @@ def scan_openlist_directory(
             # 空页才是确定的末页；有 total 时再按页数封顶。
             if not result.entries:
                 break
-            if total and page * per_page >= total:
+            # 终止判据必须基于**实际收到的条目数**，而不是 `page * per_page`：
+            # 驱动可能把每页截得比请求值短（见上方注释），此时按请求值推算会在
+            # 第一页就判定"已到末页"，后续条目被静默丢弃且目录仍标 completed。
+            # 续扫时（从第 N 页开始）本会话看不到前 N-1 页的条目，frontier 的
+            # 前提是"前 N-1 页都是满页"，因此折算 (start_page-1)*per_page 补齐。
+            directory_entries += len(result.entries)
+            delivered_estimate = directory_entries + (start_page - 1) * per_page
+            if total and delivered_estimate >= total:
                 break
             page += 1
             if frontier_driven and frontier_mark is not None:

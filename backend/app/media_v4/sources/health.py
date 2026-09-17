@@ -87,6 +87,11 @@ RATE_LIMIT_COOLDOWN_SECONDS = 3600
 TRANSIENT_FAILURE_THRESHOLD = 3
 #: 连续 transient 失败触顶后的冷却时长
 TRANSIENT_COOLDOWN_SECONDS = 30 * 60
+#: 单探针状态的存活上限（秒）。冷却到期后由第一个请求抢占探针，正常情况下
+#: 它在十几秒内就会回报结果并收口；若进程/线程在回报前退出（崩溃、强杀、
+#: 关应用、扫描线程异常），这一行会永远停在 probe 且**没有任何通道解除**，
+#: 来源从此被永久锁死——包括用户手动重试与后台扫描。因此探针必须有超时兜底。
+PROBE_TIMEOUT_SECONDS = 60.0
 
 #: 稳定状态集合
 STATE_HEALTHY = "healthy"
@@ -376,7 +381,13 @@ def enter_cooldown(
     _transition(source_id, _fn, now=now)
 
 
-def record_failure(source_id: str, kind: str, *, now: float | None = None) -> SourceHealthRecord:
+def record_failure(
+    source_id: str,
+    kind: str,
+    *,
+    now: float | None = None,
+    retry_after: float = 0.0,
+) -> SourceHealthRecord:
     """记录一次最终失败，并按失败类型推进状态机（原子事务内完成读-判-写）。
 
     返回更新后的记录；调用方可通过 ``in_cooldown`` 判断是否需要停止后续请求。
@@ -446,11 +457,16 @@ def record_failure(source_id: str, kind: str, *, now: float | None = None) -> So
             }
 
         if kind in _IMMEDIATE_COOLDOWN_KINDS:
-            cooldown = (
-                RISK_CONTROL_COOLDOWN_SECONDS
-                if kind == "risk_control"
-                else RATE_LIMIT_COOLDOWN_SECONDS
-            )
+            cooldown: float
+            if kind == "risk_control":
+                cooldown = RISK_CONTROL_COOLDOWN_SECONDS
+            elif retry_after > 0:
+                # 服务端明确给了 Retry-After：尊重它（原来解析后被丢弃，写死 1h）。
+                # 上限取 risk_control 的冷却时长，避免异常巨大的值把来源锁太久；
+                # 单调不缩短仍由 _cooldown_fields 保证。
+                cooldown = min(float(retry_after), RISK_CONTROL_COOLDOWN_SECONDS)
+            else:
+                cooldown = RATE_LIMIT_COOLDOWN_SECONDS
             return _cooldown_fields(
                 current,
                 kind,
@@ -498,6 +514,12 @@ def record_failure(source_id: str, kind: str, *, now: float | None = None) -> So
     return _transition(source_id, _fn, now=now)
 
 
+def _probe_expired(record: SourceHealthRecord, now: float) -> bool:
+    """探针是否已超时（抢占者大概率已经消失）。"""
+
+    return record.state == STATE_PROBE and (now - record.updated_at) >= PROBE_TIMEOUT_SECONDS
+
+
 def peek_request_allowed(
     source_id: str,
     *,
@@ -531,7 +553,8 @@ def peek_request_allowed(
             return False, record
         return True, record
     if record.state == STATE_PROBE:
-        return False, record
+        # 探针超时（抢占者在回报前退出）时必须重新放行，否则永久锁死。
+        return _probe_expired(record, now), record
     return True, record
 
 
@@ -556,6 +579,20 @@ def clear_cooldown(source_id: str, *, now: float | None = None) -> bool:
 
     def _fn(current: SourceHealthRecord) -> dict | None:
         nonlocal cleared
+        if current.state == STATE_PROBE:
+            # 卡住的探针（抢占者在回报前退出）同样要能被用户显式重试解除；
+            # 仍在有效期内的探针不动，避免并发出第二个探针。
+            if (now - current.updated_at) < PROBE_TIMEOUT_SECONDS:
+                return None
+            cleared = True
+            return {
+                "state": STATE_HEALTHY,
+                "reason_kind": "",
+                "consecutive_failures": 0,
+                "cooldown_until": 0.0,
+                "last_failure_at": current.last_failure_at,
+                "last_success_at": current.last_success_at,
+            }
         if current.state != STATE_COOLING_DOWN:
             return None
         if current.reason_kind in ABUSE_COOLDOWN_KINDS:
@@ -615,6 +652,19 @@ def can_request(
 
     def _fn(current: SourceHealthRecord) -> dict | None:
         nonlocal transitioned_to_probe, interactive_bypass
+        if current.state == STATE_PROBE:
+            # 探针超时：抢占者已经消失，允许重新抢占（刷新 updated_at 续期）。
+            if (now - current.updated_at) >= PROBE_TIMEOUT_SECONDS:
+                transitioned_to_probe = True
+                return {
+                    "state": STATE_PROBE,
+                    "reason_kind": current.reason_kind,
+                    "consecutive_failures": current.consecutive_failures,
+                    "cooldown_until": 0.0,
+                    "last_failure_at": current.last_failure_at,
+                    "last_success_at": current.last_success_at,
+                }
+            return None
         if current.state != STATE_COOLING_DOWN:
             # healthy / 无记录 / probe：不改写（probe 由上次调用者持有，
             # 未上报前不允许再发请求——单探针保护）
