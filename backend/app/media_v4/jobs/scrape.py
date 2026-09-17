@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -18,6 +19,47 @@ from app.media_v4.persistence.repositories import V4Repository
 from app.media_v4.resolution.candidates import work_identity_title_inputs
 
 logger = logging.getLogger(__name__)
+
+
+def _claim_provider_binding(
+    conn,
+    *,
+    work_id: str,
+    provider: str,
+    media_type: str,
+    provider_id: str,
+) -> bool:
+    """把 (provider, media_type, provider_id) 绑到该 Work；被他人占用时返回 False。
+
+    provider_bindings 有两个约束：``PRIMARY KEY(provider, media_type, provider_id)``
+    与 ``UNIQUE(work_id, provider, media_type)``。原实现只声明了后者的 ON CONFLICT，
+    于是**并发**刮削（两个 work 抢同一 Provider 身份）时预检查会同时通过，先提交者
+    成功、后提交者撞主键 → IntegrityError 把整个 scrape_work 判失败（实测线上连续
+    出现 8 次）。这里把竞态收敛成返回值：False 表示身份已被另一个 work 占用，
+    调用方据此降级为待人工复核——这正是该分支注释原本声明的意图。
+    """
+
+    try:
+        conn.execute(
+            """
+            INSERT INTO provider_bindings(work_id, provider, media_type, provider_id)
+            SELECT ?, ?, CASE WHEN work_type = 'series' THEN 'tv' ELSE 'movie' END, ?
+            FROM works WHERE work_id = ?
+            ON CONFLICT(work_id, provider, media_type) DO UPDATE SET
+                provider_id = excluded.provider_id
+            """,
+            (work_id, provider, provider_id, work_id),
+        )
+        return True
+    except sqlite3.IntegrityError:
+        owner = conn.execute(
+            "SELECT work_id FROM provider_bindings "
+            "WHERE provider = ? AND media_type = ? AND provider_id = ?",
+            (provider, media_type, provider_id),
+        ).fetchone()
+        if owner is not None and str(owner["work_id"]) != str(work_id):
+            return False
+        raise
 
 
 def _now() -> str:
@@ -548,18 +590,10 @@ class V4ScrapeService:
                         "SELECT work_id FROM provider_bindings WHERE provider = ? AND media_type = ? AND provider_id = ?",
                         (binding_provider, binding_media_type, binding_provider_id),
                     ).fetchone()
-                    if owner is None or str(owner["work_id"]) == str(job["work_id"]):
-                        conn.execute(
-                            """
-                            INSERT INTO provider_bindings(work_id, provider, media_type, provider_id)
-                            SELECT ?, ?, CASE WHEN work_type = 'series' THEN 'tv' ELSE 'movie' END, ?
-                            FROM works WHERE work_id = ?
-                            ON CONFLICT(work_id, provider, media_type) DO UPDATE SET
-                                provider_id = excluded.provider_id
-                            """,
-                            (job["work_id"], binding_provider, binding_provider_id, job["work_id"]),
-                        )
-                    else:
+                    def _degrade_identity_conflict() -> None:
+                        """身份被他人占用：降级为待人工复核，不扩散冲突身份。"""
+
+                        nonlocal identity_ready, binding_status, result
                         # 预检查与真正写入之间可能有并发任务抢先占用身份。
                         # 这时必须把本次结果降级为待人工复核，并禁止继续写入
                         # 全局 Provider/Season/Episode 映射，避免把冲突身份扩散到
@@ -586,6 +620,19 @@ class V4ScrapeService:
                                 binding_provider,
                             ),
                         )
+
+                    if owner is None or str(owner["work_id"]) == str(job["work_id"]):
+                        if not _claim_provider_binding(
+                            conn,
+                            work_id=str(job["work_id"]),
+                            provider=binding_provider,
+                            media_type=binding_media_type,
+                            provider_id=binding_provider_id,
+                        ):
+                            # 并发任务在预检查之后抢占了同一身份。
+                            _degrade_identity_conflict()
+                    else:
+                        _degrade_identity_conflict()
                 if identity_ready:
                     if clear_episode_mapping_ids:
                         conn.executemany(
