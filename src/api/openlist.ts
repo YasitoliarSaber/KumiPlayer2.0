@@ -57,6 +57,10 @@ export interface OpenListTestResult {
 export interface OpenListSaveResult {
   ok: boolean
   message: string
+  /** 本次保存是否真的跑过 Fresh Probe 并成功（后端按规范化值判断变更，可能跳过探测） */
+  verified?: boolean
+  /** 远端地址/根目录变更时内容来源路由是否被重置 */
+  routes_reset?: boolean
 }
 
 /** HYB-6：KumiPlayer → OpenList 请求成本遥测摘要 */

@@ -79,7 +79,10 @@ interface OpenListSettingsPanelProps {
   draft: OpenListDraft;
   onChangeDraft: (key: keyof OpenListDraft, value: string) => void;
   /** 保存连接：resolve 表示成功；reject 会被面板收口为可见错误。skipVerification=true 时跳过 Fresh Probe 直接持久化凭据。 */
-  onSaveConnection: (payload: OpenListConfigPayload, skipVerification?: boolean) => Promise<void>;
+  onSaveConnection: (
+    payload: OpenListConfigPayload,
+    skipVerification?: boolean,
+  ) => Promise<{ verified: boolean } | void>;
   /** 测试连接：接收 TestConnection 专用 payload，返回后端 machine status code（不 throw 分类错误；网络异常才 reject） */
   onTestConnection: (payload: OpenListTestConnectionPayload) => Promise<OpenListTestResult>;
   notice: string;
@@ -224,14 +227,17 @@ export default function OpenListSettingsPanel({
     onNotice?.('', 'info');
     setSkipVerificationOffered(false);
     try {
-      await onSaveConnection(buildPayload(), skipVerification);
+      const outcome = await onSaveConnection(buildPayload(), skipVerification);
+      // **只有后端真的探测成功才允许显示"连接正常"**：后端按规范化后的值判断
+      // 是否变更、前端按原始字符串判断，两者不等价时（例如把地址写成等价的
+      // 带尾斜杠形式）后端会跳过探测——此时若仍按 remoteAffectingDirty 显示
+      // connected，就会出现"服务其实宕机却显示连接正常"。
+      const verified = Boolean(outcome && outcome.verified);
       if (skipVerification) {
         // 仅保存不验证：凭据已持久化，但连接尚未验证
         setProbeState('saved_unverified');
       } else {
-        // remote-affecting「验证并保存」成功后，后端已 Fresh Probe 成功 → connected；
-        // local-only 保存不能凭空宣称连接正常（保持 saved_unverified）
-        setProbeState(remoteAffectingDirty ? 'connected' : saved ? 'saved_unverified' : 'unconfigured');
+        setProbeState(verified ? 'connected' : 'saved_unverified');
       }
     } catch (error) {
       // 候选保存失败：后端保持旧提交状态。已有保存配置 → saved_unverified

@@ -52,7 +52,8 @@ function renderPanel(props: Partial<Parameters<typeof OpenListSettingsPanel>[0]>
     config: baseConfig(),
     draft: baseDraft(),
     onChangeDraft: vi.fn(),
-    onSaveConnection: vi.fn(async () => undefined),
+    // 默认模拟"后端没有真的探测"（例如只改了缓存时长）：面板不得据此宣称已连接
+    onSaveConnection: vi.fn(async () => ({ verified: false })),
     onTestConnection: vi.fn(async () => ({ ok: true, code: 'connected', phase: 'root', message: '连接成功' })),
     notice: '',
     noticeKind: 'info' as const,
@@ -232,10 +233,22 @@ describe('REWORK：状态与安全语义', () => {
   });
 
   test('remote-affecting 保存成功 → connected；local-only 保存不宣称连接', async () => {
-    renderPanel({ draft: baseDraft({ remote_root: '/new-root' }) });
+    // 「连接正常」只允许来自**后端真的探测成功**（verified: true）
+    renderPanel({
+      draft: baseDraft({ remote_root: '/new-root' }),
+      onSaveConnection: vi.fn(async () => ({ verified: true })),
+    });
     fireEvent.click(screen.getByText('验证并保存'));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(await screen.findByText(/连接正常/)).toBeTruthy();
+  });
+
+  test('后端未探测（verified:false）时即使 remote-affecting 也不宣称已连接', async () => {
+    renderPanel({ draft: baseDraft({ remote_root: '/new-root' }) });
+    fireEvent.click(screen.getByText('验证并保存'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText('OpenList 连接正常')).toBeNull();
+    expect(await screen.findByText(/尚未检查当前连接/)).toBeTruthy();
   });
 
   test('local-only 保存成功 → 保持 saved_unverified，不宣称 connected', async () => {

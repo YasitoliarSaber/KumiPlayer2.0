@@ -473,6 +473,8 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
               setOpenlistNotice(result.message);
               await loadConfig();
               report(result.message);
+              // 由面板决定是否显示"连接正常"：只有后端确实探测成功才算
+              return { verified: result.verified === true };
             }}
             onTestConnection={async (payload) => {
               // REWORK P0：allow_insecure_http 由面板风险确认状态决定，
