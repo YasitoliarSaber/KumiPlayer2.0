@@ -14,12 +14,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from fastapi.testclient import TestClient
-
 from app.api import openlist_v4
 from app.core.config import load_config, save_config
 from app.integrations.openlist.providers import OpenListRouteConfig
 from app.main import app
+from fastapi.testclient import TestClient
 
 SERVER = "http://localhost:5244"
 
