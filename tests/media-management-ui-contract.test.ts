@@ -27,11 +27,12 @@ test('来源卡通过来源根承载扫描与草稿恢复，不展示游离草�
   assert.doesNotMatch(page, /resumeDraft/)
 })
 
-test('来源卡恢复为固定方形 GridView 项目，并保留小窗口单列回退', () => {
-  assert.match(styles, /\.media-v4-source-library-grid\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fill,\s*minmax\(270px,\s*300px\)\)/s)
-  assert.match(styles, /\.media-v4-library-source-card\s*\{[^}]*aspect-ratio:\s*1\s*\/\s*1/s)
-  assert.doesNotMatch(styles, /repeat\(auto-fit,\s*minmax\(min\(100%,\s*360px\),\s*1fr\)\)/)
-  assert.match(styles, /@media \(max-width: 760px\)\s*\{\s*\.media-v4-source-library-grid\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/s)
+test('来源卡为紧凑响应式卡片网格，不强制正方形并保留小窗口单列回退', () => {
+  // 09-15 起的既定设计：紧凑纵向卡片（无 aspect-ratio 方形约束）。
+  assert.match(styles, /\.media-v4-source-library-grid\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fill,\s*minmax\(min\(100%,\s*330px\),\s*380px\)\)/s)
+  assert.match(styles, /\.media-v4-library-source-card\s*\{[^}]*align-content:\s*start/s)
+  assert.doesNotMatch(styles, /\.media-v4-library-source-card\s*\{[^}]*aspect-ratio:\s*1\s*\/\s*1/s)
+  assert.match(styles, /@media \(max-width: 760px\)[\s\S]{0,400}?\.media-v4-source-library-grid\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/s)
 })
 
 test('来源卡仅显示当前人话任务并提供直接终止入口', () => {

@@ -360,8 +360,12 @@ test('来源卡使用紧凑的响应式任务卡布局', async () => {
   expect(scale).not.toBeNull()
   // jsdom 不计算实际尺寸，因此锁定 CSS 结构合同本身。
   const css = readFileSync(join(__dirname, '../../src/index.css'), 'utf-8')
-  // 来源卡按产品约定保持正方形；小窗口才降级为纵向自适应卡片。
-  expect(css).toContain('grid-template-columns: repeat(auto-fill, minmax(270px, 300px));')
-  expect(css).toMatch(/\.media-v4-library-source-card\s*\{[^}]*aspect-ratio: 1 \/ 1;/s)
+  // 09-15 的「修正来源待处理统计与卡片布局」把来源卡定为紧凑纵向卡片：
+  // 锁定该契约，并反向断言不得再强制正方形（否则会静默回退到旧设计）。
+  expect(css).toContain('grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 380px));')
+  expect(css).toMatch(/\.media-v4-library-source-card\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s)
+  expect(css).toMatch(/\.media-v4-library-source-card\s*\{[^}]*align-content:\s*start/s)
+  expect(css).not.toMatch(/\.media-v4-library-source-card\s*\{[^}]*aspect-ratio:\s*1\s*\/\s*1/s)
+  // 小窗口降级为纵向自适应卡片（这条一直存在，保持不变）。
   expect(css).toContain('.media-v4-library-source-card { aspect-ratio: auto; min-height: 210px; }')
 })

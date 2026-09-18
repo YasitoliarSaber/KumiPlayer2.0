@@ -22,6 +22,8 @@ const api = vi.hoisted(() => ({
   workExecutionDetail: vi.fn(),
   hideSourceLibraryCard: vi.fn(),
   renameSourceLibraryCard: vi.fn(),
+  sourceLibraryDeletionPreview: vi.fn(),
+  deleteSourceLibrary: vi.fn(),
   maintenancePreview: vi.fn(),
   maintenanceConfirm: vi.fn(),
 }))
@@ -71,6 +73,54 @@ test('来源卡将关联提示与真实待处理分开，操作按用途分组',
   expect(screen.getByText('2 项关联信息待补全，不影响入库和播放')).toBeVisible()
   expect(screen.getByRole('group', { name: '导入与更新' })).toContainElement(screen.getByRole('button', { name: '检查更新' }))
   expect(screen.getByRole('group', { name: '来源卡管理' })).toContainElement(screen.getByRole('button', { name: '重命名来源卡：115 动画' }))
+})
+
+test('按来源删除媒体库：先展示预览，再确认，且预览态不暴露「移除」', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
+  api.sourceLibraryDeletionPreview.mockResolvedValue({
+    root_id: 'root-115', works_total: 3, works_removable: 2, works_shared: 1,
+    artifacts_total: 24, artifact_files: 20, artifact_bytes: 3 * 1048576,
+    files_outside_mirror_count: 0,
+    removable_samples: ['摇曳露营', '孤独摇滚'], shared_samples: ['摇曳露营 剧场版'], blockers: [],
+  })
+  api.deleteSourceLibrary.mockResolvedValue({ root_id: 'root-115', job_id: 'job-delete', status: 'queued' })
+  render(<MediaManagementPage />)
+  await screen.findByText('115 动画')
+
+  fireEvent.click(screen.getByRole('button', { name: '删除来源卡：115 动画' }))
+  fireEvent.click(await screen.findByRole('button', { name: '同时删除媒体库…' }))
+
+  // 预览必须先把影响范围说清楚（含"被其他来源共享会保留"）。
+  expect(await screen.findByText(/2/)).toBeVisible()
+  expect(await screen.findByText(/部作品离开媒体库/)).toBeVisible()
+  expect(screen.getByText(/被其他来源共享，会保留/)).toBeVisible()
+  expect(api.sourceLibraryDeletionPreview).toHaveBeenCalledWith('root-115')
+  // 预览态下隐藏「移除」，避免用户以为在删除却点到较弱的隐藏操作。
+  expect(screen.queryByRole('button', { name: '移除' })).toBeNull()
+
+  fireEvent.click(screen.getByRole('button', { name: '确认删除媒体库' }))
+
+  await waitFor(() => expect(api.deleteSourceLibrary).toHaveBeenCalledWith('root-115'))
+  expect(await screen.findByText(/已开始按来源删除/)).toBeVisible()
+})
+
+test('按来源删除被阻断时给出原因，且不提供确认删除', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
+  api.sourceLibraryDeletionPreview.mockResolvedValue({
+    root_id: 'root-115', works_total: 3, works_removable: 2, works_shared: 1,
+    artifacts_total: 24, artifact_files: 20, artifact_bytes: 0,
+    files_outside_mirror_count: 0,
+    removable_samples: [], shared_samples: [], blockers: ['该来源仍有进行中的扫描，请先取消或等待结束'],
+  })
+  render(<MediaManagementPage />)
+  await screen.findByText('115 动画')
+
+  fireEvent.click(screen.getByRole('button', { name: '删除来源卡：115 动画' }))
+  fireEvent.click(await screen.findByRole('button', { name: '同时删除媒体库…' }))
+
+  expect(await screen.findByText(/暂时无法删除：该来源仍有进行中的扫描/)).toBeVisible()
+  expect(screen.queryByRole('button', { name: '确认删除媒体库' })).toBeNull()
+  expect(api.deleteSourceLibrary).not.toHaveBeenCalled()
 })
 
 beforeEach(() => {

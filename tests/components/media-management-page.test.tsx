@@ -499,6 +499,12 @@ test('来源卡只以 active_task 判断当前任务，忽略过期任务摘要'
     }],
   })
 
+  // 该断言用全局 setTimeout spy 观察"是否进入轮询"。前序用例可能留下待处理的
+  // 微任务/定时器，在全量跑时会污染本次 spy 历史（单跑通过、全量偶发失败）。
+  // 先冲掉遗留回调再清空历史，断言才只反映本用例自己的调度。
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  timeoutSpy.mockClear()
+
   render(<MediaManagementPage />)
 
   expect(await screen.findByText('已完成的目录树')).toBeVisible()
