@@ -198,6 +198,11 @@ export default function FirstRunSetup({ initialConfig, onComplete, mode = 'first
                 <p className="first-run-eyebrow">最后检查</p>
                 <h1>验证并完成</h1>
                 <p>后端会重新验证内置播放器、镜像目录和媒体来源。任何一项失败都不会写入半完成配置。</p>
+                <div className="first-run-path-example">
+                  <strong>运行环境要求</strong>
+                  <span>支持 Windows 10 / 11（含 WebView2）；后端、内置播放器和功能插件随软件安装，内置干净 MPV 无需另行准备。</span>
+                  <span>如缺少运行组件，安装器会联网补齐；整个过程不会改动你的媒体文件。</span>
+                </div>
                 <div className="first-run-summary">
                   <SummaryRow label="内置播放器" value={mpvReady ? '已就绪' : '未就绪'} ok={mpvReady} />
                   <SummaryRow label="镜像目录" value={form.mirror_dir} ok={Boolean(form.mirror_dir?.trim())} />
