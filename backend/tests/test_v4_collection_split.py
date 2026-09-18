@@ -61,3 +61,48 @@ def test_season_subdirectories_still_merge_into_one_work(tmp_path):
 
     assert len(graph.works) == 1
     assert graph.works[0].preferred_title == "摇曳露营"
+
+
+def test_series_with_naming_variants_is_never_treated_as_collection(tmp_path):
+    """回归：作品名不叫"合集"时绝不能被拆卡（2026-09-18 实测回归）。
+
+    忠实重放真实数据时发现：同一部 Yuru Camp 因为子目录基名不同
+    （季节目录、发布组前缀变体、特典目录）被判定成"合集"，拆成 3 部作品，
+    其中一部标题带 `Season 2`，在线匹配只有 27 分、无法自动采用。
+    """
+
+    graph = _draft(tmp_path, [
+        "[VCB-Studio] Yuru Camp/[Airota&Nekomoe kissaten&VCB-Studio] Yuru Camp [Ma10p_1080p]/[Airota] Yuru Camp - 01.mkv",
+        "[VCB-Studio] Yuru Camp/[Airota&Nekomoe kissaten&VCB-Studio] Yuru Camp Season 2 [Ma10p_1080p]/[Airota] Yuru Camp S02E01.mkv",
+        "[VCB-Studio] Yuru Camp/[Airota&Nekomoe kissaten&VCB-Studio] Yuru Camp Season 2 [Ma10p_1080p]/SPs/[Airota] Yuru Camp SP01.mkv",
+        "[VCB-Studio] Yuru Camp/[Airota&Nekomoe kissaten&VCB-Studio] Heya Camp [Ma10p_1080p]/[Airota] Heya Camp - 01.mkv",
+    ], revision_id="rev-yuru-variants")
+
+    titles = sorted(work.preferred_title for work in graph.works)
+    assert not any("Season 2" in title for title in titles), f"季节目录变体被拆卡：{titles}"
+    assert "Yuru Camp" in titles, titles
+    assert "Heya Camp" in titles, "外传仍应是独立作品"
+
+
+def test_collection_named_directory_with_multiple_works_still_splits(tmp_path):
+    """反证：名称自称合集且确有多个不同作品时，仍必须各自成作品。"""
+
+    graph = _draft(tmp_path, [
+        "4k 物语系列/化物语/化物语 S01E01.mkv",
+        "4k 物语系列/伪物语/伪物语 S01E01.mkv",
+    ], revision_id="rev-monogatari-collection")
+
+    titles = sorted(work.preferred_title for work in graph.works)
+    assert titles == ["偽物語", "化物語"] or titles == ["伪物语", "化物语"] or len(titles) == 2, titles
+    assert not any("物语系列" in title for title in titles), "合集名不得成为作品名"
+
+
+def test_collection_name_detection_is_token_based():
+    from app.media_v4.resolution.resolver import _looks_like_collection_name
+
+    assert _looks_like_collection_name("京阿尼合集")
+    assert _looks_like_collection_name("4k 物语系列")
+    assert _looks_like_collection_name("CLANNAD Collection")
+    # 作品名（含季/发布组/剧场版等变体）绝不能被当成合集
+    for name in ("Yuru Camp", "摇曳露营", "CLANNAD", "凉宫春日的忧郁", "Heya Camp"):
+        assert not _looks_like_collection_name(name), name

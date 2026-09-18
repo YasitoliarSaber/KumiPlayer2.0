@@ -228,6 +228,23 @@ def _series_base_title(title: str) -> str:
     return base or (title or "").strip()
 
 
+#: 判定"这是合集而不是多季系列"必须先看**名字**：真实目录里 ``京阿尼合集``、
+#: ``4k 物语系列`` 会被明确命名成合集；而 ``Yuru Camp``、``摇曳露营`` 这类作品名
+#: 永远不该因为"子目录基名不同"被当成合集——季节目录、特典目录与命名变体
+#: （``Yuru Camp Season 2``、``[VCB-Studio] Yuru Camp``）都会产生不同基名。
+#: 实测：只看基名差异会把一次本地导入的 Yuru Camp 拆成 3 部作品，其中一部无法
+#: 自动匹配在线作品（忠实重放已复现：6 部 → 修正后 4 部）。
+_COLLECTION_NAME_PATTERN = re.compile(
+    r"(?i)(?:合集|合辑|全集|套装|系列|collection|complete\s+series|\bbox\s*set\b|\bpack\b)"
+)
+
+
+def _looks_like_collection_name(name: str) -> bool:
+    """系列容器名是否**自称**为合集（判定合集的前提条件）。"""
+
+    return bool(_COLLECTION_NAME_PATTERN.search(str(name or "")))
+
+
 def _resolved_entry_work_key(
     evidence: SourceEvidence,
     facts: ParsedFacts,
@@ -355,12 +372,16 @@ class MediaResolver:
             child_title = _normalize_title(_parse_work_title_and_year(container)[0])
             if child_title:
                 series_child_containers[(group, _effective_media_type(facts))].add(child_title)
-        # 用**基名**个数判断：多季系列（``Yuru Camp S1``/``S2``）基名相同 → 仍归并；
-        # 合集（``CLANNAD``/``轻音少女``）基名不同 → 各自成作品。
+        # 判定合集需要**两个条件同时成立**：
+        #   1. 系列容器名自称合集（``京阿尼合集`` / ``4k 物语系列`` / ``xxx collection``）；
+        #   2. 去掉季度后缀后的基名确实不止一个（``CLANNAD`` vs ``轻音少女``）。
+        # 只看第 2 条会把季节/特典/命名变体误判成合集，从而把同一部作品拆卡
+        # （实测：一次本地导入把 Yuru Camp 拆成 3 部，其中一部无法自动匹配）。
         collection_series = {
             series_key
             for series_key, children in series_child_containers.items()
             if len({_series_base_title(child) for child in children}) > 1
+            and _looks_like_collection_name(str(series_key[0]))
         }
         for evidence, facts in entries:
             if facts.group_type != "special" and not facts.special_candidate:
