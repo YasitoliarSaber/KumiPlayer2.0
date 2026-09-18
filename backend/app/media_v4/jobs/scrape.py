@@ -76,21 +76,8 @@ def _claim_provider_binding(
             (work_id, provider, provider_id, work_id),
         )
 
-    stale_owner = conn.execute(
-        "SELECT work_id FROM provider_bindings "
-        "WHERE provider = ? AND media_type = ? AND provider_id = ?",
-        (provider, media_type, provider_id),
-    ).fetchone()
-    if (
-        stale_owner is not None
-        and str(stale_owner["work_id"]) != str(work_id)
-        and not _owner_is_active(conn, str(stale_owner["work_id"]))
-    ):
-        conn.execute(
-            "DELETE FROM provider_bindings WHERE work_id = ? AND provider = ? AND media_type = ?",
-            (str(stale_owner["work_id"]), provider, media_type),
-        )
-
+    # 不在插入前额外查询占用者：语句数必须与作品数无关（有性能契约测试锁定），
+    # 让位逻辑放在 IntegrityError 分支里完成即可。
     try:
         _insert()
         return True
