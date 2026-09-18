@@ -541,6 +541,7 @@ def _active_task(scan, job, revision_id: str, progress: dict) -> dict | None:
         "scrape_work": "正在获取媒体信息",
         "refresh_projection": "正在更新媒体库",
         "cleanup_superseded_artifacts": "正在整理旧文件",
+        "delete_source_library": "正在删除该来源的媒体库",
     }
     return {
         "kind": "execution",

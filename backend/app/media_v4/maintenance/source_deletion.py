@@ -23,6 +23,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+class SourceDeletionCancelled(Exception):
+    """删除被取消（批次之间检查）。
+
+    刻意**不用** ``KeyboardInterrupt``：它是 ``BaseException``，会穿透调用方
+    ``except Exception`` 的保护，把后台 worker 线程直接打死，并让作业永远停在
+    running。用普通异常在删除函数内收口成"已取消"结果，由 runner 标记 cancelled。
+    """
+
+
 @dataclass(slots=True)
 class SourceDeletionPlan:
     """删除影响范围预览（只含计数与少量样本，绝不水合全量对象）。"""
@@ -48,7 +57,7 @@ class SourceDeletionPlan:
             "artifacts_total": self.artifacts_total,
             "artifact_files": self.artifact_files,
             "artifact_bytes": self.artifact_bytes,
-            "files_outside_mirror": self.files_outside_mirror[:10],
+            "files_outside_mirror_count": len(self.files_outside_mirror),
             "removable_samples": self.removable_samples,
             "shared_samples": self.shared_samples,
             "blockers": self.blockers,
@@ -78,9 +87,10 @@ def _removable_work_ids(conn: sqlite3.Connection, root_id: str) -> tuple[list[st
         str(row["work_id"])
         for row in conn.execute(
             """
-            SELECT DISTINCT work_id FROM revision_bindings
-            WHERE revision_id IN (SELECT revision_id FROM import_revisions WHERE root_id != ?)
-              AND work_id != ''
+            SELECT DISTINCT rb.work_id FROM revision_bindings rb
+            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            WHERE ir.root_id != ? AND rb.work_id != '' AND sr.retired_at = ''
             """,
             (root_id,),
         )
@@ -98,11 +108,23 @@ def _blockers(conn: sqlite3.Connection, root_id: str, *, ignore_job_id: str = ""
     """
 
     blockers: list[str] = []
+    # 僵尸扫描（心跳失联）不得永久阻断删除：没有执行者会再刷新它的心跳，
+    # 它永远到不了终态。与 hide_source_card 使用同一判定。
+    from app.media_v4.sources.scan_state import scan_is_stale
+
     active_scan = conn.execute(
-        "SELECT status FROM source_scans WHERE root_id = ? AND status IN ('queued', 'running', 'cancelling') LIMIT 1",
+        "SELECT status, heartbeat_at, started_at FROM source_scans WHERE root_id = ?",
         (root_id,),
-    ).fetchone()
-    if active_scan is not None:
+    ).fetchall()
+    has_active_scan = any(
+        str(row["status"]) == "queued"
+        or (
+            str(row["status"]) in {"running", "cancelling"}
+            and not scan_is_stale(str(row["heartbeat_at"] or row["started_at"] or ""))
+        )
+        for row in active_scan
+    )
+    if has_active_scan:
         blockers.append("该来源仍有进行中的扫描，请先取消或等待结束")
     active_job = conn.execute(
         """
@@ -236,11 +258,14 @@ def delete_source_library(
         nonlocal cancelled
         if should_cancel is not None and should_cancel():
             cancelled = True
-            raise KeyboardInterrupt
+            raise SourceDeletionCancelled
 
     for offset in range(0, len(leaving), max(1, batch_size)):
         batch = leaving[offset : offset + max(1, batch_size)]
-        _guard()
+        try:
+            _guard()
+        except SourceDeletionCancelled:
+            break
         placeholders = ",".join("?" for _ in batch)
         with database.connect() as conn:
             rows = conn.execute(
@@ -286,6 +311,7 @@ def delete_source_library(
     if cancelled:
         return {
             "ok": False,
+            "cancelled": True,
             "reason": "已取消",
             "removed_works": 0,
             "removed_files": removed_files,

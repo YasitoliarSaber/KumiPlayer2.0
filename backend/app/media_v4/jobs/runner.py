@@ -115,6 +115,10 @@ class V4JobRunner:
                 # 本作业此刻必然是 running，阻断检查要排除它自己。
                 ignore_job_id=job_id,
             )
+            if outcome.get("cancelled"):
+                # 取消是可预期终态：标 cancelled，且**不**重建投影制造半成品视图。
+                mark_cancelled(self.database, job_id)
+                return JobRunResult(job_id, job["job_type"], "cancelled")
             if not outcome.get("ok"):
                 self._mark_failed(job_id, str(outcome.get("reason") or "按来源删除未完成"))
                 return JobRunResult(job_id, job["job_type"], "failed")

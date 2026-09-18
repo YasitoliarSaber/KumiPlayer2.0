@@ -13,11 +13,14 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from app.media_v4.maintenance.source_deletion import (
     delete_source_library,
     plan_source_deletion,
 )
 from app.media_v4.persistence.database import V4Database
+from app.media_v4.sources.scan_state import STALE_SCAN_AFTER_SECONDS
 
 
 def _database(tmp_path) -> V4Database:
@@ -171,7 +174,9 @@ def test_delete_never_touches_files_outside_the_mirror_root(tmp_path):
         _seed_artifact(conn, "art-x", "rev-x", "work-x", str(outside))
 
     plan = plan_source_deletion(database, "root-x", mirror_root=mirror)
-    assert plan["files_outside_mirror"] == [str(outside.resolve())]
+    # 只报告数量：预览不得把本地绝对路径返回给前端（项目红线）。
+    assert plan["files_outside_mirror_count"] == 1
+    assert "files_outside_mirror" not in plan
     assert plan["artifact_files"] == 0, "镜像根之外的文件不得计入可删除文件"
 
     result = delete_source_library(database, "root-x", mirror_root=mirror)
@@ -184,10 +189,12 @@ def test_delete_never_touches_files_outside_the_mirror_root(tmp_path):
 
 def test_delete_refuses_while_source_has_active_scan(tmp_path):
     database, mirror = _two_sources(tmp_path)
+    fresh = datetime.now(UTC).isoformat()
     with database.connect() as conn:
         conn.execute(
             "INSERT INTO source_scans(scan_id, root_id, generation, status, stage, heartbeat_at, started_at) "
-            "VALUES ('scan-a', 'root-a', 2, 'running', 'reading_source', 'now', 'now')"
+            "VALUES ('scan-a', 'root-a', 2, 'running', 'reading_source', ?, ?)",
+            (fresh, fresh),
         )
 
     plan = plan_source_deletion(database, "root-a", mirror_root=mirror)
@@ -200,6 +207,25 @@ def test_delete_refuses_while_source_has_active_scan(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM works WHERE work_id = 'work-two'").fetchone()[0] == 1, (
             "被阻断时不得产生任何删除副作用"
         )
+
+
+def test_stale_zombie_scan_does_not_block_deletion(tmp_path):
+    """心跳失联的扫描永远到不了终态，不能永久阻断用户删除（审核发现的缺陷）。"""
+
+    database, mirror = _two_sources(tmp_path)
+    zombie = (datetime.now(UTC) - timedelta(seconds=STALE_SCAN_AFTER_SECONDS + 3600)).isoformat()
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO source_scans(scan_id, root_id, generation, status, stage, heartbeat_at, started_at) "
+            "VALUES ('scan-zombie', 'root-a', 2, 'running', 'reading_source', ?, ?)",
+            (zombie, zombie),
+        )
+
+    plan = plan_source_deletion(database, "root-a", mirror_root=mirror)
+    assert plan["blockers"] == [], "僵尸扫描不得阻断删除"
+
+    result = delete_source_library(database, "root-a", mirror_root=mirror)
+    assert result["ok"] is True, result
 
 
 def test_api_preview_and_delete_requires_explicit_confirmation(tmp_path, monkeypatch):
@@ -257,6 +283,50 @@ def test_deletion_job_runs_end_to_end_and_retires_the_source(tmp_path, monkeypat
         assert conn.execute(
             "SELECT COUNT(*) FROM artifacts WHERE work_id = 'work-one'"
         ).fetchone()[0] == 1, "共享作品的产物必须保留"
+
+
+def test_cancelled_deletion_returns_cancelled_instead_of_raising(tmp_path):
+    """取消必须是可预期终态。
+
+    审核发现的缺陷：旧实现用 ``raise KeyboardInterrupt`` 表达取消，它是
+    ``BaseException``，会穿透 runner 的 ``except Exception``，把后台 worker 打死并让
+    作业永远停在 running。现在改为在删除函数内收口成 ``cancelled`` 结果。
+    """
+
+    database, mirror = _two_sources(tmp_path)
+
+    result = delete_source_library(
+        database, "root-a", mirror_root=mirror, should_cancel=lambda: True
+    )
+
+    assert result["ok"] is False
+    assert result.get("cancelled") is True
+    assert result["reason"] == "已取消"
+    with database.connect() as conn:
+        root = conn.execute("SELECT retired_at FROM source_roots WHERE root_id = 'root-a'").fetchone()
+        assert str(root["retired_at"]) == "", "取消后不得退役来源"
+
+
+def test_runner_maps_cancelled_outcome_to_cancelled_job(tmp_path, monkeypatch):
+    from app.media_v4.jobs.runner import V4JobRunner
+    from app.media_v4.maintenance.source_deletion import enqueue_source_deletion
+
+    database, mirror = _two_sources(tmp_path)
+    monkeypatch.setattr(
+        "app.media_v4.jobs.runner.V4LibraryProjection.rebuild", lambda _self: {}
+    )
+    monkeypatch.setattr(
+        "app.media_v4.maintenance.source_deletion.delete_source_library",
+        lambda *_args, **_kwargs: {"ok": False, "cancelled": True, "reason": "已取消"},
+    )
+    job_id = enqueue_source_deletion(database, "root-a")
+
+    result = V4JobRunner(database).process_job(job_id, mirror_root=mirror)
+
+    assert result.status == "cancelled", result
+    with database.connect() as conn:
+        status = conn.execute("SELECT status FROM jobs WHERE job_id = ?", (job_id,)).fetchone()["status"]
+    assert str(status) == "cancelled"
 
 
 def test_deletion_never_invokes_recognition(tmp_path, monkeypatch):

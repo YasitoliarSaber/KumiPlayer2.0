@@ -501,7 +501,7 @@ export const mediaV4Api = {
       artifacts_total: number
       artifact_files: number
       artifact_bytes: number
-      files_outside_mirror: string[]
+      files_outside_mirror_count: number
       removable_samples: string[]
       shared_samples: string[]
       blockers: string[]
