@@ -106,3 +106,69 @@ def test_collection_name_detection_is_token_based():
     # 作品名（含季/发布组/剧场版等变体）绝不能被当成合集
     for name in ("Yuru Camp", "摇曳露营", "CLANNAD", "凉宫春日的忧郁", "Heya Camp"):
         assert not _looks_like_collection_name(name), name
+
+
+def test_resolver_reads_persisted_facts_not_just_fresh_parse(tmp_path):
+    """回归（方法论）：必须覆盖"**已持久化事实** → resolver"这条路径。
+
+    2026-09-18 的拆卡回归之所以两次没被复现，是因为当时只用**重新解析**的窄样本
+    试跑；真实扫描是把**整批持久化事实**交给 resolver（合集/系列判定都是整批判定）。
+    这里把事实写库再读回来，走与真实扫描相同的输入形态。
+    """
+
+    from app.media_v4.persistence.repositories import V4Repository
+
+    database = V4Database(tmp_path / "persisted.db")
+    database.initialize()
+    repository = V4Repository(database)
+    paths = [
+        "[VCB-Studio] Yuru Camp/[Airota&Nekomoe kissaten&VCB-Studio] Yuru Camp [Ma10p_1080p]/[Airota] Yuru Camp - 01.mkv",
+        "[VCB-Studio] Yuru Camp/[Airota&Nekomoe kissaten&VCB-Studio] Yuru Camp Season 2 [Ma10p_1080p]/[Airota] Yuru Camp S02E01.mkv",
+    ]
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO source_roots(root_id, provider, ingest_method, created_at, updated_at) "
+            "VALUES ('root-p', 'local', 'local_scan', 'now', 'now')"
+        )
+        conn.execute(
+            "INSERT INTO source_scans(scan_id, root_id, generation, status, stage, heartbeat_at, started_at) "
+            "VALUES ('scan-p', 'root-p', 1, 'completed', 'ready', 'now', 'now')"
+        )
+    parser = V4Parser()
+    evidence_items = []
+    for relative in paths:
+        evidence = to_source_evidence(
+            SourceEntry(
+                root_id="root-p",
+                scan_id="scan-p",
+                provider="local",
+                ingest_method="local_scan",
+                relative_path=relative,
+                source_key=relative,
+            )
+        )
+        evidence_items.append((evidence, parser.parse(evidence, root_container="02_动漫")))
+    with database.connect() as conn:
+        repository.save_scan_evidence_bulk([item for item, _facts in evidence_items])
+        repository.save_parsed_facts_bulk([facts for _item, facts in evidence_items])
+    # 从库里读回（模拟真实扫描交给 resolver 的输入）
+    reloaded_evidence = repository.list_scan_evidence("scan-p")
+    pairs = [
+        (item, repository.get_parsed_facts(_fact_id_for(database, item.evidence_id)))
+        for item in reloaded_evidence
+    ]
+    from app.media_v4.resolution.resolver import MediaResolver
+
+    graph = MediaResolver().resolve(pairs)
+    titles = sorted(work.preferred_title for work in graph.works)
+    assert not any("Season 2" in title for title in titles), f"持久化事实路径被拆卡：{titles}"
+    assert "Yuru Camp" in titles, titles
+
+
+def _fact_id_for(database, evidence_id: str) -> str:
+    with database.connect() as conn:
+        row = conn.execute(
+            "SELECT parsed_fact_id FROM parsed_facts WHERE evidence_id = ? LIMIT 1", (evidence_id,)
+        ).fetchone()
+    assert row is not None, f"证据 {evidence_id} 没有持久化事实"
+    return str(row["parsed_fact_id"])
