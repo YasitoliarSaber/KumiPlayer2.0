@@ -97,6 +97,59 @@ def strip_leading_quality_prefix(title: str) -> str:
     cleaned = _RE_LEADING_QUALITY_PREFIX.sub("", value, count=1).strip()
     return cleaned or value
 
+
+#: 目录序号前缀：``1.命运石之门`` / ``16.物语系列`` 这类排序编号属于发布目录的组织
+#: 信息，不属于作品名（留着会让在线候选的规范化等值匹配失败，整部作品无法自动采用）。
+#: **必须格外小心真标题本身带数字**：``2.5次元的诱惑``、``86-不存在的战区-``、
+#: ``3月的狮子``、``22／7``、``91Days``；因此规则收紧为四重保护：
+#:   1. 只认 1–2 位数字（排序编号的真实形态，≤99）；
+#:   2. 必须紧跟 ``.`` / ``．`` / ``、`` 这类**序号分隔符**（连字符、斜杠、空白都不算）；
+#:   3. 分隔符之后**不能**是数字，否则 ``2.5次元`` 会被截断成 ``5次元``；
+#:   4. 剥离后必须仍有 ≥2 个字符且含字母或中日韩文字。
+_ORDERING_PREFIX_PATTERN = re.compile(r"^\s*(?:\d{1,2})\s*[.．、]\s*(?P<rest>.*)$", re.DOTALL)
+_RE_HAS_WORD_CHAR = re.compile(r"[A-Za-z\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+
+#: 前导装饰 token 的最大剥离轮数：``C 4k Clannad``（京阿尼合集）、``O 4k 偶像大师…``
+#: （用户选中的根目录名）都把画质标记放在**第二个** token，只剥一次第一个 token 会留下
+#: 中间的 ``4k``，并一路进入展示与刮削命名。
+_MAX_LEADING_STRIP_ROUNDS = 3
+
+
+def strip_ordering_prefix(title: str) -> str:
+    """剥离目录序号前缀（``1.命运石之门`` → ``命运石之门``），带四重反例保护。"""
+
+    value = str(title or "")
+    match = _ORDERING_PREFIX_PATTERN.match(value)
+    if not match:
+        return value
+    rest = match.group("rest").strip()
+    if not rest or rest[0].isdigit():
+        return value
+    if len(rest) < 2 or not _RE_HAS_WORD_CHAR.search(rest):
+        return value
+    return rest
+
+
+def strip_leading_decoration_run(title: str) -> str:
+    """反复剥离前导装饰 token（画质/介质 + 单字母标记），最多 3 轮。
+
+    复用两条已经过验证的规则（画质前缀、单字母标记），只是**循环执行**，因此不会
+    引入新的误伤面；任一轮没有变化就停止，永不返回空串。
+    """
+
+    value = str(title or "").strip()
+    if not value:
+        return value
+    for _ in range(_MAX_LEADING_STRIP_ROUNDS):
+        candidate = strip_leading_quality_prefix(value)
+        if candidate == value:
+            stripped_single = _RE_SINGLE_LETTER_NUMERIC_PREFIX.sub("", value, count=1).strip()
+            candidate = stripped_single or value
+        if candidate == value:
+            break
+        value = candidate
+    return value
+
 # 技术标签关键词（用于过滤方括号 token）
 _TECH_KEYWORDS = {
     "bdrip", "webrip", "web-dl", "bdmv", "remux",
@@ -243,10 +296,23 @@ def clean_work_title_container(container: str) -> TitleCleanResult:
 
     # 0. 先剥离前置画质前缀（``4k偶像大师…``）——它属于发布信息，不属于作品名，
     #    留着会让在线候选的规范化等值匹配失败，作品永远无法自动采用。
-    prefixed = strip_leading_quality_prefix(container)
+    #    用**循环**版本：实测 ``C 4k Clannad``、``O 4k 偶像大师…``（用户选中的根
+    #    目录名）把画质标记放在第二个 token，只剥一次会留下中间的 ``4k`` 并进入展示。
+    original_before_leading = container
+    prefixed = strip_leading_decoration_run(container)
     if prefixed != container:
         container = prefixed
-        applied.append("去掉前置画质前缀")
+        applied.append("去掉前置画质/装饰前缀")
+        # 循环剥离可能已经带走了单字母分区前缀（``B 86-…`` / ``C 4k …``）：
+        # 补记该规则，让 applied_rules 仍然如实说明"单字母前缀被去掉了"。
+        if _RE_SINGLE_LETTER_NUMERIC_PREFIX.match(original_before_leading):
+            applied.append("去掉单字母分区前缀")
+
+    # 0.1 目录序号前缀（``1.命运石之门`` → ``命运石之门``）：同样会让在线匹配失败。
+    unnumbered = strip_ordering_prefix(container)
+    if unnumbered != container:
+        container = unnumbered
+        applied.append("去掉目录序号前缀")
 
     # 1. 去掉状态词
     cleaned = container
