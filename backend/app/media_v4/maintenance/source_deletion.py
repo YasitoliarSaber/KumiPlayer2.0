@@ -1,0 +1,303 @@
+"""按来源卡片 / 按导入删除媒体库条目。
+
+历史教训：旧版"按来源删除"会长时间占用识别、甚至卡住。因此本模块的红线是：
+
+- **绝不参与识别**：不调用 resolver / parser / scanner，只读已确认的事实表；
+- **先预览后执行**：预览只做计数与少量样本（有界查询，不水合对象）；
+- **按来源引用计数**：只删除"不再被任何其他来源 revision 绑定"的作品，
+  多来源共享的作品必须保留（否则删一个来源会打穿另一个来源的媒体库）；
+- **路径防护**：只删除镜像根之内的文件，真实来源媒体永不触碰；
+- **批量 + 可取消**：每批独立事务，进度可回报、可中断，投影只在最后刷新一次。
+
+外键约束决定了执行顺序（已用 PRAGMA 实测）：
+
+- ``revision_bindings.work_id`` 是 **RESTRICT**：必须先删绑定行，才能删作品行；
+- ``artifacts`` 与 ``works`` 之间**没有外键**：产物行与文件必须显式清理，不会级联；
+- ``seasons`` / ``episodes`` / ``provider_bindings`` 从 ``works`` 级联，无需手工删。
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+@dataclass(slots=True)
+class SourceDeletionPlan:
+    """删除影响范围预览（只含计数与少量样本，绝不水合全量对象）。"""
+
+    root_id: str
+    works_total: int = 0
+    works_removable: int = 0
+    works_shared: int = 0
+    artifacts_total: int = 0
+    artifact_files: int = 0
+    artifact_bytes: int = 0
+    files_outside_mirror: list[str] = field(default_factory=list)
+    removable_samples: list[str] = field(default_factory=list)
+    shared_samples: list[str] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "root_id": self.root_id,
+            "works_total": self.works_total,
+            "works_removable": self.works_removable,
+            "works_shared": self.works_shared,
+            "artifacts_total": self.artifacts_total,
+            "artifact_files": self.artifact_files,
+            "artifact_bytes": self.artifact_bytes,
+            "files_outside_mirror": self.files_outside_mirror[:10],
+            "removable_samples": self.removable_samples,
+            "shared_samples": self.shared_samples,
+            "blockers": self.blockers,
+        }
+
+
+def _removable_work_ids(conn: sqlite3.Connection, root_id: str) -> tuple[list[str], list[str]]:
+    """(可删除的作品, 与其他来源共享而必须保留的作品)。
+
+    判定只依赖"该作品是否还被**其他来源**的 revision 绑定"，因此是引用计数而不是
+    先到先得；同来源自己的多个 revision 不构成保留理由。
+    """
+
+    rows = conn.execute(
+        """
+        SELECT work_id FROM revision_bindings
+        WHERE revision_id IN (SELECT revision_id FROM import_revisions WHERE root_id = ?)
+          AND work_id != ''
+        GROUP BY work_id
+        """,
+        (root_id,),
+    ).fetchall()
+    own = [str(row["work_id"]) for row in rows]
+    if not own:
+        return [], []
+    others = {
+        str(row["work_id"])
+        for row in conn.execute(
+            """
+            SELECT DISTINCT work_id FROM revision_bindings
+            WHERE revision_id IN (SELECT revision_id FROM import_revisions WHERE root_id != ?)
+              AND work_id != ''
+            """,
+            (root_id,),
+        )
+    }
+    removable = [work_id for work_id in own if work_id not in others]
+    shared = [work_id for work_id in own if work_id in others]
+    return removable, shared
+
+
+def _blockers(conn: sqlite3.Connection, root_id: str) -> list[str]:
+    """删除前置条件：来源自己的扫描/作业必须已经停下。"""
+
+    blockers: list[str] = []
+    active_scan = conn.execute(
+        "SELECT status FROM source_scans WHERE root_id = ? AND status IN ('queued', 'running', 'cancelling') LIMIT 1",
+        (root_id,),
+    ).fetchone()
+    if active_scan is not None:
+        blockers.append("该来源仍有进行中的扫描，请先取消或等待结束")
+    active_job = conn.execute(
+        """
+        SELECT job_type FROM jobs job
+        JOIN import_revisions revision ON revision.revision_id = job.revision_id
+        WHERE revision.root_id = ? AND job.status IN ('queued', 'running') LIMIT 1
+        """,
+        (root_id,),
+    ).fetchone()
+    if active_job is not None:
+        blockers.append(f"该来源仍有进行中的后台任务（{active_job['job_type']}），请稍后重试")
+    return blockers
+
+
+def plan_source_deletion(
+    database,
+    root_id: str,
+    *,
+    mirror_root: str | Path = "",
+    sample_limit: int = 8,
+) -> dict:
+    """只读预览：会删掉哪些作品/文件，哪些作品因为被其他来源共享而保留。"""
+
+    mirror = Path(mirror_root).resolve(strict=False) if mirror_root else None
+    plan = SourceDeletionPlan(root_id=root_id)
+    with database.connect() as conn:
+        plan.blockers = _blockers(conn, root_id)
+        removable, shared = _removable_work_ids(conn, root_id)
+        plan.works_removable = len(removable)
+        plan.works_shared = len(shared)
+        plan.works_total = len(removable) + len(shared)
+
+        if removable:
+            placeholders = ",".join("?" for _ in removable)
+            plan.removable_samples = [
+                str(row["preferred_title"] or row["work_id"])
+                for row in conn.execute(
+                    f"SELECT work_id, preferred_title FROM works WHERE work_id IN ({placeholders}) "
+                    "ORDER BY preferred_title LIMIT ?",
+                    (*removable, sample_limit),
+                )
+            ]
+        if shared:
+            placeholders = ",".join("?" for _ in shared)
+            plan.shared_samples = [
+                str(row["preferred_title"] or row["work_id"])
+                for row in conn.execute(
+                    f"SELECT work_id, preferred_title FROM works WHERE work_id IN ({placeholders}) "
+                    "ORDER BY preferred_title LIMIT ?",
+                    (*shared, sample_limit),
+                )
+            ]
+
+        if removable:
+            placeholders = ",".join("?" for _ in removable)
+            for row in conn.execute(
+                f"SELECT target_path FROM artifacts WHERE work_id IN ({placeholders})",
+                removable,
+            ):
+                target = str(row["target_path"] or "")
+                if not target:
+                    continue
+                plan.artifacts_total += 1
+                path = Path(target)
+                if mirror is not None:
+                    try:
+                        resolved = path.resolve(strict=False)
+                    except OSError:
+                        continue
+                    if mirror != resolved and mirror not in resolved.parents:
+                        # 镜像根之外的文件（例如来源真实媒体）绝不删除，只如实报告。
+                        plan.files_outside_mirror.append(str(resolved))
+                        continue
+                plan.artifact_files += 1
+                try:
+                    plan.artifact_bytes += path.stat().st_size
+                except OSError:
+                    pass
+    return plan.to_dict()
+
+
+def delete_source_library(
+    database,
+    root_id: str,
+    *,
+    mirror_root: str | Path,
+    batch_size: int = 200,
+    progress=None,
+    should_cancel=None,
+) -> dict:
+    """执行删除：退役该来源（其作品退出活动库）并回收它们的镜像产物。
+
+    **为什么不是"删作品行"**（这是实现时必须遵守的项目不变量，实测确认）：
+
+    - 数据库触发器 ``v4_confirmed_binding_delete_guard`` 禁止删除已确认 revision 的
+      绑定行，``revision_bindings.work_id`` 又是 ``RESTRICT`` —— 只要绑定还在，
+      作品行就删不掉；
+    - 强行绕开就等于改写已确认事实，违反"confirmed revision 不可反向改写"。
+
+    因此本实现走项目既有的 ``retired_at`` 语义（来源退役即让作品、播放与追更查询
+    退出活动库），并**物理删除可再生的镜像产物**（artifacts 行 + 镜像根之内的文件）
+    来真正回收磁盘：
+
+    - 只处理**不与其它来源共享**的作品：仍被别的来源绑定的作品必须保留其产物，
+      否则会出现"作品还在媒体墙上、文件却被删掉"的悬挂状态；
+    - 事实行（evidence / parsed_facts / bindings / revision）一律保留，作为审计；
+    - 绝不触碰镜像根之外的任何文件（来源真实媒体）。纯 SQL + 文件操作，不重跑识别。
+    """
+
+    mirror = Path(mirror_root).resolve(strict=False)
+    removed_files = 0
+    removed_artifacts = 0
+    skipped_outside = 0
+    cancelled = False
+
+    with database.connect() as conn:
+        blockers = _blockers(conn, root_id)
+        if blockers:
+            return {"ok": False, "reason": blockers[0], "removed_works": 0, "removed_files": 0}
+        leaving, shared = _removable_work_ids(conn, root_id)
+
+    def _guard() -> None:
+        nonlocal cancelled
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            raise KeyboardInterrupt
+
+    for offset in range(0, len(leaving), max(1, batch_size)):
+        batch = leaving[offset : offset + max(1, batch_size)]
+        _guard()
+        placeholders = ",".join("?" for _ in batch)
+        with database.connect() as conn:
+            rows = conn.execute(
+                f"SELECT artifact_id, target_path FROM artifacts WHERE work_id IN ({placeholders})",
+                batch,
+            ).fetchall()
+            portable_ids: list[str] = []
+            for row in rows:
+                target = str(row["target_path"] or "")
+                artifact_id = str(row["artifact_id"])
+                if not target:
+                    portable_ids.append(artifact_id)
+                    continue
+                path = Path(target)
+                try:
+                    resolved = path.resolve(strict=False)
+                except OSError:
+                    portable_ids.append(artifact_id)
+                    continue
+                if mirror != resolved and mirror not in resolved.parents:
+                    # 镜像根之外：绝不删除，保留产物行以便用户看见这条异常。
+                    skipped_outside += 1
+                    portable_ids.append(artifact_id)
+                    continue
+                try:
+                    path.unlink(missing_ok=True)
+                    removed_files += 1
+                    removed_artifacts += 1
+                except OSError:
+                    portable_ids.append(artifact_id)
+            if portable_ids:
+                kept_placeholders = ",".join("?" for _ in portable_ids)
+                conn.execute(
+                    f"DELETE FROM artifacts WHERE work_id IN ({placeholders}) "
+                    f"AND artifact_id NOT IN ({kept_placeholders})",
+                    (*batch, *portable_ids),
+                )
+            else:
+                conn.execute(f"DELETE FROM artifacts WHERE work_id IN ({placeholders})", batch)
+        if progress is not None:
+            progress(min(offset + len(batch), len(leaving)), len(leaving))
+
+    if cancelled:
+        return {
+            "ok": False,
+            "reason": "已取消",
+            "removed_works": 0,
+            "removed_files": removed_files,
+        }
+
+    now = _now()
+    with database.connect() as conn:
+        # 退役来源：作品、播放与追更查询据此退出活动库（项目既有的按来源清理语义）。
+        conn.execute(
+            "UPDATE source_roots SET retired_at = COALESCE(NULLIF(retired_at, ''), ?), "
+            "enabled = 0, retired_reason = '用户按来源删除媒体库', updated_at = ? WHERE root_id = ?",
+            (now, now, root_id),
+        )
+    return {
+        "ok": True,
+        "works_leaving_library": len(leaving),
+        "removed_artifacts": removed_artifacts,
+        "removed_files": removed_files,
+        "files_outside_mirror_skipped": skipped_outside,
+        "shared_works_kept": len(shared),
+    }
+
+
+def _now() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).isoformat()
