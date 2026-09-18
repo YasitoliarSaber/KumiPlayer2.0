@@ -21,6 +21,27 @@ from app.media_v4.resolution.candidates import work_identity_title_inputs
 logger = logging.getLogger(__name__)
 
 
+def _owner_is_active(conn, work_id: str) -> bool:
+    """该 Work 是否仍由**活动来源的已确认 revision**提供。
+
+    只有活动作品才构成"这个在线身份已经名花有主"。被取代的导入（superseded）
+    或已退役来源留下的绑定属于**陈旧批次残留**，必须允许新导入接管；否则每次
+    重新导入都会被上一批残留的身份挡住，反复退化成"需要人工处理"。
+    """
+
+    row = conn.execute(
+        """
+        SELECT 1 FROM revision_bindings rb
+        JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+        JOIN source_roots sr ON sr.root_id = ir.root_id
+        WHERE rb.work_id = ? AND ir.status = 'confirmed' AND sr.retired_at = ''
+        LIMIT 1
+        """,
+        (work_id,),
+    ).fetchone()
+    return row is not None
+
+
 def _claim_provider_binding(
     conn,
     *,
@@ -37,9 +58,13 @@ def _claim_provider_binding(
     成功、后提交者撞主键 → IntegrityError 把整个 scrape_work 判失败（实测线上连续
     出现 8 次）。这里把竞态收敛成返回值：False 表示身份已被另一个 work 占用，
     调用方据此降级为待人工复核——这正是该分支注释原本声明的意图。
+
+    **活动范围**：占用者必须仍然活动（活动来源的已确认 revision）。陈旧占用者
+    （被取代导入 / 已退役来源的残留绑定）会被自动释放并让本次接管，否则跨批次
+    导入会互相挡路：实测重新导入时被上一批残留身份挡成"需要人工处理"。
     """
 
-    try:
+    def _insert() -> None:
         conn.execute(
             """
             INSERT INTO provider_bindings(work_id, provider, media_type, provider_id)
@@ -50,6 +75,24 @@ def _claim_provider_binding(
             """,
             (work_id, provider, provider_id, work_id),
         )
+
+    stale_owner = conn.execute(
+        "SELECT work_id FROM provider_bindings "
+        "WHERE provider = ? AND media_type = ? AND provider_id = ?",
+        (provider, media_type, provider_id),
+    ).fetchone()
+    if (
+        stale_owner is not None
+        and str(stale_owner["work_id"]) != str(work_id)
+        and not _owner_is_active(conn, str(stale_owner["work_id"]))
+    ):
+        conn.execute(
+            "DELETE FROM provider_bindings WHERE work_id = ? AND provider = ? AND media_type = ?",
+            (str(stale_owner["work_id"]), provider, media_type),
+        )
+
+    try:
+        _insert()
         return True
     except sqlite3.IntegrityError:
         owner = conn.execute(
@@ -58,7 +101,15 @@ def _claim_provider_binding(
             (provider, media_type, provider_id),
         ).fetchone()
         if owner is not None and str(owner["work_id"]) != str(work_id):
-            return False
+            if _owner_is_active(conn, str(owner["work_id"])):
+                return False
+            # 竞态窗口内出现的陈旧占用者：释放后重试一次。
+            conn.execute(
+                "DELETE FROM provider_bindings WHERE work_id = ? AND provider = ? AND media_type = ?",
+                (str(owner["work_id"]), provider, media_type),
+            )
+            _insert()
+            return True
         raise
 
 

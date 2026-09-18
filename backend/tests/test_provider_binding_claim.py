@@ -26,26 +26,92 @@ def _seed_work(conn, work_id: str, *, work_type: str = "series") -> None:
     )
 
 
-def test_claiming_an_identity_owned_by_another_work_returns_false(tmp_path):
+def _make_active(conn, work_id: str, *, revision_id: str, root_id: str) -> None:
+    """把 work 挂到"活动来源的已确认 revision"上，使其成为活动作品。"""
+
+    conn.execute(
+        "INSERT OR IGNORE INTO source_roots(root_id, provider, ingest_method, created_at, updated_at) "
+        "VALUES (?, 'local', 'local_scan', 'now', 'now')",
+        (root_id,),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO source_scans(scan_id, root_id, generation, status, stage, heartbeat_at, started_at) "
+        "VALUES (?, ?, 1, 'completed', 'ready', 'now', 'now')",
+        (f"scan-{revision_id}", root_id),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO import_revisions(revision_id, root_id, scan_id, resolver_version, status, created_at) "
+        "VALUES (?, ?, ?, 'fixture', 'confirmed', 'now')",
+        (revision_id, root_id, f"scan-{revision_id}"),
+    )
+    evidence_id = f"ev-{work_id}"
+    conn.execute(
+        "INSERT INTO source_evidence(evidence_id, scan_id, root_id, source_key, relative_path, entry_kind, "
+        "provider, source_locator, fingerprint) VALUES (?, ?, ?, ?, ?, 'video', 'local', ?, ?)",
+        (evidence_id, f"scan-{revision_id}", root_id, evidence_id, f"{evidence_id}.mkv", evidence_id, evidence_id),
+    )
+    conn.execute(
+        "INSERT INTO revision_bindings(binding_id, revision_id, evidence_id, work_id) VALUES (?, ?, ?, ?)",
+        (f"bind-{work_id}", revision_id, evidence_id, work_id),
+    )
+
+
+def test_active_owner_still_blocks_and_stale_owner_is_taken_over(tmp_path):
+    """活动占用者必须继续拦住；**陈旧占用者**（被取代导入的残留绑定）必须让位。
+
+    跨批次回归：重新导入时若上一批（已被取代）的作品仍占着同一个在线身份，
+    新批次会被判成"在线作品已关联到另一部作品"、反复退化为人工处理。
+    """
+
     database = _database(tmp_path)
     with database.connect() as conn:
         _seed_work(conn, "work-a")
         _seed_work(conn, "work-b")
+        _seed_work(conn, "work-c")
+        # work-a 活动并占用身份；work-b 是"陈旧占用者"（没有任何活动 revision 绑定）
+        _make_active(conn, "work-a", revision_id="rev-a", root_id="root-a")
+        _make_active(conn, "work-b", revision_id="rev-b", root_id="root-b")
         conn.execute(
             "INSERT INTO provider_bindings(work_id, provider, media_type, provider_id) "
-            "VALUES ('work-a', 'tmdb', 'tv', '12345')"
+            "VALUES ('work-b', 'tmdb', 'tv', '12345')"
         )
+        conn.execute("UPDATE import_revisions SET status = 'superseded' WHERE revision_id = 'rev-b'")
 
-        claimed = _claim_provider_binding(
-            conn, work_id="work-b", provider="tmdb", media_type="tv", provider_id="12345"
+        # 活动占用者：拒绝
+        assert (
+            _claim_provider_binding(
+                conn, work_id="work-a", provider="tmdb", media_type="tv", provider_id="12345"
+            )
+            is True
+        ), "活动作品之间仍按先到先得"
+        _claim_provider_binding(
+            conn, work_id="work-c", provider="tmdb", media_type="tv", provider_id="12345"
         )
-
-        assert claimed is False, "身份已被他人占用时必须返回 False，而不是抛 IntegrityError"
         owner = conn.execute(
             "SELECT work_id FROM provider_bindings WHERE provider = 'tmdb' "
             "AND media_type = 'tv' AND provider_id = '12345'"
         ).fetchone()
-        assert str(owner["work_id"]) == "work-a", "已占用的身份不得被覆盖"
+        assert str(owner["work_id"]) == "work-a", "活动占用者的身份不得被抢占"
+
+        # 陈旧占用者：允许接管（把身份归还给活动 work）
+        conn.execute(
+            "INSERT INTO provider_bindings(work_id, provider, media_type, provider_id) "
+            "VALUES ('work-b', 'tmdb', 'tv', '54321')"
+        )
+        assert _claim_provider_binding(
+            conn, work_id="work-c", provider="tmdb", media_type="tv", provider_id="54321"
+        ), "陈旧占用者必须让位，否则跨批次导入会一直被挡成人工处理"
+        new_owner = conn.execute(
+            "SELECT work_id FROM provider_bindings WHERE provider = 'tmdb' "
+            "AND media_type = 'tv' AND provider_id = '54321'"
+        ).fetchone()
+        assert str(new_owner["work_id"]) == "work-c"
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM provider_bindings WHERE work_id = 'work-b' AND provider_id = '54321'"
+            ).fetchone()[0]
+            == 0
+        ), "陈旧绑定必须被释放"
 
 
 def test_claiming_a_free_identity_succeeds_and_is_idempotent(tmp_path):
