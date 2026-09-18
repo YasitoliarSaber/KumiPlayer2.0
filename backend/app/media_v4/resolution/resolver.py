@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections import OrderedDict, defaultdict
+from collections.abc import Set as AbstractSet
 from pathlib import PurePosixPath
 
 from app.media_v4.domain.models import (
@@ -210,10 +211,28 @@ def _edition_key(facts: ParsedFacts) -> str:
     return "+".join(tags) or "default"
 
 
+#: 子作品容器名里的季度/分部后缀：``Yuru Camp S2``、``CLANNAD 第二季``、``Part 2``。
+#: 去掉它之后比较"基名"才能区分两种完全不同的结构：
+#: - 基名相同（``Yuru Camp S1`` vs ``Yuru Camp S2``）→ **同一作品的多季**，仍归并；
+#: - 基名不同（``CLANNAD`` vs ``轻音少女``）→ **合集**，各自成作品。
+_SEASON_SUFFIX_PATTERN = re.compile(
+    r"(?i)\s*(?:s\d{1,2}|season\s*\d{1,2}|\d{1,2}(?:st|nd|rd|th)\s+season"
+    r"|第\s*(?:\d+|[一二三四五六七八九十]+)\s*季|part\s*\d+|cour\s*\d+)\s*$"
+)
+
+
+def _series_base_title(title: str) -> str:
+    """去掉季度/分部后缀后的基名（用于判断是否同一作品的多季）。"""
+
+    base = _SEASON_SUFFIX_PATTERN.sub("", title or "").strip()
+    return base or (title or "").strip()
+
+
 def _resolved_entry_work_key(
     evidence: SourceEvidence,
     facts: ParsedFacts,
     structural_series_identities: set[tuple[str, str]],
+    collection_series: AbstractSet[tuple[str, str]] = frozenset(),
 ) -> str:
     key = _work_key(facts, evidence)
     if facts.card_type == "standalone":
@@ -224,11 +243,17 @@ def _resolved_entry_work_key(
     # 这是结构化的同作品证据，应归入同一个 TV Work。外传和电影的
     # series_group 同样可能指向父系列，却只能用于 relation；它们已经由
     # standalone/card type 在上方隔离，不能被这一规则吞并。
+    #
+    # **合集例外**：``京阿尼合集/CLANNAD/…`` 与 ``京阿尼合集/轻音少女/…`` 的
+    # series_group 都是"京阿尼合集"，但它们是**不同作品**。把系列提升应用在合集上
+    # 会把 200+ 个不同动画的文件并成同一部作品的剧集（身份、刮削、剧集编号全错），
+    # 因此合集不参与系列归并（见 resolve() 里的 collection_series 判定）。
     normalized_group = _normalize_title(facts.series_group)
     if (
         facts.relation_type == "main"
         and normalized_group
         and (normalized_group, media_type) in structural_series_identities
+        and (normalized_group, media_type) not in collection_series
     ):
         return f"series:{normalized_group}:{media_type}"
     matching_series = next(
@@ -310,10 +335,37 @@ class MediaResolver:
         }
         explicit_special_numbers: dict[str, set[int]] = defaultdict(set)
         local_special_identities: dict[str, set[tuple[str, int, int | None]]] = defaultdict(set)
+        # 「合集目录」与「多季系列」只能靠**整批**区分，单条解析看不出：
+        # - ``京阿尼合集/CLANNAD/…`` + ``京阿尼合集/轻音少女/…`` → 同一 series_group
+        #   下出现两个不同子作品容器 → 这是合集，各子作品必须各自成作品；
+        # - ``摇曳露营/第1季/…`` + ``摇曳露营/第2季/…`` → 子作品容器是结构目录
+        #   （提取为空），集合里只剩作品自身 → 仍是同一 Work 的多季。
+        series_child_containers: dict[tuple[str, str], set[str]] = defaultdict(set)
+        for evidence, facts in entries:
+            if facts.card_type == "standalone":
+                continue
+            group = _normalize_title(facts.series_group)
+            if not group or is_generic_container_title(facts.series_group):
+                continue
+            container = _extract_work_container(
+                evidence.relative_path, provider_to_source(evidence.provider)
+            )
+            if not container:
+                continue
+            child_title = _normalize_title(_parse_work_title_and_year(container)[0])
+            if child_title:
+                series_child_containers[(group, _effective_media_type(facts))].add(child_title)
+        # 用**基名**个数判断：多季系列（``Yuru Camp S1``/``S2``）基名相同 → 仍归并；
+        # 合集（``CLANNAD``/``轻音少女``）基名不同 → 各自成作品。
+        collection_series = {
+            series_key
+            for series_key, children in series_child_containers.items()
+            if len({_series_base_title(child) for child in children}) > 1
+        }
         for evidence, facts in entries:
             if facts.group_type != "special" and not facts.special_candidate:
                 continue
-            key = _resolved_entry_work_key(evidence, facts, structural_series_identities)
+            key = _resolved_entry_work_key(evidence, facts, structural_series_identities, collection_series)
             local_identity = _local_special_identity(evidence, facts)
             if key and local_identity is not None:
                 local_special_identities[key].add(local_identity)
@@ -371,7 +423,7 @@ class MediaResolver:
                 continue
             if (facts.special_number or facts.episode_candidate or 0) > 0:
                 continue
-            key = _resolved_entry_work_key(evidence, facts, structural_series_identities)
+            key = _resolved_entry_work_key(evidence, facts, structural_series_identities, collection_series)
             if not key:
                 continue
             title_identity = _normalize_title(facts.episode_title) or _normalize_title(
@@ -393,7 +445,7 @@ class MediaResolver:
             if not facts.is_importable or facts.is_auxiliary:
                 continue
             identity_title = facts.work_title or (facts.title_candidates or ("",))[0]
-            key = _resolved_entry_work_key(evidence, facts, structural_series_identities)
+            key = _resolved_entry_work_key(evidence, facts, structural_series_identities, collection_series)
             if facts.needs_review:
                 # 身份已经解析出来时，“解析过程有不确定信息”不该阻断确认；只有身份
                 # 确实无法确定的条目才是 blocking。两者用不同 code 区分，前端据
