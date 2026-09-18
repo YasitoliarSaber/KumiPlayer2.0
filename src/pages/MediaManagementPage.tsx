@@ -1692,7 +1692,7 @@ export default function MediaManagementPage() {
                       {sourceDeletionPreview !== null && sourceDeletionPreview.blockers.length === 0 && (
                         <Button className="media-v4-source-card-dialog-confirm media-v4-source-card-dialog-danger" appearance="primary" icon={sourceCardDeleting ? <Spinner size="tiny" /> : <Delete24Regular />} disabled={sourceCardDeleting} onClick={() => void deleteSourceLibrary()}>{sourceCardDeleting ? '正在提交…' : '确认删除媒体库'}</Button>
                       )}
-                      <Button className="media-v4-source-card-dialog-confirm media-v4-source-card-dialog-danger" appearance="primary" icon={sourceCardDeleting ? <Spinner size="tiny" /> : <Delete24Regular />} disabled={sourceCardDeleting} onClick={() => void hideSourceCard()}>{sourceCardDeleting ? '正在移除…' : '仅移除卡片'}</Button>
+                      <Button className="media-v4-source-card-dialog-confirm media-v4-source-card-dialog-danger" appearance="primary" icon={sourceCardDeleting ? <Spinner size="tiny" /> : <Delete24Regular />} disabled={sourceCardDeleting} onClick={() => void hideSourceCard()}>{sourceCardDeleting ? '正在移除…' : '移除'}</Button>
                     </>
                   )}
                 </DialogActions>

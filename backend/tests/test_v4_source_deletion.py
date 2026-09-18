@@ -203,10 +203,9 @@ def test_delete_refuses_while_source_has_active_scan(tmp_path):
 
 
 def test_api_preview_and_delete_requires_explicit_confirmation(tmp_path, monkeypatch):
+    from app.api import media_v4
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
-
-    from app.api import media_v4
 
     database, mirror = _two_sources(tmp_path)
     monkeypatch.setattr(media_v4, "_database", database)
