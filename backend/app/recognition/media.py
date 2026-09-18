@@ -258,19 +258,40 @@ def _extract_work_container(relative_path: str, source: str = "pan115") -> str:
     if source == "baidu":
         idx = _source_work_index(parts, source)
         return parts[idx] if idx is not None else ""
-    # 优先按“分类层 + 作品目录”结构取第二层；路径不足三段（如 OpenList
-    # 相对选中 root 的路径没有分类层，作品目录下直接就是文件）时，第一层
-    # 就是作品容器，不能把文件名当容器。结构段目录名（S1/Season/第X季）
-    # 永远不是作品容器。
-    if len(parts) >= 3:
-        if _looks_like_plain_season_dir(parts[1]):
-            return ""
-        return parts[1]
-    if len(parts) == 2:
-        if _looks_like_plain_season_dir(parts[0]):
-            return ""
-        return parts[0]
-    return ""
+    # 结构目录（S1/Season/第X季/特别篇/OVA…）永远不是作品容器：与目录树/本地
+    # 路径（_source_work_index）保持一致——**向上回退到最近的非结构目录**，
+    # 而不是放弃容器。放弃容器会让调用方回退到文件名派生标题，而实测
+    # ``摇曳露营/特别篇/…`` 里的 ``特别篇``、``OVA/…`` 里的 ``OVA`` 会被当成
+    # 作品容器，导出成独立作品（用户导入页确实出现了名为「OVA」「特别篇」的作品）。
+    segments = [segment for segment in parts[:-1] if segment]
+    while segments and (
+        _looks_like_plain_season_dir(segments[-1]) or _looks_like_specials_dir(segments[-1])
+    ):
+        segments.pop()
+    if not segments:
+        return ""
+    if len(segments) >= 2:
+        return segments[1]
+    return segments[0]
+
+
+def _looks_like_specials_dir(dirname: str) -> bool:
+    """特典/花絮类**结构目录**（不是作品容器）。
+
+    目录树路径靠"分类层 + 作品目录"天然避开这类目录；OpenList 相对根的路径
+    层数少，此前会把 ``摇曳露营/特别篇`` 的 ``特别篇`` 当成作品容器，实测导出
+    名为「OVA」「特别篇」「始动篇」的独立作品。这里按**整段精确匹配**判断，
+    因此 ``SPY×FAMILY`` 这类真标题不受影响。
+    """
+
+    cleaned = re.sub(r"[\s._\-·:：/\\()（）【】\[\]]+", "", dirname or "").casefold()
+    if not cleaned:
+        return False
+    return cleaned in {
+        "特别篇", "特典", "映像特典", "番外", "番外篇", "短片",
+        "sp", "sps", "ova", "oad", "oads", "ncop", "nced", "op", "ed",
+        "menu", "pv", "cm", "preview", "short", "shorts", "extra", "extras", "bonus",
+    }
 
 
 def _extract_series_name_from_filename(filename: str) -> str:

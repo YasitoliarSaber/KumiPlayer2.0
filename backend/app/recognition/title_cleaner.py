@@ -79,6 +79,10 @@ _RE_LEADING_QUALITY_PREFIX = re.compile(
     r"(?:\d{3,4}p|[248]k|uhd|hdr(?:10\+)?)\s*(?=[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af])"
     r"|(?:[248]k|uhd|blu[- ]?ray|bd(?:rip|remux)?|web(?:rip|-?dl)?|remux|hdr(?:10\+)?|\d{3,4}p)"
     r"[\s._\-]+"
+    # 特典/花絮类前缀（``OVA 小魔女学园`` → ``小魔女学园``）。只在后面确实跟着
+    # 分隔符时剥离，且不收录 sp/pv/cm/op/ed 这类易与真标题冲突的短词。
+    r"|(?:ova|oad|特别篇|特典|映像特典|ncop|nced|menu)"
+    r"[\s._\-]+"
     r")",
     re.IGNORECASE,
 )
