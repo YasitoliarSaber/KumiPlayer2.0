@@ -136,6 +136,12 @@ class SourceCardRenameRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=200)
 
 
+class SourceLibraryDeletionRequest(BaseModel):
+    """按来源删除媒体库的确认载荷：必须显式 confirm，避免误触。"""
+
+    confirm: bool = False
+
+
 
 
 class WorkTitleRequest(BaseModel):
@@ -1229,6 +1235,40 @@ def hide_source_library_card(root_id: str):
         raise HTTPException(status_code=404, detail="来源卡不存在或已移除") from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/sources/libraries/{root_id}/deletion-preview")
+def preview_source_library_deletion(root_id: str):
+    """按来源删除媒体库的影响范围预览（只读）。
+
+    只做计数与少量样本，绝不水合全量对象，也不触发识别/扫描；UI 必须先展示它
+    再允许确认删除。
+    """
+
+    from app.core.paths import get_mirror_root
+    from app.media_v4.maintenance.source_deletion import plan_source_deletion
+
+    try:
+        return plan_source_deletion(get_database(), root_id, mirror_root=get_mirror_root())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="来源卡不存在或已移除") from exc
+
+
+@router.post("/sources/libraries/{root_id}/deletion")
+def start_source_library_deletion(root_id: str, request: SourceLibraryDeletionRequest):
+    """按来源删除媒体库：需要显式确认，执行走异步作业（不阻塞、可取消）。"""
+
+    from app.media_v4.maintenance.source_deletion import enqueue_source_deletion
+
+    if not request.confirm:
+        raise HTTPException(status_code=400, detail="请先确认预览中的影响范围")
+    try:
+        job_id = enqueue_source_deletion(get_database(), root_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="来源卡不存在或已移除") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"root_id": root_id, "job_id": job_id, "status": "queued"}
 
 
 @router.patch("/sources/libraries/{root_id}")

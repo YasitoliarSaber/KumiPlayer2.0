@@ -491,6 +491,29 @@ export const mediaV4Api = {
   hideSourceLibraryCard: (rootId: string) =>
     api.delete<{ root_id: string; hidden: boolean }>(`/api/v4/sources/libraries/${encodeURIComponent(rootId)}`),
 
+  /** 按来源删除媒体库的影响范围预览（只读；UI 必须先展示它再允许确认）。 */
+  sourceLibraryDeletionPreview: (rootId: string) =>
+    api.get<{
+      root_id: string
+      works_total: number
+      works_removable: number
+      works_shared: number
+      artifacts_total: number
+      artifact_files: number
+      artifact_bytes: number
+      files_outside_mirror: string[]
+      removable_samples: string[]
+      shared_samples: string[]
+      blockers: string[]
+    }>(`/api/v4/sources/libraries/${encodeURIComponent(rootId)}/deletion-preview`),
+
+  /** 按来源删除媒体库：后端排队为异步作业（不阻塞界面，可取消）。 */
+  deleteSourceLibrary: (rootId: string) =>
+    api.post<{ root_id: string; job_id: string; status: string }>(
+      `/api/v4/sources/libraries/${encodeURIComponent(rootId)}/deletion`,
+      { confirm: true },
+    ),
+
   renameSourceLibraryCard: (rootId: string, displayName: string) =>
     api.patch<{ root_id: string; display_name: string }>(
       `/api/v4/sources/libraries/${encodeURIComponent(rootId)}`,

@@ -39,6 +39,7 @@ class V4JobRunner:
         "scrape_work",
         "refresh_projection",
         "cleanup_superseded_artifacts",
+        "delete_source_library",
     })
 
     def __init__(self, database: V4Database, metadata_provider: Callable[[dict], dict] | None = None):
@@ -92,6 +93,37 @@ class V4JobRunner:
             self.cleanup.process(job_id, mirror_root or get_mirror_root())
             return JobRunResult(job_id, job["job_type"], self._current_status(job_id))
 
+        if job["job_type"] == "delete_source_library":
+            # 按来源删除媒体库：纯 SQL + 文件回收（退役来源 + 删除不与其它来源共享的
+            # 作品的镜像产物），**不重跑识别**。取消检查贯穿批次之间。
+            from app.media_v4.maintenance.source_deletion import delete_source_library
+
+            if not claim_running(self.database, job_id):
+                raise ValueError("任务已由其他执行器领取")
+            with self.database.connect() as conn:
+                revision = conn.execute(
+                    "SELECT root_id FROM import_revisions WHERE revision_id = ?",
+                    (job["revision_id"],),
+                ).fetchone()
+            if revision is None:
+                raise ValueError("删除任务的来源 revision 不存在")
+            outcome = delete_source_library(
+                self.database,
+                str(revision["root_id"]),
+                mirror_root=mirror_root or get_mirror_root(),
+                should_cancel=lambda: cancel_requested(self.database, job_id),
+                # 本作业此刻必然是 running，阻断检查要排除它自己。
+                ignore_job_id=job_id,
+            )
+            if not outcome.get("ok"):
+                self._mark_failed(job_id, str(outcome.get("reason") or "按来源删除未完成"))
+                return JobRunResult(job_id, job["job_type"], "failed")
+            heartbeat(self.database, job_id)
+            # 来源退役后媒体墙必须立即反映：删除作业自己收口一次投影重建。
+            self.projection.rebuild()
+            self._mark_succeeded(job_id)
+            return JobRunResult(job_id, job["job_type"], "succeeded")
+
         if not claim_running(self.database, job_id):
             raise ValueError("任务已由其他执行器领取")
         try:
@@ -119,9 +151,10 @@ class V4JobRunner:
                 WHERE status = 'queued'
                   AND job_type IN (
                       'materialize_mirror', 'scrape_work', 'refresh_projection',
-                      'cleanup_superseded_artifacts'
+                      'cleanup_superseded_artifacts', 'delete_source_library'
                   )
                 ORDER BY CASE job_type
+                    WHEN 'delete_source_library' THEN 0
                     WHEN 'materialize_mirror' THEN 1
                     WHEN 'scrape_work' THEN 2
                     WHEN 'refresh_projection' THEN 3
@@ -186,6 +219,10 @@ class V4JobRunner:
     def _prerequisites_succeeded(self, job: dict) -> bool:
         job_type = str(job["job_type"])
         if job_type == "materialize_mirror":
+            return True
+        if job_type == "delete_source_library":
+            # 按来源删除不依赖本 revision 的镜像/刮削是否完成：它只回收产物并按
+            # 引用计数决定哪些作品离开媒体库。
             return True
         params: tuple[object, ...]
         if job_type == "scrape_work":

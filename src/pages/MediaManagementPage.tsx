@@ -258,6 +258,18 @@ export default function MediaManagementPage() {
   const [sourceCardsLoading, setSourceCardsLoading] = useState(true)
   const [sourceCardPendingDelete, setSourceCardPendingDelete] = useState<V4SourceLibraryCard | null>(null)
   const [sourceCardDeleting, setSourceCardDeleting] = useState(false)
+  // 按来源删除媒体库：两步确认——先取预览（影响范围），再次点击才真正排队删除。
+  const [sourceDeletionPreview, setSourceDeletionPreview] = useState<{
+    works_removable: number
+    works_shared: number
+    artifact_files: number
+    artifact_bytes: number
+    removable_samples: string[]
+    shared_samples: string[]
+    blockers: string[]
+  } | null>(null)
+  const [sourceDeletionLoading, setSourceDeletionLoading] = useState(false)
+  const [sourceDeletionQueued, setSourceDeletionQueued] = useState(false)
   const [sourceCardPendingRename, setSourceCardPendingRename] = useState<V4SourceLibraryCard | null>(null)
   const [sourceCardRenameValue, setSourceCardRenameValue] = useState('')
   const [sourceCardRenaming, setSourceCardRenaming] = useState(false)
@@ -1147,6 +1159,51 @@ export default function MediaManagementPage() {
     }
   }
 
+  /** 第一步：取删除影响范围预览（只读，后端不水合全量对象）。 */
+  const loadSourceDeletionPreview = async () => {
+    if (!sourceCardPendingDelete || sourceDeletionLoading) return
+    const card = sourceCardPendingDelete
+    setSourceDeletionLoading(true)
+    setError('')
+    try {
+      const preview = await mediaV4Api.sourceLibraryDeletionPreview(card.root_id)
+      setSourceDeletionPreview({
+        works_removable: preview.works_removable,
+        works_shared: preview.works_shared,
+        artifact_files: preview.artifact_files,
+        artifact_bytes: preview.artifact_bytes,
+        removable_samples: preview.removable_samples,
+        shared_samples: preview.shared_samples,
+        blockers: preview.blockers,
+      })
+    } catch (cause) {
+      setError(userFacingPageError(cause, '无法读取删除影响范围，请稍后重试'))
+      setSourceCardPendingDelete(null)
+    } finally {
+      setSourceDeletionLoading(false)
+    }
+  }
+
+  /** 第二步：确认后排队异步删除（不阻塞界面；完成后来源卡自然消失）。 */
+  const deleteSourceLibrary = async () => {
+    if (!sourceCardPendingDelete || sourceCardDeleting || !sourceDeletionPreview) return
+    const card = sourceCardPendingDelete
+    if (sourceDeletionPreview.blockers.length > 0) return
+    setSourceCardDeleting(true)
+    setError('')
+    try {
+      await mediaV4Api.deleteSourceLibrary(card.root_id)
+      // 删除是异步作业：对话框不立即关闭，先在原地给出收尾提示，避免用户
+      // 以为"点了没反应"（来源卡会在作业完成后随轮询消失）。
+      setSourceDeletionQueued(true)
+      void refreshSourceCards()
+    } catch (cause) {
+      setError(userFacingPageError(cause, '按来源删除媒体库失败，请稍后重试'))
+    } finally {
+      setSourceCardDeleting(false)
+    }
+  }
+
   const openSourceCardRename = (card: V4SourceLibraryCard) => {
     setSourceCardRenameValue(card.display_name)
     setSourceCardRenameError('')
@@ -1578,7 +1635,7 @@ export default function MediaManagementPage() {
       )}
       </>}
       {sourceCardPendingDelete && (
-        <Dialog modalType="modal" open onOpenChange={(_, data) => { if (!data.open && !sourceCardDeleting) setSourceCardPendingDelete(null) }}>
+        <Dialog modalType="modal" open onOpenChange={(_, data) => { if (!data.open && !sourceCardDeleting) { setSourceCardPendingDelete(null); setSourceDeletionPreview(null); setSourceDeletionQueued(false) } }}>
           <DialogSurface
             className="media-v4-source-card-delete-dialog"
             backdrop={{ className: 'media-v4-source-card-delete-backdrop' }}
@@ -1586,14 +1643,58 @@ export default function MediaManagementPage() {
           >
             <FluentProvider theme={getKumiFluentTheme(appearanceMode)} className="media-v4-source-card-delete-dialog-provider">
               <DialogBody className="media-v4-source-card-dialog-body">
-                <DialogTitle className="media-v4-source-card-dialog-title">移除来源卡？</DialogTitle>
+                <DialogTitle className="media-v4-source-card-dialog-title">{sourceDeletionQueued ? '已开始删除' : '移除来源卡？'}</DialogTitle>
                 <DialogContent className="media-v4-source-card-dialog-content">
-                  <p>要从“已导入来源”中移除“{sourceCardPendingDelete.display_name}”吗？</p>
-                  <p>只会隐藏这张来源卡，不会删除媒体库、镜像、资料或观看状态；以后重新扫描同一来源时，卡片会再次出现。</p>
+                  {sourceDeletionQueued ? (
+                    <>
+                      <p>已开始按来源删除“{sourceCardPendingDelete.display_name}”的媒体库。</p>
+                      <p>删除在后台分批进行（不会重跑识别）。完成后该来源卡会消失，媒体墙上属于它的作品也会一并离开；被其他来源共享的作品会保留。</p>
+                    </>
+                  ) : (
+                    <>
+                      <p>要从“已导入来源”中移除“{sourceCardPendingDelete.display_name}”吗？</p>
+                      {sourceDeletionPreview === null && (
+                        <p>只会隐藏这张来源卡，不会删除媒体库、镜像、资料或观看状态；以后重新扫描同一来源时，卡片会再次出现。</p>
+                      )}
+                      {sourceDeletionPreview !== null && (
+                        <div className="media-v4-source-card-deletion-preview">
+                          <p>
+                            将删除该来源的媒体库：<strong>{sourceDeletionPreview.works_removable}</strong> 部作品离开媒体库、回收{' '}
+                            <strong>{sourceDeletionPreview.artifact_files}</strong> 个镜像文件
+                            {sourceDeletionPreview.artifact_bytes > 0 ? `（约 ${Math.max(1, Math.round(sourceDeletionPreview.artifact_bytes / 1048576))} MB）` : ''}。
+                          </p>
+                          {sourceDeletionPreview.works_shared > 0 && (
+                            <p>
+                              其中 <strong>{sourceDeletionPreview.works_shared}</strong> 部作品被其他来源共享，会保留
+                              {sourceDeletionPreview.shared_samples.length > 0 ? `（如：${sourceDeletionPreview.shared_samples.join('、')}）` : ''}。
+                            </p>
+                          )}
+                          {sourceDeletionPreview.removable_samples.length > 0 && (
+                            <p>将被删除的作品示例：{sourceDeletionPreview.removable_samples.join('、')}。</p>
+                          )}
+                          {sourceDeletionPreview.blockers.length > 0 && (
+                            <p role="alert">暂时无法删除：{sourceDeletionPreview.blockers.join('；')}</p>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  )}
                 </DialogContent>
                 <DialogActions className="media-v4-source-card-dialog-actions">
-                  <Button className="media-v4-source-card-dialog-cancel" appearance="secondary" disabled={sourceCardDeleting} onClick={() => setSourceCardPendingDelete(null)}>取消</Button>
-                  <Button className="media-v4-source-card-dialog-confirm media-v4-source-card-dialog-danger" appearance="primary" icon={sourceCardDeleting ? <Spinner size="tiny" /> : <Delete24Regular />} disabled={sourceCardDeleting} onClick={() => void hideSourceCard()}>{sourceCardDeleting ? '正在移除…' : '移除'}</Button>
+                  {sourceDeletionQueued ? (
+                    <Button className="media-v4-source-card-dialog-confirm" appearance="primary" onClick={() => { setSourceCardPendingDelete(null); setSourceDeletionPreview(null); setSourceDeletionQueued(false) }}>关闭</Button>
+                  ) : (
+                    <>
+                      <Button className="media-v4-source-card-dialog-cancel" appearance="secondary" disabled={sourceCardDeleting} onClick={() => { setSourceCardPendingDelete(null); setSourceDeletionPreview(null) }}>取消</Button>
+                      {sourceDeletionPreview === null && (
+                        <Button className="media-v4-source-card-dialog-confirm media-v4-source-card-dialog-danger" appearance="secondary" icon={sourceDeletionLoading ? <Spinner size="tiny" /> : <Delete24Regular />} disabled={sourceCardDeleting || sourceDeletionLoading} onClick={() => void loadSourceDeletionPreview()}>{sourceDeletionLoading ? '正在统计…' : '同时删除媒体库…'}</Button>
+                      )}
+                      {sourceDeletionPreview !== null && sourceDeletionPreview.blockers.length === 0 && (
+                        <Button className="media-v4-source-card-dialog-confirm media-v4-source-card-dialog-danger" appearance="primary" icon={sourceCardDeleting ? <Spinner size="tiny" /> : <Delete24Regular />} disabled={sourceCardDeleting} onClick={() => void deleteSourceLibrary()}>{sourceCardDeleting ? '正在提交…' : '确认删除媒体库'}</Button>
+                      )}
+                      <Button className="media-v4-source-card-dialog-confirm media-v4-source-card-dialog-danger" appearance="primary" icon={sourceCardDeleting ? <Spinner size="tiny" /> : <Delete24Regular />} disabled={sourceCardDeleting} onClick={() => void hideSourceCard()}>{sourceCardDeleting ? '正在移除…' : '仅移除卡片'}</Button>
+                    </>
+                  )}
                 </DialogActions>
               </DialogBody>
             </FluentProvider>

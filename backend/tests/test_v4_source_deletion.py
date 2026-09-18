@@ -200,3 +200,83 @@ def test_delete_refuses_while_source_has_active_scan(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM works WHERE work_id = 'work-two'").fetchone()[0] == 1, (
             "被阻断时不得产生任何删除副作用"
         )
+
+
+def test_api_preview_and_delete_requires_explicit_confirmation(tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api import media_v4
+
+    database, mirror = _two_sources(tmp_path)
+    monkeypatch.setattr(media_v4, "_database", database)
+    monkeypatch.setattr("app.core.paths.get_mirror_root", lambda: mirror)
+    application = FastAPI()
+    application.include_router(media_v4.router)
+    client = TestClient(application)
+
+    preview = client.get("/api/v4/sources/libraries/root-a/deletion-preview")
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["works_removable"] == 1 and body["works_shared"] == 1
+    assert body["artifact_files"] == 1
+
+    assert client.get("/api/v4/sources/libraries/nope/deletion-preview").status_code == 404
+
+    unconfirmed = client.post("/api/v4/sources/libraries/root-a/deletion", json={"confirm": False})
+    assert unconfirmed.status_code == 400, "未确认不得开始删除"
+
+    confirmed = client.post("/api/v4/sources/libraries/root-a/deletion", json={"confirm": True})
+    assert confirmed.status_code == 200, confirmed.text
+    job_id = confirmed.json()["job_id"]
+    with database.connect() as conn:
+        job = conn.execute("SELECT job_type, status FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+    assert str(job["job_type"]) == "delete_source_library"
+    assert str(job["status"]) == "queued"
+
+
+def test_deletion_job_runs_end_to_end_and_retires_the_source(tmp_path, monkeypatch):
+    from app.media_v4.jobs.runner import V4JobRunner
+    from app.media_v4.maintenance.source_deletion import enqueue_source_deletion
+
+    database, mirror = _two_sources(tmp_path)
+    # 投影重建是删除后的收口步骤，其自身正确性由投影测试覆盖；这里隔离它，
+    # 让本用例专注"删除语义与作业接线"。
+    monkeypatch.setattr("app.media_v4.jobs.runner.V4LibraryProjection.rebuild", lambda _self: {})
+    job_id = enqueue_source_deletion(database, "root-a")
+
+    result = V4JobRunner(database).process_job(job_id, mirror_root=mirror)
+
+    assert result.status == "succeeded", result
+    with database.connect() as conn:
+        assert str(conn.execute(
+            "SELECT retired_at FROM source_roots WHERE root_id = 'root-a'"
+        ).fetchone()["retired_at"]) != ""
+        assert conn.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE work_id = 'work-two'"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE work_id = 'work-one'"
+        ).fetchone()[0] == 1, "共享作品的产物必须保留"
+
+
+def test_deletion_never_invokes_recognition(tmp_path, monkeypatch):
+    """红线（用户明确要求）：按来源删除绝不重跑识别，否则会像旧版那样卡住。"""
+
+    from app.media_v4.jobs.runner import V4JobRunner
+    from app.media_v4.maintenance.source_deletion import enqueue_source_deletion
+    from app.media_v4.parsing.parser import V4Parser
+    from app.media_v4.resolution.resolver import MediaResolver
+
+    def _explode(*_args, **_kwargs):
+        raise AssertionError("按来源删除不得调用识别/解析链路")
+
+    monkeypatch.setattr(MediaResolver, "resolve", _explode)
+    monkeypatch.setattr(V4Parser, "parse", _explode)
+    monkeypatch.setattr("app.media_v4.jobs.runner.V4LibraryProjection.rebuild", lambda _self: {})
+    database, mirror = _two_sources(tmp_path)
+    job_id = enqueue_source_deletion(database, "root-a")
+
+    result = V4JobRunner(database).process_job(job_id, mirror_root=mirror)
+
+    assert result.status == "succeeded", result

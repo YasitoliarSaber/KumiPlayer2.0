@@ -90,8 +90,12 @@ def _removable_work_ids(conn: sqlite3.Connection, root_id: str) -> tuple[list[st
     return removable, shared
 
 
-def _blockers(conn: sqlite3.Connection, root_id: str) -> list[str]:
-    """删除前置条件：来源自己的扫描/作业必须已经停下。"""
+def _blockers(conn: sqlite3.Connection, root_id: str, *, ignore_job_id: str = "") -> list[str]:
+    """删除前置条件：来源自己的扫描/作业必须已经停下。
+
+    ``ignore_job_id`` 排除**删除作业自己**：作业执行时必然处于 running，否则它会
+    把自己判成阻断条件而永远无法完成（实测被测试抓到过）。
+    """
 
     blockers: list[str] = []
     active_scan = conn.execute(
@@ -104,9 +108,11 @@ def _blockers(conn: sqlite3.Connection, root_id: str) -> list[str]:
         """
         SELECT job_type FROM jobs job
         JOIN import_revisions revision ON revision.revision_id = job.revision_id
-        WHERE revision.root_id = ? AND job.status IN ('queued', 'running') LIMIT 1
+        WHERE revision.root_id = ? AND job.status IN ('queued', 'running')
+          AND job.job_id != ?
+        LIMIT 1
         """,
-        (root_id,),
+        (root_id, ignore_job_id),
     ).fetchone()
     if active_job is not None:
         blockers.append(f"该来源仍有进行中的后台任务（{active_job['job_type']}），请稍后重试")
@@ -125,6 +131,11 @@ def plan_source_deletion(
     mirror = Path(mirror_root).resolve(strict=False) if mirror_root else None
     plan = SourceDeletionPlan(root_id=root_id)
     with database.connect() as conn:
+        root = conn.execute(
+            "SELECT root_id FROM source_roots WHERE root_id = ?", (root_id,)
+        ).fetchone()
+        if root is None:
+            raise KeyError(root_id)
         plan.blockers = _blockers(conn, root_id)
         removable, shared = _removable_work_ids(conn, root_id)
         plan.works_removable = len(removable)
@@ -188,6 +199,7 @@ def delete_source_library(
     batch_size: int = 200,
     progress=None,
     should_cancel=None,
+    ignore_job_id: str = "",
 ) -> dict:
     """执行删除：退役该来源（其作品退出活动库）并回收它们的镜像产物。
 
@@ -215,7 +227,7 @@ def delete_source_library(
     cancelled = False
 
     with database.connect() as conn:
-        blockers = _blockers(conn, root_id)
+        blockers = _blockers(conn, root_id, ignore_job_id=ignore_job_id)
         if blockers:
             return {"ok": False, "reason": blockers[0], "removed_works": 0, "removed_files": 0}
         leaving, shared = _removable_work_ids(conn, root_id)
@@ -295,6 +307,51 @@ def delete_source_library(
         "files_outside_mirror_skipped": skipped_outside,
         "shared_works_kept": len(shared),
     }
+
+
+def enqueue_source_deletion(database, root_id: str) -> str:
+    """把"按来源删除媒体库"排队为一个异步作业，返回 job_id。
+
+    排队前先做阻断检查：该来源仍有进行中的扫描/后台任务时拒绝（返回 ValueError，
+    由 API 映射为 409），避免删除与扫描互相踩。作业挂在**该来源最新的已确认
+    revision** 上（jobs 表以 revision 为轴，且执行器只允许 confirmed revision 的任务），
+    root_id 由 revision 反查，因此不需要给 jobs 增列。
+    """
+
+    import uuid
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC).isoformat()
+    with database.connect() as conn:
+        root = conn.execute(
+            "SELECT root_id FROM source_roots WHERE root_id = ?", (root_id,)
+        ).fetchone()
+        if root is None:
+            raise KeyError(root_id)
+        blockers = _blockers(conn, root_id)
+        if blockers:
+            raise ValueError(blockers[0])
+        revision = conn.execute(
+            "SELECT revision_id FROM import_revisions WHERE root_id = ? AND status = 'confirmed' "
+            "ORDER BY created_at DESC, revision_id DESC LIMIT 1",
+            (root_id,),
+        ).fetchone()
+        if revision is None:
+            raise ValueError("该来源还没有已确认的导入，无需按来源删除媒体库")
+        idempotency_key = f"delete_source_library:{root_id}"
+        existing = conn.execute(
+            "SELECT job_id FROM jobs WHERE idempotency_key = ? AND status IN ('queued', 'running')",
+            (idempotency_key,),
+        ).fetchone()
+        if existing is not None:
+            return str(existing["job_id"])
+        job_id = "job_" + uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO jobs(job_id, job_type, revision_id, work_id, idempotency_key, status, "
+            "created_at, updated_at) VALUES (?, 'delete_source_library', ?, '', ?, 'queued', ?, ?)",
+            (job_id, str(revision["revision_id"]), idempotency_key, now, now),
+        )
+    return job_id
 
 
 def _now() -> str:
