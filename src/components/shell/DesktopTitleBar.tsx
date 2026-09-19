@@ -12,6 +12,7 @@ const sourceOptions: Array<{ value: SourceId; label: string }> = [
   { value: 'all', label: '全部来源' },
   { value: 'pan115', label: '115 网盘' },
   { value: 'baidu', label: '百度网盘' },
+  { value: 'quark', label: '夸克网盘' },
   { value: 'local', label: '本地' },
 ];
 

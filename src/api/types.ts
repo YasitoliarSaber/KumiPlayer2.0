@@ -1,8 +1,8 @@
 // KumiPlayer 2.0 API 类型定义
 
 // V4 来源入口与内容提供商。
-export type SourceId = 'all' | 'pan115' | 'baidu' | 'local' | 'openlist'
-export type ImportSourceId = 'pan115' | 'baidu' | 'local' | 'openlist'
+export type SourceId = 'all' | 'pan115' | 'baidu' | 'quark' | 'local' | 'openlist'
+export type ImportSourceId = 'pan115' | 'baidu' | 'quark' | 'local' | 'openlist'
 
 // 内容提供商（OpenList 路由/媒体预设的真实归属）
 export type ProviderId = 'pan115' | 'baidu' | 'quark' | 'other' | 'local'
@@ -75,8 +75,8 @@ export interface WorkIndex {
   studios: string[]
   show_type: 'anime_series' | 'anime_movie' | 'live_series' | 'live_movie' | ''
   media_type: 'tv' | 'movie' | ''
-  source: 'pan115' | 'baidu' | 'local' | 'openlist'
-  sources?: Array<'pan115' | 'baidu' | 'local' | 'openlist'>
+  source: ImportSourceId
+  sources?: ImportSourceId[]
   provider_id?: ProviderId
   ingest_method?: IngestMethod
   source_route_id?: string
