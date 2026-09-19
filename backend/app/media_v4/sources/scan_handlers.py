@@ -43,6 +43,38 @@ def _assert_scan_identity(task, returned_scan_id, evidence) -> None:
         )
 
 
+#: 请求预算耗尽后的自动缓冲：时长与最大自动轮数。
+#: 缓冲保留风控意义（不是连发请求），但不再要求用户手动点"继续扫描"；
+#: 只有连续多轮仍撞预算（例如对方持续限流）才交回人工，且 frontier 保留可续扫。
+SCAN_BUDGET_COOLDOWN_SECONDS = 15.0
+SCAN_BUDGET_MAX_AUTO_COOLDOWNS = 20
+
+
+def _wait_for_scan_budget(database, *, scan_id: str, runtime=None) -> None:
+    """预算耗尽后的缓冲等待：分批睡眠，期间刷新扫描心跳并响应取消。"""
+
+    import time
+    from datetime import UTC, datetime
+
+    from app.media_v4.sources.scanner import SourceScanCancelled
+
+    deadline = time.monotonic() + SCAN_BUDGET_COOLDOWN_SECONDS
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        if runtime is not None and runtime.cancellation_requested():
+            raise SourceScanCancelled()
+        # 心跳必须持续刷新：缓冲累计时长可能超过"扫描失联"阈值，
+        # 否则会被维护逻辑当成僵尸扫描。
+        with database.connect() as conn:
+            conn.execute(
+                "UPDATE source_scans SET heartbeat_at = ? WHERE scan_id = ?",
+                (datetime.now(UTC).isoformat(), scan_id),
+            )
+        time.sleep(min(0.5, remaining))
+
+
 def _tree_resolution(task):
     """恢复注册期完成的纯词法解析结果；归档文本 + 登记期证据已足够。"""
 
@@ -170,40 +202,55 @@ def scan_openlist_full_source(database, task, runtime):
     config = load_config()
     directory_observations: dict[str, float | None] = {}
     scan_stats: dict = {}
-    _scan_id, evidence = scan_openlist_directory(
-        _client(config),
-        remote_root=str(request.get("remote_root") or ""),
-        mapping_root=str(request.get("mapping_root") or _remote_root(config)),
-        mount_root=str(request.get("mount_root") or ""),
-        root_id=task.root_id,
-        scan_id=task.scan_id,
-        default_provider=str(request.get("provider") or ""),
-        routes=_routes_from(request),
-        directory_observations=directory_observations,
-        directory_budget=int(
-            request.get("directory_budget") or DEFAULT_FULL_SCAN_DIRECTORY_BUDGET
-        ),
-        scan_stats=scan_stats,
-        # 目录级 frontier：完成一页写回游标、完成目录置 completed；中断（进程退出、
-        # 风控 5xx、用户取消）后重新执行同一 scan_id 即可从断点继续。
-        frontier_next=lambda: scan_frontier.next_pending_directory(
-            database, scan_id=task.scan_id,
-        ),
-        frontier_mark=lambda **kwargs: scan_frontier.mark_directory(
-            database, scan_id=task.scan_id, **kwargs,
-        ),
-        frontier_add=lambda **kwargs: scan_frontier.ensure_directories(
-            database, scan_id=task.scan_id, **kwargs,
-        ),
-        **_callbacks(runtime),
-    )
-    if scan_stats.get("budget_exhausted"):
-        # 达到请求预算：不清理 frontier，交由 runner 收口为 paused/resumable；
-        # 绝不能当作完整扫描去建立基线。
-        raise SourceScanPaused(
-            f"本次巡检已达到请求预算（已读取 {scan_stats.get('directories_listed', 0)} 个目录），"
-            "进度已保留，可稍后继续扫描"
+
+    # 请求预算耗尽**不再直接停住等人点**：缓冲一小段时间后从目录级 frontier
+    # 自动继续。旧行为是抛 SourceScanPaused → 扫描停在"已达请求预算"上，用户
+    # 不点就什么都不做（实测 10 分钟后仍停着），既不像进度也谈不上安全缓冲。
+    # 缓冲仍然保留风控意义（不是连发请求），只是把"人工点继续"换成"自动续跑"。
+    cooldown_rounds = 0
+    _scan_id = task.scan_id
+    evidence: list = []
+    while True:
+        scan_stats.clear()
+        _scan_id, evidence = scan_openlist_directory(
+            _client(config),
+            remote_root=str(request.get("remote_root") or ""),
+            mapping_root=str(request.get("mapping_root") or _remote_root(config)),
+            mount_root=str(request.get("mount_root") or ""),
+            root_id=task.root_id,
+            scan_id=task.scan_id,
+            default_provider=str(request.get("provider") or ""),
+            routes=_routes_from(request),
+            directory_observations=directory_observations,
+            directory_budget=int(
+                request.get("directory_budget") or DEFAULT_FULL_SCAN_DIRECTORY_BUDGET
+            ),
+            scan_stats=scan_stats,
+            # 目录级 frontier：完成一页写回游标、完成目录置 completed；中断（进程退出、
+            # 风控 5xx、用户取消）后重新执行同一 scan_id 即可从断点继续。
+            frontier_next=lambda: scan_frontier.next_pending_directory(
+                database, scan_id=task.scan_id,
+            ),
+            frontier_mark=lambda **kwargs: scan_frontier.mark_directory(
+                database, scan_id=task.scan_id, **kwargs,
+            ),
+            frontier_add=lambda **kwargs: scan_frontier.ensure_directories(
+                database, scan_id=task.scan_id, **kwargs,
+            ),
+            **_callbacks(runtime),
         )
+        if not scan_stats.get("budget_exhausted"):
+            break
+        cooldown_rounds += 1
+        if cooldown_rounds > SCAN_BUDGET_MAX_AUTO_COOLDOWNS:
+            # 兜底：连续多轮都撞预算（例如对方持续限流）时才交回人工，
+            # 且保留 frontier，用户点"继续扫描"仍从断点接着跑。
+            raise SourceScanPaused(
+                f"本次巡检已达到请求预算（已读取 {scan_stats.get('directories_listed', 0)} 个目录，"
+                f"自动缓冲 {cooldown_rounds - 1} 次仍未跑完），进度已保留，可稍后继续扫描"
+            )
+        _wait_for_scan_budget(database, scan_id=task.scan_id, runtime=runtime)
+
     _assert_scan_identity(task, _scan_id, evidence)
     # 扫描完整走完才清理 frontier；异常路径保留断点供续扫。
     scan_frontier.clear(database, scan_id=task.scan_id)
@@ -211,7 +258,10 @@ def scan_openlist_full_source(database, task, runtime):
         task.scan_id,
         build_full_scan_state(task.root_id, str(request.get("remote_root") or ""), directory_observations),
     )
-    return evidence
+    # 多轮续跑的完整证据以数据库为准：本轮返回值只包含本轮的收集结果。
+    from app.media_v4.persistence.repositories import V4Repository
+
+    return V4Repository(database).list_scan_evidence(task.scan_id)
 
 
 @_handler("openlist_incremental")
