@@ -209,7 +209,9 @@ def scan_openlist_full_source(database, task, runtime):
     # 缓冲仍然保留风控意义（不是连发请求），只是把"人工点继续"换成"自动续跑"。
     cooldown_rounds = 0
     _scan_id = task.scan_id
-    evidence: list = []
+    # 按轮累积证据：多轮续跑时把每轮收集到的条目合并（按 evidence_id 去重），
+    # 单轮情况下与改动前完全一致。
+    collected: dict[str, object] = {}
     while True:
         scan_stats.clear()
         _scan_id, evidence = scan_openlist_directory(
@@ -239,6 +241,8 @@ def scan_openlist_full_source(database, task, runtime):
             ),
             **_callbacks(runtime),
         )
+        for item in evidence or ():
+            collected.setdefault(str(item.evidence_id), item)
         if not scan_stats.get("budget_exhausted"):
             break
         cooldown_rounds += 1
@@ -251,17 +255,14 @@ def scan_openlist_full_source(database, task, runtime):
             )
         _wait_for_scan_budget(database, scan_id=task.scan_id, runtime=runtime)
 
-    _assert_scan_identity(task, _scan_id, evidence)
+    _assert_scan_identity(task, _scan_id, list(collected.values()))
     # 扫描完整走完才清理 frontier；异常路径保留断点供续扫。
     scan_frontier.clear(database, scan_id=task.scan_id)
     stage_scan_state(
         task.scan_id,
         build_full_scan_state(task.root_id, str(request.get("remote_root") or ""), directory_observations),
     )
-    # 多轮续跑的完整证据以数据库为准：本轮返回值只包含本轮的收集结果。
-    from app.media_v4.persistence.repositories import V4Repository
-
-    return V4Repository(database).list_scan_evidence(task.scan_id)
+    return list(collected.values())
 
 
 @_handler("openlist_incremental")
