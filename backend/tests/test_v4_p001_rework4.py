@@ -10,8 +10,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
 from app.media_v4.domain.models import ParsedFacts, SourceEvidence
 
 
@@ -330,11 +328,8 @@ def test_multi_work_dir_tvshow_nfo_is_ambiguous_and_not_injected(tmp_path, monke
             "WHERE revision_id = 'rev-nfo-amb' AND evidence = 'sidecar_nfo_provider'"
         ).fetchall()
     assert rows == []
-    # confirm 被 issue 阻断。
-    from app.media_v4.revisions.service import RevisionBlockedError
-
-    with pytest.raises(RevisionBlockedError):
-        service.confirm("rev-nfo-amb")
+    # 不再拦截：歧义提示只作提示，确认照常进行（用户要求导入永不拦截）。
+    service.confirm("rev-nfo-amb")
 
 
 def test_failed_alias_detail_is_cached_for_the_whole_draft(monkeypatch):
@@ -417,10 +412,9 @@ def test_owned_tvshow_nfo_uses_its_content_titles_as_query(tmp_path, monkeypatch
 
 
 def _client(tmp_path, monkeypatch):
+    from app.api import media_v4
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
-
-    from app.api import media_v4
 
     _patch_database(tmp_path, monkeypatch)
     application = FastAPI()

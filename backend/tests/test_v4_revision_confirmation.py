@@ -350,7 +350,7 @@ def test_preview_blocks_provider_rebinding_before_confirm_can_hit_unique_constra
     """同一结构 Work 改指向已属于另一 Work 的 Provider 身份必须留在第 2 步。"""
 
     from app.media_v4.persistence.database import V4Database
-    from app.media_v4.revisions.service import RevisionBlockedError, V4RevisionService
+    from app.media_v4.revisions.service import V4RevisionService
 
     database = V4Database(tmp_path / "provider-rebinding.db")
     database.initialize()
@@ -377,8 +377,8 @@ def test_preview_blocks_provider_rebinding_before_confirm_can_hit_unique_constra
     )
 
     assert any(issue.code == "provider_identity_conflict" for issue in graph.issues)
-    with pytest.raises(RevisionBlockedError, match="review issue"):
-        service.confirm("rev-provider-conflict")
+    # 不再拦截：身份冲突时静默跳过本次绑定，作品照常入库（用户要求永不拦截）。
+    service.confirm("rev-provider-conflict")
 
     with database.connect() as conn:
         bindings = {
@@ -395,20 +395,20 @@ def test_preview_blocks_provider_rebinding_before_confirm_can_hit_unique_constra
     assert bindings == {("101", "Show One"), ("202", "Show Two")}
 
 
-def test_review_issues_block_confirmation_without_legacy_fallback(tmp_path):
+def test_review_issues_do_not_block_confirmation(tmp_path):
+    """提示类 issue 只作提示：确认照常进行（用户要求导入永不拦截）。"""
+
     from app.media_v4.persistence.database import V4Database
-    from app.media_v4.revisions.service import RevisionBlockedError, V4RevisionService
+    from app.media_v4.revisions.service import V4RevisionService
 
     database = V4Database(tmp_path / "blocked.db")
     database.initialize()
     service = V4RevisionService(database)
     service.create_draft("rev-1", [_entry(title="", evidence_id="ev-blocked")])
 
-    with pytest.raises(RevisionBlockedError, match="review"):
-        service.confirm("rev-1")
+    service.confirm("rev-1")
 
-    assert service.get_status("rev-1") == "draft"
-    assert service.list_jobs("rev-1") == []
+    assert service.get_status("rev-1") == "confirmed"
 
 
 def test_draft_does_not_publish_authoritative_media_graph(tmp_path):

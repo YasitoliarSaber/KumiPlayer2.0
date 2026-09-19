@@ -9,8 +9,6 @@ from __future__ import annotations
 from dataclasses import replace
 from types import SimpleNamespace
 
-import pytest
-
 
 def _entry(
     evidence_id: str,
@@ -63,10 +61,9 @@ def _patch_database(tmp_path, monkeypatch):
 
 
 def _client(tmp_path, monkeypatch):
+    from app.api import library_v4, media_v4
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
-
-    from app.api import library_v4, media_v4
 
     _patch_database(tmp_path, monkeypatch)
     application = FastAPI()
@@ -142,7 +139,7 @@ def test_pre_confirm_candidate_resolution_merges_cross_language_titles(tmp_path,
 
 
 def test_ambiguous_candidates_block_confirm_and_no_scrape_search(tmp_path, monkeypatch):
-    from app.media_v4.revisions.service import RevisionBlockedError, V4RevisionService
+    from app.media_v4.revisions.service import V4RevisionService
 
     database = _patch_database(tmp_path, monkeypatch)
     from app.media_v4.resolution import candidates as candidates_module
@@ -159,11 +156,9 @@ def test_ambiguous_candidates_block_confirm_and_no_scrape_search(tmp_path, monke
     graph = service.create_draft("rev-ambiguous", [_entry("ev-amb", work_title="Show")], candidate_search=search)
 
     assert any(issue.code == "candidate_ambiguous" for issue in graph.issues)
-    with pytest.raises(RevisionBlockedError):
-        service.confirm("rev-ambiguous")
-    with database.connect() as conn:
-        jobs = conn.execute("SELECT COUNT(*) AS c FROM jobs WHERE revision_id = 'rev-ambiguous'").fetchone()["c"]
-    assert jobs == 0
+    # 不再拦截：候选歧义只是提示，确认照常进行并继续入库（用户要求永不拦截）。
+    service.confirm("rev-ambiguous")
+    assert service.get_status("rev-ambiguous") == "confirmed"
 
 
 # ---------------------------------------------------------------------------

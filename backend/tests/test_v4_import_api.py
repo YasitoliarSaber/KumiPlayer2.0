@@ -597,7 +597,8 @@ def test_preview_with_unknown_title_returns_review_issue_and_confirm_conflict(tm
     assert preview.json()["issues"]
 
     confirmed = client.post("/api/v4/imports/rev-review/confirm")
-    assert confirmed.status_code == 409
+    # 用户明确要求：导入永不拦截。提示类 issue 只作提示，确认必须成功。
+    assert confirmed.status_code == 200, confirmed.text
 
 
 def test_hybrid_tree_scan_reuses_the_openlist_root_identity(tmp_path, monkeypatch):
@@ -736,9 +737,8 @@ def test_tree_scan_resolves_the_precise_sub_library_root_from_the_tree_location(
 
 
 def test_remote_tree_scan_requires_a_playback_mapping(tmp_path, monkeypatch):
-    from fastapi import HTTPException
-
     from app.api import media_v4
+    from fastapi import HTTPException
 
     tree = tmp_path / "tree.txt"
     tree.write_text("Show/Show.S01E01.mkv\n", encoding="utf-8")
@@ -793,10 +793,9 @@ def test_local_scan_receives_all_configured_cloud_mount_roots(monkeypatch):
 
 
 def test_explicit_openlist_incremental_without_baseline_returns_actionable_409(monkeypatch):
-    from fastapi import HTTPException
-
     from app.api import media_v4
     from app.integrations.openlist.providers import OpenListRouteConfig
+    from fastapi import HTTPException
 
     config = SimpleNamespace(
         openlist_server_url="https://openlist.example.test",
@@ -882,11 +881,10 @@ def test_openlist_auto_scan_rebuilds_missing_checkpoint_from_confirmed_revision(
 def test_plain_openlist_full_scan_confirm_enables_incremental_and_keeps_mode(tmp_path, monkeypatch):
     """普通 OpenList 完整扫描确认后即可增量；来源卡模式保持 openlist_full。"""
 
-    from fastapi import HTTPException
-
     from app.api import media_v4, openlist_v4
     from app.integrations.openlist.providers import OpenListRouteConfig
     from app.media_v4.sources.adapters import SourceEntry, to_source_evidence
+    from fastapi import HTTPException
 
     config = SimpleNamespace(
         openlist_server_url="https://openlist.example.test",
@@ -1094,9 +1092,8 @@ def test_openlist_status_endpoint_reports_no_baseline_for_unconfirmed_root(tmp_p
 
 
 def test_openlist_scan_rejects_an_unmapped_remote_root_before_network(monkeypatch):
-    from fastapi import HTTPException
-
     from app.api import media_v4, openlist_v4
+    from fastapi import HTTPException
 
     config = SimpleNamespace(
         openlist_server_url="https://openlist.example.test",
@@ -1687,11 +1684,10 @@ def test_sync_and_durable_tree_entries_share_one_root_identity(tmp_path, monkeyp
     """
 
     _patch_database(tmp_path, monkeypatch)
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-
     from app.api import media_v4
     from app.media_v4.sources.durable_scan import get_durable_scan
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
 
     database = media_v4.get_database()
     mount = tmp_path / "百度网盘"

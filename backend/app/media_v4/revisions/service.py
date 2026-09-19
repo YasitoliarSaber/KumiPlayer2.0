@@ -725,21 +725,21 @@ def _freeze_candidate_bindings(
             (chosen.provider, chosen.media_type, chosen.provider_id),
         ).fetchone()
         if identity_owner is not None and str(identity_owner["work_id"]) != work_id:
-            # 只有**仍占着媒体库位置**的作品才算身份冲突。旧导入已被取代、来源已退役
-            # 或作品已退出时，其残留绑定不得把新导入挡成人工处理（跨批次串接）。
-            if work_holds_live_slot(conn, str(identity_owner["work_id"])):
-                raise RevisionBlockedError(
-                    "Provider 身份冲突：该身份已经属于另一部作品，请返回检查识别结果"
+            # 用户要求导入永不拦截：活动作品占用该身份时**不再阻断**——本次不写入绑定
+            # （下面的 INSERT 带 ON CONFLICT DO NOTHING 会静默跳过），作品照常入库。
+            # 只有占用者已退出媒体库（旧导入被取代 / 来源退役 / 作品退出）时才释放它。
+            if not work_holds_live_slot(conn, str(identity_owner["work_id"])):
+                conn.execute(
+                    "DELETE FROM provider_bindings WHERE work_id = ? AND provider = ? AND media_type = ?",
+                    (str(identity_owner["work_id"]), chosen.provider, chosen.media_type),
                 )
-            conn.execute(
-                "DELETE FROM provider_bindings WHERE work_id = ? AND provider = ? AND media_type = ?",
-                (str(identity_owner["work_id"]), chosen.provider, chosen.media_type),
-            )
         conn.execute(
             """
             INSERT INTO provider_bindings(work_id, provider, media_type, provider_id)
             VALUES (?, ?, ?, ?)
-            ON CONFLICT(work_id, provider, media_type) DO NOTHING
+            -- 用户要求导入永不拦截：身份已被别的作品占用时静默跳过本次绑定，
+            -- 作品照常入库（不带该在线身份），事后再修；绝不因此中断整次导入。
+            ON CONFLICT DO NOTHING
             """,
             (work_id, chosen.provider, chosen.media_type, chosen.provider_id),
         )
@@ -1566,13 +1566,13 @@ class V4RevisionService:
                             if item.status == "confirmed"
                         },
                     )
+                    # 用户明确要求：**导入永不拦截**。review issue 只作为界面提示，
+                    # 不再阻止确认；未采纳的身份/关系留到入库后再修正。
                     graph, candidates_by_key = self._evaluate_draft(
                         entries,
                         conn=conn,
                         frozen_candidates=candidates_by_key,
                     )
-                    if graph.issues:
-                        raise RevisionBlockedError("revision 仍有 review issue，不能确认")
                     root_id = str(current_revision["root_id"] or root_id)
                     scan_id = str(current_revision["scan_id"] or scan_id)
                     override_payloads = self._load_override_payloads(revision_id, conn=conn)
@@ -1941,30 +1941,15 @@ class V4RevisionService:
                     release_inactive_provider_identity(
                         conn, "tmdb", facts.tmdb_hint_type, provider_id
                     )
-                    identity_owner = conn.execute(
-                        """
-                        SELECT work_id FROM provider_bindings
-                        WHERE provider = 'tmdb' AND media_type = ? AND provider_id = ?
-                        """,
-                        (facts.tmdb_hint_type, provider_id),
-                    ).fetchone()
-                    work_binding = conn.execute(
-                        """
-                        SELECT provider_id FROM provider_bindings
-                        WHERE work_id = ? AND provider = 'tmdb' AND media_type = ?
-                        """,
-                        (work_id, facts.tmdb_hint_type),
-                    ).fetchone()
-                    if identity_owner is not None and identity_owner["work_id"] != work_id:
-                        raise RevisionBlockedError("TMDB 身份已经属于另一个作品，拒绝静默合并")
-                    if work_binding is not None and work_binding["provider_id"] != provider_id:
-                        raise RevisionBlockedError("作品已经绑定另一个 TMDB 身份，拒绝静默覆盖")
+                    # 用户要求导入永不拦截：TMDB 身份已被别的作品占用、或本作品已绑定
+                    # 另一个身份时，**不再抛错**——本次不写入该身份即可（下面的
+                    # INSERT ... ON CONFLICT DO NOTHING 会静默跳过），作品照常入库。
                     conn.execute(
                         """
                         INSERT INTO provider_bindings(
                             work_id, provider, media_type, provider_id
                         ) VALUES (?, 'tmdb', ?, ?)
-                        ON CONFLICT(work_id, provider, media_type) DO NOTHING
+                        ON CONFLICT DO NOTHING
                         """,
                         (
                             work_id,

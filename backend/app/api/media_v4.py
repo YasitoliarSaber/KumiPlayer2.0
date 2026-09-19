@@ -211,11 +211,9 @@ def _graph_to_dict(graph) -> dict:
         "work_assets": [asdict(asset) for asset in graph.work_assets],
         "relations": [asdict(relation) for relation in graph.relations],
         "issues": issues,
-        # 前端只用这个数字决定能否确认：提示类 issue（不确定信息、父系列待补全）
-        # 不阻断导入，避免“一条脏数据卡死整批”。
-        "blocking_issue_count": sum(
-            1 for issue in issues if str(issue.get("code") or "") not in NON_BLOCKING_ISSUE_CODES
-        ),
+        # 用户明确要求：**导入永不拦截**。issues 仍然完整返回供界面提示与排查，
+        # 但不再有"阻断性 issue"这种概念——前端也不会因此禁用确认按钮。
+        "blocking_issue_count": 0,
     }
 
 
