@@ -54,6 +54,9 @@ def _make_active(conn, work_id: str, *, revision_id: str, root_id: str) -> None:
         "INSERT INTO revision_bindings(binding_id, revision_id, evidence_id, work_id) VALUES (?, ?, ?, ?)",
         (f"bind-{work_id}", revision_id, evidence_id, work_id),
     )
+    # 显式设定：不要依赖列默认值，否则断言会受 schema 默认影响。
+    conn.execute("UPDATE source_roots SET retired_at = '' WHERE root_id = ?", (root_id,))
+    conn.execute("UPDATE works SET status = 'active' WHERE work_id = ?", (work_id,))
 
 
 def test_active_owner_still_blocks_and_stale_owner_is_taken_over(tmp_path):
@@ -112,6 +115,40 @@ def test_active_owner_still_blocks_and_stale_owner_is_taken_over(tmp_path):
             ).fetchone()[0]
             == 0
         ), "陈旧绑定必须被释放"
+
+
+def test_work_holds_live_slot_covers_the_three_stale_shapes(tmp_path):
+    """“是否还占着媒体库位置”的唯一定义：三种陈旧形态都必须判为不占位。
+
+    这是跨批次串接的地基——只有仍留在媒体库里的作品才算占着在线身份。
+    """
+
+    from app.media_v4.persistence.identity_lifecycle import work_holds_live_slot
+
+    database = _database(tmp_path)
+    with database.connect() as conn:
+        # 每种形态用独立作品与来源：revision 状态的转换是**单向**的
+        # （触发器禁止 superseded → confirmed），所以不能"改了再还原"。
+        for index, work_id in enumerate(("live", "superseded-import", "retired-root", "retired-work"), start=1):
+            _seed_work(conn, f"work-{work_id}")
+            _make_active(
+                conn, f"work-{work_id}", revision_id=f"rev-{index}", root_id=f"root-{index}"
+            )
+
+        # ① 正常活动
+        assert work_holds_live_slot(conn, "work-live") is True
+
+        # ② 导入被取代（按来源删除后重导的情形）
+        conn.execute("UPDATE import_revisions SET status = 'superseded' WHERE revision_id = 'rev-2'")
+        assert work_holds_live_slot(conn, "work-superseded-import") is False
+
+        # ③ 来源退役
+        conn.execute("UPDATE source_roots SET retired_at = 'now' WHERE root_id = 'root-3'")
+        assert work_holds_live_slot(conn, "work-retired-root") is False
+
+        # ④ 作品本身退出媒体库
+        conn.execute("UPDATE works SET status = 'superseded' WHERE work_id = 'work-retired-work'")
+        assert work_holds_live_slot(conn, "work-retired-work") is False
 
 
 def test_claiming_a_free_identity_succeeds_and_is_idempotent(tmp_path):

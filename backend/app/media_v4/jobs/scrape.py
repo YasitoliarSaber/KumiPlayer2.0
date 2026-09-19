@@ -21,27 +21,6 @@ from app.media_v4.resolution.candidates import work_identity_title_inputs
 logger = logging.getLogger(__name__)
 
 
-def _owner_is_active(conn, work_id: str) -> bool:
-    """该 Work 是否仍由**活动来源的已确认 revision**提供。
-
-    只有活动作品才构成"这个在线身份已经名花有主"。被取代的导入（superseded）
-    或已退役来源留下的绑定属于**陈旧批次残留**，必须允许新导入接管；否则每次
-    重新导入都会被上一批残留的身份挡住，反复退化成"需要人工处理"。
-    """
-
-    row = conn.execute(
-        """
-        SELECT 1 FROM revision_bindings rb
-        JOIN import_revisions ir ON ir.revision_id = rb.revision_id
-        JOIN source_roots sr ON sr.root_id = ir.root_id
-        WHERE rb.work_id = ? AND ir.status = 'confirmed' AND sr.retired_at = ''
-        LIMIT 1
-        """,
-        (work_id,),
-    ).fetchone()
-    return row is not None
-
-
 def _claim_provider_binding(
     conn,
     *,
@@ -88,9 +67,12 @@ def _claim_provider_binding(
             (provider, media_type, provider_id),
         ).fetchone()
         if owner is not None and str(owner["work_id"]) != str(work_id):
-            if _owner_is_active(conn, str(owner["work_id"])):
+            from app.media_v4.persistence.identity_lifecycle import work_holds_live_slot
+
+            if work_holds_live_slot(conn, str(owner["work_id"])):
+                # 占用者仍在媒体库里：先到先得，降级为人工复核。
                 return False
-            # 竞态窗口内出现的陈旧占用者：释放后重试一次。
+            # 占用者已退出媒体库（来源退役 / 导入被取代 / 作品退出）：释放后让本次接管。
             conn.execute(
                 "DELETE FROM provider_bindings WHERE work_id = ? AND provider = ? AND media_type = ?",
                 (str(owner["work_id"]), provider, media_type),

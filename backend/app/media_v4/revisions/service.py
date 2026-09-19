@@ -709,7 +709,10 @@ def _freeze_candidate_bindings(
             raise RevisionBlockedError(
                 "Provider 身份冲突：该作品已经绑定另一条确认身份，请返回检查识别结果"
             )
-        from app.media_v4.persistence.identity_lifecycle import release_inactive_provider_identity
+        from app.media_v4.persistence.identity_lifecycle import (
+            release_inactive_provider_identity,
+            work_holds_live_slot,
+        )
 
         release_inactive_provider_identity(
             conn, chosen.provider, chosen.media_type, chosen.provider_id
@@ -722,8 +725,15 @@ def _freeze_candidate_bindings(
             (chosen.provider, chosen.media_type, chosen.provider_id),
         ).fetchone()
         if identity_owner is not None and str(identity_owner["work_id"]) != work_id:
-            raise RevisionBlockedError(
-                "Provider 身份冲突：该身份已经属于另一部作品，请返回检查识别结果"
+            # 只有**仍占着媒体库位置**的作品才算身份冲突。旧导入已被取代、来源已退役
+            # 或作品已退出时，其残留绑定不得把新导入挡成人工处理（跨批次串接）。
+            if work_holds_live_slot(conn, str(identity_owner["work_id"])):
+                raise RevisionBlockedError(
+                    "Provider 身份冲突：该身份已经属于另一部作品，请返回检查识别结果"
+                )
+            conn.execute(
+                "DELETE FROM provider_bindings WHERE work_id = ? AND provider = ? AND media_type = ?",
+                (str(identity_owner["work_id"]), chosen.provider, chosen.media_type),
             )
         conn.execute(
             """

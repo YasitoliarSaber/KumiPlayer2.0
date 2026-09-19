@@ -48,6 +48,34 @@ def retire_work_identity(conn: sqlite3.Connection, work_id: str, now: str) -> No
         conn.execute(f"DELETE FROM {table} WHERE work_id = ?", (work_id,))
 
 
+def work_holds_live_slot(conn: sqlite3.Connection, work_id: str) -> bool:
+    """该作品是否仍占着媒体库位置（= 仍由**活动来源的已确认导入**提供）。
+
+    这是判断"在线身份是否名花有主"的唯一依据：只有还留在媒体库里的作品才算
+    占用者。三个容易漏掉的反例都被覆盖——
+    - 来源已退役（``sr.retired_at != ''``）；
+    - 作品的导入已被取代（``ir.status = 'superseded'``，例如按来源删除后重导）；
+    - 作品本身已退出（``w.status != 'active'``）。
+    历史事实（evidence / parsed_facts / bindings）一律保留，这里只回答"还算不算数"。
+    """
+
+    row = conn.execute(
+        """
+        SELECT 1 FROM works w
+        WHERE w.work_id = ? AND w.status = 'active'
+          AND EXISTS (
+            SELECT 1 FROM revision_bindings rb
+            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            WHERE rb.work_id = w.work_id AND ir.status = 'confirmed' AND sr.retired_at = ''
+          )
+        LIMIT 1
+        """,
+        (work_id,),
+    ).fetchone()
+    return row is not None
+
+
 def release_inactive_provider_identity(
     conn: sqlite3.Connection,
     provider: str,
