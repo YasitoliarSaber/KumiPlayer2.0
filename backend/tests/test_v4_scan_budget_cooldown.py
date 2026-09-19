@@ -79,3 +79,103 @@ def test_auto_cooldown_has_a_cap_so_it_can_still_fall_back_to_manual_resume():
     # 上限存在：连续撞预算时会回到"可继续扫描"，不会无限缓冲。
     assert scan_handlers.SCAN_BUDGET_MAX_AUTO_COOLDOWNS >= 1
     assert scan_handlers.SCAN_BUDGET_COOLDOWN_SECONDS <= 30
+
+
+def _handler_task():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        request={
+            "remote_root": "/动画",
+            "mapping_root": "/动画",
+            "mount_root": "",
+            "provider": "quark",
+        },
+        root_id="root-c",
+        scan_id="scan-c",
+    )
+
+
+def _handler_runtime():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        cancellation_requested=lambda: False,
+        persist_evidence_batch=lambda *_a, **_k: None,
+        report_progress=lambda *_a, **_k: None,
+    )
+
+
+def _patch_handler_globals(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("app.api.openlist_v4._client", lambda _config: object())
+    monkeypatch.setattr("app.api.openlist_v4._remote_root", lambda _config: "/动画")
+    monkeypatch.setattr("app.core.config.load_config", lambda: SimpleNamespace())
+
+
+def test_full_scan_auto_continues_after_budget_instead_of_pausing(tmp_path, monkeypatch):
+    """核心验证：撞到请求预算后**自动继续**，最终不是 paused，且证据被合并。"""
+
+    from app.media_v4.sources.adapters import SourceEntry, to_source_evidence
+
+    database = _database(tmp_path)
+    rounds: list[int] = []
+    waits: list[int] = []
+
+    def fake_scan(_client, **kwargs):
+        rounds.append(len(rounds) + 1)
+        relative = f"动画/作品/e{len(rounds)}.mkv"
+        evidence = to_source_evidence(
+            SourceEntry(
+                root_id="root-c",
+                scan_id="scan-c",
+                provider="quark",
+                ingest_method="openlist_scan",
+                relative_path=relative,
+                source_key=relative,
+            )
+        )
+        # 第一轮假装撞预算，第二轮正常跑完
+        kwargs["scan_stats"]["budget_exhausted"] = len(rounds) == 1
+        kwargs["scan_stats"]["directories_listed"] = 400 * len(rounds)
+        return kwargs["scan_id"], [evidence]
+
+    monkeypatch.setattr("app.api.media_v4.scan_openlist_directory", fake_scan)
+    monkeypatch.setattr(
+        scan_handlers, "_wait_for_scan_budget", lambda *_a, **_k: waits.append(1)
+    )
+    _patch_handler_globals(monkeypatch)
+
+    evidence = scan_handlers.scan_openlist_full_source(
+        database, _handler_task(), _handler_runtime()
+    )
+
+    assert len(rounds) == 2, "撞预算后必须自动再跑一轮，而不是停下等人点"
+    assert waits == [1], "自动续跑前必须先缓冲一次"
+    assert len(evidence) == 2, "多轮收集的证据必须合并返回"
+
+
+def test_full_scan_pauses_only_after_auto_cooldown_cap(tmp_path, monkeypatch):
+    """兜底仍然存在：连续撞预算超过上限时回到"可继续扫描"。"""
+
+    import pytest
+
+    from app.media_v4.sources.scanner import SourceScanPaused
+
+    database = _database(tmp_path)
+
+    def always_budget_exhausted(_client, **kwargs):
+        kwargs["scan_stats"]["budget_exhausted"] = True
+        kwargs["scan_stats"]["directories_listed"] = 999
+        return kwargs["scan_id"], []
+
+    monkeypatch.setattr("app.api.media_v4.scan_openlist_directory", always_budget_exhausted)
+    monkeypatch.setattr(scan_handlers, "_wait_for_scan_budget", lambda *_a, **_k: None)
+    monkeypatch.setattr(scan_handlers, "SCAN_BUDGET_MAX_AUTO_COOLDOWNS", 2)
+    _patch_handler_globals(monkeypatch)
+
+    with pytest.raises(SourceScanPaused):
+        scan_handlers.scan_openlist_full_source(
+            database, _handler_task(), _handler_runtime()
+        )
