@@ -209,7 +209,7 @@ def test_ambiguous_existing_structural_bindings_block_confirmation(tmp_path):
     """同一稳定边界已属于多个旧 Work 时必须显式阻断确认。"""
 
     from app.media_v4.persistence.database import V4Database
-    from app.media_v4.revisions.service import RevisionBlockedError, V4RevisionService
+    from app.media_v4.revisions.service import V4RevisionService
 
     database = V4Database(tmp_path / "ambiguous-structural-binding.db")
     database.initialize()
@@ -256,9 +256,17 @@ def test_ambiguous_existing_structural_bindings_block_confirmation(tmp_path):
         candidate_search=lambda *_args: [],
     )
 
-    assert any(issue.code == "structural_identity_ambiguous" for issue in graph.issues)
-    with pytest.raises(RevisionBlockedError):
-        service.confirm("rev-ambiguous-structure")
+    # 复用歧义**不再阻断确认**：复用只是优化，歧义时改为不复用、照常建立新作品。
+    assert not any(issue.code == "structural_identity_ambiguous" for issue in graph.issues)
+    service.confirm("rev-ambiguous-structure")
+    with database.connect() as conn:
+        bound = {
+            str(row["work_id"])
+            for row in conn.execute(
+                "SELECT DISTINCT work_id FROM revision_bindings WHERE revision_id = 'rev-ambiguous-structure'"
+            )
+        }
+    assert bound.isdisjoint({"old-work-a", "old-work-b"}), "歧义时不得复用旧的同名作品"
 
 
 def test_override_rechecks_structural_identity_before_confirmation(tmp_path):
@@ -266,7 +274,7 @@ def test_override_rechecks_structural_identity_before_confirmation(tmp_path):
 
     from app.media_v4.domain.models import ParsedFacts, SourceEvidence
     from app.media_v4.persistence.database import V4Database
-    from app.media_v4.revisions.service import RevisionBlockedError, V4RevisionService
+    from app.media_v4.revisions.service import V4RevisionService
 
     database = V4Database(tmp_path / "override-structural-identity.db")
     database.initialize()
@@ -325,9 +333,17 @@ def test_override_rechecks_structural_identity_before_confirmation(tmp_path):
         {"episode_candidate": 2},
     )
 
-    assert any(issue.code == "structural_identity_ambiguous" for issue in graph.issues)
-    with pytest.raises(RevisionBlockedError):
-        service.confirm("rev-override-structure")
+    # 人工修正后同样不因复用歧义阻断；歧义即不复用。
+    assert not any(issue.code == "structural_identity_ambiguous" for issue in graph.issues)
+    service.confirm("rev-override-structure")
+    with database.connect() as conn:
+        bound = {
+            str(row["work_id"])
+            for row in conn.execute(
+                "SELECT DISTINCT work_id FROM revision_bindings WHERE revision_id = 'rev-override-structure'"
+            )
+        }
+    assert bound.isdisjoint({"old-work-a", "old-work-b"}), "歧义时不得复用旧的同名作品"
 
 
 def test_preview_blocks_provider_rebinding_before_confirm_can_hit_unique_constraint(tmp_path):

@@ -1138,11 +1138,8 @@ class V4RevisionService:
                 ]
                 title_matches = _existing_work_matches(conn, work, related_entries)
                 if len(title_matches) > 1:
-                    issues.append(ResolutionIssue(
-                        code="work_identity_ambiguous",
-                        evidence_id=next(iter(work.source_evidence_ids), ""),
-                        message="同名作品已有多个相容记录，无法安全复用，请先合并或修正识别结果",
-                    ))
+                    # 同名有多个相容记录时**不复用**即可，不写入阻断性 issue：
+                    # 复用只是优化，不该让用户被迫先去做人工合并。
                     continue
                 if len(title_matches) == 1:
                     existing_work_ids.add(str(title_matches[0]["work_id"]))
@@ -1300,14 +1297,8 @@ class V4RevisionService:
                     identity_id = ""
                 if len(owner_ids) <= 1 and (not identity_id or not owner_ids or identity_id in owner_ids):
                     continue
-                evidence_id = next(iter(work.source_evidence_ids), "")
-                issues.append(
-                    ResolutionIssue(
-                        code="structural_identity_ambiguous",
-                        evidence_id=evidence_id,
-                        message="同一来源作品边界已对应多部作品，无法安全复用，请检查识别结果后重试",
-                    )
-                )
+                # 边界对应多部作品时同样**不复用**，但不写入阻断性 issue。
+                continue
         return issues
 
     def _evaluate_draft(
@@ -1673,9 +1664,9 @@ class V4RevisionService:
                     work_type = "series" if work.media_type == "tv" else "movie"
                     identity_matches = _existing_work_matches(conn, work, related_entries)
                     if len(identity_matches) > 1:
-                        raise RevisionBlockedError(
-                            "同名作品已有多个身份归属，无法安全复用；请先合并或修正识别结果"
-                        )
+                        # 复用旧作品只是"省一次刮削"的优化。同名有多个归属时**不复用**，
+                        # 照常新建作品并正常抓取；绝不因为复用歧义让整个导入无法确认。
+                        identity_matches = []
                     existing_work = identity_matches[0] if identity_matches else None
 
                     if existing_work is None:
@@ -1759,9 +1750,9 @@ class V4RevisionService:
                                     continue
                                 source_work_ids.add(binding["work_id"])
                         if len(source_work_ids) > 1:
-                            raise RevisionBlockedError(
-                                "同一来源作品边界已对应多部作品，无法安全复用；请检查识别结果后重试"
-                            )
+                            # 同一来源边界对应多部作品时不复用（新建作品继续导入），
+                            # 而不是阻断整个确认流程。
+                            source_work_ids = set()
                         if len(source_work_ids) == 1:
                             existing_work = conn.execute(
                                 "SELECT * FROM works WHERE work_id = ?",
@@ -1773,9 +1764,8 @@ class V4RevisionService:
                         if len(alias_matches) == 1:
                             existing_work = alias_matches[0]
                         elif len(alias_matches) > 1:
-                            raise RevisionBlockedError(
-                                "同名作品已有多个身份归属，无法安全复用；请先合并或修正识别结果"
-                            )
+                            # 同名多归属：不复用，走下面的"新建作品"分支继续导入。
+                            existing_work = None
 
                     if existing_work is None:
                         work_id = str(uuid.uuid4())
