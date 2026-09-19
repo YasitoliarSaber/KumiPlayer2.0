@@ -160,7 +160,6 @@ def test_full_scan_pauses_only_after_auto_cooldown_cap(tmp_path, monkeypatch):
     """兜底仍然存在：连续撞预算超过上限时回到"可继续扫描"。"""
 
     import pytest
-
     from app.media_v4.sources.scanner import SourceScanPaused
 
     database = _database(tmp_path)

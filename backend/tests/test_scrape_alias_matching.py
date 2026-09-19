@@ -19,7 +19,6 @@ from app.media_v4.resolution.ranker import (
     AUTO_ADOPT_MIN_SCORE,
     auto_adopt,
     rank_candidates,
-    score_candidate,
 )
 
 # 一部真实形状的在线资料：中文主标题 + 日文原名 + 常见别名
