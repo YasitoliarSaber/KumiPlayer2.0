@@ -33,13 +33,13 @@ type OpenListDraft = Pick<OpenListConfigPayload, 'server_url' | 'remote_root' | 
   prefetch_limit: string;
 };
 
-const sectionTabs: Array<{ key: SettingsTab; label: string; summary: string; icon: LucideIcon }> = [
-  { key: 'bangumi', label: '账户与同步', summary: 'Bangumi 登录与观看同步', icon: UserRound },
-  { key: 'appearance', label: '外观', summary: '主题、卡片与显示密度', icon: Palette },
-  { key: 'sources', label: '媒体来源', summary: '本地、网盘与目录树来源', icon: Database },
-  { key: 'openlist', label: 'OpenList 设置', summary: '连接、远端目录与内容路由', icon: Network },
-  { key: 'scrape', label: '元数据与图片', summary: 'TMDB、AniList 与刮削', icon: KeyRound },
-  { key: 'player', label: '播放', summary: 'mpv 与连续播放', icon: PlaySquare },
+const sectionTabs: Array<{ key: SettingsTab; label: string; icon: LucideIcon }> = [
+  { key: 'bangumi', label: '账户与同步', icon: UserRound },
+  { key: 'appearance', label: '外观', icon: Palette },
+  { key: 'sources', label: '媒体来源', icon: Database },
+  { key: 'openlist', label: 'OpenList 设置', icon: Network },
+  { key: 'scrape', label: '元数据与图片', icon: KeyRound },
+  { key: 'player', label: '播放', icon: PlaySquare },
 ];
 
 const sourceLabels: Record<SourceKey | 'all' | 'openlist', string> = {
@@ -107,6 +107,16 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
     }, 2500);
     return () => window.clearInterval(timer);
   }, [activeSection]);
+
+  // 打开「账户与同步」时**自动验证**一次：已保存登录信息时不该出现
+  // "显示已连接却又提示尚未验证"这种自相矛盾的状态（用户反馈）。
+  const bangumiAutoVerifiedRef = useRef(false);
+  useEffect(() => {
+    if (activeSection !== 'bangumi') return;
+    if (!hasStoredCredential || authStatus !== 'unknown' || bangumiAutoVerifiedRef.current) return;
+    bangumiAutoVerifiedRef.current = true;
+    void Promise.resolve(verifyBangumiSession()).catch(() => undefined);
+  }, [activeSection, hasStoredCredential, authStatus, verifyBangumiSession]);
 
   useEffect(() => {
     if (!config) return;
@@ -369,7 +379,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
 
   const renderAppearance = () => (
     <PanelStack>
-      <SectionIntro title="外观" description="选择适合观影和管理场景的界面风格，偏好会自动保留。" />
+      <SectionIntro title="外观" />
       <SettingsSection title="应用主题">
         <div className="appearance-grid">
           {([
@@ -392,7 +402,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
 
   const renderScrape = () => (
     <PanelStack>
-      <SectionIntro title="元数据与图片" description="管理刮削来源、图片保存方式与图片策略。" />
+      <SectionIntro title="元数据与图片" />
       {config && (
         <SettingsSection title="常用连接配置">
           <div className="settings-field-list">
@@ -456,7 +466,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
 
   const renderOpenList = () => (
     <PanelStack>
-      <SectionIntro title="OpenList 设置" description="管理 OpenList 连接、远端根目录与内容路由。" />
+      <SectionIntro title="OpenList 设置" />
       {config && (
         <SettingsSection title="连接与远端根目录">
           <OpenListSettingsPanel
@@ -528,7 +538,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
 
   const renderSources = () => (
     <PanelStack>
-      <SectionIntro title="媒体来源" description="管理本地、115、百度和目录树的扫描根目录与镜像位置。" />
+      <SectionIntro title="媒体来源" />
       {config && (
         <SettingsSection title="来源根目录">
           <div className="sources-root-panel">
@@ -584,7 +594,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
 
   const renderPlayer = () => (
     <PanelStack>
-      <SectionIntro title="播放" description="内置播放器、连续播放与桌面后台行为。" />
+      <SectionIntro title="播放" />
       {config && (
         <SettingsSection title="内置播放器">
           <div className="settings-field-list">
@@ -621,7 +631,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
     const isConnected = hasStoredCredential && authStatus === 'valid' && connectivity === 'online';
     return (
     <PanelStack>
-      <SectionIntro title="账户与同步" description="连接 Bangumi 后，KumiPlayer 可以同步收藏状态和已看集数。" />
+      <SectionIntro title="账户与同步" />
       <SettingsSection className="settings-account-card">
         {user ? (
           <div className={`settings-account-hero${isConnected ? ' is-connected' : ''}`}>
@@ -630,7 +640,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
               <div className="min-w-0">
                 <span className="settings-account-kicker">{isConnected ? 'Bangumi 已连接' : 'Bangumi 账户'}</span>
                 <strong>{user.nickname || user.username}</strong>
-                <small>@{user.username} · ID {user.id ?? '-'}{lastSuccessAt ? ` · 上次成功连接 ${lastSuccessAt.slice(0, 16).replace('T', ' ')}` : ''}</small>
+                <small>@{user.username}{lastSuccessAt ? ` · 上次成功连接 ${lastSuccessAt.slice(0, 16).replace('T', ' ')}` : ''}</small>
               </div>
             </div>
             <GhostButton onClick={logoutBangumi}>退出</GhostButton>
@@ -644,7 +654,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
               <div>
                 <span className="settings-account-kicker">登录信息已保存</span>
                 <strong>Bangumi 账户</strong>
-                <small>尚未验证用户资料</small>
+                <small>登录信息已保存，正在确认连接状态</small>
               </div>
             </div>
           </div>
@@ -676,7 +686,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
             ) : credentialState === 'unavailable' ? (
               <div><strong>暂时无法读取本机 Bangumi 登录凭据</strong><span>请检查 Windows Credential Manager 是否可用；已保存的账户资料不会被清除。</span></div>
             ) : (
-              <div><strong>登录信息已保存</strong><span>尚未验证 Bangumi 连接。</span></div>
+              <div><strong>正在检查 Bangumi 登录状态</strong><span>若长时间停在这里，点下方「重新验证」立即检查。</span></div>
             )}
             {lastSuccessAt && !isConnected && <small>上次成功连接：{lastSuccessAt.slice(0, 16).replace('T', ' ')}</small>}
             {!isConnected && (
@@ -745,7 +755,6 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
         <nav className="settings-outline" aria-label="设置分类">
           <div className="settings-outline-heading">
             <strong>设置</strong>
-            <span>连接、媒体与播放偏好</span>
           </div>
           <div className="settings-outline-nav">
             {sectionTabs.map((tab) => {
@@ -759,7 +768,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
                   aria-current={activeSection === tab.key ? 'location' : undefined}
                 >
                   <span className="settings-outline-icon"><Icon size={17} strokeWidth={1.8} /></span>
-                  <span className="settings-outline-copy"><strong>{tab.label}</strong><small>{tab.summary}</small></span>
+                  <span className="settings-outline-copy"><strong>{tab.label}</strong></span>
                 </button>
               );
             })}

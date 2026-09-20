@@ -145,7 +145,14 @@ export default function Sidebar() {
 
         <div className="sidebar-account-wrap mt-4 h-[76px]">
         {hasStoredCredential && user && (
-          <div className="sidebar-account-card flex h-full items-center gap-3 rounded-lg border p-3" style={{ borderColor: 'var(--border)' }}>
+          <button
+            type="button"
+            onClick={handleSettings}
+            aria-label="打开设置 · 账户与同步"
+            title="打开设置 · 账户与同步"
+            className="sidebar-account-card flex h-full w-full cursor-pointer items-center gap-3 rounded-lg border p-3 text-left"
+            style={{ borderColor: 'var(--border)', background: 'transparent' }}
+          >
             {user.avatar && (
               <DecodedImage
                 src={buildBangumiImageUrl(user.avatar)}
@@ -161,7 +168,7 @@ export default function Sidebar() {
                 Bangumi ID: {user.id ?? user.username}
               </div>
             </div>
-          </div>
+          </button>
         )}
         </div>
       </div>
