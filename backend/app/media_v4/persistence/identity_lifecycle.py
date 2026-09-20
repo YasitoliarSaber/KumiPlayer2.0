@@ -82,7 +82,12 @@ def release_inactive_provider_identity(
     media_type: str,
     provider_id: str,
 ) -> None:
-    """写入新权威绑定前，清除已退出媒体库的旧 owner 槽位。"""
+    """写入新权威绑定前，清除已退出媒体库的旧 owner 槽位。
+
+    阶段 3：解除在线 ID 独占后，同一条在线映射可能同时被多个本地作品引用。
+    这里只在**没有任何活动作品共享该映射**时才释放失效槽位，否则会删掉其他作品
+    仍然在用的资料引用（修复一部作品不得影响另一部）。
+    """
 
     conn.execute(
         "DELETE FROM provider_bindings "
@@ -90,6 +95,14 @@ def release_inactive_provider_identity(
         "AND EXISTS ("
         "SELECT 1 FROM works w "
         "WHERE w.work_id = provider_bindings.work_id AND w.status != 'active'"
+        ") "
+        "AND NOT EXISTS ("
+        "SELECT 1 FROM provider_bindings live "
+        "JOIN works lw ON lw.work_id = live.work_id "
+        "WHERE live.provider = provider_bindings.provider "
+        "AND live.media_type = provider_bindings.media_type "
+        "AND live.provider_id = provider_bindings.provider_id "
+        "AND lw.status = 'active'"
         ")",
         (provider, media_type, provider_id),
     )
