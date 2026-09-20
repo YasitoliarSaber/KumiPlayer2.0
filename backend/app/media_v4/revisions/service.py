@@ -706,9 +706,9 @@ def _freeze_candidate_bindings(
             (work_id, chosen.provider, chosen.media_type),
         ).fetchone()
         if existing_slot is not None and str(existing_slot["provider_id"]) != chosen.provider_id:
-            raise RevisionBlockedError(
-                "Provider 身份冲突：该作品已经绑定另一条确认身份，请返回检查识别结果"
-            )
+            # 阶段 1（架构方案）：在线身份冲突**不再阻断整批确认**——本次不应用该候选，
+            # 本地作品与文件照常入库；冲突原因仍会作为 issue 展示，可事后修正。
+            continue
         from app.media_v4.persistence.identity_lifecycle import (
             release_inactive_provider_identity,
             work_holds_live_slot,

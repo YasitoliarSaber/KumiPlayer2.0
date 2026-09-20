@@ -60,14 +60,22 @@ def test_same_title_different_year_is_not_silently_merged():
     assert len(graph.works) == 2
 
 
-def test_missing_identity_becomes_review_issue_instead_of_path_hash_identity():
+def test_missing_identity_still_records_local_work_and_asset():
+    """阶段 1：身份无法确定的视频**也必须有本地记录**。
+
+    旧行为是直接丢弃（确认成功却 0 作品 0 Asset）。现在：本地记录是基本结果，
+    在线资料是可选补充——仍然记录原因，但文件必须留下来。
+    """
+
     from app.media_v4.resolution.resolver import MediaResolver
 
     evidence, facts = _pair("ev-unknown", provider="local", title="")
     graph = MediaResolver().resolve([(evidence, facts)])
 
-    assert graph.works == ()
     assert any(issue.code == "work_identity_missing" for issue in graph.issues)
+    assert len(graph.works) == 1, "无法确定身份的视频仍必须生成本地作品"
+    assert graph.works[0].work_key.startswith("local:"), "本地作品使用独立本地键，不冒用在线身份"
+    assert graph.episodes, "无集号也要生成集条目（使用稳定文件键）"
 
 
 def test_generic_category_directory_does_not_merge_different_works_on_confirmation(tmp_path):

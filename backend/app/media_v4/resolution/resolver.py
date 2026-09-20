@@ -245,6 +245,26 @@ def _looks_like_collection_name(name: str) -> bool:
     return bool(_COLLECTION_NAME_PATTERN.search(str(name or "")))
 
 
+def _local_fallback_work_key(evidence: SourceEvidence, facts: ParsedFacts) -> str:
+    """身份无法确定时的**稳定本地键**（阶段 1）。
+
+    本地记录是基本结果，在线资料是可选补充：无法判断作品身份的视频也必须留下可查的
+    本地作品与文件。键必须稳定（同一路径每次相同），且**不能**冒用在线身份或路径哈希
+    作为全局身份；无可用标题时退化为按证据的本地键。
+    """
+
+    identity_title = facts.work_title or (facts.title_candidates or ("",))[0]
+    seed = (
+        _normalize_title(identity_title)
+        or _normalize_title(facts.work_title)
+        or _normalize_title(facts.series_group)
+    )
+    media_type = _effective_media_type(facts)
+    if seed and not is_generic_container_title(seed):
+        return f"local:{seed}:{media_type}"
+    return f"local:file:{evidence.evidence_id}"
+
+
 def _resolved_entry_work_key(
     evidence: SourceEvidence,
     facts: ParsedFacts,
@@ -281,7 +301,14 @@ def _resolved_entry_work_key(
         ),
         "",
     )
-    return f"series:{matching_series}:{media_type}" if matching_series else key
+    if matching_series:
+        return f"series:{matching_series}:{media_type}"
+    if key:
+        return key
+    # 阶段 1（架构方案）：身份无法确定的视频也必须有稳定本地键，否则会在后续流程里
+    # 被丢弃（实测"revision confirmed 但 works=0 / assets=0"）。兜底键必须在这里生成：
+    # 特殊篇编号等预分配都按这个键建立，晚生成会出现 KeyError。
+    return _local_fallback_work_key(evidence, facts)
 
 
 def _preferred_work_title(facts: ParsedFacts, work_key: str) -> str:
@@ -467,22 +494,23 @@ class MediaResolver:
                 continue
             identity_title = facts.work_title or (facts.title_candidates or ("",))[0]
             key = _resolved_entry_work_key(evidence, facts, structural_series_identities, collection_series)
+            # 阶段 1（架构方案）：身份无法确定的条目得到"本地兜底键"，**不再被丢弃**。
+            local_fallback = key.startswith("local:")
             if facts.needs_review:
-                # 身份已经解析出来时，“解析过程有不确定信息”不该阻断确认；只有身份
-                # 确实无法确定的条目才是 blocking。两者用不同 code 区分，前端据
-                # blocking_issue_count 决定是否禁用确认。
+                # 身份确实无法确定的条目保留 need_review 语义（供界面提示）；身份已确定的
+                # 解析不确定信息只是提示，不阻断确认。前端据 blocking_issue_count 判断。
                 issues.append(
                     ResolutionIssue(
-                        code="parsed_facts_review_hint" if key else "parsed_facts_need_review",
+                        code="parsed_facts_review_hint" if not local_fallback else "parsed_facts_need_review",
                         evidence_id=evidence.evidence_id,
                         message=(
                             "解析结果包含不确定信息，不影响确认，可稍后核对"
-                            if key
-                            else "解析结果标记为需要人工复核，确认前必须处理"
+                            if not local_fallback
+                            else "解析结果标记为需要人工复核，已按清洗后的本地名称入库"
                         ),
                     )
                 )
-            if not key:
+            if local_fallback:
                 generic = bool(identity_title.strip()) and is_generic_container_title(identity_title)
                 issues.append(
                     ResolutionIssue(
@@ -490,13 +518,13 @@ class MediaResolver:
                         evidence_id=evidence.evidence_id,
                         message=(
                             "目录/文件只能提供通用容器标题（Season/S01/Specials/分类/纯数字），"
-                            "无法确定作品身份，需人工确认"
+                            "已按清洗后的本地名称入库，可稍后补充在线资料"
                             if generic
-                            else "缺少足够的作品标题或 Provider 身份，需人工确认"
+                            else "缺少足够的作品标题或 Provider 身份，已按清洗后的本地名称入库，"
+                            "可稍后补充在线资料"
                         ),
                     )
                 )
-                continue
 
             work = work_rows.setdefault(
                 key,
