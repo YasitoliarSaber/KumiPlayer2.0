@@ -91,6 +91,9 @@ def _removable_work_ids(conn: sqlite3.Connection, root_id: str) -> tuple[list[st
             JOIN import_revisions ir ON ir.revision_id = rb.revision_id
             JOIN source_roots sr ON sr.root_id = ir.root_id
             WHERE ir.root_id != ? AND rb.work_id != '' AND sr.retired_at = ''
+              -- 阶段 2：只有**当前有效**的引用才算"别人还需要它"。缺这条会把已被取代/
+              -- 草稿 revision 的历史引用也算成共享，应该回收的产物永远留着。
+              AND ir.status = 'confirmed'
             """,
             (root_id,),
         )

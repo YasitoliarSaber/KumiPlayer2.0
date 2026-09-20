@@ -140,12 +140,17 @@ def _provider_binding_conflict(
     owner = conn.execute(
         "SELECT pb.work_id FROM provider_bindings pb "
         "JOIN works w ON w.work_id = pb.work_id "
-        "WHERE pb.provider = ? AND pb.media_type = ? AND pb.provider_id = ? "
-        "AND w.status = 'active'",
+        "WHERE pb.provider = ? AND pb.media_type = ? AND pb.provider_id = ?",
         (provider, media_type, provider_id),
     ).fetchone()
     if owner is not None and str(owner["work_id"]) != work_id:
-        return "该在线作品已关联到另一部作品，请返回检查识别结果或选择正确候选"
+        # 阶段 2：与 identity_lifecycle.work_holds_live_slot 使用**同一个**活动范围。
+        # 旧实现只看 works.status='active'，会把"来源还在、但那条导入已被取代"的旧记录
+        # 也当成占用者，历史数据继续干预新导入（口径不一致已实测复现）。
+        from app.media_v4.persistence.identity_lifecycle import work_holds_live_slot
+
+        if work_holds_live_slot(conn, str(owner["work_id"])):
+            return "该在线作品已关联到另一部作品，请返回检查识别结果或选择正确候选"
     existing = conn.execute(
         "SELECT provider_id FROM provider_bindings WHERE work_id = ? AND provider = ? AND media_type = ?",
         (work_id, provider, media_type),

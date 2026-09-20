@@ -133,6 +133,23 @@ def test_plan_keeps_works_shared_with_other_sources(tmp_path):
     assert plan["blockers"] == []
 
 
+def test_superseded_reference_does_not_count_as_sharing(tmp_path):
+    """阶段 2：只有**当前有效**的引用才算"别人还需要它"。
+
+    旧实现把其他来源的 superseded/草稿 revision 也当成共享，于是应该回收的产物永远
+    留着（实测口径不一致）。这里把另一来源的导入标为 superseded 后再预览。
+    """
+
+    database, mirror = _two_sources(tmp_path)
+    with database.connect() as conn:
+        conn.execute("UPDATE import_revisions SET status = 'superseded' WHERE revision_id = 'rev-b'")
+
+    plan = plan_source_deletion(database, "root-a", mirror_root=mirror)
+
+    assert plan["works_shared"] == 0, f"已被取代的引用不得再算成共享：{plan}"
+    assert plan["works_removable"] == 2, plan
+
+
 def test_delete_removes_only_unshared_works_and_their_files(tmp_path):
     database, mirror = _two_sources(tmp_path)
 
