@@ -321,10 +321,18 @@ class V4ScrapeService:
                 raise KeyError(job_id)
             if job["job_type"] != "scrape_work":
                 raise ValueError(f"不是刮削任务: {job['job_type']}")
+            if job["status"] == "cancelled" or bool(job["cancel_requested"]):
+                # 同来源的新 revision 已确认后，旧任务可能刚好迟到。它已经失去活动
+                # 身份，按取消幂等收口即可，不能再触发 Provider 冲突或覆盖当前资料。
+                mark_cancelled(self.database, job_id)
+                return
             revision = conn.execute(
                 "SELECT status FROM import_revisions WHERE revision_id = ?",
                 (job["revision_id"],),
             ).fetchone()
+            if revision is not None and revision["status"] == "superseded":
+                mark_cancelled(self.database, job_id)
+                return
             if revision is None or revision["status"] != "confirmed":
                 raise RuntimeError("只有 confirmed revision 才能执行刮削")
             work = conn.execute(

@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import pytest
-
 from app.media_v4.domain.models import ParsedFacts, SourceEvidence
 from app.media_v4.parsing.parser import V4Parser, normalize_batch_parsed_facts
 from app.media_v4.persistence.database import V4Database
@@ -327,8 +326,8 @@ def test_second_round_does_not_rename_main_series_with_season_title(tmp_path):
 
 @pytest.mark.parametrize('title', ['虫师', '奇巧计程车', '紫罗兰永恒花园', '斩服少女', '月色真美', '天国大魔境', 'CLANNAD', '路人女主的养成方法', '想吃掉我的非人少女'])
 @pytest.mark.parametrize('collection_first', [False, True])
-def test_collection_and_plain_directory_share_work_across_sources(tmp_path, title, collection_first):
-    """普通目录与合集是同一主系列；离线 TXT 确认不得再造身份后撞 TMDB 绑定。"""
+def test_collection_and_plain_directory_stay_independent_across_sources(tmp_path, title, collection_first):
+    """跨来源的同名结构保持独立；Provider 资料不能反向认领本地 Work。"""
     database = V4Database(tmp_path / 'cross-source.db')
     database.initialize()
     service = V4RevisionService(database)
@@ -353,7 +352,7 @@ def test_collection_and_plain_directory_share_work_across_sources(tmp_path, titl
             work_ids.append(conn.execute('SELECT work_id FROM revision_bindings WHERE revision_id=?', (f'rev-{index}',)).fetchone()[0])
             if index == 0:
                 conn.execute("INSERT INTO provider_bindings(work_id, provider, media_type, provider_id) VALUES (?, 'tmdb', 'tv', '12345')", (work_ids[0],))
-    assert work_ids[0] == work_ids[1]
+    assert work_ids[0] != work_ids[1]
     with database.connect() as conn:
-        assert conn.execute('SELECT COUNT(*) FROM works').fetchone()[0] == 1
-        assert conn.execute('SELECT COUNT(*) FROM episodes').fetchone()[0] == 1
+        assert conn.execute('SELECT COUNT(*) FROM works').fetchone()[0] == 2
+        assert conn.execute('SELECT COUNT(*) FROM episodes').fetchone()[0] == 2

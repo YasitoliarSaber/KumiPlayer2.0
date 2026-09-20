@@ -6,7 +6,6 @@ from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
-
 from app.media_v4.domain.models import ParsedFacts, ResolvedWork, SourceEvidence
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.persistence.repositories import V4Repository
@@ -135,7 +134,7 @@ def test_reimport_movie_after_cancelled_jobs_reuses_correct_identity(tmp_path):
         assert [r[0] for r in conn.execute("SELECT work_id FROM works WHERE status = 'active'")] == first_ids
 
 
-def test_confirmed_scraped_title_reuses_cross_language_owner_not_empty_duplicate(tmp_path):
+def test_confirmed_scraped_title_does_not_claim_cross_source_local_work(tmp_path):
     import json
 
     database = V4Database(tmp_path / "translated-owner.db")
@@ -167,9 +166,11 @@ def test_confirmed_scraped_title_reuses_cross_language_owner_not_empty_duplicate
     service.create_draft('chinese', [(evidence, facts)])
     service.confirm('chinese')
     with database.connect() as conn:
-        assert {r[0] for r in conn.execute(
+        current_ids = {r[0] for r in conn.execute(
             "SELECT work_id FROM revision_bindings WHERE revision_id='chinese'",
-        )} == {owner}
+        )}
+    assert current_ids != {owner}
+    assert owner not in current_ids
 
 
 def test_independent_work_keeps_asset_boundary_when_episode_numbers_match():
@@ -249,8 +250,8 @@ def test_polluted_historical_work_is_not_reused_for_either_boundary(tmp_path):
         assert _existing_work_matches(conn, heya_work, entries) == []
 
 
-def test_provider_candidate_owned_by_polluted_work_requires_repair(tmp_path):
-    """Provider owner 仍存在时，草稿不能绕过边界校验直接复用它。"""
+def test_provider_candidate_owned_by_polluted_work_does_not_claim_new_source(tmp_path):
+    """非当前 confirmed 来源的污染 owner 不再参与本次本地身份判断。"""
 
     database = V4Database(tmp_path / "polluted-provider.db")
     database.initialize()
@@ -312,7 +313,7 @@ def test_provider_candidate_owned_by_polluted_work_requires_repair(tmp_path):
         candidates,
         entries,
     )
-    assert any(issue.code == "work_identity_conflict" for issue in issues)
+    assert not any(issue.code == "work_identity_conflict" for issue in issues)
 
 
 def _seed_polluted_media(database: V4Database, *, main_title="Yuru Camp", main_series="Yuru Camp") -> str:

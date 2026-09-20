@@ -9,6 +9,7 @@ import uuid
 from contextlib import nullcontext
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 
 from app.media_v4.domain.models import (
     ParsedFacts,
@@ -23,6 +24,7 @@ from app.media_v4.resolution.candidates import CandidateSearch
 from app.media_v4.resolution.identity_policy import historical_identity_conflict
 from app.media_v4.resolution.resolver import MediaResolver
 from app.media_v4.resolution.title_norm import normalize_identity_title
+from app.recognition.media import _extract_work_container
 
 
 def _now() -> str:
@@ -780,7 +782,59 @@ def _structural_key(
         series = _normalize_title(facts.series_group)
         if series:
             return f"series:{series}:{media_type}"
+    # 普通单作品目录不会总是带 card_type。仍要为同一来源的连续扫描保存稳定
+    # 边界，否则一旦停用历史标题自动认领，每次重导都会生成重复作品。
+    title = _normalize_title(facts.work_title)
+    if title:
+        return f"work:{title}:{media_type}"
     return ""
+
+
+def _source_path_structural_key(relative_path: str, facts: ParsedFacts | None) -> str:
+    """返回来源根内的精确作品容器路径键；找不到可靠容器时不猜。"""
+
+    if facts is None:
+        return ""
+    normalized_path = str(relative_path or "").replace("\\", "/").strip("/")
+    if not normalized_path:
+        return ""
+    container = _extract_work_container(normalized_path, "openlist")
+    normalized_container = _normalize_title(container)
+    if not normalized_container:
+        return ""
+    parts = PurePosixPath(normalized_path).parts[:-1]
+    boundary_index = -1
+    for index, part in enumerate(parts):
+        if _normalize_title(part) == normalized_container:
+            boundary_index = index
+    if boundary_index < 0:
+        return ""
+    boundary = "/".join(part.casefold().strip() for part in parts[: boundary_index + 1])
+    hinted_type = facts.tmdb_hint_type.casefold()
+    media_type = (
+        hinted_type
+        if facts.tmdb_hint_id and hinted_type in {"movie", "tv"}
+        else (facts.media_type or ("movie" if facts.group_type == "movie" else "tv"))
+    ).casefold()
+    return f"path:{boundary}:{media_type}" if boundary else ""
+
+
+def _structural_keys(
+    relative_path: str,
+    *,
+    facts: ParsedFacts | None,
+    work_key: str,
+) -> set[str]:
+    """兼容旧语义键，并优先增加精确来源容器键。"""
+
+    return {
+        key
+        for key in (
+            _source_path_structural_key(relative_path, facts),
+            _structural_key(relative_path, facts=facts, work_key=work_key),
+        )
+        if key
+    }
 
 
 def _snapshot_structural_bindings(conn, root_id: str) -> dict[str, list[dict]]:
@@ -796,7 +850,10 @@ def _snapshot_structural_bindings(conn, root_id: str) -> dict[str, list[dict]]:
         FROM work_source_bindings b
         JOIN works w ON w.work_id = b.work_id
         JOIN source_roots sr ON sr.root_id = b.root_id
+        JOIN revision_bindings rb ON rb.work_id = b.work_id
+        JOIN import_revisions ir ON ir.revision_id = rb.revision_id
         WHERE b.root_id = ? AND w.status = 'active' AND sr.retired_at = ''
+          AND ir.root_id = b.root_id AND ir.status = 'confirmed'
         """,
         (root_id,),
     ).fetchall()
@@ -815,6 +872,58 @@ def _snapshot_structural_bindings(conn, root_id: str) -> dict[str, list[dict]]:
             }
         )
     return snapshot
+
+
+def _source_bound_work_ids(
+    conn,
+    work,
+    related_entries: list[tuple[SourceEvidence, ParsedFacts]],
+) -> set[str]:
+    """只按当前来源的 confirmed 结构绑定续接本地 Work。
+
+    标题、别名与 Provider ID 都可能来自历史误识别，不能取得本地身份决定权。
+    同一个来源根的当前 confirmed revision 与相同结构边界才是自动续接依据。
+    """
+
+    if not related_entries:
+        return set()
+    root_ids = {evidence.root_id for evidence, _facts in related_entries}
+    if len(root_ids) != 1:
+        return set()
+    root_id = next(iter(root_ids))
+    work_type = "series" if str(getattr(work, "media_type", "") or "") == "tv" else "movie"
+    work_year = getattr(work, "year", None)
+    keys = {
+        key
+        for evidence, facts in related_entries
+        for key in _structural_keys(
+            evidence.relative_path,
+            facts=facts,
+            work_key=work.work_key,
+        )
+    }
+    if not keys:
+        return set()
+    placeholders = ",".join("?" for _ in keys)
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT b.work_id, w.year
+        FROM work_source_bindings b
+        JOIN works w ON w.work_id = b.work_id
+        JOIN source_roots sr ON sr.root_id = b.root_id
+        JOIN revision_bindings rb ON rb.work_id = b.work_id
+        JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+        WHERE b.root_id = ? AND b.structural_key IN ({placeholders})
+          AND w.status = 'active' AND w.work_type = ? AND sr.retired_at = ''
+          AND ir.root_id = b.root_id AND ir.status = 'confirmed'
+        """,
+        (root_id, *sorted(keys), work_type),
+    ).fetchall()
+    return {
+        str(row["work_id"])
+        for row in rows
+        if row["year"] is None or work_year is None or int(row["year"]) == int(work_year)
+    }
 
 
 def _lookup_work_by_key(conn, work_key: str, *, exclude_work_id: str = "") -> str:
@@ -1076,13 +1185,7 @@ class V4RevisionService:
         entries: list[tuple[SourceEvidence, ParsedFacts]] | None = None,
         conn=None,
     ) -> dict[str, list[tuple[str, str, str]]]:
-        """读取可安全归属的既有 provider binding，供跨 revision 候选复用。
-
-        目录树、OpenList 与本地扫描可能为同一作品生成不同的 identity_key。
-        先按 identity_key 命中；未命中时再用规范作品标题/别名和媒体类型、
-        年份兼容性寻找唯一 owner。多个同名 owner 时保持空结果，让后续
-        review 流程处理，不能按数据库遍历顺序猜一个。
-        """
+        """只复用同来源当前 confirmed 结构边界上的 provider binding。"""
 
         bindings: dict[str, list[tuple[str, str, str]]] = {}
         with (nullcontext(conn) if conn is not None else self.database.connect()) as conn:
@@ -1092,8 +1195,8 @@ class V4RevisionService:
                     for evidence, facts in entries or []
                     if evidence.evidence_id in work.source_evidence_ids
                 ]
-                matches = _existing_work_matches(conn, work, related_entries)
-                if len(matches) != 1:
+                source_work_ids = _source_bound_work_ids(conn, work, related_entries)
+                if len(source_work_ids) != 1:
                     bindings[work.work_key] = []
                     continue
                 rows = conn.execute(
@@ -1102,7 +1205,7 @@ class V4RevisionService:
                     FROM provider_bindings pb
                     WHERE pb.work_id = ?
                     """,
-                    (str(matches[0]["work_id"]),),
+                    (next(iter(source_work_ids)),),
                 ).fetchall()
                 bindings[work.work_key] = [(str(r[0]), str(r[1]), str(r[2])) for r in rows]
         return bindings
@@ -1136,75 +1239,9 @@ class V4RevisionService:
                     for evidence_id in work.source_evidence_ids
                     if evidence_id in evidence_by_id
                 ]
-                title_matches = _existing_work_matches(conn, work, related_entries)
-                if len(title_matches) > 1:
-                    # 同名有多个相容记录时**不复用**即可，不写入阻断性 issue：
-                    # 复用只是优化，不该让用户被迫先去做人工合并。
-                    continue
-                if len(title_matches) == 1:
-                    existing_work_ids.add(str(title_matches[0]["work_id"]))
-                # Provider key 会把跨语言目录合并到同一候选 Work；同时仍要以
-                # 来源根 + 结构目录检查既有本地谱系，防止一个错误 hint 把
-                # Show One 重绑到已经属于 Show Two 的 provider_id。
-                for evidence_id in work.source_evidence_ids:
-                    evidence = evidence_by_id.get(evidence_id)
-                    if evidence is None:
-                        continue
-                    structural_key = _structural_key(
-                        evidence.relative_path,
-                        facts=facts_by_evidence_id.get(evidence.evidence_id),
-                        work_key=work.work_key,
-                    )
-                    if not structural_key:
-                        continue
-                    rows = conn.execute(
-                        """
-                        SELECT DISTINCT b.work_id
-                        FROM work_source_bindings b
-                        JOIN works w ON w.work_id = b.work_id
-                        JOIN source_roots sr ON sr.root_id = b.root_id
-                        WHERE b.root_id = ? AND b.structural_key = ?
-                          AND w.status = 'active' AND sr.retired_at = ''
-                        """,
-                        (evidence.root_id, structural_key),
-                    ).fetchall()
-                    existing_work_ids.update(str(row["work_id"]) for row in rows)
-                # Provider owner 可能没有被标题/结构查询选中，但确认阶段仍会
-                # 通过全局 Provider 唯一键回收它。先检查 owner 的历史结构边界，
-                # 防止污染 Work 绕过上面的安全复用筛选再次进入 confirmed。
-                for candidate in candidates_by_key.get(work.work_key, []):
-                    if (
-                        candidate.status not in {"confirmed", "proposed"}
-                        or candidate.confidence != "high"
-                        or not candidate_service.supported_provider(candidate.provider)
-                    ):
-                        continue
-                    owner = conn.execute(
-                        "SELECT work_id FROM provider_bindings "
-                        "WHERE provider = ? AND media_type = ? AND provider_id = ?",
-                        (candidate.provider, candidate.media_type, candidate.provider_id),
-                    ).fetchone()
-                    if owner is None or str(owner["work_id"]) in retired_ids:
-                        continue
-                    owner_keys = {
-                        str(binding["structural_key"] or "")
-                        for binding in conn.execute(
-                            "SELECT b.structural_key FROM work_source_bindings b "
-                            "JOIN source_roots sr ON sr.root_id = b.root_id "
-                            "WHERE b.work_id = ? AND sr.retired_at = ''",
-                            (str(owner["work_id"]),),
-                        ).fetchall()
-                    }
-                    if historical_identity_conflict(work, owner_keys) is not None:
-                        issues.append(ResolutionIssue(
-                            code="work_identity_conflict",
-                            evidence_id=next(iter(work.source_evidence_ids), ""),
-                            message=(
-                                "Provider 身份属于一个同时覆盖主系列与独立作品的历史记录；"
-                                "请先执行作品身份修复，不能继续复用"
-                            ),
-                        ))
-                        break
+                existing_work_ids.update(
+                    _source_bound_work_ids(conn, work, related_entries)
+                )
                 existing_work_ids -= retired_ids
                 if not existing_work_ids:
                     continue
@@ -1244,62 +1281,9 @@ class V4RevisionService:
         entries: list[tuple[SourceEvidence, ParsedFacts]],
         conn=None,
     ) -> list[ResolutionIssue]:
-        """阻止一个稳定来源边界静默对应多个既有 Work。"""
+        """结构边界歧义通过“不复用并新建”降级，不再产生阻断性 issue。"""
 
-        evidence_by_id = {evidence.evidence_id: evidence for evidence, _facts in entries}
-        facts_by_evidence_id = {evidence.evidence_id: facts for evidence, facts in entries}
-        issues: list[ResolutionIssue] = []
-        with (nullcontext(conn) if conn is not None else self.database.connect()) as conn:
-            from app.media_v4.persistence.identity_lifecycle import retired_only_work_ids
-
-            retired_ids = retired_only_work_ids(conn)
-            for work in graph.works:
-                work_entries = [
-                    (evidence_by_id[evidence_id], facts_by_evidence_id.get(evidence_id))
-                    for evidence_id in work.source_evidence_ids
-                    if evidence_id in evidence_by_id
-                ]
-                root_ids = {evidence.root_id for evidence, _facts in work_entries}
-                if len(root_ids) != 1:
-                    continue
-                structural_keys = {
-                    _structural_key(
-                        evidence.relative_path,
-                        facts=facts,
-                        work_key=work.work_key,
-                    )
-                    for evidence, facts in work_entries
-                }
-                structural_keys.discard("")
-                if not structural_keys:
-                    continue
-                owner_ids: set[str] = set()
-                for structural_key in structural_keys:
-                    rows = conn.execute(
-                        """
-                        SELECT DISTINCT b.work_id
-                        FROM work_source_bindings b
-                        JOIN works w ON w.work_id = b.work_id
-                        JOIN source_roots sr ON sr.root_id = b.root_id
-                        WHERE b.root_id = ? AND b.structural_key = ?
-                          AND w.status = 'active' AND sr.retired_at = ''
-                        """,
-                        (next(iter(root_ids)), structural_key),
-                    ).fetchall()
-                    owner_ids.update(str(row["work_id"]) for row in rows)
-                identity_row = conn.execute(
-                    "SELECT work_id FROM works WHERE identity_key = ? AND status = 'active'",
-                    (work.work_key,),
-                ).fetchone()
-                owner_ids -= retired_ids
-                identity_id = str(identity_row["work_id"]) if identity_row is not None else ""
-                if identity_id in retired_ids:
-                    identity_id = ""
-                if len(owner_ids) <= 1 and (not identity_id or not owner_ids or identity_id in owner_ids):
-                    continue
-                # 边界对应多部作品时同样**不复用**，但不写入阻断性 issue。
-                continue
-        return issues
+        return []
 
     def _evaluate_draft(
         self,
@@ -1662,82 +1646,17 @@ class V4RevisionService:
                         if evidence.evidence_id in work.source_evidence_ids
                     ]
                     work_type = "series" if work.media_type == "tv" else "movie"
-                    identity_matches = _existing_work_matches(conn, work, related_entries)
-                    if len(identity_matches) > 1:
-                        # 复用旧作品只是"省一次刮削"的优化。同名有多个归属时**不复用**，
-                        # 照常新建作品并正常抓取；绝不因为复用歧义让整个导入无法确认。
-                        identity_matches = []
-                    existing_work = identity_matches[0] if identity_matches else None
-
-                    if existing_work is None:
-                        # P-001 7.8 R6：确认事务按冻结候选 identity 复用已有 Work
-                        # （provider+media_type+provider_id 在数据库层唯一归属一个 Work）。
-                        frozen = [
-                            item for item in candidates_by_key.get(work.work_key, [])
-                            if item.status == "confirmed"
-                            and candidate_service.supported_provider(item.provider)
-                        ]
-                        unique_frozen = {
-                            (item.provider, item.media_type, item.provider_id) for item in frozen
-                        }
-                        if len(unique_frozen) == 1:
-                            chosen = frozen[0]
-                            owner_row = conn.execute(
-                                """
-                                SELECT w.work_id FROM provider_bindings pb
-                                JOIN works w ON w.work_id = pb.work_id
-                                WHERE pb.provider = ? AND pb.media_type = ? AND pb.provider_id = ?
-                                  AND w.status = 'active'
-                                LIMIT 1
-                                """,
-                                (chosen.provider, chosen.media_type, chosen.provider_id),
-                            ).fetchone()
-                            if owner_row is not None:
-                                existing_work = conn.execute(
-                                    "SELECT * FROM works WHERE work_id = ?",
-                                    (owner_row["work_id"],),
-                                ).fetchone()
-
-                    if existing_work is None:
-                        provider_candidates = {
-                            (facts.tmdb_hint_type.casefold(), str(facts.tmdb_hint_id))
-                            for _evidence, facts in related_entries
-                            if facts.tmdb_hint_id and facts.tmdb_hint_type
-                        }
-                        provider_work_ids = {
-                            str(row["work_id"])
-                            for media_type, provider_id in provider_candidates
-                            for row in [
-                                conn.execute(
-                                    """
-                                    SELECT w.work_id
-                                    FROM provider_bindings pb
-                                    JOIN works w ON w.work_id = pb.work_id
-                                    WHERE pb.provider = 'tmdb'
-                                      AND pb.media_type = ? AND pb.provider_id = ?
-                                      AND w.status = 'active'
-                                    """,
-                                    (media_type, provider_id),
-                                ).fetchone()
-                            ]
-                            if row is not None
-                        }
-                        if len(provider_work_ids) == 1:
-                            existing_work = conn.execute(
-                                "SELECT * FROM works WHERE work_id = ?",
-                                (next(iter(provider_work_ids)),),
-                            ).fetchone()
-
-                    if existing_work is None:
-                        source_work_ids: set[str] = set()
-                        for evidence, facts in related_entries:
-                            structural_key = _structural_key(
-                                evidence.relative_path,
-                                facts=facts,
-                                work_key=work.work_key,
-                            )
-                            if not structural_key:
-                                continue
+                    # 本地 Work 只能沿同一来源根的当前 confirmed 结构绑定续接。
+                    # 历史标题、别名和 Provider owner 都可能来自旧误识别，只能用于补资料，
+                    # 不能决定本次本地身份；找不到精确续接时新建记录并继续导入。
+                    source_work_ids: set[str] = set()
+                    for evidence, facts in related_entries:
+                        structural_keys = _structural_keys(
+                            evidence.relative_path,
+                            facts=facts,
+                            work_key=work.work_key,
+                        )
+                        for structural_key in structural_keys:
                             for binding in structural_binding_snapshot.get(structural_key, []):
                                 if binding["work_type"] != work_type:
                                     continue
@@ -1749,23 +1668,13 @@ class V4RevisionService:
                                 ):
                                     continue
                                 source_work_ids.add(binding["work_id"])
-                        if len(source_work_ids) > 1:
-                            # 同一来源边界对应多部作品时不复用（新建作品继续导入），
-                            # 而不是阻断整个确认流程。
-                            source_work_ids = set()
-                        if len(source_work_ids) == 1:
-                            existing_work = conn.execute(
-                                "SELECT * FROM works WHERE work_id = ?",
-                                (next(iter(source_work_ids)),),
-                            ).fetchone()
-
-                    if existing_work is None:
-                        alias_matches = _existing_work_matches(conn, work, related_entries)
-                        if len(alias_matches) == 1:
-                            existing_work = alias_matches[0]
-                        elif len(alias_matches) > 1:
-                            # 同名多归属：不复用，走下面的"新建作品"分支继续导入。
-                            existing_work = None
+                    if len(source_work_ids) == 1:
+                        existing_work = conn.execute(
+                            "SELECT * FROM works WHERE work_id = ?",
+                            (next(iter(source_work_ids)),),
+                        ).fetchone()
+                    else:
+                        existing_work = None
 
                     if existing_work is None:
                         work_id = str(uuid.uuid4())
@@ -1778,7 +1687,7 @@ class V4RevisionService:
                             """,
                             (
                                 work_id,
-                                work.work_key,
+                                f"local:{work_id}",
                                 work_type,
                                 work.preferred_title,
                                 work.year,
@@ -1847,12 +1756,9 @@ class V4RevisionService:
 
                     work_ids[work.work_key] = work_id
                     for evidence, facts in related_entries:
-                        structural_key = _structural_key(
-                            evidence.relative_path,
-                            facts=facts,
-                            work_key=work.work_key,
-                        )
-                        if structural_key:
+                        for structural_key in _structural_keys(
+                            evidence.relative_path, facts=facts, work_key=work.work_key
+                        ):
                             conn.execute(
                                 """
                                 INSERT OR IGNORE INTO work_source_bindings(

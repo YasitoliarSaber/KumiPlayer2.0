@@ -35,6 +35,35 @@ def _entry(title: str = "Show", evidence_id: str = "ev-revision"):
     return evidence, facts
 
 
+def _entry_for_root(
+    *,
+    root_id: str,
+    scan_id: str,
+    evidence_id: str,
+    title: str = "Show",
+    episode: int = 1,
+    tmdb_id: int | None = None,
+):
+    """构造可跨来源/跨轮次比较的真实 V4 输入，不绕过解析后的事实合同。"""
+
+    evidence, facts = _entry(title, evidence_id)
+    evidence = replace(
+        evidence,
+        root_id=root_id,
+        scan_id=scan_id,
+        source_key=f"{title}/S01E{episode:02d}.mkv",
+        relative_path=f"{title}/S01E{episode:02d}.mkv",
+    )
+    facts = replace(
+        facts,
+        season_candidate=1,
+        episode_candidate=episode,
+        tmdb_hint_id=tmdb_id,
+        tmdb_hint_type="tv" if tmdb_id else "",
+    )
+    return evidence, facts
+
+
 def test_confirmation_atomically_publishes_revision_and_outbox_jobs(tmp_path):
     from app.media_v4.persistence.database import V4Database
     from app.media_v4.revisions.service import V4RevisionService
@@ -71,8 +100,8 @@ def test_confirmation_is_idempotent_and_does_not_duplicate_jobs(tmp_path):
     assert len(service.list_jobs("rev-1")) == 3
 
 
-def test_reused_provider_identity_keeps_existing_preferred_title_and_records_new_structure_as_alias(tmp_path):
-    """较晚的目录标题不得重命名已确认 Work。"""
+def test_same_provider_hint_does_not_merge_different_source_structures(tmp_path):
+    """Provider 相同只代表资料引用相同，不能自动合并不同本地结构。"""
 
     from app.media_v4.persistence.database import V4Database
     from app.media_v4.revisions.service import V4RevisionService
@@ -92,17 +121,11 @@ def test_reused_provider_identity_keeps_existing_preferred_title_and_records_new
     service.confirm("rev-title-later")
 
     with database.connect() as conn:
-        work = conn.execute("SELECT work_id, preferred_title FROM works").fetchone()
-        aliases = {
-            row["normalized_title"]
-            for row in conn.execute(
-                "SELECT normalized_title FROM work_aliases WHERE work_id = ?",
-                (work["work_id"],),
-            ).fetchall()
-        }
+        works = conn.execute(
+            "SELECT work_id, preferred_title FROM works ORDER BY preferred_title"
+        ).fetchall()
 
-    assert work["preferred_title"] == "Yuru Camp"
-    assert "yuru camp movie" in aliases
+    assert [str(work["preferred_title"]) for work in works] == ["Yuru Camp", "Yuru Camp Movie"]
 
 
 def test_confirmation_does_not_reuse_bindings_created_earlier_in_same_revision(tmp_path):
@@ -346,8 +369,8 @@ def test_override_rechecks_structural_identity_before_confirmation(tmp_path):
     assert bound.isdisjoint({"old-work-a", "old-work-b"}), "歧义时不得复用旧的同名作品"
 
 
-def test_preview_blocks_provider_rebinding_before_confirm_can_hit_unique_constraint(tmp_path):
-    """同一结构 Work 改指向已属于另一 Work 的 Provider 身份必须留在第 2 步。"""
+def test_preview_does_not_block_when_provider_hint_is_already_used(tmp_path):
+    """在线身份被使用时保留本地记录，不把资料冲突变成导入阻断。"""
 
     from app.media_v4.persistence.database import V4Database
     from app.media_v4.revisions.service import V4RevisionService
@@ -376,8 +399,7 @@ def test_preview_blocks_provider_rebinding_before_confirm_can_hit_unique_constra
         [(conflicting_evidence, replace(conflicting_facts, tmdb_hint_id=202, tmdb_hint_type="tv"))],
     )
 
-    assert any(issue.code == "provider_identity_conflict" for issue in graph.issues)
-    # 不再拦截：身份冲突时静默跳过本次绑定，作品照常入库（用户要求永不拦截）。
+    assert not any(issue.code == "provider_identity_conflict" for issue in graph.issues)
     service.confirm("rev-provider-conflict")
 
     with database.connect() as conn:
@@ -392,7 +414,9 @@ def test_preview_blocks_provider_rebinding_before_confirm_can_hit_unique_constra
                 """
             ).fetchall()
         }
+        works = conn.execute("SELECT preferred_title FROM works").fetchall()
     assert bindings == {("101", "Show One"), ("202", "Show Two")}
+    assert len(works) == 3, "冲突条目仍应作为独立本地作品入库"
 
 
 def test_review_issues_do_not_block_confirmation(tmp_path):
@@ -621,7 +645,15 @@ def test_new_confirmed_revision_supersedes_same_root_without_unlocking_snapshot(
         old_binding = conn.execute(
             "SELECT binding_id FROM revision_bindings WHERE revision_id = 'rev-old'"
         ).fetchone()[0]
+        reused_work_ids = {
+            str(row["work_id"])
+            for row in conn.execute(
+                "SELECT DISTINCT work_id FROM revision_bindings "
+                "WHERE revision_id IN ('rev-old', 'rev-new')"
+            ).fetchall()
+        }
     assert statuses == {"rev-old": "superseded", "rev-new": "confirmed"}
+    assert len(reused_work_ids) == 1, "同根连续导入必须沿当前结构绑定续接同一个本地 Work"
     card = V4LibraryProjection(database).rebuild().cards[0]
     assert card["episode_count"] == 1
     assert card["asset_count"] == 1
@@ -680,6 +712,143 @@ def test_confirming_a_newer_revision_requests_stop_for_old_running_jobs(tmp_path
     assert jobs["materialize_mirror"] == {"job_type": "materialize_mirror", "status": "running", "cancel_requested": 1}
     assert jobs["scrape_work"]["status"] == "cancelled"
     assert jobs["refresh_projection"]["status"] == "cancelled"
+
+
+def test_cancelled_execution_can_reimport_same_root_without_duplicate_work(tmp_path):
+    """取消的是执行，不是本地谱系；随后重导应沿同根结构绑定续接。"""
+
+    from app.media_v4.jobs.runner import V4JobRunner
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "cancel-reimport.db")
+    database.initialize()
+    service = V4RevisionService(database)
+    service.create_draft(
+        "rev-before-cancel",
+        [_entry_for_root(root_id="root-cancel", scan_id="scan-1", evidence_id="ev-1")],
+    )
+    service.confirm("rev-before-cancel")
+    V4JobRunner(database).cancel_revision("rev-before-cancel")
+
+    service.create_draft(
+        "rev-after-cancel",
+        [
+            _entry_for_root(
+                root_id="root-cancel",
+                scan_id="scan-2",
+                evidence_id="ev-2",
+                episode=2,
+            )
+        ],
+    )
+    service.confirm("rev-after-cancel")
+
+    with database.connect() as conn:
+        work_ids = {
+            str(row["work_id"])
+            for row in conn.execute(
+                "SELECT work_id FROM revision_bindings "
+                "WHERE revision_id IN ('rev-before-cancel', 'rev-after-cancel')"
+            ).fetchall()
+        }
+    assert len(work_ids) == 1
+
+
+@pytest.mark.parametrize("old_status", ["confirmed", "superseded"])
+def test_other_root_title_or_provider_history_never_claims_new_local_work(tmp_path, old_status):
+    """跨来源的标题、别名和 Provider owner 只能补资料，不能认领本地 Work。"""
+
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / f"cross-root-{old_status}.db")
+    database.initialize()
+    service = V4RevisionService(database)
+    first = _entry_for_root(
+        root_id="root-history",
+        scan_id="scan-history",
+        evidence_id="ev-history",
+        title="Same Title",
+        tmdb_id=42,
+    )
+    service.create_draft("rev-history", [first])
+    service.confirm("rev-history")
+    with database.connect() as conn:
+        old_work_id = str(
+            conn.execute(
+                "SELECT work_id FROM revision_bindings WHERE revision_id='rev-history'"
+            ).fetchone()[0]
+        )
+        if old_status == "superseded":
+            conn.execute(
+                "UPDATE import_revisions SET status='superseded' WHERE revision_id='rev-history'"
+            )
+
+    second = _entry_for_root(
+        root_id="root-current",
+        scan_id="scan-current",
+        evidence_id="ev-current",
+        title="Same Title",
+        tmdb_id=42,
+    )
+    service.create_draft("rev-current", [second])
+    service.confirm("rev-current")
+
+    with database.connect() as conn:
+        current_work_id = str(
+            conn.execute(
+                "SELECT work_id FROM revision_bindings WHERE revision_id='rev-current'"
+            ).fetchone()[0]
+        )
+    assert current_work_id != old_work_id
+
+
+def test_late_superseded_scrape_job_is_a_noop(tmp_path):
+    """旧 revision 的迟到任务不得报业务冲突，更不能覆盖当前导入。"""
+
+    from app.media_v4.jobs.scrape import V4ScrapeService
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "late-old-job.db")
+    database.initialize()
+    service = V4RevisionService(database)
+    service.create_draft(
+        "rev-old-late",
+        [_entry_for_root(root_id="root-late", scan_id="scan-old", evidence_id="ev-old")],
+    )
+    service.confirm("rev-old-late")
+    old_job = next(
+        job for job in service.list_jobs("rev-old-late") if job["job_type"] == "scrape_work"
+    )
+
+    service.create_draft(
+        "rev-new-current",
+        [
+            _entry_for_root(
+                root_id="root-late",
+                scan_id="scan-new",
+                evidence_id="ev-new",
+                episode=2,
+            )
+        ],
+    )
+    service.confirm("rev-new-current")
+    called = False
+
+    def provider(_target):
+        nonlocal called
+        called = True
+        return {"provider": "tmdb", "provider_id": "999"}
+
+    V4ScrapeService(database).process(old_job["job_id"], provider)
+
+    assert called is False
+    with database.connect() as conn:
+        assert conn.execute(
+            "SELECT status FROM jobs WHERE job_id=?", (old_job["job_id"],)
+        ).fetchone()[0] == "cancelled"
 
 
 def test_loading_draft_replaces_stale_persisted_issues_with_current_evaluation(tmp_path):
