@@ -1,10 +1,4 @@
-"""provider 身份抢占：并发刮削不得因唯一约束把 job 打失败。
-
-provider_bindings 有 ``PRIMARY KEY(provider, media_type, provider_id)`` 与
-``UNIQUE(work_id, provider, media_type)`` 两个约束。原实现只声明了后者的
-ON CONFLICT，于是两个 work 并发抢同一 Provider 身份时，后提交者撞主键 →
-IntegrityError → 整个 scrape_work 失败（实测线上连续出现 8 次）。
-"""
+"""provider 绑定：共享在线资料不合并本地作品，也不覆盖本作品已有身份。"""
 
 from __future__ import annotations
 
@@ -59,62 +53,25 @@ def _make_active(conn, work_id: str, *, revision_id: str, root_id: str) -> None:
     conn.execute("UPDATE works SET status = 'active' WHERE work_id = ?", (work_id,))
 
 
-def test_active_owner_still_blocks_and_stale_owner_is_taken_over(tmp_path):
-    """活动占用者必须继续拦住；**陈旧占用者**（被取代导入的残留绑定）必须让位。
-
-    跨批次回归：重新导入时若上一批（已被取代）的作品仍占着同一个在线身份，
-    新批次会被判成"在线作品已关联到另一部作品"、反复退化为人工处理。
-    """
+def test_shared_identity_is_normal_but_a_work_cannot_overwrite_its_own_slot(tmp_path):
+    """不同 Work 可共享在线 ID；自动结果不能改写自身已有不同 ID。"""
 
     database = _database(tmp_path)
     with database.connect() as conn:
         _seed_work(conn, "work-a")
         _seed_work(conn, "work-b")
-        _seed_work(conn, "work-c")
-        # work-a 活动并占用身份；work-b 是"陈旧占用者"（没有任何活动 revision 绑定）
-        _make_active(conn, "work-a", revision_id="rev-a", root_id="root-a")
-        _make_active(conn, "work-b", revision_id="rev-b", root_id="root-b")
-        conn.execute(
-            "INSERT INTO provider_bindings(work_id, provider, media_type, provider_id) "
-            "VALUES ('work-b', 'tmdb', 'tv', '12345')"
-        )
-        conn.execute("UPDATE import_revisions SET status = 'superseded' WHERE revision_id = 'rev-b'")
-
-        # 活动占用者：拒绝
-        assert (
-            _claim_provider_binding(
-                conn, work_id="work-a", provider="tmdb", media_type="tv", provider_id="12345"
-            )
-            is True
-        ), "活动作品之间仍按先到先得"
-        _claim_provider_binding(
-            conn, work_id="work-c", provider="tmdb", media_type="tv", provider_id="12345"
-        )
-        owner = conn.execute(
-            "SELECT work_id FROM provider_bindings WHERE provider = 'tmdb' "
-            "AND media_type = 'tv' AND provider_id = '12345'"
-        ).fetchone()
-        assert str(owner["work_id"]) == "work-a", "活动占用者的身份不得被抢占"
-
-        # 陈旧占用者：允许接管（把身份归还给活动 work）
-        conn.execute(
-            "INSERT INTO provider_bindings(work_id, provider, media_type, provider_id) "
-            "VALUES ('work-b', 'tmdb', 'tv', '54321')"
+        assert _claim_provider_binding(
+            conn, work_id="work-a", provider="tmdb", media_type="tv", provider_id="12345"
         )
         assert _claim_provider_binding(
-            conn, work_id="work-c", provider="tmdb", media_type="tv", provider_id="54321"
-        ), "陈旧占用者必须让位，否则跨批次导入会一直被挡成人工处理"
-        new_owner = conn.execute(
-            "SELECT work_id FROM provider_bindings WHERE provider = 'tmdb' "
-            "AND media_type = 'tv' AND provider_id = '54321'"
-        ).fetchone()
-        assert str(new_owner["work_id"]) == "work-c"
-        assert (
-            conn.execute(
-                "SELECT COUNT(*) FROM provider_bindings WHERE work_id = 'work-b' AND provider_id = '54321'"
-            ).fetchone()[0]
-            == 0
-        ), "陈旧绑定必须被释放"
+            conn, work_id="work-b", provider="tmdb", media_type="tv", provider_id="12345"
+        )
+        assert not _claim_provider_binding(
+            conn, work_id="work-b", provider="tmdb", media_type="tv", provider_id="54321"
+        )
+        assert [tuple(row) for row in conn.execute(
+            "SELECT work_id, provider_id FROM provider_bindings ORDER BY work_id"
+        )] == [("work-a", "12345"), ("work-b", "12345")]
 
 
 def test_work_holds_live_slot_covers_the_three_stale_shapes(tmp_path):

@@ -415,7 +415,11 @@ def test_preview_does_not_block_when_provider_hint_is_already_used(tmp_path):
             ).fetchall()
         }
         works = conn.execute("SELECT preferred_title FROM works").fetchall()
-    assert bindings == {("101", "Show One"), ("202", "Show Two")}
+    assert bindings == {
+        ("101", "Show One"),
+        ("202", "Show One"),
+        ("202", "Show Two"),
+    }
     assert len(works) == 3, "冲突条目仍应作为独立本地作品入库"
 
 

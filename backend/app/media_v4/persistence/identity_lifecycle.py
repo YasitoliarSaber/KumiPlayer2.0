@@ -76,25 +76,6 @@ def work_holds_live_slot(conn: sqlite3.Connection, work_id: str) -> bool:
     return row is not None
 
 
-def release_inactive_provider_identity(
-    conn: sqlite3.Connection,
-    provider: str,
-    media_type: str,
-    provider_id: str,
-) -> None:
-    """写入新权威绑定前，清除已退出媒体库的旧 owner 槽位。"""
-
-    conn.execute(
-        "DELETE FROM provider_bindings "
-        "WHERE provider = ? AND media_type = ? AND provider_id = ? "
-        "AND EXISTS ("
-        "SELECT 1 FROM works w "
-        "WHERE w.work_id = provider_bindings.work_id AND w.status != 'active'"
-        ")",
-        (provider, media_type, provider_id),
-    )
-
-
 def release_retired_source_identities(
     conn: sqlite3.Connection,
     root_id: str,

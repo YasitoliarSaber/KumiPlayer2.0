@@ -80,76 +80,23 @@ def provider_identity_conflicts(
     graph: ResolvedMediaGraph,
     candidates_by_key: dict[str, list[WorkCandidate]],
 ) -> tuple[set[tuple[str, str, str]], list[ResolutionIssue]]:
-    """找出同一 Provider ID 横跨独立作品边界的候选身份。
+    """共享在线资料不再是候选冲突。
 
-    同一主系列的多语言标题仍允许合并；只有图中存在明确独立关系时才
-    阻断。旧绑定候选会被降为 rejected，避免后续确认阶段再次冻结它。
+    在线资料是辅助信息，不是本地 Work 的唯一主键；独立作品是否合并仍由
+    :func:`can_merge_provider_identity` 负责，因此共享不会把作品卡混成一张。
     """
 
-    members: dict[tuple[str, str, str], list[tuple[ResolvedWork, WorkCandidate]]] = {}
-    for work in graph.works:
-        for candidate in candidates_by_key.get(work.work_key, []):
-            if candidate.status != "confirmed":
-                continue
-            identity = (candidate.provider, candidate.media_type, candidate.provider_id)
-            members.setdefault(identity, []).append((work, candidate))
-
-    blocked: set[tuple[str, str, str]] = set()
-    issues: list[ResolutionIssue] = []
-    for identity, identity_members in members.items():
-        work_keys = {work.work_key for work, _candidate in identity_members}
-        if len(work_keys) < 2:
-            continue
-        independent = [work for work, _candidate in identity_members if is_independent_work(work)]
-        if not independent:
-            continue
-        blocked.add(identity)
-        evidence_id = next(
-            (
-                evidence_id
-                for work, _candidate in identity_members
-                for evidence_id in work.source_evidence_ids
-            ),
-            "",
-        )
-        issues.append(
-            ResolutionIssue(
-                code="work_identity_conflict",
-                evidence_id=evidence_id,
-                message=(
-                    "、".join(dict.fromkeys(f"《{work.preferred_title}》" for work, _ in identity_members))
-                    + "被匹配到了同一份在线资料，但目录显示它们是不同作品。"
-                    "为避免把正篇、外传或电影混在一起，暂未合并；需要核对作品对应的在线资料，"
-                    "不用修改文件名或集数。"
-                ),
-            )
-        )
-    return blocked, issues
+    return set(), []
 
 
 def reject_conflicting_candidates(
     graph: ResolvedMediaGraph,
     candidates_by_key: dict[str, list[WorkCandidate]],
 ) -> tuple[dict[str, list[WorkCandidate]], list[ResolutionIssue]]:
-    """把冲突身份标记为 rejected，并返回需要阻断确认的 issue。"""
+    """保留候选；共享在线资料不能把导入降级为人工处理。"""
 
-    from dataclasses import replace
-
-    blocked, issues = provider_identity_conflicts(graph, candidates_by_key)
-    if not blocked:
-        return candidates_by_key, issues
-    protected: dict[str, list[WorkCandidate]] = {}
-    for work_key, candidates in candidates_by_key.items():
-        protected[work_key] = [
-            replace(
-                candidate,
-                status="rejected",
-            )
-            if (candidate.provider, candidate.media_type, candidate.provider_id) in blocked
-            else candidate
-            for candidate in candidates
-        ]
-    return protected, issues
+    _blocked, issues = provider_identity_conflicts(graph, candidates_by_key)
+    return candidates_by_key, issues
 
 
 def can_merge_provider_identity(

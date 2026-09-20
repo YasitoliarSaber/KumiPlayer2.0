@@ -103,7 +103,7 @@ def _search_fn(*rules):
 # ---------------------------------------------------------------------------
 
 
-def test_cross_revision_merge_with_frozen_candidate_identity(tmp_path, monkeypatch):
+def test_cross_source_same_provider_identity_keeps_independent_local_works(tmp_path, monkeypatch):
     from app.media_v4.revisions.service import V4RevisionService
 
     database = _patch_database(tmp_path, monkeypatch)
@@ -123,8 +123,14 @@ def test_cross_revision_merge_with_frozen_candidate_identity(tmp_path, monkeypat
     with database.connect() as conn:
         works = conn.execute("SELECT work_id, preferred_title FROM works ORDER BY preferred_title").fetchall()
 
-    assert len(works) == 1
-    assert works[0]["work_id"] == zh_work["work_id"]
+    assert len(works) == 2
+    assert any(row["work_id"] == zh_work["work_id"] for row in works)
+    with database.connect() as conn:
+        bindings = conn.execute(
+            "SELECT work_id FROM provider_bindings "
+            "WHERE provider = 'tmdb' AND media_type = 'tv' AND provider_id = '42'"
+        ).fetchall()
+    assert {str(row["work_id"]) for row in bindings} == {str(row["work_id"]) for row in works}
 
 
 def test_same_title_different_year_is_not_auto_merged_by_candidates(tmp_path, monkeypatch):
@@ -405,8 +411,8 @@ def test_manual_candidate_belongs_to_active_confirmed_revision(tmp_path, monkeyp
     assert row["revision_id"] == "rev-a1"
 
 
-def test_manual_confirm_rejects_candidate_from_superseded_revision(tmp_path, monkeypatch):
-    """候选必须属于当前 active confirmed revision，不能跨 revision 复用。"""
+def test_manual_confirm_accepts_candidate_from_its_own_active_source_revision(tmp_path, monkeypatch):
+    """同名但不同来源各自保留 Work；候选仍属于其自身当前 revision。"""
 
     import uuid
     from datetime import UTC, datetime
@@ -445,11 +451,11 @@ def test_manual_confirm_rejects_candidate_from_superseded_revision(tmp_path, mon
         "/api/v4/metadata/confirm",
         json={"work_id": work_id, "candidate_id": candidate_id},
     )
-    assert response.status_code == 409
+    assert response.status_code == 200, response.text
 
 
-def test_manual_confirm_reports_conflict_when_provider_identity_belongs_to_other_work(tmp_path, monkeypatch):
-    """Provider 全局唯一冲突必须返回可恢复的 409，而非暴露 SQLite 异常。"""
+def test_manual_confirm_allows_shared_provider_identity_for_another_local_work(tmp_path, monkeypatch):
+    """手工确认可复用在线资料，但不会合并或改写已有本地作品。"""
 
     import uuid
     from datetime import UTC, datetime
@@ -498,4 +504,11 @@ def test_manual_confirm_reports_conflict_when_provider_identity_belongs_to_other
         "/api/v4/metadata/confirm",
         json={"work_id": target_id, "candidate_id": candidate_id},
     )
-    assert response.status_code == 409
+    assert response.status_code == 200, response.text
+    with database.connect() as conn:
+        rows = conn.execute(
+            "SELECT work_id, provider_id FROM provider_bindings "
+            "WHERE provider = 'tmdb' AND media_type = 'tv' AND provider_id = '42' "
+            "ORDER BY work_id"
+        ).fetchall()
+    assert [str(row["work_id"]) for row in rows] == sorted([str(owner_id), str(target_id)])

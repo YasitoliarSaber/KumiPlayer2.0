@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 20
+V4_SCHEMA_VERSION = 21
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -214,10 +214,13 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             provider TEXT NOT NULL,
             media_type TEXT NOT NULL,
             provider_id TEXT NOT NULL,
-            PRIMARY KEY(provider, media_type, provider_id),
-            UNIQUE(work_id, provider, media_type)
+            PRIMARY KEY(work_id, provider, media_type)
         )
         """
+    )
+    conn.execute(
+        "CREATE INDEX idx_v4_provider_bindings_identity "
+        "ON provider_bindings(provider, media_type, provider_id)"
     )
     conn.execute(
         """
@@ -1272,6 +1275,70 @@ def migrate_schema_v19_to_v20(conn: sqlite3.Connection) -> None:
     """v19 → v20 增量迁移：新增三个查询索引，不改写任何媒体事实。"""
 
     create_v20_structures(conn)
+
+
+def provider_bindings_primary_key_columns(conn: sqlite3.Connection) -> tuple[str, ...]:
+    """返回 provider_bindings 的主键列顺序，供迁移做物理结构判断。"""
+
+    rows = conn.execute("PRAGMA table_info(provider_bindings)").fetchall()
+    primary_key = sorted(
+        (
+            (int(row[5]), str(row[1]))
+            for row in rows
+            if int(row[5]) > 0
+        ),
+        key=lambda item: item[0],
+    )
+    return tuple(column for _, column in primary_key)
+
+
+def provider_bindings_is_v21(conn: sqlite3.Connection) -> bool:
+    """v21 允许多个作品共享同一在线资料，但每个作品槽位保持唯一。"""
+
+    return provider_bindings_primary_key_columns(conn) == (
+        "work_id",
+        "provider",
+        "media_type",
+    )
+
+
+def create_v21_structures(conn: sqlite3.Connection) -> None:
+    """补齐 v21 的非唯一在线身份反查索引。"""
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_v4_provider_bindings_identity "
+        "ON provider_bindings(provider, media_type, provider_id)"
+    )
+
+
+def migrate_schema_v20_to_v21(conn: sqlite3.Connection) -> None:
+    """v20 → v21：解除在线身份跨作品独占，逐行保全既有绑定。"""
+
+    if provider_bindings_is_v21(conn):
+        create_v21_structures(conn)
+        return
+
+    conn.execute(
+        """
+        CREATE TABLE provider_bindings_v21 (
+            work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE CASCADE,
+            provider TEXT NOT NULL,
+            media_type TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            PRIMARY KEY(work_id, provider, media_type)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO provider_bindings_v21(work_id, provider, media_type, provider_id)
+        SELECT work_id, provider, media_type, provider_id
+        FROM provider_bindings
+        """
+    )
+    conn.execute("DROP TABLE provider_bindings")
+    conn.execute("ALTER TABLE provider_bindings_v21 RENAME TO provider_bindings")
+    create_v21_structures(conn)
 
 
 def migrate_schema_v15_to_v16(conn: sqlite3.Connection) -> None:

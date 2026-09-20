@@ -584,8 +584,8 @@ def test_confirmed_scrape_receives_regular_alias_but_not_bonus_or_history(tmp_pa
         assert binding["status"] == "waiting_review"
 
 
-def test_scrape_provider_identity_conflict_becomes_recoverable_review_state(tmp_path, monkeypatch):
-    """第三步的重复 Provider 身份不能泄漏 SQLite 唯一索引或写坏既有作品。"""
+def test_scrape_shared_provider_identity_keeps_both_local_works_playable(tmp_path, monkeypatch):
+    """不同本地作品共享在线资料时，刮削不应进入人工处理或丢掉映射。"""
 
     from dataclasses import replace
 
@@ -680,11 +680,11 @@ def test_scrape_provider_identity_conflict_becomes_recoverable_review_state(tmp_
 
     assert job["status"] == "succeeded"
     assert job["last_error"] == ""
-    assert binding["provider"] == "local"
-    assert binding["status"] == "waiting_review"
-    assert "已关联到另一部作品" in json.loads(binding["metadata_json"])["reason"]
-    assert len(owners) == 1
-    assert episode_mappings == []
+    assert binding["provider"] == "tmdb"
+    assert binding["status"] == "confirmed"
+    assert "reason_code" not in json.loads(binding["metadata_json"])
+    assert len(owners) == 2
+    assert [str(row["provider_episode_id"]) for row in episode_mappings] == ["9901"]
 
 
 def test_local_artwork_mode_materializes_episode_stills_as_v4_artifacts(tmp_path, monkeypatch):

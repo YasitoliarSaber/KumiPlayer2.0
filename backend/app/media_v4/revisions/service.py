@@ -711,36 +711,10 @@ def _freeze_candidate_bindings(
             # 阶段 1（架构方案）：在线身份冲突**不再阻断整批确认**——本次不应用该候选，
             # 本地作品与文件照常入库；冲突原因仍会作为 issue 展示，可事后修正。
             continue
-        from app.media_v4.persistence.identity_lifecycle import (
-            release_inactive_provider_identity,
-            work_holds_live_slot,
-        )
-
-        release_inactive_provider_identity(
-            conn, chosen.provider, chosen.media_type, chosen.provider_id
-        )
-        identity_owner = conn.execute(
-            """
-            SELECT work_id FROM provider_bindings
-            WHERE provider = ? AND media_type = ? AND provider_id = ?
-            """,
-            (chosen.provider, chosen.media_type, chosen.provider_id),
-        ).fetchone()
-        if identity_owner is not None and str(identity_owner["work_id"]) != work_id:
-            # 用户要求导入永不拦截：活动作品占用该身份时**不再阻断**——本次不写入绑定
-            # （下面的 INSERT 带 ON CONFLICT DO NOTHING 会静默跳过），作品照常入库。
-            # 只有占用者已退出媒体库（旧导入被取代 / 来源退役 / 作品退出）时才释放它。
-            if not work_holds_live_slot(conn, str(identity_owner["work_id"])):
-                conn.execute(
-                    "DELETE FROM provider_bindings WHERE work_id = ? AND provider = ? AND media_type = ?",
-                    (str(identity_owner["work_id"]), chosen.provider, chosen.media_type),
-                )
         conn.execute(
             """
             INSERT INTO provider_bindings(work_id, provider, media_type, provider_id)
             VALUES (?, ?, ?, ?)
-            -- 用户要求导入永不拦截：身份已被别的作品占用时静默跳过本次绑定，
-            -- 作品照常入库（不带该在线身份），事后再修；绝不因此中断整次导入。
             ON CONFLICT DO NOTHING
             """,
             (work_id, chosen.provider, chosen.media_type, chosen.provider_id),
@@ -1217,63 +1191,13 @@ class V4RevisionService:
         entries: list[tuple[SourceEvidence, ParsedFacts]],
         conn=None,
     ) -> list[ResolutionIssue]:
-        """在草稿预览阶段阻断会改写既有 Work 身份的候选。
+        """在线候选只补充资料，不能把导入变成待人工处理。
 
-        同一个本地 ``identity_key`` 已经确认过某个 provider/media_type
-        身份时，新的草稿不能静默换绑到另一个 provider_id。尤其当新 ID 已
-        属于另一 Work 时，确认阶段会触发 SQLite 的全局唯一索引；在这里先
-        生成可读 review issue，既不泄漏 SQL，也避免用户等到第 3 步才发现。
+        同 Work 的不同身份会在确认/刮削写入时保留既有槽位并跳过新结果；
+        跨 Work 的相同身份则是允许的共享资料。两种情况都不应产生“需要处理”。
         """
 
-        issues: list[ResolutionIssue] = []
-        evidence_by_id = {evidence.evidence_id: evidence for evidence, _facts in entries}
-        facts_by_evidence_id = {evidence.evidence_id: facts for evidence, facts in entries}
-        with (nullcontext(conn) if conn is not None else self.database.connect()) as conn:
-            from app.media_v4.persistence.identity_lifecycle import retired_only_work_ids
-
-            retired_ids = retired_only_work_ids(conn)
-            for work in graph.works:
-                existing_work_ids: set[str] = set()
-                related_entries = [
-                    (evidence_by_id[evidence_id], facts_by_evidence_id[evidence_id])
-                    for evidence_id in work.source_evidence_ids
-                    if evidence_id in evidence_by_id
-                ]
-                existing_work_ids.update(
-                    _source_bound_work_ids(conn, work, related_entries)
-                )
-                existing_work_ids -= retired_ids
-                if not existing_work_ids:
-                    continue
-                placeholders = ",".join("?" for _ in existing_work_ids)
-                bindings = {
-                    (str(row["provider"]), str(row["media_type"])): str(row["provider_id"])
-                    for row in conn.execute(
-                        "SELECT provider, media_type, provider_id FROM provider_bindings "
-                        f"WHERE work_id IN ({placeholders})",
-                        tuple(sorted(existing_work_ids)),
-                    ).fetchall()
-                }
-                for candidate in candidates_by_key.get(work.work_key, []):
-                    if (
-                        candidate.status not in {"confirmed", "proposed"}
-                        or candidate.confidence != "high"
-                        or not candidate_service.supported_provider(candidate.provider)
-                    ):
-                        continue
-                    existing_id = bindings.get((candidate.provider, candidate.media_type))
-                    if existing_id is None or existing_id == candidate.provider_id:
-                        continue
-                    issues.append(ResolutionIssue(
-                        code="provider_identity_conflict",
-                        evidence_id=next(iter(work.source_evidence_ids), ""),
-                        message=(
-                            "识别到的 Provider 身份与该作品已确认的身份冲突；"
-                            "请在检查识别结果中修正作品或 Provider 提示后重试"
-                        ),
-                    ))
-                    break
-        return issues
+        return []
 
     def _structural_identity_conflicts(
         self,
@@ -1840,29 +1764,23 @@ class V4RevisionService:
                         continue
                     work_id = work_ids[work_key]
                     provider_id = str(facts.tmdb_hint_id)
-                    from app.media_v4.persistence.identity_lifecycle import (
-                        release_inactive_provider_identity,
-                    )
-
-                    release_inactive_provider_identity(
-                        conn, "tmdb", facts.tmdb_hint_type, provider_id
-                    )
-                    # 用户要求导入永不拦截：TMDB 身份已被别的作品占用、或本作品已绑定
-                    # 另一个身份时，**不再抛错**——本次不写入该身份即可（下面的
-                    # INSERT ... ON CONFLICT DO NOTHING 会静默跳过），作品照常入库。
-                    conn.execute(
+                    existing_slot = conn.execute(
                         """
-                        INSERT INTO provider_bindings(
-                            work_id, provider, media_type, provider_id
-                        ) VALUES (?, 'tmdb', ?, ?)
-                        ON CONFLICT DO NOTHING
+                        SELECT provider_id FROM provider_bindings
+                        WHERE work_id = ? AND provider = 'tmdb' AND media_type = ?
                         """,
-                        (
-                            work_id,
-                            facts.tmdb_hint_type,
-                            provider_id,
-                        ),
-                    )
+                        (work_id, facts.tmdb_hint_type),
+                    ).fetchone()
+                    if existing_slot is None or str(existing_slot["provider_id"]) == provider_id:
+                        conn.execute(
+                            """
+                            INSERT INTO provider_bindings(
+                                work_id, provider, media_type, provider_id
+                            ) VALUES (?, 'tmdb', ?, ?)
+                            ON CONFLICT DO NOTHING
+                            """,
+                            (work_id, facts.tmdb_hint_type, provider_id),
+                        )
 
                 episode_ids: dict[str, str] = {}
                 season_ids: dict[tuple[str, int | None, str], str] = {}

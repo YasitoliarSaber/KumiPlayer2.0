@@ -549,19 +549,15 @@ def _apply_transaction(conn: sqlite3.Connection, preview: dict, operation_id: st
                 (work_id, root_id, work_key),
             )
 
-    provider_target = {
-        (item["provider"], item["media_type"], item["provider_id"]): target_ids[item["target_work_key"]]
-        for item in preview["provider_assignments"]
-    }
     for assignment in preview["provider_assignments"]:
         provider = assignment["provider"]
         provider_id = assignment["provider_id"]
-        target_work_id = provider_target[(provider, assignment["media_type"], provider_id)]
+        target_work_id = target_ids[assignment["target_work_key"]]
         if provider == "local":
             provider_id = target_work_id
         conn.execute(
-            "DELETE FROM provider_bindings WHERE provider = ? AND media_type = ? AND provider_id = ?",
-            (provider, assignment["media_type"], assignment["provider_id"]),
+            "DELETE FROM provider_bindings WHERE work_id = ? AND provider = ? AND media_type = ?",
+            (target_work_id, provider, assignment["media_type"]),
         )
         conn.execute(
             "INSERT INTO provider_bindings(work_id, provider, media_type, provider_id) VALUES (?, ?, ?, ?)",

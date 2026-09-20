@@ -22,6 +22,7 @@ from app.media_v4.persistence.schema_v4 import (
     create_v18_structures,
     create_v19_structures,
     create_v20_structures,
+    create_v21_structures,
     migrate_schema_v4_to_v5,
     migrate_schema_v5_to_v6,
     migrate_schema_v6_to_v7,
@@ -38,6 +39,7 @@ from app.media_v4.persistence.schema_v4 import (
     migrate_schema_v17_to_v18,
     migrate_schema_v18_to_v19,
     migrate_schema_v19_to_v20,
+    migrate_schema_v20_to_v21,
 )
 
 
@@ -152,7 +154,7 @@ class V4Database:
         使用字面量；写回后立即读回校验，版本升级时若字面量未同步会立即失败。
         """
 
-        conn.execute("PRAGMA user_version = 20")
+        conn.execute("PRAGMA user_version = 21")
         written = int(conn.execute("PRAGMA user_version").fetchone()[0])
         if written != V4_SCHEMA_VERSION:
             raise RuntimeError(
@@ -248,6 +250,24 @@ class V4Database:
                     conn.rollback()
                     raise V4ResetRequiredError(
                         "数据库声明为 V4 但索引结构不完整，需要一次性重置；" + str(exc)
+                    ) from exc
+                except Exception:
+                    conn.rollback()
+                    raise
+                version = self.CURRENT_SCHEMA_VERSION
+            if version == 20 and self._has_user_tables(conn):
+                # v20 → v21：在线资料可被多个本地作品共享；每个作品自身
+                # 的 provider/type 槽位仍保持唯一。迁移重建的只是绑定表，
+                # 不改写媒体事实或已确认 revision。
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    migrate_schema_v20_to_v21(conn)
+                    self._set_user_version(conn)
+                    conn.commit()
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    raise V4ResetRequiredError(
+                        "数据库声明为 V4 但在线身份绑定结构不完整，需要一次性重置；" + str(exc)
                     ) from exc
                 except Exception:
                     conn.rollback()
@@ -515,6 +535,7 @@ class V4Database:
                     migrate_schema_v17_to_v18(conn)
                     migrate_schema_v18_to_v19(conn)
                     migrate_schema_v19_to_v20(conn)
+                    migrate_schema_v20_to_v21(conn)
                     conn.commit()
                 except sqlite3.OperationalError as exc:
                     conn.rollback()
@@ -536,6 +557,7 @@ class V4Database:
                 # 的索引都踩过这个坑）。
                 create_v19_structures(conn)
                 create_v20_structures(conn)
+                create_v21_structures(conn)
                 self._set_user_version(conn)
                 conn.commit()
             except Exception:
@@ -619,6 +641,7 @@ class V4Database:
             create_v18_structures(expected)
             create_v19_structures(expected)
             create_v20_structures(expected)
+            create_v21_structures(expected)
             for table in sorted(self.REQUIRED_TABLES):
                 actual_cols = self._table_contract(conn, table)
                 expected_cols = self._table_contract(expected, table)

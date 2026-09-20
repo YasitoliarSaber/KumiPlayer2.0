@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
+
 from app.media_v4.domain.models import ParsedFacts, ResolvedWork, SourceEvidence
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.persistence.repositories import V4Repository
@@ -98,13 +99,13 @@ def test_historical_heya_binding_does_not_merge_with_main_series():
     )
 
     assert merge_map == {}
-    assert any(issue.code == "work_identity_conflict" for issue in issues)
+    assert not any(issue.code == "work_identity_conflict" for issue in issues)
     assert {
         item.provider_id
         for values in candidates.values()
         for item in values
         if item.status == "confirmed"
-    } == set()
+    } == {"95213"}
 
 
 def test_reimport_movie_after_cancelled_jobs_reuses_correct_identity(tmp_path):

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -29,57 +28,30 @@ def _claim_provider_binding(
     media_type: str,
     provider_id: str,
 ) -> bool:
-    """把 (provider, media_type, provider_id) 绑到该 Work；被他人占用时返回 False。
+    """为该 Work 冻结在线身份；其他本地作品共享身份是正常情况。
 
-    provider_bindings 有两个约束：``PRIMARY KEY(provider, media_type, provider_id)``
-    与 ``UNIQUE(work_id, provider, media_type)``。原实现只声明了后者的 ON CONFLICT，
-    于是**并发**刮削（两个 work 抢同一 Provider 身份）时预检查会同时通过，先提交者
-    成功、后提交者撞主键 → IntegrityError 把整个 scrape_work 判失败（实测线上连续
-    出现 8 次）。这里把竞态收敛成返回值：False 表示身份已被另一个 work 占用，
-    调用方据此降级为待人工复核——这正是该分支注释原本声明的意图。
-
-    **活动范围**：占用者必须仍然活动（活动来源的已确认 revision）。陈旧占用者
-    （被取代导入 / 已退役来源的残留绑定）会被自动释放并让本次接管，否则跨批次
-    导入会互相挡路：实测重新导入时被上一批残留身份挡成"需要人工处理"。
+    v21 后唯一槽位是 ``(work_id, provider, media_type)``。自动刮削只能在
+    槽位为空或已有相同 ID 时成功，避免一次不稳定的在线结果覆盖本作品已确认的
+    身份；它绝不再查询、抢占或删除其他作品的绑定。
     """
 
-    def _insert() -> None:
-        conn.execute(
-            """
-            INSERT INTO provider_bindings(work_id, provider, media_type, provider_id)
-            SELECT ?, ?, CASE WHEN work_type = 'series' THEN 'tv' ELSE 'movie' END, ?
-            FROM works WHERE work_id = ?
-            ON CONFLICT(work_id, provider, media_type) DO UPDATE SET
-                provider_id = excluded.provider_id
-            """,
-            (work_id, provider, provider_id, work_id),
-        )
-
-    # 不在插入前额外查询占用者：语句数必须与作品数无关（有性能契约测试锁定），
-    # 让位逻辑放在 IntegrityError 分支里完成即可。
-    try:
-        _insert()
-        return True
-    except sqlite3.IntegrityError:
-        owner = conn.execute(
-            "SELECT work_id FROM provider_bindings "
-            "WHERE provider = ? AND media_type = ? AND provider_id = ?",
-            (provider, media_type, provider_id),
-        ).fetchone()
-        if owner is not None and str(owner["work_id"]) != str(work_id):
-            from app.media_v4.persistence.identity_lifecycle import work_holds_live_slot
-
-            if work_holds_live_slot(conn, str(owner["work_id"])):
-                # 占用者仍在媒体库里：先到先得，降级为人工复核。
-                return False
-            # 占用者已退出媒体库（来源退役 / 导入被取代 / 作品退出）：释放后让本次接管。
-            conn.execute(
-                "DELETE FROM provider_bindings WHERE work_id = ? AND provider = ? AND media_type = ?",
-                (str(owner["work_id"]), provider, media_type),
-            )
-            _insert()
-            return True
-        raise
+    conn.execute(
+        """
+        INSERT INTO provider_bindings(work_id, provider, media_type, provider_id)
+        SELECT ?, ?, CASE WHEN work_type = 'series' THEN 'tv' ELSE 'movie' END, ?
+        FROM works WHERE work_id = ?
+        ON CONFLICT(work_id, provider, media_type) DO UPDATE SET
+            provider_id = excluded.provider_id
+        WHERE provider_bindings.provider_id = excluded.provider_id
+        """,
+        (work_id, provider, provider_id, work_id),
+    )
+    row = conn.execute(
+        "SELECT provider_id FROM provider_bindings "
+        "WHERE work_id = ? AND provider = ? AND media_type = ?",
+        (work_id, provider, media_type),
+    ).fetchone()
+    return row is not None and str(row["provider_id"]) == provider_id
 
 
 def _now() -> str:
@@ -124,40 +96,6 @@ def _retain_successful_details(previous: dict, current: dict, target: dict) -> d
         result["episode_mappings"] = list(mappings.values())
         result["episode_mapping_status"] = "partial"
     return result
-
-
-def _provider_binding_conflict(
-    conn,
-    *,
-    work_id: str,
-    work_type: str,
-    provider: str,
-    provider_id: str,
-) -> str:
-    """在写入前把 Provider 全局唯一约束转为可恢复的领域状态。"""
-
-    media_type = "tv" if work_type == "series" else "movie"
-    owner = conn.execute(
-        "SELECT pb.work_id FROM provider_bindings pb "
-        "JOIN works w ON w.work_id = pb.work_id "
-        "WHERE pb.provider = ? AND pb.media_type = ? AND pb.provider_id = ?",
-        (provider, media_type, provider_id),
-    ).fetchone()
-    if owner is not None and str(owner["work_id"]) != work_id:
-        # 阶段 2：与 identity_lifecycle.work_holds_live_slot 使用**同一个**活动范围。
-        # 旧实现只看 works.status='active'，会把"来源还在、但那条导入已被取代"的旧记录
-        # 也当成占用者，历史数据继续干预新导入（口径不一致已实测复现）。
-        from app.media_v4.persistence.identity_lifecycle import work_holds_live_slot
-
-        if work_holds_live_slot(conn, str(owner["work_id"])):
-            return "该在线作品已关联到另一部作品，请返回检查识别结果或选择正确候选"
-    existing = conn.execute(
-        "SELECT provider_id FROM provider_bindings WHERE work_id = ? AND provider = ? AND media_type = ?",
-        (work_id, provider, media_type),
-    ).fetchone()
-    if existing is not None and str(existing["provider_id"]) != provider_id:
-        return "当前作品已有不一致的在线身份，请返回检查识别结果后重新确认"
-    return ""
 
 
 class V4ScrapeService:
@@ -433,26 +371,7 @@ class V4ScrapeService:
             if not metadata_state:
                 metadata_state = "ready" if provider_name != "local" else "waiting_metadata"
             has_provider_identity = provider_name not in {"", "local"} and bool(provider_id)
-            binding_conflict = False
             ready = metadata_state == "ready" and has_provider_identity
-            if has_provider_identity:
-                with self.database.connect() as conn:
-                    conflict_reason = _provider_binding_conflict(
-                        conn,
-                        work_id=str(job["work_id"]),
-                        work_type=str(target.get("work_type") or ""),
-                        provider=provider_name,
-                        provider_id=provider_id,
-                    )
-                if conflict_reason:
-                    ready = False
-                    binding_conflict = True
-                    result = {
-                        **result,
-                        "metadata_state": "waiting_review",
-                        "reason": conflict_reason,
-                        "reason_code": "provider_identity_conflict",
-                    }
             if ready and mirror_root is None:
                 # 完整性门控必经：镜像根从配置解析，不能由调用方是否传参决定。
                 from app.core.paths import get_mirror_root
@@ -486,7 +405,7 @@ class V4ScrapeService:
                 season_id = str(mapping.get("season_id") or "")
                 if season_id not in valid_season_ids:
                     raise ValueError("刮削结果包含不属于当前 revision 的 Season 映射")
-            if has_provider_identity and not binding_conflict and metadata_state in {
+            if has_provider_identity and metadata_state in {
                 "source_unavailable", "waiting_metadata", "failed",
             }:
                 with self.database.connect() as conn:
@@ -567,7 +486,7 @@ class V4ScrapeService:
             }
             # 元数据尚未完整时仍保留已确认的 Provider 身份，下一次重试
             # 应直接沿用该 ID；只有身份冲突或本地结果才退回 local。
-            identity_ready = has_provider_identity and not binding_conflict
+            identity_ready = has_provider_identity
             binding_provider = provider_name if identity_ready else "local"
             binding_provider_id = provider_id if identity_ready else ""
             if cancel_requested(self.database, job_id):
@@ -599,9 +518,6 @@ class V4ScrapeService:
                     ),
                 )
                 if identity_ready:
-                    # D5：provider_bindings 的 (provider, media_type, provider_id)
-                    # 全局唯一。该身份已被其他 work 占用时不得覆盖，也不得让
-                    # UNIQUE 约束炸掉任务——记录明确错误，等待人工合并重复条目。
                     work_row = conn.execute(
                         "SELECT work_type FROM works WHERE work_id = ?",
                         (job["work_id"],),
@@ -609,40 +525,25 @@ class V4ScrapeService:
                     binding_media_type = (
                         "tv" if str((work_row["work_type"] if work_row else "") or "") == "series" else "movie"
                     )
-                    from app.media_v4.persistence.identity_lifecycle import (
-                        release_inactive_provider_identity,
-                    )
-
-                    release_inactive_provider_identity(
+                    if not _claim_provider_binding(
                         conn,
-                        binding_provider,
-                        binding_media_type,
-                        binding_provider_id,
-                    )
-                    owner = conn.execute(
-                        "SELECT work_id FROM provider_bindings WHERE provider = ? AND media_type = ? AND provider_id = ?",
-                        (binding_provider, binding_media_type, binding_provider_id),
-                    ).fetchone()
-                    def _degrade_identity_conflict() -> None:
-                        """身份被他人占用：降级为待人工复核，不扩散冲突身份。"""
-
-                        nonlocal identity_ready, binding_status, result
-                        # 预检查与真正写入之间可能有并发任务抢先占用身份。
-                        # 这时必须把本次结果降级为待人工复核，并禁止继续写入
-                        # 全局 Provider/Season/Episode 映射，避免把冲突身份扩散到
-                        # 当前 Work 的播放链路。
+                        work_id=str(job["work_id"]),
+                        provider=binding_provider,
+                        media_type=binding_media_type,
+                        provider_id=binding_provider_id,
+                    ):
+                        # 同一作品自身已有不同的确认身份。保留旧身份，当前任务
+                        # 仍成功完成，但不把可能错误的集映射写入播放链路。
                         identity_ready = False
-                        binding_status = "waiting_review"
                         result = {
                             **result,
-                            "metadata_state": "waiting_review",
-                            "reason": "该在线作品已关联到另一部作品，请返回检查识别结果或选择正确候选",
-                            "reason_code": "provider_identity_conflict",
+                            "reason": "当前作品保留已有在线资料，本次自动结果未覆盖它。",
+                            "reason_code": "local_identity_mismatch",
                         }
                         conn.execute(
                             """
                             UPDATE scrape_bindings
-                            SET status = 'waiting_review', metadata_json = ?, updated_at = ?
+                            SET provider = 'local', provider_id = '', metadata_json = ?, updated_at = ?
                             WHERE revision_id = ? AND work_id = ? AND provider = ?
                             """,
                             (
@@ -653,19 +554,6 @@ class V4ScrapeService:
                                 binding_provider,
                             ),
                         )
-
-                    if owner is None or str(owner["work_id"]) == str(job["work_id"]):
-                        if not _claim_provider_binding(
-                            conn,
-                            work_id=str(job["work_id"]),
-                            provider=binding_provider,
-                            media_type=binding_media_type,
-                            provider_id=binding_provider_id,
-                        ):
-                            # 并发任务在预检查之后抢占了同一身份。
-                            _degrade_identity_conflict()
-                    else:
-                        _degrade_identity_conflict()
                 if identity_ready:
                     if clear_episode_mapping_ids:
                         conn.executemany(
