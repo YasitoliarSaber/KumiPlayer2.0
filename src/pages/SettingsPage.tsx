@@ -675,22 +675,30 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
         )}
         {hasStoredCredential && (
           <div className="settings-bangumi-session settings-note">
-            {authStatus === 'reauth_required' ? (
-              <div><strong>Bangumi 登录授权已失效</strong><span>账户资料仍保存在本机，请更新 Personal Access Token。</span></div>
-            ) : connectivity === 'rate_limited' ? (
-              <div><strong>Bangumi 请求暂时受限</strong><span>登录信息仍然有效，稍后会自动恢复。</span></div>
-            ) : connectivity === 'forbidden' ? (
-              <div><strong>Bangumi 拒绝了本次请求</strong><span>登录信息仍然保存着，请稍后重新验证。</span></div>
-            ) : connectivity === 'offline' || connectivity === 'server_error' ? (
-              <div><strong>登录信息已保存，暂时无法连接 Bangumi</strong><span>本地服务、代理或网络恢复后会自动恢复。</span></div>
-            ) : credentialState === 'unavailable' ? (
-              <div><strong>暂时无法读取本机 Bangumi 登录凭据</strong><span>请检查 Windows Credential Manager 是否可用；已保存的账户资料不会被清除。</span></div>
-            ) : (
-              <div><strong>正在检查 Bangumi 登录状态</strong><span>若长时间停在这里，点下方「重新验证」立即检查。</span></div>
-            )}
-            {lastSuccessAt && !isConnected && <small>上次成功连接：{lastSuccessAt.slice(0, 16).replace('T', ' ')}</small>}
+            {/* 左侧：状态文案（+ 上次成功连接）；右侧：重新验证按钮。
+                容器的 CSS 已是 flex + space-between，因此按钮作为第二个子元素即落在右边。 */}
+            <div>
+              {authStatus === 'reauth_required' ? (
+                <div><strong>Bangumi 登录授权已失效</strong><span>账户资料仍保存在本机，请更新 Personal Access Token。</span></div>
+              ) : connectivity === 'rate_limited' ? (
+                <div><strong>Bangumi 请求暂时受限</strong><span>登录信息仍然有效，稍后会自动恢复。</span></div>
+              ) : connectivity === 'forbidden' ? (
+                <div><strong>Bangumi 拒绝了本次请求</strong><span>登录信息仍然保存着，请稍后重新验证。</span></div>
+              ) : connectivity === 'offline' || connectivity === 'server_error' ? (
+                <div><strong>登录信息已保存，暂时无法连接 Bangumi</strong><span>本地服务、代理或网络恢复后会自动恢复。</span></div>
+              ) : credentialState === 'unavailable' ? (
+                <div><strong>暂时无法读取本机 Bangumi 登录凭据</strong><span>请检查 Windows Credential Manager 是否可用；已保存的账户资料不会被清除。</span></div>
+              ) : bangumiLoading ? (
+                <div><strong>正在验证 Bangumi 登录状态</strong><span>稍等一下；若长时间停在这里，点右侧「重新验证」。</span></div>
+              ) : (
+                <div><strong>登录信息已保存，尚未验证连接</strong><span>点右侧「重新验证」立即检查当前连接。</span></div>
+              )}
+              {lastSuccessAt && !isConnected && <small>上次成功连接：{lastSuccessAt.slice(0, 16).replace('T', ' ')}</small>}
+            </div>
             {!isConnected && (
-              <GhostButton onClick={() => void verifyBangumiSession()} disabled={bangumiLoading}>重新验证</GhostButton>
+              <GhostButton onClick={() => void verifyBangumiSession()} disabled={bangumiLoading}>
+                {bangumiLoading ? '正在验证…' : '重新验证'}
+              </GhostButton>
             )}
           </div>
         )}

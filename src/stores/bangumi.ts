@@ -103,8 +103,14 @@ export const useBangumiStore = create<BangumiState>()((set) => ({
       applySession(set, session);
       return session;
     } catch (error) {
-      // 本地会话接口失败（后端不可达）：保守保留上次本地状态，不伪装退出
-      set({ loading: false, error: (error as Error).message });
+      // 本地会话接口失败（后端不可达）：保守保留上次本地状态，不伪装退出。
+      // 但**必须离开 checking**：否则界面会永远停在"正在检查登录状态"（实测卡死，
+      // 且看不到"重新验证"入口）。有已保存凭据时落到"已保存但当前离线/未验证"。
+      set((state) => ({
+        loading: false,
+        error: (error as Error).message,
+        sessionStatus: state.hasStoredCredential ? 'saved_offline' : 'signed_out',
+      }));
       return null;
     }
   },
@@ -117,7 +123,12 @@ export const useBangumiStore = create<BangumiState>()((set) => ({
       applySession(set, session);
       return session;
     } catch (error) {
-      set({ loading: false, error: (error as Error).message });
+      // 同上：异常时必须收敛到终态，不能让面板停在 checking。
+      set((state) => ({
+        loading: false,
+        error: (error as Error).message,
+        sessionStatus: state.hasStoredCredential ? 'saved_offline' : 'signed_out',
+      }));
       return null;
     }
   },
