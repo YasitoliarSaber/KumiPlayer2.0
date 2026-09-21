@@ -13916,8 +13916,29 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-work-progress-hint { color: var(--text-secondary); font-size: 12px; }
 .media-v4-metadata-search-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; margin: 12px 0; }
 /* 弹窗固定在视口中央并自持滚动：不受 .app-main 滚动位置或祖先 overflow 裁剪影响。 */
-.media-v4-metadata-dialog { min-width: min(480px, 92vw); max-width: 560px; max-height: min(640px, 84vh); }
-.media-v4-metadata-dialog .fui-DialogContent { overflow: auto; }
+/* 元数据恢复弹窗与识别弹窗一样：DialogSurface 通过 Portal 挂到页面之外，
+   必须显式声明视口定位、居中、实体底色与圆角；缺这段时弹窗会贴在左下角
+   且不可用（用户截图 + 规格 §4.4）。此处与 .media-v4-recognition-dialog 同模式。 */
+.media-v4-metadata-dialog {
+  position: fixed !important;
+  z-index: 1000;
+  inset: 50% auto auto 50% !important;
+  transform: translate(-50%, -50%) !important;
+  box-sizing: border-box;
+  width: min(560px, calc(100vw - 32px));
+  min-width: min(480px, calc(100vw - 32px)) !important;
+  max-width: calc(100vw - 32px);
+  max-height: min(640px, 84vh);
+  margin: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-solid) !important;
+  color: var(--text);
+  box-shadow: var(--shadow-flyout);
+}
+.media-v4-metadata-dialog .fui-DialogBody { display: grid; gap: 16px; }
+.media-v4-metadata-dialog .fui-DialogContent { min-width: 0; overflow: auto; overflow-wrap: anywhere; }
 /* 识别弹窗通过 Portal 挂到页面之外，显式保留遮罩、居中和实体底色。 */
 .media-v4-recognition-backdrop {
   position: fixed;
