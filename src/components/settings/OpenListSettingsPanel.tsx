@@ -297,22 +297,32 @@ export default function OpenListSettingsPanel({
         </span>
       </div>
 
-      <div className="sources-openlist-meta">
+      <div className="sources-openlist-meta is-stacked">
         <details className="sources-openlist-intro">
-          <summary>介绍</summary>
-          <span className="sources-route-summary">OpenList 用于读取远程目录；115、百度、夸克是实际内容来源。通常只需配置一次。</span>
+          <summary>这是什么？</summary>
+          <span className="sources-route-summary">OpenList 负责读取远程目录；115、百度、夸克才是内容来源。通常只需配置一次。</span>
         </details>
-        {config.openlist_server_url && <span>服务地址：<code>{config.openlist_server_url}</code></span>}
-        {config.openlist_mount_root && <span>本地挂载：<code>{config.openlist_mount_root}</code></span>}
-        {saved && <span>账号与密码已保存（仅存本机凭据管理器）</span>}
+        {config.openlist_server_url && (
+          <div><span>服务地址</span><code>{config.openlist_server_url}</code></div>
+        )}
+        {config.openlist_mount_root && (
+          <div><span>本地挂载位置</span><code>{config.openlist_mount_root}</code></div>
+        )}
+        <div>
+          <span>账号密码</span>
+          <code>{saved ? '已保存（只存在这台电脑上）' : '未保存'}</code>
+        </div>
       </div>
 
       {telemetry && (
-        <div className="sources-openlist-telemetry">
-          <span className="sources-telemetry-summary">
-            今日请求：目录 {telemetry.fs_list} / 登录 {telemetry.login}（共 {telemetry.total}）
-          </span>
-          <span className="sources-route-hint">{telemetry.disclaimer}</span>
+        <div className="sources-openlist-telemetry is-stacked">
+          <div>
+            <span>今天的请求</span>
+            <code>共 {telemetry.total} 次（读取目录 {telemetry.fs_list} 次、登录 {telemetry.login} 次）</code>
+          </div>
+          <p className="sources-route-hint">
+            这只是 KumiPlayer 向 OpenList 发起的次数，用来判断访问是否过于频繁；网盘实际被访问的次数通常更少。
+          </p>
         </div>
       )}
 

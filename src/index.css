@@ -3526,6 +3526,31 @@
   transform: translateX(20px);
 }
 
+/* OpenList 连接卡：信息竖排成"标签 + 值"，避免全部横排挤在一行 */
+.sources-openlist-meta.is-stacked,
+.sources-openlist-telemetry.is-stacked {
+  display: grid;
+  gap: 6px;
+  align-items: start;
+}
+
+.sources-openlist-meta.is-stacked > div,
+.sources-openlist-telemetry.is-stacked > div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.sources-openlist-meta.is-stacked > div > span:first-child,
+.sources-openlist-telemetry.is-stacked > div > span:first-child {
+  flex: 0 0 88px;
+  color: var(--text-muted);
+}
+
+.sources-openlist-telemetry.is-stacked .sources-route-hint {
+  margin: 0;
+}
+
 .settings-account {
   display: flex;
   align-items: center;

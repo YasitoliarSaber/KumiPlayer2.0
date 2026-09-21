@@ -68,9 +68,10 @@ function renderPanel(props: Partial<Parameters<typeof OpenListSettingsPanel>[0]>
 }
 
 describe('OpenListSettingsPanel', () => {
-  test('saved credential 显示“账号与密码已保存”，但不显示“连接正常”', () => {
+  test('saved credential 显示账号密码已保存，但不显示“连接正常”', () => {
     renderPanel();
-    expect(screen.getByText('账号与密码已保存', { exact: false })).toBeTruthy();
+    // 文案改为面向普通用户：不再出现“凭据管理器”这类术语
+    expect(screen.getByText('已保存（只存在这台电脑上）', { exact: false })).toBeTruthy();
     expect(screen.queryByText('OpenList 连接正常')).toBeNull();
   });
 
@@ -348,7 +349,8 @@ describe('提示条交互', () => {
 
   test('挂载后展示今日遥测摘要', async () => {
     renderPanel();
-    expect(await screen.findByText(/今日请求：目录 3 \/ 登录 1（共 4）/)).toBeTruthy();
+    // 措辞改为“共 N 次（读取目录 x 次、登录 y 次）”，不再使用"目录/登录"斜杠缩写
+    expect(await screen.findByText(/共 4 次（读取目录 3 次、登录 1 次）/)).toBeTruthy();
     expect(openlistApi.getTelemetryToday).toHaveBeenCalled();
   });
 });
