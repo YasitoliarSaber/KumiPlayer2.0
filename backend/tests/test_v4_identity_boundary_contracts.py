@@ -107,13 +107,15 @@ def test_differently_named_series_entries_are_separate_works():
     assert len(keys) == 3, f"三者的工作键必须互不相同：{keys}"
 
 
-def test_shared_provider_hint_does_not_auto_merge_named_works():
-    """RED：两个名字不同、各自高置信的在线身份不应把不同作品合并成一个 Work。
+def test_differently_named_works_sharing_online_id_are_not_mergeable():
+    """RED→GREEN：名字不同、但共享同一在线身份的两个作品不得被合并。
 
-    规格 §5 第 0 步契约 3：共享 Provider ID 不自动合并。
-    当前 `_work_key` 在高置信 `tmdb_hint_id` 下直接返回 `provider:...`，
-    会让两部不同作品落到同一个 Work。
+    规格 §5 第 0 步契约 3 / §4.1：Provider ID 只是资料引用，不能成为作品唯一键；
+    "最终 merge 门"（`identity_policy.can_merge_provider_identity`）必须要求双方
+    标题互为变体，否则《化物语》与《终物语》会因为同属一个系列目录而被并成一个 Work。
     """
+
+    from app.media_v4.resolution.identity_policy import can_merge_provider_identity
 
     first = _facts(work_title="化物语", series_group="物语系列", tmdb_hint_id=46195)
     second = _facts(work_title="终物语", series_group="物语系列", tmdb_hint_id=46195)
@@ -124,7 +126,11 @@ def test_shared_provider_hint_does_not_auto_merge_named_works():
         ]
     )
 
-    assert len(graph.works) == 2, "共享在线 ID 只是资料引用，不能合并两个不同作品"
+    assert len(graph.works) == 2, "名字不同 + 各自有身份证据，不得仅因共享在线 ID 合并"
+    keys = {work.work_key for work in graph.works}
+    assert can_merge_provider_identity(graph, keys) is False, (
+        "两个名字不同的作品不得通过 merge 门（否则会共用一条在线身份）"
+    )
 
 
 # --------------------------------------------------------------------------
