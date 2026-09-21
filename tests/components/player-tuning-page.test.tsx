@@ -81,17 +81,18 @@ describe('PlayerTuningPage', () => {
     expect(await screen.findByText('已打开 MPV 配置文件夹')).toBeTruthy();
   });
 
-  it('在当前主题容器内展开 Anime4K 选项', async () => {
+  it('点击后展开 Anime4K 选项（浮层渲染，不常驻文档流）', async () => {
     (configApi.getConfig as ReturnType<typeof vi.fn>).mockResolvedValue({
       mpv_anime4k_mode: 'off',
       mpv_anime4k_quality: 'balanced',
     });
-    const { container } = render(<PlayerTuningPage />);
+    render(<PlayerTuningPage />);
 
     await screen.findByText('关闭');
     fireEvent.click(screen.getByRole('combobox', { name: '模式' }));
 
+    // 与项目内已验证范例（DetailSeasonPicker）一致：弹层走浮层渲染，
+    // 不再使用 inlinePopup（那会让选项常驻展开并遮挡下方内容）。
     expect(await screen.findByRole('listbox')).toBeTruthy();
-    expect(container.querySelector('.player-tuning-page')).toContainElement(screen.getByRole('listbox'));
   });
 });

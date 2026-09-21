@@ -13192,21 +13192,6 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
   gap: 6px;
 }
 .player-tuning-field .fui-Dropdown { width: 100%; }
-
-/* 下拉触发器必须单行：值在左、展开箭头在右。Fluent 默认结构如此，这里显式锁定，
-   避免被全局 reset（svg/button 归零）影响后出现"箭头换行、控件像一坨文字"。 */
-.player-tuning-field .fui-Dropdown__button {
-  display: flex;
-  align-items: center;
-  flex-wrap: nowrap;
-  gap: 8px;
-}
-
-.player-tuning-field .fui-Dropdown__expandIcon {
-  display: flex;
-  align-items: center;
-  margin-left: auto;
-}
 .player-tuning-field label {
   font-size: 13px;
   font-weight: 600;

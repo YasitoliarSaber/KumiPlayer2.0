@@ -150,7 +150,6 @@ export default function PlayerTuningPage() {
             <label id="player-mode-label">使用哪个播放器</label>
             <Dropdown
               aria-labelledby="player-mode-label"
-              inlinePopup
               clearButton={null}
               value={PLAYER_MODE_OPTIONS.find((item) => item.value === playerMode)?.label || playerMode}
               selectedOptions={[playerMode]}
@@ -196,7 +195,6 @@ export default function PlayerTuningPage() {
               <label id="anime4k-mode-label">模式</label>
               <Dropdown
                 aria-labelledby="anime4k-mode-label"
-                inlinePopup
               clearButton={null}
                 value={MODE_OPTIONS.find((item) => item.value === mode)?.label || mode}
                 selectedOptions={[mode]}
@@ -214,7 +212,6 @@ export default function PlayerTuningPage() {
               <label id="anime4k-quality-label">质量</label>
               <Dropdown
                 aria-labelledby="anime4k-quality-label"
-                inlinePopup
               clearButton={null}
                 value={QUALITY_OPTIONS.find((item) => item.value === quality)?.label || quality}
                 selectedOptions={[quality]}
