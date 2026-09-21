@@ -76,7 +76,16 @@ def _card_payload(card: dict, override: dict | None = None) -> dict:
     if watch_status is None:
         watch_status = {"work_id": card["work_id"], "status": "", "note": "", "favorite": False, "updated_at": ""}
     # P-006：用户覆盖层（标题/图片）优先于刮削事实；不覆盖原始抓取数据。
-    display_title = str(override.get("title") or "") or metadata.get("title") or card["title"]
+    # 第 3 步（施工规格）：在线标题只作**兜底**，不得覆盖本地作品身份。
+    # 实测：多个名字不同的本地作品被刮削到同一条系列条目（如"物语系列"下的
+    # 《化物语》《终物语》《续终物语》）时，卡片标题会全部变成在线系列名，
+    # 媒体库出现多张标题/海报/评分/季数完全相同的卡片。
+    _local_title = str(card.get("title") or "").strip()
+    display_title = (
+        str(override.get("title") or "").strip()
+        or _local_title
+        or str(metadata.get("title") or "").strip()
+    )
     local_poster = str(override.get("local_poster_path") or "") or metadata.get("local_poster_path") or ""
     local_fanart = str(override.get("local_fanart_path") or "") or metadata.get("local_fanart_path") or ""
     local_clearlogo = str(override.get("local_clearlogo_path") or "") or metadata.get("local_clearlogo_path") or ""

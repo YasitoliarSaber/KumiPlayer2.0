@@ -230,6 +230,32 @@ def test_ordinary_episode_title_has_no_bracket_debris():
         )
 
 
+def test_library_card_title_keeps_local_identity_over_online_title():
+    """第 3 步：在线标题只作**兜底**，不得覆盖本地作品身份；手动覆盖仍最高优先。
+
+    实测（`api/library_v4.py:79`）：`override → metadata.title → card.title`，
+    于是多个名字不同的本地作品被刮削到同一条系列条目（物语系列）时，卡片标题
+    全部变成在线系列名，媒体库出现多张同名同图的卡片。
+    """
+
+    from app.api.library_v4 import _card_payload
+
+    card = {
+        "work_id": "w1",
+        "title": "化物语",
+        "media_type": "tv",
+        "year": 2009,
+        "episode_count": 15,
+        "asset_count": 15,
+        "card_type": "main_series",
+        "show_type": "anime_series",
+        "metadata": {"title": "物语系列", "provider": "tmdb", "original_title": "化物語"},
+    }
+    assert _card_payload(card)["title"] == "化物语", "本地标题必须优先于在线标题"
+    assert _card_payload(card, {"title": "我的标题"})["title"] == "我的标题", "手动覆盖优先级最高"
+    assert _card_payload(dict(card, title=""))["title"] == "物语系列", "本地无标题时才用在线标题"
+
+
 def test_missing_identity_still_produces_local_work():
     """GREEN：没有身份线索时仍必须生成本地 Work（阶段 1 的既有契约）。"""
 
