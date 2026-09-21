@@ -707,6 +707,12 @@ def scan_openlist_directory(
                 # 文件不会入库，但必须让用户看见，不能静默丢弃。
                 skipped_entries += int(getattr(result, "skipped_entries", 0) or 0)
             except OpenListNotFoundError:
+                # 只有父目录中残留的失效子目录可以局部跳过。用户选择的扫描
+                # 根目录若不存在，说明这次扫描根本没有读取到来源；把它吞成
+                # 空结果会生成“0 条且可确认”的 revision，并可能让后续流程
+                # 误判整个来源已经清空。根目录必须如实失败。
+                if directory == selected_root:
+                    raise
                 # 幽灵目录：父目录列表里仍有它，但上游已经移动/改名/删除
                 # （实测 /夸克网盘/动画/4k 京阿尼合集/冰菓 的上游响应是
                 #  "failed get objs: failed get dir: object not found"，OpenList

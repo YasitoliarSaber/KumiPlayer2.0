@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+
 from app.integrations.openlist.client import OpenListClient
 from app.integrations.openlist.governor import OpenListRequestGovernor
 from app.integrations.openlist.models import (
@@ -267,6 +268,33 @@ def test_full_scan_skips_ghost_directory_and_keeps_going():
     assert [item.relative_path for item in evidence] == ["a.mkv"], "幽灵目录之外的条目照常入库"
     assert stats["missing_directory_count"] == 1
     assert stats["missing_directories"] == [f"{root}/ghost"]
+
+
+def test_full_scan_does_not_treat_missing_selected_root_as_empty():
+    """用户选择的扫描根目录失效时必须失败，不能伪装成空来源。
+
+    子目录可能是 OpenList 陈旧索引里的幽灵条目，可以局部跳过；但根目录
+    本身不存在意味着本次扫描根本没有发生。若吞掉异常并返回空证据，后续会
+    生成一个“0 条且可确认”的 revision，甚至允许移除先前已经导入的媒体。
+    """
+
+    from app.media_v4.sources.scanner import scan_openlist_directory
+
+    root = "/夸克网盘/动画"
+
+    class _MissingRootClient:
+        def list_dir(self, path, page=1, per_page=100, refresh=False):  # noqa: ANN001
+            assert path == root
+            raise OpenListNotFoundError()
+
+    with pytest.raises(OpenListNotFoundError):
+        scan_openlist_directory(
+            _MissingRootClient(),
+            remote_root=root,
+            mapping_root=root,
+            mount_root="",
+            root_id="root-1",
+        )
 
 
 def test_full_scan_retries_transient_failure_before_failing(monkeypatch):
