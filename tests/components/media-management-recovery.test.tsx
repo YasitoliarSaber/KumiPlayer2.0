@@ -143,10 +143,18 @@ test('OpenList 缓存过期时展示提示且刷新可获取最新', async () =>
   render(<OpenListFolderBrowser configured initialPath="/" onPathChange={() => undefined} onGoSettings={() => undefined} />)
   expect(await screen.findByText(/缓存的目录列表/)).toBeVisible()
 
-  openlist.browse.mockImplementation(async (path: string) => browseResult(path || '/', 'fresh'))
+  openlist.browse.mockImplementation(async (path: string) => browseResult(path || '/', 'none'))
   fireEvent.click(screen.getByRole('button', { name: '刷新当前层' }))
   await waitFor(() => expect(openlist.browse).toHaveBeenCalledWith('/', 1, true, 100))
   expect(await screen.findByText(/远端最新/)).toBeVisible()
+})
+
+test('OpenList 有效缓存不会冒充远端最新', async () => {
+  openlist.browse.mockImplementation(async (path: string) => browseResult(path || '/', 'fresh'))
+  render(<OpenListFolderBrowser configured initialPath="/" onPathChange={() => undefined} onGoSettings={() => undefined} />)
+
+  expect(await screen.findByText(/缓存有效/)).toBeVisible()
+  expect(screen.queryByText(/远端最新/)).not.toBeInTheDocument()
 })
 
 test('OpenList 慢响应不覆盖新目录（最新请求获胜）', async () => {

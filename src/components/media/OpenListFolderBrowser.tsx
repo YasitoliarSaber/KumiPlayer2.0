@@ -144,7 +144,7 @@ export default function OpenListFolderBrowser({
           </div>
           {result.entries.length === 0 && <div className="media-v4-browser-empty">此目录没有可浏览的内容。</div>}
           <div className="media-openlist-foot">
-            <span title={result.path}>当前目录：{result.path} · 已加载 {result.entries.length}{result.total > 0 ? ` / ${result.total}` : ''} 项{result.cache.status === 'fresh' && !result.cache.refreshing ? ' · 远端最新' : ''}</span>
+            <span title={result.path}>当前目录：{result.path} · 已加载 {result.entries.length}{result.total > 0 ? ` / ${result.total}` : ''} 项{result.cache.status === 'fresh' && !result.cache.refreshing ? ' · 缓存有效' : result.cache.status === 'none' && !result.cache.refreshing ? ' · 远端最新' : ''}</span>
             {result.has_more && <Button appearance="secondary" disabled={loadingMore} onClick={() => void browse(result.path, result.page + 1, false, true)}>{loadingMore ? '正在加载…' : '加载更多'}</Button>}
           </div>
         </>
