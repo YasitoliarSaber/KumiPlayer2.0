@@ -178,6 +178,31 @@ def test_match_normalization_still_equates_harmless_variants():
     assert normalize_match_title("K-ON!") == normalize_match_title("K-ON!!")
 
 
+def test_punctuation_only_difference_is_identity_equal_by_project_contract():
+    """⚠️ 规格 §4.2 与项目既有契约**冲突**（已实测；勿按规格直接收紧）。
+
+    规格第 2 步要求"检索命中不得升级为身份等值"，即 `K-ON!` 与 `K-ON!!` 在身份层应不同。
+    但项目现有 4 条契约明确要求**相反**行为（标点/符号差异必须视为同一标题）：
+      - `test_v4_title_normalization_unity.py::test_ranker_and_draft_scorer_agree_on_a_punctuation_only_difference`
+      - `test_v4_candidate_ranker.py::test_cjk_punctuation_difference_still_counts_as_the_same_title`
+      - `test_scrape_alias_matching.py::test_every_language_variant_of_the_same_work_is_adoptable`
+      - `test_scrape_alias_matching.py::test_punctuation_and_symbols_do_not_break_equality`
+
+    实测：把 `ranker._title_identity_level` 的身份等值改为严格归一化后，上述 4 条
+    全部失败。因此第 2 步的这项收紧**未实施**，需规格作者先裁定这 4 条契约是否应改。
+    本用例锁定当前行为，并留下冲突记录。
+    """
+
+    from app.media_v4.resolution.ranker import _title_identity_level
+
+    assert _title_identity_level(["K-ON!!"], {"title": "K-ON!"})[0] >= 2, (
+        "当前契约：标点差异视为同一标题"
+    )
+    assert _title_identity_level(["Yuru Camp"], {"title": "《Ｙｕｒｕ Ｃａｍｐ》"})[0] >= 2, (
+        "无害差异（全半角/空格/书名号）必须等值"
+    )
+
+
 def test_missing_identity_still_produces_local_work():
     """GREEN：没有身份线索时仍必须生成本地 Work（阶段 1 的既有契约）。"""
 
