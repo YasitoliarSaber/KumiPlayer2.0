@@ -203,6 +203,33 @@ def test_punctuation_only_difference_is_identity_equal_by_project_contract():
     )
 
 
+def test_ordinary_episode_title_has_no_bracket_debris():
+    """第 4 步：普通剧集标题不得是方括号残片（实测为 `]`）或纯发布参数。
+
+    证据（探针 `.context/openlist-debug/episode_title_probe.py`）：
+    `冰海战记 第1季 [S01E01][Ma10p_2160p][x265_flac_ass].mkv`、
+    `辉夜大小姐想让我告白-超级浪漫- [S03E01][Ma10p_2160p][x265_flac_ass].mkv`、
+    `灵能百分百 路人超能100 [S01E01][Ma10p_2160p][x265_flac_ass].mkv`
+    三者的 `episode_title` 都是 `]`，在媒体库里直接显示为 `]`。
+    注意：与作品名相同**不是**无效标题（规格 §4.3），只清理纯符号与纯发布参数。
+    """
+
+    parser = V4Parser()
+    cases = {
+        "冰海战记 第1季 [S01E01][Ma10p_2160p][x265_flac_ass].mkv": (1, 1),
+        "辉夜大小姐想让我告白-超级浪漫- [S03E01][Ma10p_2160p][x265_flac_ass].mkv": (3, 1),
+        "[TUDO&Ygm] Vindland Saga [06][Ma10p_2160p][x265_flac_ass].mkv": (1, 6),
+    }
+    for index, (name, (season, episode)) in enumerate(cases.items()):
+        rel = f"夸克网盘/动画/某作品/{name}"
+        facts = parser.parse(_evidence(index, rel), root_container="/夸克网盘")
+        assert facts.season_candidate == season, f"{name} 的季号解析错误"
+        assert facts.episode_candidate == episode, f"{name} 的集号解析错误"
+        assert (facts.episode_title or "").strip() == "", (
+            f"{name} 的集标题应是空（由界面回退为未命名），实际为 {facts.episode_title!r}"
+        )
+
+
 def test_missing_identity_still_produces_local_work():
     """GREEN：没有身份线索时仍必须生成本地 Work（阶段 1 的既有契约）。"""
 

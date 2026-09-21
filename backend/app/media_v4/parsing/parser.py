@@ -259,6 +259,33 @@ def _normalize_filename_stem(stem: str) -> str:
     return re.sub(r"[\s._-]+", " ", value).strip()
 
 
+_EPISODE_TITLE_PUNCT_ONLY = re.compile(r"^[\s\[\](){}<>《》【】._\-—~!！?？,，。:：;；'\"·|/\\+*#@&%$^=]+$")
+_EPISODE_TITLE_RELEASE_ONLY = re.compile(
+    r"(?i)^[\s\[\](){}._\-]*(?:ma10p|10bit|8bit|\d{3,4}p|x26[45]|h\.?26[45]|hevc|avc"
+    r"|flac|aac|ac3|e?dts(?:\d(?:\.\d)?)?|ass|srt|sub|web-?dl|bd(?:rip|box)?|remux"
+    r"|bluray|hdtv|webrip)[\s\[\](){}._\-]*$"
+)
+
+
+def _sanitize_episode_title(value: str) -> str:
+    """集标题的**最终校验**（规格 §5 第 4 步）。
+
+    实测：``冰海战记 第1季 [S01E01][Ma10p_2160p][x265_flac_ass].mkv`` 这类
+    常见命名会让普通剧集分支得到标题 ``]``（方括号残片），在媒体库里直接显示为 ``]``。
+    这里只清理**纯符号**与**纯发布参数**两种残片；与作品名相同**不是**无效标题，
+    因此不做任何名称比对（规格 §4.3）。
+    """
+
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if _EPISODE_TITLE_PUNCT_ONLY.fullmatch(text):
+        return ""
+    if _EPISODE_TITLE_RELEASE_ONLY.fullmatch(text):
+        return ""
+    return text
+
+
 def _normalized_container(value: str) -> str:
     return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", (value or "").casefold())
 
@@ -578,6 +605,9 @@ class V4Parser:
                 series_group=resolved_series_group,
                 special_number=special_number,
             )
+        # 第 4 步最终校验：普通与特别篇分支都可能残留方括号碎片或纯发布参数
+        # （实测 `…[S01E01][Ma10p_2160p][x265_flac_ass].mkv` → 标题 `]`）。
+        episode_title = _sanitize_episode_title(episode_title)
         return ParsedFacts(
             parsed_fact_id="facts_" + evidence.evidence_id,
             evidence_id=evidence.evidence_id,
