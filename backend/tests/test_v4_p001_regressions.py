@@ -83,7 +83,9 @@ def test_generic_container_title_must_generate_review_issue(title):
 
     graph = _resolve(entries)
 
-    assert graph.works == ()
+    # 阶段 1 起：身份不明的视频也必须有本地 Work（否则"确认成功却没有文件"）。
+    # 这里保留"必须给出 generic_container_title 提示"的要求，只放宽 work 数量断言。
+    assert len(graph.works) == 1
     assert any(issue.code == "generic_container_title" for issue in graph.issues)
 
 
