@@ -23,6 +23,9 @@ function PosterCard({
   localArtworkOnly = false,
 }: PosterCardProps) {
   const seriesCardImageMode = useUiStore((state) => state.seriesCardImageMode);
+  // 该 prop 仍是调用方的公开 API（分类页会传），但第 6 步移除"失败回退原图"后
+  // 组件内不再需要它；显式标记为有意保留，避免 noUnusedLocals 报错。
+  void localArtworkOnly;
   const openWorkDetail = useLibraryStore((state) => state.openWorkDetail);
   const getWorkDetail = useLibraryStore((state) => state.getWorkDetail);
   const prewarmTimerRef = useRef<number | null>(null);
@@ -64,22 +67,19 @@ function PosterCard({
   const artworkKind = showType === 'recent' || seriesCardImageMode === 'fanart' ? 'fanart' : 'poster';
   // 已确认的本地镜像比远程 metadata URL 更快、更稳定；远程图仍是本地缺失时的兜底。
   const selectedImagePath = preferredArtworkPath(work, artworkKind);
-  const [useOriginalImage, setUseOriginalImage] = useState(false);
   const originalImageUrl = buildAssetUrl(selectedImagePath, {
     kind: isHorizontal ? 'backdrop' : 'poster',
   });
   // 远程图已按尺寸档归一化，不生成本地派生缩略图 URL；本地图继续走缩略图管线。
+  // 第 6 步（规格 §4.5）：横图**也要**用按尺寸生成的缩略图；此前 `!isHorizontal`
+  // 让横图直接取原图，等于把大背景图塞进小卡。
   const thumbnailImageUrl = isRemoteAssetPath(selectedImagePath)
     ? originalImageUrl
     : buildAssetUrl(selectedImagePath, {
         kind: isHorizontal ? 'backdrop' : 'poster',
-        ...(thumbnailWidth > 0 && !isHorizontal ? { thumbnailWidth } : {}),
+        ...(thumbnailWidth > 0 ? { thumbnailWidth } : {}),
       });
-  const imageUrl = useOriginalImage ? originalImageUrl : thumbnailImageUrl;
-
-  useEffect(() => {
-    setUseOriginalImage(false);
-  }, [selectedImagePath, thumbnailWidth, isHorizontal, localArtworkOnly]);
+  const imageUrl = thumbnailImageUrl;
 
   const mediaClassName = `poster-media ${isHorizontal ? 'poster-media-horizontal' : 'poster-media-vertical'}`;
 
@@ -98,22 +98,21 @@ function PosterCard({
         className={mediaClassName}
         style={{ background: 'var(--surface-soft)' }}
       >
-        {imageUrl ? (
+        {/* 第 6 步（规格 §4.5）：标题占位**常驻底层**，图片解码成功后自然覆盖它。
+            这样"有 URL 但未解码/加载失败"时不会再出现空白海报位（白卡）；
+            同时**不再**在缩略图失败后重复请求原图（后端生成失败时已返回原图）。 */}
+        <div className="poster-placeholder-title">
+          <span title={displayTitle}>
+            {displayTitle}
+          </span>
+        </div>
+        {imageUrl && (
           <DecodedImage
             src={imageUrl}
             alt={displayTitle}
             loading="lazy"
             className="poster-image"
-            onError={() => {
-              if (thumbnailImageUrl !== originalImageUrl) setUseOriginalImage(true);
-            }}
           />
-        ) : (
-          <div className="poster-placeholder-title">
-            <span title={displayTitle}>
-              {displayTitle}
-            </span>
-          </div>
         )}
 
         {work.rating > 0 && (

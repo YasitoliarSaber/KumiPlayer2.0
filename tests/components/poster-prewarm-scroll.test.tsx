@@ -104,7 +104,7 @@ test('卸载海报卡不残留每卡滚动监听与计时器', async () => {
   expect(vi.getTimerCount()).toBe(1);
 });
 
-test('本地缩略图请求失败时回退同一张本地原图', async () => {
+test('本地缩略图请求失败时不再重复请求原图，改为常驻标题占位', async () => {
   render(<PosterCard work={work('w1')} thumbnailWidth={384} />);
   const image = screen.getByRole('img', { name: '作品w1' });
 
@@ -112,8 +112,9 @@ test('本地缩略图请求失败时回退同一张本地原图', async () => {
   fireEvent.error(image);
 
   await act(async () => {});
-  expect(image.getAttribute('src')).toContain('/api/assets?path=');
-  expect(image.getAttribute('src')).not.toContain('/api/assets/thumbnail');
+  // 后端在缩略图生成失败时已经返回原图，前端再换原图 URL 只会重复失败请求（规格 §4.5）。
+  expect(image.getAttribute('src')).toContain('/api/assets/thumbnail?path=');
+  expect(document.querySelector('.poster-placeholder-title')).toBeTruthy();
 });
 
 test('分类页在索引保留远程引用时仍优先使用本地镜像海报', () => {
