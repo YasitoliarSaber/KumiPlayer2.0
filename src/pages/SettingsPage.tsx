@@ -678,7 +678,11 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
             {/* 左侧：状态文案（+ 上次成功连接）；右侧：重新验证按钮。
                 容器的 CSS 已是 flex + space-between，因此按钮作为第二个子元素即落在右边。 */}
             <div>
-              {authStatus === 'reauth_required' ? (
+              {isConnected ? (
+                // 已连接时**不能**再说"尚未验证"，也不能提示去点一个不存在的按钮
+                // （用户实测：顶栏写着"BANGUMI 已连接"，下面却写"尚未验证连接"且右侧没有按钮）。
+                <div><strong>Bangumi 连接正常</strong><span>收藏状态与已看集数会自动同步。</span></div>
+              ) : authStatus === 'reauth_required' ? (
                 <div><strong>Bangumi 登录授权已失效</strong><span>账户资料仍保存在本机，请更新 Personal Access Token。</span></div>
               ) : connectivity === 'rate_limited' ? (
                 <div><strong>Bangumi 请求暂时受限</strong><span>登录信息仍然有效，稍后会自动恢复。</span></div>
@@ -689,17 +693,17 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
               ) : credentialState === 'unavailable' ? (
                 <div><strong>暂时无法读取本机 Bangumi 登录凭据</strong><span>请检查 Windows Credential Manager 是否可用；已保存的账户资料不会被清除。</span></div>
               ) : bangumiLoading ? (
-                <div><strong>正在验证 Bangumi 登录状态</strong><span>稍等一下；若长时间停在这里，点右侧「重新验证」。</span></div>
+                <div><strong>正在验证 Bangumi 登录状态</strong><span>稍等一下；若长时间停在这里，点右侧按钮重试。</span></div>
               ) : (
-                <div><strong>登录信息已保存，尚未验证连接</strong><span>点右侧「重新验证」立即检查当前连接。</span></div>
+                <div><strong>登录信息已保存</strong><span>点右侧「重新验证」确认当前连接。</span></div>
               )}
               {lastSuccessAt && !isConnected && <small>上次成功连接：{lastSuccessAt.slice(0, 16).replace('T', ' ')}</small>}
             </div>
-            {!isConnected && (
-              <GhostButton onClick={() => void verifyBangumiSession()} disabled={bangumiLoading}>
-                {bangumiLoading ? '正在验证…' : '重新验证'}
-              </GhostButton>
-            )}
+            {/* 按钮始终在右侧（容器是 flex + space-between）：已连接时它是"重新检查"，
+                其余状态是"重新验证"。绝不再出现"提示去点右侧按钮但右侧没有按钮"。 */}
+            <GhostButton onClick={() => void verifyBangumiSession()} disabled={bangumiLoading}>
+              {bangumiLoading ? '正在验证…' : isConnected ? '重新检查' : '重新验证'}
+            </GhostButton>
           </div>
         )}
         {authStatus === 'reauth_required' && bangumiError && <div className="settings-note danger">已保存的登录信息无法通过验证：{bangumiError}</div>}
