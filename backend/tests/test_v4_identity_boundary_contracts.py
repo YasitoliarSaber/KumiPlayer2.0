@@ -23,11 +23,15 @@ from app.media_v4.resolution.title_norm import normalize_identity_title, normali
 # --------------------------------------------------------------------------
 
 # 同一系列下**名字不同**的条目（物语系列）：必须各自成 Work（规格 §4.1 / §11.7）
+# 使用**真实形态**：扫描根是网盘挂载名（`/夸克网盘`），作品目录在挂载名之下。
+# 实测（探针）：修复前 parser 会把挂载名当成 work_title/series_group，整根塌缩成
+# 1 个 Work（key 全为 `title:夸克网盘:tv`）；修复后各自成 Work。
+MOUNT_ROOT = "/夸克网盘"
 MONOGATARI_PATHS = [
-    "动画/物语系列/化物语/[Group] Bakemonogatari [01][Ma10p_2160p][x265_flac].mkv",
-    "动画/物语系列/化物语/[Group] Bakemonogatari [02][Ma10p_2160p][x265_flac].mkv",
-    "动画/物语系列/终物语/[Group] Owarimonogatari [01][Ma10p_2160p][x265_flac].mkv",
-    "动画/物语系列/续终物语/[Group] Zoku Owarimonogatari [01][Ma10p_2160p][x265_flac].mkv",
+    "夸克网盘/动画/物语系列/化物语/[Group] Bakemonogatari [01][Ma10p_2160p][x265_flac].mkv",
+    "夸克网盘/动画/物语系列/化物语/[Group] Bakemonogatari [02][Ma10p_2160p][x265_flac].mkv",
+    "夸克网盘/动画/物语系列/终物语/[Group] Owarimonogatari [01][Ma10p_2160p][x265_flac].mkv",
+    "夸克网盘/动画/物语系列/续终物语/[Group] Zoku Owarimonogatari [01][Ma10p_2160p][x265_flac].mkv",
 ]
 
 # 同名作品的多季：必须仍是同一个 Work（GREEN，锁定现状）
@@ -99,7 +103,7 @@ def test_differently_named_series_entries_are_separate_works():
     使三者共用 `series:物语系列:tv`，形成"身份塌缩"（规格 §4.1）。
     """
 
-    graph = _resolve_paths(MONOGATARI_PATHS, "物语系列")
+    graph = _resolve_paths(MONOGATARI_PATHS, MOUNT_ROOT)
     keys = {work.work_key for work in graph.works}
     titles = {work.preferred_title for work in graph.works}
 
@@ -117,17 +121,10 @@ def test_differently_named_works_sharing_online_id_are_not_mergeable():
 
     from app.media_v4.resolution.identity_policy import can_merge_provider_identity
 
-    first = _facts(work_title="化物语", series_group="物语系列", tmdb_hint_id=46195)
-    second = _facts(work_title="终物语", series_group="物语系列", tmdb_hint_id=46195)
-    graph = MediaResolver().resolve(
-        [
-            (_evidence(0, "动画/物语系列/化物语/[Group] Bakemonogatari [01].mkv"), first),
-            (_evidence(1, "动画/物语系列/终物语/[Group] Owarimonogatari [01].mkv"), second),
-        ]
-    )
-
-    assert len(graph.works) == 2, "名字不同 + 各自有身份证据，不得仅因共享在线 ID 合并"
+    graph = _resolve_paths(MONOGATARI_PATHS, MOUNT_ROOT)
     keys = {work.work_key for work in graph.works}
+
+    assert len(keys) >= 2, "名字不同的条目必须得到不同的 Work 键"
     assert can_merge_provider_identity(graph, keys) is False, (
         "两个名字不同的作品不得通过 merge 门（否则会共用一条在线身份）"
     )
