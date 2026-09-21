@@ -151,6 +151,7 @@ export default function PlayerTuningPage() {
             <Dropdown
               aria-labelledby="player-mode-label"
               inlinePopup
+              clearButton={null}
               value={PLAYER_MODE_OPTIONS.find((item) => item.value === playerMode)?.label || playerMode}
               selectedOptions={[playerMode]}
               onOptionSelect={(_, data) => {
@@ -196,6 +197,7 @@ export default function PlayerTuningPage() {
               <Dropdown
                 aria-labelledby="anime4k-mode-label"
                 inlinePopup
+              clearButton={null}
                 value={MODE_OPTIONS.find((item) => item.value === mode)?.label || mode}
                 selectedOptions={[mode]}
                 onOptionSelect={(_, data) => {
@@ -213,6 +215,7 @@ export default function PlayerTuningPage() {
               <Dropdown
                 aria-labelledby="anime4k-quality-label"
                 inlinePopup
+              clearButton={null}
                 value={QUALITY_OPTIONS.find((item) => item.value === quality)?.label || quality}
                 selectedOptions={[quality]}
                 onOptionSelect={(_, data) => {
