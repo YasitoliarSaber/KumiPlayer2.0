@@ -112,11 +112,21 @@ def test_differently_named_series_entries_are_separate_works():
 
 
 def test_differently_named_works_sharing_online_id_are_not_mergeable():
-    """RED→GREEN：名字不同、但共享同一在线身份的两个作品不得被合并。
+    """RED（待修）：名字不同、但可能共享在线身份的两个作品不得被合并。
 
-    规格 §5 第 0 步契约 3 / §4.1：Provider ID 只是资料引用，不能成为作品唯一键；
-    "最终 merge 门"（`identity_policy.can_merge_provider_identity`）必须要求双方
-    标题互为变体，否则《化物语》与《终物语》会因为同属一个系列目录而被并成一个 Work。
+    规格 §5 第 0 步契约 3 / §4.1：Provider ID 只是资料引用，不能成为作品唯一键。
+
+    已排除的两条**错误**修法（均实测，勿重试）：
+    1. 给 `can_merge_provider_identity` 加"标题必须互为变体"：会破坏跨语言同一作品
+       （`test_v4_hierarchy_inheritance` 辉夜大小姐 2 项 + `sample_corpus` 1 项回归）。
+    2. 认为"独立性信号没传进 `ResolvedWork`"：**不成立** ——
+       `ResolvedWork.relation_type` 存在（domain/models.py:87）且 resolver.py:685 有传值。
+       本例的两个条目事实层 `relation=''`、`card_type='main_series'`，本就不是
+       `is_independent_work` 覆盖的情形，所以该信号无法区分它们。
+
+    结论：判别必须来自 **provider/candidate 层**（规格 §4.1 提到的
+    `candidates.merge_map_from_candidates` 与候选别名/身份证据），而不是标题前缀，
+    也不是独立性标记。本用例保留为该层修复的验收条件。
     """
 
     from app.media_v4.resolution.identity_policy import can_merge_provider_identity
