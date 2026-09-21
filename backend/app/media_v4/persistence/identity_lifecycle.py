@@ -83,9 +83,8 @@ def release_retired_source_identities(
     *,
     work_keys: set[str],
     titles: set[str],
-    provider_identities: set[tuple[str, str, str]],
 ) -> None:
-    """确认时仅释放本来源或本次作品命中的已清理/已删除身份，不做全库迁移。"""
+    """仅按同来源或明确的本地作品边界释放退役身份。"""
 
     source_ids = {
         str(row[0]) for row in conn.execute(
@@ -98,6 +97,5 @@ def release_retired_source_identities(
         row = conn.execute("SELECT identity_key, preferred_title FROM works WHERE work_id = ?", (work_id,)).fetchone()
         aliases = {str(item[0]).casefold() for item in conn.execute("SELECT normalized_title FROM work_aliases WHERE work_id = ?", (work_id,)).fetchall()}
         aliases.add(str(row[1]).strip().casefold())
-        providers = {tuple(str(value) for value in item) for item in conn.execute("SELECT provider,media_type,provider_id FROM provider_bindings WHERE work_id = ?", (work_id,)).fetchall()}
-        if work_id in source_ids or str(row[0]) in work_keys or aliases & titles or providers & provider_identities:
+        if work_id in source_ids or str(row[0]) in work_keys or aliases & titles:
             retire_work_identity(conn, work_id, now)

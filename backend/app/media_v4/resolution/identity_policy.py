@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from app.media_v4.domain.models import ResolutionIssue, ResolvedMediaGraph, ResolvedWork
@@ -93,10 +93,52 @@ def reject_conflicting_candidates(
     graph: ResolvedMediaGraph,
     candidates_by_key: dict[str, list[WorkCandidate]],
 ) -> tuple[dict[str, list[WorkCandidate]], list[ResolutionIssue]]:
-    """保留候选；共享在线资料不能把导入降级为人工处理。"""
+    """静默丢弃跨作品边界传播的旧绑定，不把导入降级为人工处理。
 
-    _blocked, issues = provider_identity_conflicts(graph, candidates_by_key)
-    return candidates_by_key, issues
+    数据库和人工确认允许多个本地作品共享同一在线资料。不过，当同一次解析中
+    主系列与明确独立的外传同时继承同一条 *历史* 绑定时，这更可能是旧代码留下
+    的污染，而不是用户本次作出的确认。这里只拒绝独立作品的历史候选；路径明确
+    绑定、NFO、文件名提示和在线搜索结果均不受影响。
+    """
+
+    works = {work.work_key: work for work in graph.works}
+    members_by_identity: dict[tuple[str, str, str], set[str]] = {}
+    for work_key, candidates in candidates_by_key.items():
+        for candidate in candidates:
+            if candidate.status != "confirmed":
+                continue
+            identity = (candidate.provider, candidate.media_type, candidate.provider_id)
+            members_by_identity.setdefault(identity, set()).add(work_key)
+
+    polluted_slots: set[tuple[str, str, str, str]] = set()
+    for identity, work_keys in members_by_identity.items():
+        member_works = [works[key] for key in work_keys if key in works]
+        if not any(is_independent_work(work) for work in member_works):
+            continue
+        if not any(not is_independent_work(work) for work in member_works):
+            continue
+        for work in member_works:
+            if is_independent_work(work):
+                polluted_slots.add((work.work_key, *identity))
+
+    if not polluted_slots:
+        return candidates_by_key, []
+
+    protected: dict[str, list[WorkCandidate]] = {}
+    for work_key, candidates in candidates_by_key.items():
+        protected[work_key] = [
+            replace(candidate, status="rejected")
+            if candidate.evidence == "existing_provider_binding"
+            and (
+                work_key,
+                candidate.provider,
+                candidate.media_type,
+                candidate.provider_id,
+            ) in polluted_slots
+            else candidate
+            for candidate in candidates
+        ]
+    return protected, []
 
 
 def can_merge_provider_identity(

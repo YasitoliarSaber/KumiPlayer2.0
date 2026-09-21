@@ -454,6 +454,68 @@ def test_manual_confirm_accepts_candidate_from_its_own_active_source_revision(tm
     assert response.status_code == 200, response.text
 
 
+def test_manual_confirm_rejects_candidate_from_superseded_same_work_revision(tmp_path, monkeypatch):
+    """同来源连续导入复用 Work 后，旧 revision 的候选不能改写当前身份。"""
+
+    import uuid
+    from datetime import UTC, datetime
+
+    client = _client(tmp_path, monkeypatch)
+    database = _patch_database(tmp_path, monkeypatch)
+    from app.media_v4.revisions.service import V4RevisionService
+
+    service = V4RevisionService(database)
+    service.create_draft("rev-stale-old", [_entry("stale-old", work_title="Show")])
+    service.confirm("rev-stale-old")
+    service.create_draft(
+        "rev-stale-current",
+        [_entry("stale-current", work_title="Show", episode=2)],
+    )
+    service.confirm("rev-stale-current")
+
+    candidate_id = str(uuid.uuid4())
+    now = datetime.now(UTC).isoformat()
+    with database.connect() as conn:
+        work_ids = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT work_id FROM revision_bindings "
+                "WHERE revision_id IN ('rev-stale-old', 'rev-stale-current')"
+            ).fetchall()
+        }
+        assert len(work_ids) == 1
+        work_id = next(iter(work_ids))
+        conn.execute(
+            """
+            INSERT INTO revision_work_candidates(
+                candidate_id, revision_id, work_id, draft_work_key, provider,
+                provider_id, media_type, title, evidence, confidence, status,
+                created_at, updated_at
+            ) VALUES (?, 'rev-stale-old', ?, 'stale-key', 'tmdb', '42', 'tv',
+                      'Show', 'manual_search', 'high', 'proposed', ?, ?)
+            """,
+            (candidate_id, work_id, now, now),
+        )
+
+    response = client.post(
+        "/api/v4/metadata/confirm",
+        json={"work_id": work_id, "candidate_id": candidate_id},
+    )
+
+    assert response.status_code == 409
+    with database.connect() as conn:
+        candidate_status = conn.execute(
+            "SELECT status FROM revision_work_candidates WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()[0]
+        binding = conn.execute(
+            "SELECT 1 FROM provider_bindings WHERE work_id = ? AND provider_id = '42'",
+            (work_id,),
+        ).fetchone()
+    assert str(candidate_status) == "proposed"
+    assert binding is None
+
+
 def test_manual_confirm_allows_shared_provider_identity_for_another_local_work(tmp_path, monkeypatch):
     """手工确认可复用在线资料，但不会合并或改写已有本地作品。"""
 

@@ -555,10 +555,15 @@ def _apply_transaction(conn: sqlite3.Connection, preview: dict, operation_id: st
         target_work_id = target_ids[assignment["target_work_key"]]
         if provider == "local":
             provider_id = target_work_id
-        conn.execute(
-            "DELETE FROM provider_bindings WHERE work_id = ? AND provider = ? AND media_type = ?",
+        existing_binding = conn.execute(
+            "SELECT provider_id FROM provider_bindings "
+            "WHERE work_id = ? AND provider = ? AND media_type = ?",
             (target_work_id, provider, assignment["media_type"]),
-        )
+        ).fetchone()
+        # 目标 Work 可能是媒体库里已经存在的正确作品。身份修复只负责迁移资产，
+        # 不能用待修复 Work 携带的污染身份覆盖它已经确认的 Provider 槽位。
+        if existing_binding is not None:
+            continue
         conn.execute(
             "INSERT INTO provider_bindings(work_id, provider, media_type, provider_id) VALUES (?, ?, ?, ?)",
             (target_work_id, provider, assignment["media_type"], provider_id),

@@ -1468,11 +1468,6 @@ class V4RevisionService:
                                 if entry[0].evidence_id in work.source_evidence_ids
                             ])
                         },
-                        provider_identities={
-                            (item.provider, item.media_type, item.provider_id)
-                            for items in candidates_by_key.values() for item in items
-                            if item.status == "confirmed"
-                        },
                     )
                     # 用户明确要求：**导入永不拦截**。review issue 只作为界面提示，
                     # 不再阻止确认；未采纳的身份/关系留到入库后再修正。

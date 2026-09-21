@@ -687,6 +687,75 @@ def test_scrape_shared_provider_identity_keeps_both_local_works_playable(tmp_pat
     assert [str(row["provider_episode_id"]) for row in episode_mappings] == ["9901"]
 
 
+def test_scrape_identity_mismatch_is_discarded_before_artifact_publish(tmp_path, monkeypatch):
+    """同 Work 返回不同在线 ID 时局部降级；既不发布错误资料，也不撞 local 唯一键。"""
+
+    from app.media_v4.jobs import scrape as scrape_module
+    from app.media_v4.jobs.scrape import V4ScrapeService
+    from app.media_v4.persistence.database import V4Database
+    from app.media_v4.revisions.service import V4RevisionService
+
+    database = V4Database(tmp_path / "scrape-local-identity-mismatch.db")
+    database.initialize()
+    revisions = V4RevisionService(database)
+    revisions.create_draft("rev-mismatch", [_entry("mismatch")])
+    revisions.confirm("rev-mismatch")
+    scrape = V4ScrapeService(database)
+    job = scrape.enqueue_for_revision("rev-mismatch")[0]
+    with database.connect() as conn:
+        work_id = str(conn.execute(
+            "SELECT work_id FROM revision_bindings WHERE revision_id = 'rev-mismatch' LIMIT 1"
+        ).fetchone()[0])
+        conn.execute(
+            "INSERT INTO scrape_bindings(binding_id, revision_id, work_id, provider, provider_id, "
+            "metadata_json, status, created_at, updated_at) "
+            "VALUES ('existing-local', 'rev-mismatch', ?, 'local', '', '{}', "
+            "'waiting_metadata', 'old', 'old')",
+            (work_id,),
+        )
+
+    published: list[str] = []
+    monkeypatch.setattr(
+        scrape_module,
+        "publish_metadata_artifacts",
+        lambda *_args, **_kwargs: published.append("published"),
+    )
+    monkeypatch.setattr(
+        scrape_module,
+        "assess_metadata_completeness",
+        lambda *_args, **_kwargs: (True, []),
+    )
+
+    scrape.process(
+        job["job_id"],
+        lambda _target: {**_ready_metadata("99"), "title": "Wrong Show"},
+        mirror_root=tmp_path / "mirror",
+    )
+
+    with database.connect() as conn:
+        job_row = conn.execute(
+            "SELECT status, last_error FROM jobs WHERE job_id = ?",
+            (job["job_id"],),
+        ).fetchone()
+        rows = conn.execute(
+            "SELECT provider, provider_id, status, metadata_json FROM scrape_bindings "
+            "WHERE revision_id = 'rev-mismatch' AND work_id = ? ORDER BY provider",
+            (work_id,),
+        ).fetchall()
+        frozen = conn.execute(
+            "SELECT provider_id FROM provider_bindings "
+            "WHERE work_id = ? AND provider = 'tmdb' AND media_type = 'tv'",
+            (work_id,),
+        ).fetchone()
+
+    assert published == []
+    assert tuple(job_row) == ("succeeded", "")
+    assert str(frozen["provider_id"]) == "42"
+    assert len(rows) == 1
+    assert tuple(rows[0][:3]) == ("local", "", "waiting_metadata")
+    assert json.loads(rows[0]["metadata_json"])["reason_code"] == "local_identity_mismatch"
+
+
 def test_local_artwork_mode_materializes_episode_stills_as_v4_artifacts(tmp_path, monkeypatch):
     from types import SimpleNamespace
 

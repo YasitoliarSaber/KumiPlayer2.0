@@ -234,14 +234,18 @@ def test_inactive_historical_binding_cannot_block_reimport(tmp_path):
     service.confirm("rev-fresh")
 
     with database.connect() as conn:
-        owner = conn.execute(
-            "SELECT work_id FROM provider_bindings "
-            "WHERE provider='tmdb' AND media_type='tv' AND provider_id='100'"
-        ).fetchone()
-        assert owner is not None and owner["work_id"] != "old"
+        owners = {
+            str(row["work_id"])
+            for row in conn.execute(
+                "SELECT work_id FROM provider_bindings "
+                "WHERE provider='tmdb' AND media_type='tv' AND provider_id='100'"
+            ).fetchall()
+        }
+        assert "old" in owners
+        assert any(work_id != "old" for work_id in owners)
         assert conn.execute(
             "SELECT 1 FROM provider_bindings WHERE work_id='old'"
-        ).fetchone() is None
+        ).fetchone() is not None
 
 
 @pytest.mark.parametrize("legacy_cleanup", [False, True, "hidden"])

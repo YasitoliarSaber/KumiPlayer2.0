@@ -100,12 +100,18 @@ def test_historical_heya_binding_does_not_merge_with_main_series():
 
     assert merge_map == {}
     assert not any(issue.code == "work_identity_conflict" for issue in issues)
-    assert {
-        item.provider_id
-        for values in candidates.values()
-        for item in values
-        if item.status == "confirmed"
-    } == {"95213"}
+    confirmed_by_title = {
+        title: {
+            item.provider_id
+            for item in candidates[work_key]
+            if item.status == "confirmed"
+        }
+        for title, work_key in work_keys.items()
+    }
+    assert confirmed_by_title == {
+        "Yuru Camp": {"95213"},
+        "Heya Camp": set(),
+    }
 
 
 def test_reimport_movie_after_cancelled_jobs_reuses_correct_identity(tmp_path):
@@ -541,3 +547,46 @@ def test_identity_repair_preview_apply_and_resume_are_asset_scoped(tmp_path):
     )
     assert repeated == result
     assert resume_identity_repair(database, operation_id=preview["preview_id"]) == result
+
+
+def test_identity_repair_does_not_overwrite_existing_target_provider_slot(tmp_path):
+    """修复污染 Work 时，只迁移资产，不改写目标 Work 已确认的不同在线身份。"""
+
+    from app.media_v4.maintenance.identity_repair import (
+        apply_identity_repair,
+        build_identity_repair_preview,
+    )
+
+    database = V4Database(tmp_path / "identity-repair-existing-target.db")
+    database.initialize()
+    work_id = _seed_polluted_media(database)
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO works(work_id, identity_key, work_type, preferred_title, created_at, updated_at) "
+            "VALUES ('existing-heya', 'work:heya camp:tv', 'series', 'Heya Camp', 'now', 'now')"
+        )
+        conn.execute(
+            "INSERT INTO provider_bindings(work_id, provider, media_type, provider_id) "
+            "VALUES ('existing-heya', 'tmdb', 'tv', '99999')"
+        )
+
+    preview = build_identity_repair_preview(database, work_id=work_id)
+    result = apply_identity_repair(
+        database,
+        preview_id=preview["preview_id"],
+        digest=preview["digest"],
+    )
+
+    assert result["status"] == "completed"
+    with database.connect() as conn:
+        binding = conn.execute(
+            "SELECT provider_id FROM provider_bindings "
+            "WHERE work_id = 'existing-heya' AND provider = 'tmdb' AND media_type = 'tv'"
+        ).fetchone()
+        migrated_assets = conn.execute(
+            "SELECT COUNT(*) FROM episode_assets ea "
+            "JOIN episodes e ON e.episode_id = ea.episode_id "
+            "WHERE e.work_id = 'existing-heya'"
+        ).fetchone()[0]
+    assert str(binding["provider_id"]) == "99999"
+    assert migrated_assets == 1

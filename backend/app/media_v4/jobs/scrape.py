@@ -422,6 +422,30 @@ class V4ScrapeService:
                         previous = {}
                     if isinstance(previous, dict):
                         result = _retain_successful_details(previous, result, target)
+            # 在发布 NFO/图片和写入集映射之前先冻结本 Work 的在线身份。
+            # 同一 Work 已有不同 ID 时局部降级为 local，避免错误资料先落盘，
+            # 也避免事后把 provider 行改成 local 时撞上已有 local 唯一键。
+            identity_ready = has_provider_identity
+            if identity_ready:
+                binding_media_type = (
+                    "tv" if str(target.get("work_type") or "") == "series" else "movie"
+                )
+                with self.database.connect() as conn:
+                    identity_ready = _claim_provider_binding(
+                        conn,
+                        work_id=str(job["work_id"]),
+                        provider=provider_name,
+                        media_type=binding_media_type,
+                        provider_id=provider_id,
+                    )
+                if not identity_ready:
+                    ready = False
+                    result = {
+                        **result,
+                        "metadata_state": "waiting_metadata",
+                        "reason": "当前作品保留已有在线资料，本次自动结果未覆盖它。",
+                        "reason_code": "local_identity_mismatch",
+                    }
             if mirror_root and job["work_id"] and ready:
                 publish_metadata_artifacts(
                     self.database,
@@ -486,7 +510,6 @@ class V4ScrapeService:
             }
             # 元数据尚未完整时仍保留已确认的 Provider 身份，下一次重试
             # 应直接沿用该 ID；只有身份冲突或本地结果才退回 local。
-            identity_ready = has_provider_identity
             binding_provider = provider_name if identity_ready else "local"
             binding_provider_id = provider_id if identity_ready else ""
             if cancel_requested(self.database, job_id):
@@ -517,43 +540,6 @@ class V4ScrapeService:
                         now,
                     ),
                 )
-                if identity_ready:
-                    work_row = conn.execute(
-                        "SELECT work_type FROM works WHERE work_id = ?",
-                        (job["work_id"],),
-                    ).fetchone()
-                    binding_media_type = (
-                        "tv" if str((work_row["work_type"] if work_row else "") or "") == "series" else "movie"
-                    )
-                    if not _claim_provider_binding(
-                        conn,
-                        work_id=str(job["work_id"]),
-                        provider=binding_provider,
-                        media_type=binding_media_type,
-                        provider_id=binding_provider_id,
-                    ):
-                        # 同一作品自身已有不同的确认身份。保留旧身份，当前任务
-                        # 仍成功完成，但不把可能错误的集映射写入播放链路。
-                        identity_ready = False
-                        result = {
-                            **result,
-                            "reason": "当前作品保留已有在线资料，本次自动结果未覆盖它。",
-                            "reason_code": "local_identity_mismatch",
-                        }
-                        conn.execute(
-                            """
-                            UPDATE scrape_bindings
-                            SET provider = 'local', provider_id = '', metadata_json = ?, updated_at = ?
-                            WHERE revision_id = ? AND work_id = ? AND provider = ?
-                            """,
-                            (
-                                json.dumps(result, ensure_ascii=False, sort_keys=True),
-                                now,
-                                job["revision_id"],
-                                job["work_id"],
-                                binding_provider,
-                            ),
-                        )
                 if identity_ready:
                     if clear_episode_mapping_ids:
                         conn.executemany(

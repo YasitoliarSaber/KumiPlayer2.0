@@ -108,6 +108,46 @@ def test_work_holds_live_slot_covers_the_three_stale_shapes(tmp_path):
         assert work_holds_live_slot(conn, "work-retired-work") is False
 
 
+def test_retired_source_cleanup_does_not_use_shared_provider_identity(tmp_path):
+    """共享在线 ID 不是同一作品证据，不能据此清除另一个来源的续接身份。"""
+
+    from app.media_v4.persistence.identity_lifecycle import release_retired_source_identities
+
+    database = _database(tmp_path)
+    with database.connect() as conn:
+        _seed_work(conn, "retired-shared")
+        _make_active(
+            conn,
+            "retired-shared",
+            revision_id="rev-retired-shared",
+            root_id="root-retired-shared",
+        )
+        conn.execute(
+            "INSERT INTO provider_bindings(work_id, provider, media_type, provider_id) "
+            "VALUES ('retired-shared', 'tmdb', 'tv', '12345')"
+        )
+        conn.execute(
+            "UPDATE source_roots SET retired_at = 'now' WHERE root_id = 'root-retired-shared'"
+        )
+
+        release_retired_source_identities(
+            conn,
+            "another-root",
+            "later",
+            work_keys={"series:another:tv"},
+            titles={"another"},
+        )
+
+        work = conn.execute(
+            "SELECT status, identity_key FROM works WHERE work_id = 'retired-shared'"
+        ).fetchone()
+        binding = conn.execute(
+            "SELECT provider_id FROM provider_bindings WHERE work_id = 'retired-shared'"
+        ).fetchone()
+    assert tuple(work) == ("active", "title:retired-shared")
+    assert str(binding["provider_id"]) == "12345"
+
+
 def test_claiming_a_free_identity_succeeds_and_is_idempotent(tmp_path):
     database = _database(tmp_path)
     with database.connect() as conn:
