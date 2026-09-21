@@ -248,12 +248,25 @@ def _extract_work_container(relative_path: str, source: str = "pan115") -> str:
     """
     parts = relative_path.replace("\\", "/").split("/")
     if source == "local":
-        if len(parts) >= 3 and _is_local_collection_dir(parts[0]):
-            if _looks_like_plain_season_dir(parts[1]):
-                return parts[0]
-            return parts[1]
-        if len(parts) >= 2:
-            return parts[0]
+        # 从文件向上回退到第一个"像作品"的目录：
+        # 跳过网盘挂载名/分类目录（_GENERIC_CATEGORY_NAMES 已含"夸克网盘""百度网盘"
+        # "115网盘""动画"等）、发布组目录、季/特别篇结构目录。
+        #
+        # 实测：来源根是网盘挂载名时（`夸克网盘/动画/物语系列/化物语/…`），
+        # 旧实现直接 `return parts[0]`，把挂载名当成 work_title，导致该根下
+        # **所有作品塌缩成同一个 Work**（key 全为 `title:夸克网盘:tv`），
+        # 媒体库出现多张同名同海报的卡片。
+        directories = [segment for segment in parts[:-1] if segment]
+        while directories:
+            candidate = directories[-1]
+            if (
+                not _is_generic_category_name(candidate)
+                and not _looks_like_plain_season_dir(candidate)
+                and not _looks_like_specials_dir(candidate)
+                and not _is_group_folder(candidate)
+            ):
+                return candidate
+            directories.pop()
         return ""
     if source == "baidu":
         idx = _source_work_index(parts, source)

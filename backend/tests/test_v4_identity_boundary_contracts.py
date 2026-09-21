@@ -189,5 +189,6 @@ def test_missing_identity_still_produces_local_work():
     )
     graph = MediaResolver().resolve([(_evidence(0, "动画/未知/[Group] SP01.mkv"), facts)])
 
+    # 有目录名可用时用目录名做本地身份；完全没有可用标题时才退化为 local:file:。
     assert len(graph.works) == 1
-    assert graph.works[0].work_key.startswith("local:")
+    assert graph.works[0].work_key.startswith(("local:", "title:"))
