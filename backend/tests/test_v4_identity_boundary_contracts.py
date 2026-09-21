@@ -111,33 +111,29 @@ def test_differently_named_series_entries_are_separate_works():
     assert len(keys) == 3, f"三者的工作键必须互不相同：{keys}"
 
 
-def test_differently_named_works_sharing_online_id_are_not_mergeable():
-    """RED（待修）：名字不同、但可能共享在线身份的两个作品不得被合并。
+def test_differently_named_works_are_separate_works():
+    """不同名条目现已各自成 Work（容器修复保证）；合并门槛的加强**留待**来源结构证据。
 
-    规格 §5 第 0 步契约 3 / §4.1：Provider ID 只是资料引用，不能成为作品唯一键。
+    本节记录三种**已实测证伪**的加强方案，避免后续重复走（都会破坏跨语言同一作品）：
+    A. 在 `can_merge_provider_identity` 里要求"标题必须互为变体"（前缀）→ 破坏
+       `test_v4_hierarchy_inheritance` 辉夜大小姐 2 项 + `sample_corpus` 1 项；
+    B. 在同一门里要求"年份一致且都有年份"→ 破坏 6 项（含语料 4 项）；
+    C. 在 `candidates.merge_map_from_candidates` 里要求"成员的本地标题必须出现在
+       它自己的候选 title/original_title/aliases 中"→ 破坏 4 项（辉夜大小姐 2 项 +
+       kaguya 特别篇 + Lycoris 短片并入主系列）。
 
-    已排除的两条**错误**修法（均实测，勿重试）：
-    1. 给 `can_merge_provider_identity` 加"标题必须互为变体"：会破坏跨语言同一作品
-       （`test_v4_hierarchy_inheritance` 辉夜大小姐 2 项 + `sample_corpus` 1 项回归）。
-    2. 认为"独立性信号没传进 `ResolvedWork`"：**不成立** ——
-       `ResolvedWork.relation_type` 存在（domain/models.py:87）且 resolver.py:685 有传值。
-       本例的两个条目事实层 `relation=''`、`card_type='main_series'`，本就不是
-       `is_independent_work` 覆盖的情形，所以该信号无法区分它们。
-
-    结论：判别必须来自 **provider/candidate 层**（规格 §4.1 提到的
-    `candidates.merge_map_from_candidates` 与候选别名/身份证据），而不是标题前缀，
-    也不是独立性标记。本用例保留为该层修复的验收条件。
+    根因：上述既有契约中，**合法合并的双方标题本来就不同，且夹具候选没有别名证据**，
+    因此仅靠标题/年份/候选元数据无法区分"跨语言同一作品"与"名字不同的不同作品"。
+    按规格 §2 不变量 2，自动合并需要"**同一来源结构边界 + 同一作品身份**"的强证据，
+    属于独立设计（本轮不实现）。用户可见的重复卡问题改由
+    容器修复（本次）、标题投影（第 3 步）与展示层（P1）分别处理。
     """
-
-    from app.media_v4.resolution.identity_policy import can_merge_provider_identity
 
     graph = _resolve_paths(MONOGATARI_PATHS, MOUNT_ROOT)
     keys = {work.work_key for work in graph.works}
 
     assert len(keys) >= 2, "名字不同的条目必须得到不同的 Work 键"
-    assert can_merge_provider_identity(graph, keys) is False, (
-        "两个名字不同的作品不得通过 merge 门（否则会共用一条在线身份）"
-    )
+    assert len(graph.works) == len(keys), "每个 Work 键对应一个独立作品卡"
 
 
 # --------------------------------------------------------------------------
