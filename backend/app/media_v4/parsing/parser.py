@@ -578,23 +578,24 @@ class V4Parser:
         if episode_match and episode_match.group(2):
             episode_range = (int(episode_match.group(1)[1:]), int(episode_match.group(2)))
 
+        # 中文命名的集号**优先**于 `_ABSOLUTE_TOKEN` 的括号/尾随数字形态。
+        # 实测：`[Group] 121热斗！大型庆典(2)!!.mp4` 会被 `_ABSOLUTE_TOKEN` 的
+        # `(2)` 抢先判成"绝对集号 2"，而正确集号是开头的 121（联网核对：该系列共 191 集）。
+        # 中文规则只在前导数字（2–4 位 + 中文）或 `第N` 形态成立时命中，
+        # 因此既有 `[13]` / `EP13` / `- 13` / 尾随 ` 13` 等绝对集号完全不受影响
+        # （test_v4_parser_golden.py 有 golden 断言保护）。
+        cjk_episode = None
         absolute_candidate = None
         if not episode_match:
-            absolute_match = _ABSOLUTE_TOKEN.search(PurePosixPath(filename).stem)
-            if absolute_match:
-                raw_absolute = next(value for value in absolute_match.groupdict().values() if value)
-                absolute_candidate = int(raw_absolute)
-                episode_token = absolute_match.group(0).strip()
-
-        # 中文命名的集号（**追加**识别，不改变既有拉丁 SxxExx / 绝对集号规则）：
-        #   `第002集.mp4`、`第 12 话`、`146栎树林，寻找大葱鸭.MP4`（前导数字 + 中文标题）
-        # 实测（OpenList 中文库如"宝可梦国语三/无印篇"）：这类命名没有 SxxExx，
-        # 会让整部作品折叠成"电影 · 1 集 · N 个文件"，275 个文件只剩 1 集。
-        cjk_episode = None
-        if not episode_match and absolute_candidate is None:
             cjk_episode = _cjk_episode_number(PurePosixPath(filename).stem)
             if cjk_episode is not None:
                 episode_token = str(cjk_episode)
+            else:
+                absolute_match = _ABSOLUTE_TOKEN.search(PurePosixPath(filename).stem)
+                if absolute_match:
+                    raw_absolute = next(value for value in absolute_match.groupdict().values() if value)
+                    absolute_candidate = int(raw_absolute)
+                    episode_token = absolute_match.group(0).strip()
 
         group_type = guess.group_type or "unknown"
         resolved_media_type = guess.media_type
