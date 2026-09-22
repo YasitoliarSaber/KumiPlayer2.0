@@ -182,6 +182,45 @@ def test_default_metadata_provider_maps_specials_by_title_not_local_number(monke
     }]
 
 
+def test_seasonless_local_episodes_are_not_forced_into_an_online_season():
+    """规划方要求：未分季的本地集不得被硬套进任意在线季度。
+
+    实测场景（用户库《宝可梦》各篇章）：在线条目有多个常规季，而本地导入是**未分季**
+    的一整串集号（例如第 155 集）。此时没有任何证据证明"第 155 集"属于哪个在线季，
+    因此必须**不做绑定**（保留本地标题），而不是塞进 Season 1，更不能凭空造季号。
+    """
+
+    from app.media_v4.jobs.metadata import _build_tv_episode_mappings
+
+    class FakeClient:
+        def get_tv_season_episodes(self, provider_id, season_number):
+            raise AssertionError("未分季场景不得请求任何在线季")
+
+    mappings = _build_tv_episode_mappings(
+        FakeClient(),
+        42,
+        {"episodes": [
+            {
+                "episode_id": "ep-155",
+                "season_id": "season-local",
+                "local_season_number": None,
+                "local_episode_number": 155,
+                "provider_season_number": None,
+                "display_title": "盆才怪与忍者学园!!",
+                "season_kind": "regular",
+                "episode_kind": "regular",
+            },
+        ]},
+        work_detail={"seasons": [
+            {"season_number": 1},
+            {"season_number": 2},
+            {"season_number": 3},
+        ]},
+    )
+
+    assert mappings == [], f"未分季集不得产生任何季集绑定，实际 {mappings}"
+
+
 def test_special_mapping_uses_remote_title_and_season_zero_even_with_stale_season_mapping():
     from app.media_v4.jobs.metadata import _build_tv_episode_mappings
 
