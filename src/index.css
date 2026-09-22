@@ -13269,21 +13269,22 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
  * 必须带 !important：griffel 的原子规则在运行时注入，注入时机晚于本文件；
  * 实测浮层规则特异性与之打平（都是两个类），不加 !important 会被 griffel 覆盖，
  * 兜底失效（按钮规则因特异性更高而侥幸生效，浮层则不会）。
+ *
+ * 浮层规则**不能限定在 .player-tuning-page 内**：实测 Fluent 把 Listbox Portal 到了
+ * document.body（祖先链为 Listbox → FluentProvider → BODY → HTML），它不在本页
+ * 容器里，任何页面作用域的写法都匹配不到。
+ *
+ * 只覆盖"底色"这一条属性：正常状态下取值与 Fluent 完全相同（token 先命中），
+ * 因此不会带来任何视觉变化（早期版本还加了 border/shadow，实测会把浮层边框从
+ * 0px 变成 1px，属于无谓的外观改动，已移除）。
  */
-.player-tuning-page .fui-Dropdown__listbox,
-.player-tuning-page [role='listbox'] {
+.fui-Dropdown__listbox,
+[role='listbox'] {
   background-color: var(--colorNeutralBackground1, var(--surface-raised, #ffffff)) !important;
-  border: 1px solid var(--colorNeutralStroke1, var(--border, #d0d0d0)) !important;
-  box-shadow: var(--shadow-float, 0 8px 18px rgb(0 0 0 / 18%)) !important;
 }
 .player-tuning-actions .fui-Button {
   background-color: var(--colorBrandBackground, var(--accent-strong)) !important;
   color: var(--colorNeutralForegroundOnBrand, #ffffff) !important;
-  border: 1px solid var(--colorBrandBackground, var(--accent-strong)) !important;
-  border-radius: 6px;
-  min-height: 32px;
-  padding: 0 14px;
-  font-weight: 650;
 }
 /* 外部播放器路径：长 Windows 路径必须能完整显示，不能被压窄。 */
 .player-tuning-path-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -14544,4 +14545,43 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
   font-size: 12px !important;
   line-height: 1.4 !important;
   color: var(--text-muted);
+}
+
+/* 弹窗内的本地标题与文件名样本（用户反馈：看不到文件名无法判断）。 */
+.media-v4-metadata-dialog-local-title {
+  margin: 0 !important;
+  font-size: 13px !important;
+  color: var(--text-muted) !important;
+}
+
+.media-v4-metadata-dialog-files {
+  display: grid !important;
+  gap: 6px !important;
+  padding: 10px 12px !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 8px !important;
+  background: var(--surface-soft) !important;
+}
+
+.media-v4-metadata-dialog-files-title {
+  font-size: 12px !important;
+  color: var(--text-muted) !important;
+}
+
+.media-v4-metadata-dialog-files ul {
+  display: grid !important;
+  gap: 4px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  list-style: none !important;
+  max-height: 132px !important;
+  overflow: auto !important;
+}
+
+.media-v4-metadata-dialog-files li {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
+  font-size: 12px !important;
+  line-height: 1.45 !important;
+  overflow-wrap: anywhere !important;
+  color: var(--text) !important;
 }

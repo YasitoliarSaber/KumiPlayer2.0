@@ -291,7 +291,7 @@ export default function MediaManagementPage() {
   const [jobs, setJobs] = useState<V4Job[]>([])
   const [busy, setBusy] = useState<'scan' | 'preview' | 'override' | 'confirm' | ''>('')
   const [retryingJobId, setRetryingJobId] = useState('')
-  const [metadataRecovery, setMetadataRecovery] = useState<{ workId: string; workTitle: string; candidates: MetadataRecoveryCandidate[] } | null>(null)
+  const [metadataRecovery, setMetadataRecovery] = useState<{ workId: string; workTitle: string; candidates: MetadataRecoveryCandidate[]; fileNames: string[] } | null>(null)
   const [metadataRecoveryQuery, setMetadataRecoveryQuery] = useState('')
   const [metadataRecoveryBusy, setMetadataRecoveryBusy] = useState('')
   const [scanTask, setScanTask] = useState<DurableScanTask | null>(null)
@@ -1022,7 +1022,22 @@ export default function MediaManagementPage() {
     setError('')
     try {
       const result = await mediaV4Api.metadataSearch({ work_id: workId, query })
-      setMetadataRecovery({ workId, workTitle, candidates: result.candidates })
+      // 用户反馈：只看到"12 个文件"根本无法判断，必须能看到**文件名**；
+      // 同时把本地标题一并展示，便于对照候选的判定理由。
+      let fileNames: string[] = []
+      const revisionId = executeProgress?.revision_id || ''
+      if (revisionId) {
+        try {
+          const detail = await mediaV4Api.workExecutionDetail(revisionId, workId)
+          fileNames = (detail.episodes || [])
+            .map((episode) => episode.file_name || '')
+            .filter((name) => name)
+            .slice(0, 8)
+        } catch {
+          fileNames = []
+        }
+      }
+      setMetadataRecovery({ workId, workTitle, candidates: result.candidates, fileNames })
       setMetadataRecoveryQuery(query || workTitle)
     } catch (cause) {
       setError(userFacingPageError(cause, '无法搜索在线作品候选'))
@@ -1606,6 +1621,19 @@ export default function MediaManagementPage() {
                     重新搜索
                   </Button>
                 </div>
+                <p className="media-v4-metadata-dialog-local-title">本地标题：{metadataRecovery.workTitle}</p>
+                {metadataRecovery.fileNames.length > 0 && (
+                  <div className="media-v4-metadata-dialog-files">
+                    <div className="media-v4-metadata-dialog-files-title">
+                      该作品的本地文件（显示 {metadataRecovery.fileNames.length} 个）
+                    </div>
+                    <ul>
+                      {metadataRecovery.fileNames.map((name) => (
+                        <li key={name} title={name}>{name}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 {/* 用户反馈："重新搜索"没反应 —— 失败原因此前只写在页面顶部、被弹窗挡住。
                     现在直接显示在弹窗内。 */}
                 {error && (
