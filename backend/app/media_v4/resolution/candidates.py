@@ -187,6 +187,35 @@ def _query_variants(title: str) -> list[str]:
     return variants
 
 
+def _retry_titles_from_candidates(
+    candidates: list[WorkCandidate],
+    queries: list[str],
+    *,
+    limit: int = 3,
+) -> list[str]:
+    """从首轮候选里挑出"与本地查询词不同"的标题，用于第二轮回搜。
+
+    业界做法（Jellyfin/Emby "prefer alternate titles"）：本地名与在线名不一致时，
+    用**在线条目的标题/原名**再搜一次。实测：本地是罗马音
+    `Kimetsu no Yaiba Mugen Ressha-hen`，首轮搜到 `鬼灭之刃：无限列车篇`
+    却因"名称不等值"拿不到分（候选分 23）；回搜同名条目即可完成等值。
+    """
+
+    known = {_normalize_title(value) for value in queries}
+    retry: list[str] = []
+    for candidate in candidates:
+        for value in (candidate.title, candidate.original_title, *candidate.aliases):
+            text = (value or "").strip()
+            normalized = _normalize_title(text)
+            if len(text) < 2 or not normalized or normalized in known:
+                continue
+            known.add(normalized)
+            retry.append(text)
+            if len(retry) >= limit:
+                return retry
+    return retry
+
+
 def _with_series_search_context(
     identity_titles: list[str],
     work: ResolvedWork,
@@ -513,6 +542,24 @@ def plan_work_candidates(
                 searched = search(work.work_key, queries, work.year, work.media_type) or []
             except Exception:
                 searched = []
+        # 第二轮回搜（"prefer alternate titles"）：首轮候选若带着与本地名不同的标题，
+        # 用候选自己的标题/原名再搜一次，并把它们并入查询词，使"名称等值"能够成立。
+        # 只影响检索；身份、别名落库与合并判定都不使用这些回搜标题。
+        retry_titles = _retry_titles_from_candidates(searched, queries)
+        if retry_titles:
+            try:
+                extra = search(work.work_key, retry_titles, work.year, work.media_type) or []
+            except Exception:
+                extra = []
+            known_keys = {
+                (item.provider, item.media_type, item.provider_id) for item in searched
+            }
+            for item in extra:
+                key = (item.provider, item.media_type, item.provider_id)
+                if key not in known_keys:
+                    known_keys.add(key)
+                    searched.append(item)
+            queries.extend(retry_titles)
         candidates: dict[tuple[str, str, str], WorkCandidate] = {**confirmed}
         # D2 采用顺序：既有核验绑定是最高优先身份。在线候选与核验身份不同
         # 时必须降级（不得并列 high 制造假歧义——独立失败项 candidate_ambiguous
