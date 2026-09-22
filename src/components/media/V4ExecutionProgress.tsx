@@ -129,7 +129,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
     succeeded: '镜像已完成', failed: '镜像失败', running: '正在生成镜像', queued: '等待生成镜像', cancelled: '镜像已取消',
   }
   const metadataStateLabels: Record<string, string> = {
-    ready: '媒体信息已就绪', waiting_review: '需要人工确认作品', waiting_metadata: '缺少在线资料配置',
+    ready: '媒体信息已就绪', waiting_review: '使用本地信息，可补齐在线资料', waiting_metadata: '缺少在线资料配置',
     source_unavailable: '在线资料服务暂不可用', failed: '获取媒体信息失败',
   }
   const loadedDetail = detail?.status === 'loaded' ? detail.detail : null
@@ -199,7 +199,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
           )}
           {unit.overall_status === 'needs_attention' && <>
             <div className="media-v4-job-error" role="status">
-              {unit.metadata_reason || '在线媒体信息没有唯一匹配，需要确认正确作品后继续。'}
+              {unit.metadata_reason || '在线资料尚未补齐，可以选择对应作品，也可以稍后处理。'}
             </div>
             {unit.metadata_recovery_hint && <div className="media-v4-work-progress-hint">{unit.metadata_recovery_hint}</div>}
             {['retry_metadata', 'check_settings'].includes(unit.metadata_recovery_action ?? '') && onRetryMetadata && (
@@ -287,7 +287,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                         <span>
                           {candidateDecisionLabel(scrape.candidate_decision.decision)}
                           {scrape.candidate_decision.selected_score != null
-                            ? ` · 匹配度 ${Math.round(scrape.candidate_decision.selected_score)}`
+                            ? ` · 候选分 ${Math.round(scrape.candidate_decision.selected_score)}`
                             : ''}
                         </span>
                         {scrape.candidate_decision.reason && <span>{scrape.candidate_decision.reason}</span>}
@@ -297,7 +297,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                           {scrape.candidate_decision.ranked_candidates.slice(0, 5).map((candidate) => (
                             <li key={`${candidate.provider}:${candidate.provider_id}`}>
                               <span>{candidate.title || candidate.original_title || '未命名候选'}</span>
-                              {candidate.score != null && <span>匹配度 {Math.round(candidate.score)}</span>}
+                              {candidate.score != null && <span>候选分 {Math.round(candidate.score)}</span>}
                             </li>
                           ))}
                         </ul>
@@ -345,7 +345,10 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                         <span className="media-v4-work-detail-episode-code">
                           {episode.season_kind === 'special'
                             ? episode.episode_number == null ? '特别篇（未编号）' : `SP${String(episode.episode_number).padStart(2, '0')}`
-                            : `S${String(episode.season_number).padStart(2, '0')}E${episode.episode_number == null ? '?' : String(episode.episode_number).padStart(2, '0')}`}
+                            : episode.season_number == null || episode.season_number <= 0
+                              // 未分季不等于第 0 季，也不能补成第 1 季：直接按集号显示。
+                              ? episode.episode_number == null ? '未分季（未编号）' : `第 ${episode.episode_number} 集`
+                              : `S${String(episode.season_number).padStart(2, '0')}E${episode.episode_number == null ? '?' : String(episode.episode_number).padStart(2, '0')}`}
                         </span>
                         <div className="media-v4-work-detail-episode-content">
                           <strong className="media-v4-work-detail-episode-name">{episode.scraped_title || episode.display_title || '未命名'}</strong>

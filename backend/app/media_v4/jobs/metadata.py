@@ -692,7 +692,13 @@ def default_metadata_provider(target: dict) -> dict:
                     review_reason = (
                         "在线资料中没有找到候选作品，请检查作品标题后重试"
                         if not ranked
-                        else "在线作品候选不足以自动确认，需要人工确认后再继续"
+                        else (
+                            # "候选分"不是匹配百分比（类型/动画域会先给基础分，名称可能得 0），
+                            # 而且只有 1 个候选时也不能说成"多个可能作品"。
+                            "只找到 1 个候选作品，但缺少可信的同名或别名证据，需要人工确认"
+                            if len(ranked) == 1
+                            else "在线作品候选不足以自动确认，需要人工确认后再继续"
+                        )
                     )
                     return _local_state(
                         "waiting_review",

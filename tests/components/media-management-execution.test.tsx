@@ -552,7 +552,7 @@ test('展开已完成作品后读取并显示作品信息、镜像结果与剧�
   expect(screen.getByText('第 1 季 · 1 集')).toBeVisible()
   expect(screen.getByText('刮削结果')).toBeVisible()
   expect(screen.getByText('这是作品级刮削简介。')).toBeVisible()
-  expect(screen.getByText(/自动采用 · 匹配度 98/)).toBeVisible()
+  expect(screen.getByText(/自动采用 · 候选分 98/)).toBeVisible()
   expect(fetchWorkDetail).toHaveBeenCalledWith('rev-exec', 'w-done')
   // 一条完整集名 + 季集号 + 阶段结果。
   expect(screen.getByText('远程第一集全名')).toBeVisible()

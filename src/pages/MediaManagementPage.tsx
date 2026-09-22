@@ -1599,7 +1599,7 @@ export default function MediaManagementPage() {
             <DialogBody>
               <DialogTitle>确认“{metadataRecovery.workTitle}”的在线作品</DialogTitle>
               <DialogContent>
-                <p>系统没有得到唯一匹配。请从候选中选择正确作品；确认后会立即继续获取媒体信息。</p>
+                <p>搜索并选择对应作品，即可补齐在线资料。没有合适结果时可以暂不处理，本地信息会保留。</p>
                 <div className="media-v4-metadata-search-row">
                   <Input aria-label="搜索作品名称" value={metadataRecoveryQuery} onChange={(_, data) => setMetadataRecoveryQuery(data.value)} />
                   <Button appearance="secondary" disabled={metadataRecoveryBusy !== '' || !metadataRecoveryQuery.trim()} onClick={() => { void searchMetadataRecovery(metadataRecovery.workId, metadataRecoveryQuery.trim()) }}>
@@ -1618,7 +1618,7 @@ export default function MediaManagementPage() {
                       </span>
                       {(candidate.score != null || (candidate.reasons?.length ?? 0) > 0) && (
                         <span className="media-v4-metadata-candidate-evidence">
-                          {candidate.score != null && <span className="media-v4-metadata-candidate-score">匹配度 {Math.round(candidate.score)}</span>}
+                          {candidate.score != null && <span className="media-v4-metadata-candidate-score">候选分 {Math.round(candidate.score)}</span>}
                           {(candidate.reasons ?? []).slice(0, 2).map((reason) => <span key={reason}>{reason}</span>)}
                         </span>
                       )}
