@@ -153,4 +153,38 @@ def history(limit: int = 50, work_id: str | None = None):
             "SELECT * FROM playback_history " + where + " ORDER BY played_at DESC, event_id LIMIT ?",
             (*params, bounded),
         ).fetchall()
-    return {"items": [dict(row) for row in rows], "limit": bounded}
+        # 用户反馈："最近播放"只显示四个字，看不到**哪一集、进度、什么时候**。
+        # 播放历史行只存事件与快照（`season_snapshot`/`episode_snapshot`），
+        # 进度在 `playback_progress` 里，因此这里联表补全。取法是防御式的：
+        # 该表结构变化或缺表都不影响历史列表本身。
+        progress_by_key: dict[tuple[str, str, str], dict] = {}
+        try:
+            for row in conn.execute("SELECT * FROM playback_progress").fetchall():
+                data = dict(row)
+                key = (
+                    str(data.get("work_id") or ""),
+                    str(data.get("episode_id") or ""),
+                    str(data.get("asset_id") or ""),
+                )
+                progress_by_key[key] = data
+        except Exception:  # noqa: BLE001 - 历史列表不得因进度表问题整体失败
+            progress_by_key = {}
+    items: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        data = progress_by_key.get(
+            (
+                str(item.get("work_id") or ""),
+                str(item.get("episode_id") or ""),
+                str(item.get("asset_id") or ""),
+            )
+        )
+        if data:
+            item["position"] = data.get("position", 0)
+            item["duration"] = data.get("duration", 0)
+            item["completed"] = bool(data.get("completed", 0))
+            item["updated_at"] = str(data.get("updated_at") or item.get("played_at") or "")
+        else:
+            item["updated_at"] = str(item.get("played_at") or "")
+        items.append(item)
+    return {"items": items, "limit": bounded}

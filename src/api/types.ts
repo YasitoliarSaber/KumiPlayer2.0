@@ -176,6 +176,10 @@ export interface PlaybackHistoryItem {
   episode_title?: string
   season_number?: number | null
   episode_number?: number | null
+  // 播放历史行自带的快照（后端 `/history` 直接返回这些字段）。
+  season_snapshot?: string
+  episode_snapshot?: string
+  title_snapshot?: string
 }
 
 // V4 播放适配器状态。当前桌面播放器会话不由后端持久化。

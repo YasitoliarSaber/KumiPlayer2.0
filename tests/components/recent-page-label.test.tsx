@@ -42,6 +42,22 @@ describe('「最近播放」标签（规格 §12）', () => {
     expect(label).toContain('今天 21:20')
   })
 
+  it('使用后端 /history 的快照字段（真实返回形状）', () => {
+    const label = recentEpisodeLabel(
+      item({
+        season_number: null,
+        episode_number: null,
+        episode_title: undefined,
+        season_snapshot: '第 1 季',
+        episode_snapshot: '第 3 集',
+      }),
+      NOW,
+    )
+    expect(label).toContain('第 1 季 · 第 3 集')
+    expect(label).toContain('12:34 / 24:00')
+    expect(label).not.toBe('最近播放')
+  })
+
   it('已看完与无进度分别给出明确文案', () => {
     expect(recentProgressLabel(item({ completed: true }))).toBe('已看完')
     expect(recentProgressLabel(item({ position: 0 }))).toBe('')

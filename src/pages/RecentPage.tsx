@@ -134,9 +134,16 @@ export function recentTimeLabel(value: string, now: Date = new Date()) {
 export function recentEpisodeLabel(item: PlaybackHistoryItem, now: Date = new Date()) {
   const episodeNumber = Number(item.episode_number ?? 0);
   const seasonNumber = Number(item.season_number ?? 0);
+  // 后端 `/history` 返回的是**快照**字段（`episode_snapshot`/`season_snapshot`）；
+  // 数字集号只有详情页补充时才存在。此前只读数字，导致永远退化成"最近播放"。
+  const episodeSnapshot = (item.episode_snapshot || '').trim();
+  const seasonSnapshot = (item.season_snapshot || '').trim();
+  const snapshotLabel = [seasonSnapshot, episodeSnapshot].filter(Boolean).join(' · ');
   const base = episodeNumber > 0
     ? `${seasonNumber > 0 ? `第 ${seasonNumber} 季 · ` : ''}最近播放第 ${episodeNumber} 集`
-    : item.episode_title ? `最近播放：${item.episode_title}` : '最近播放';
+    : snapshotLabel
+      ? `最近播放：${snapshotLabel}`
+      : item.episode_title ? `最近播放：${item.episode_title}` : '最近播放';
   return [base, recentProgressLabel(item), recentTimeLabel(item.updated_at, now)]
     .filter((part) => Boolean(part))
     .join(' · ');
