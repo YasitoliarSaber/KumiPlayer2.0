@@ -406,3 +406,41 @@ def test_queued_jobs_do_not_block_source_deletion(tmp_path):
             "SELECT status FROM jobs WHERE job_id = 'job-queued'"
         ).fetchone()["status"]
     assert str(queued_status) == "cancelled", "排队作业必须让路并被取消"
+
+
+def test_second_deletion_after_succeeded_does_not_hit_unique_key(tmp_path):
+    """重新导入后再删除不得撞 `jobs.idempotency_key` 的 UNIQUE 约束。
+
+    实测（用户库，只读核对）：后端日志里是
+    `sqlite3.IntegrityError: UNIQUE constraint failed: jobs.idempotency_key` ——
+    旧幂等键只含 root_id，而已完成的删除作业行不会消失，于是第二次删除直接 500，
+    用户看到"点了没反应"。修复后键按 **revision** 唯一：同一次导入仍去重，
+    新导入（新 revision）可以重新删除。
+    """
+
+    from app.media_v4.maintenance.source_deletion import enqueue_source_deletion
+
+    database, _mirror = _two_sources(tmp_path)
+
+    def _mark_succeeded(job_id: str) -> None:
+        with database.connect() as conn:
+            conn.execute(
+                "UPDATE jobs SET status = 'succeeded' WHERE job_id = ?", (job_id,)
+            )
+
+    # 第一次删除：入队后置为已完成（模拟真实历史作业行仍然存在）。
+    first = enqueue_source_deletion(database, "root-a")
+    _mark_succeeded(first)
+
+    # 再点一次：必须能再次入队，绝不能抛 IntegrityError（这就是用户遇到的 500）。
+    second = enqueue_source_deletion(database, "root-a")
+
+    assert second.startswith("job_")
+    with database.connect() as conn:
+        keys = [
+            str(row["idempotency_key"])
+            for row in conn.execute(
+                "SELECT idempotency_key FROM jobs WHERE job_type = 'delete_source_library'"
+            )
+        ]
+    assert len(keys) == len(set(keys)), f"幂等键必须唯一，实际 {keys}"

@@ -388,14 +388,21 @@ def enqueue_source_deletion(database, root_id: str) -> str:
         ).fetchone()
         if revision is None:
             raise ValueError("该来源还没有已确认的导入，无需按来源删除媒体库")
-        idempotency_key = f"delete_source_library:{root_id}"
+        # 幂等键必须**每次尝试都唯一**：jobs.idempotency_key 有 UNIQUE 约束，而历史作业行
+        # （包括已 succeeded 的删除）会一直留着。此前键只含 root_id（后又试过 root+revision），
+        # 重新删除时都会直接撞 UNIQUE → 500，用户看到的就是"点了没反应"
+        # （实测 backend-stderr.log: sqlite3.IntegrityError: UNIQUE constraint failed:
+        # jobs.idempotency_key）。
+        # "在途复用"改为按 revision 查询在途作业，不再依赖键字符串比较。
         existing = conn.execute(
-            "SELECT job_id FROM jobs WHERE idempotency_key = ? AND status IN ('queued', 'running')",
-            (idempotency_key,),
+            "SELECT job_id FROM jobs WHERE job_type = 'delete_source_library' "
+            "AND revision_id = ? AND status IN ('queued', 'running') LIMIT 1",
+            (str(revision["revision_id"]),),
         ).fetchone()
         if existing is not None:
             return str(existing["job_id"])
         job_id = "job_" + uuid.uuid4().hex
+        idempotency_key = f"delete_source_library:{root_id}:{revision['revision_id']}:{job_id}"
         conn.execute(
             "INSERT INTO jobs(job_id, job_type, revision_id, work_id, idempotency_key, status, "
             "created_at, updated_at) VALUES (?, 'delete_source_library', ?, '', ?, 'queued', ?, ?)",

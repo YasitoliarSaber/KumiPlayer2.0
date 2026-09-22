@@ -1675,6 +1675,13 @@ export default function MediaManagementPage() {
                           {sourceDeletionPreview.blockers.length > 0 && (
                             <p role="alert">暂时无法删除：{sourceDeletionPreview.blockers.join('；')}</p>
                           )}
+                          {/* 失败原因必须显示在对话框里：此前错误只写到页面顶部，被模态框挡住，
+                              用户看到的就是"点了没反应"（实测后端返回 500 时正是如此）。 */}
+                          {error && (
+                            <p role="alert" className="media-v4-source-card-dialog-error">
+                              删除未完成：{error}
+                            </p>
+                          )}
                         </div>
                       )}
                     </>
