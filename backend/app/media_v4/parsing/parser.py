@@ -288,7 +288,10 @@ def _cjk_episode_number(stem: str) -> int | None:
         value = int(match.group(1))
         if 0 < value <= 9999:
             return value
-    match = _CJK_LEADING_EPISODE.match(stem or "")
+    # 去掉开头的发布组/标签块（`[Group]`、`【组】`、`{组}`）后再找前导数字：
+    # 实测 `[Group] 121热斗！大型庆典(2)!!.mp4` 因前缀而未被识别。
+    stripped = re.sub(r"^(?:\[[^\]]*\]|【[^】]*】|\{[^}]*\})\s*", "", stem or "")
+    match = _CJK_LEADING_EPISODE.match(stripped)
     if match:
         value = int(match.group(1))
         if 0 < value <= 999:

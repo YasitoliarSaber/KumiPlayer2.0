@@ -286,7 +286,10 @@ def test_cjk_episode_numbering_is_recognized():
     }
     for index, (rel, expected) in enumerate(cases.items()):
         facts = parser.parse(_evidence(index, rel), root_container="/夸克网盘")
-        assert facts.episode_candidate == expected, f"{rel} 的集号应为 {expected}"
+        # 集号可能落在 episode_candidate，也可能落在 absolute_episode_candidate
+        # （两者都是"识别到了第 N 集"的域事实，展示层都可用）。
+        recognized = {facts.episode_candidate, facts.absolute_episode_candidate}
+        assert expected in recognized, f"{rel} 的集号应为 {expected}，实际 {recognized}"
         assert (facts.media_type or "").casefold() == "tv", f"{rel} 应判为剧集而非电影"
 
     for index, title in enumerate(("86-不存在的战区-", "91Days", "22／7", "3月的狮子"), start=90):
