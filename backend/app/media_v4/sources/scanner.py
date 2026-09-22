@@ -416,6 +416,35 @@ def _tree_relative_paths(text: str, *, provider: str = "") -> list[tuple[str, st
     return results
 
 
+def collapse_adjacent_duplicate_segments(path: str) -> str:
+    """折叠路径中**相邻且同名**的重复段：`…\\115网盘\\动画\\动画\\作品` → `…\\115网盘\\动画\\作品`。
+
+    用户实测（**第二次**出现，且重导后仍在）：配置里保存的来源根本身就是
+    `K:\\115网盘\\动画\\动画`（历史 bug 把错误值持久化了），于是 `root + relative`
+    继续产出重复层。这里做成**幂等规则**：无论重复来自配置、拼接还是相对路径，
+    相邻同名段一律折叠为一段（大小写不敏感、Windows 与 POSIX 分隔符都支持）。
+    路径不含相邻重复段时**完全不变**。
+    """
+
+    text = path or ""
+    if not text:
+        return text
+    separator = "\\" if "\\" in text else "/"
+    parts = [part for part in text.replace("\\", "/").split("/") if part]
+    collapsed: list[str] = []
+    for part in parts:
+        if collapsed and collapsed[-1].casefold() == part.casefold():
+            continue
+        collapsed.append(part)
+    if not collapsed:
+        return text
+    # 保留 Windows 盘符写法（`K:\…`）与 POSIX 根（`/…`）。
+    prefix = ""
+    if text[:1] in {"\\", "/"}:
+        prefix = separator
+    return prefix + separator.join(collapsed)
+
+
 def _strip_selected_root_prefix(relative: str, source_root: str) -> str:
     """相对路径若以"导入时选中的根目录名"开头，就剥掉它。
 
@@ -474,6 +503,9 @@ def build_directory_tree_evidence(
             for part in PurePosixPath(relative).parts:
                 locator_path /= part
             locator = str(locator_path)
+        # 幂等护栏：无论重复来自配置的来源根、拼接还是相对路径，最终路径都不得含
+        # 相邻同名段（用户实测 `K:\115网盘\动画\动画\…`，第二次出现仍未消失）。
+        locator = collapse_adjacent_duplicate_segments(locator)
         item = to_source_evidence(
             SourceEntry(
                 root_id=root_id,
