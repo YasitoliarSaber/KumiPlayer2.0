@@ -354,6 +354,48 @@ def test_cjk_episode_title_is_filled_without_overwriting():
     )
 
 
+def test_search_queries_include_parent_series_context():
+    """#1：检索词必须带父目录（系列/合集）上下文，但身份边界不得被污染。
+
+    实测（用户真实库）：`宝可梦国语三/超世代/155盆才怪与忍者学园!!.mp4` 的查询词
+    只有"超世代"，而在线库里叫"宝可梦"，名称匹配拿不到分。规划方要求：
+    **本地仍各自成卡，搜索可以使用父目录上下文，但父系列名不得成为子作品别名或合并依据**。
+    """
+
+    from app.media_v4.domain.models import ResolvedWork
+    from app.media_v4.resolution.candidates import (
+        build_query_inputs,
+        work_identity_title_inputs,
+    )
+
+    parser = V4Parser()
+    rel = "夸克网盘/动画/宝可梦国语三/超世代/155盆才怪与忍者学园!!.mp4"
+    evidence = _evidence(0, rel)
+    facts = parser.parse(evidence, root_container="/夸克网盘")
+    work = ResolvedWork(
+        work_key="title:超世代::tv",
+        preferred_title="超世代",
+        year=None,
+        media_type="tv",
+        source_evidence_ids=(evidence.evidence_id,),
+        card_type="main_series",
+        show_type="anime_series",
+        series_group="超世代",
+        relation_type="",
+    )
+
+    queries = build_query_inputs(work, [(evidence, facts)])
+    assert queries[0] == "超世代", "主标题必须留在第一位，不能被上下文挤出"
+    assert any("宝可梦" in query and "超世代" in query for query in queries), (
+        f"检索词应包含父目录上下文，实际 {queries}"
+    )
+    # 身份边界不受影响：父系列名不得进入身份标题列表。
+    identity_titles = work_identity_title_inputs(work, [facts])
+    assert all("宝可梦" not in title for title in identity_titles), (
+        f"父系列名不得污染身份边界，实际 {identity_titles}"
+    )
+
+
 def test_missing_identity_still_produces_local_work():
     """GREEN：没有身份线索时仍必须生成本地 Work（阶段 1 的既有契约）。"""
 

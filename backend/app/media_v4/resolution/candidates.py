@@ -119,7 +119,65 @@ def build_query_inputs(
         ]
     else:
         related = related_facts
-    return work_identity_title_inputs(work, related)[:8]
+    return _with_series_search_context(
+        work_identity_title_inputs(work, related), work, entries, related
+    )[:8]
+
+
+def _with_series_search_context(
+    identity_titles: list[str],
+    work: ResolvedWork,
+    entries: list[tuple[SourceEvidence, ParsedFacts]],
+    related: list[ParsedFacts],
+) -> list[str]:
+    """给**检索词**补父目录（系列/合集）上下文。
+
+    实测（用户真实库 `宝可梦国语三/超世代/155盆才怪与忍者学园!!.mp4`）：查询词只有
+    "超世代"，而在线库里这部作品叫"宝可梦"，名称匹配因此拿不到任何分。
+
+    边界（规格 §2 不变量 3，本地身份与在线资料分层）：
+    - 只影响**检索词**，不改 `work_identity_title_inputs()` 返回的身份边界；
+    - 父系列名不得写入别名、不得作为合并依据、不得升级为子作品身份；
+    - 组合词插在主标题之后，主标题始终留在第一位（不被挤出查询额度）。
+    """
+
+    from app.media_v4.generic_container import is_generic_container_title
+
+    if not identity_titles:
+        return identity_titles
+    related_ids = {facts.evidence_id for facts in related}
+    parents: list[str] = []
+    for evidence, _facts in entries:
+        if evidence.evidence_id not in related_ids:
+            continue
+        parts = [
+            part for part in evidence.relative_path.replace("\\", "/").split("/") if part
+        ][:-1]
+        # 作品容器是文件所在目录（最后一段），它上面的一段才是系列/合集目录。
+        if len(parts) < 2:
+            continue
+        parent = parts[-2].strip()
+        if not parent or is_generic_container_title(parent):
+            continue
+        if parent not in parents:
+            parents.append(parent)
+    if not parents:
+        return identity_titles
+
+    seen = {_normalize_title(value) for value in identity_titles}
+    combined: list[str] = []
+    for parent in parents:
+        for value in identity_titles[:3]:
+            if _normalize_title(parent) == _normalize_title(value):
+                continue
+            text = f"{parent} {value}".strip()
+            normalized = _normalize_title(text)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                combined.append(text)
+    if not combined:
+        return identity_titles
+    return identity_titles[:1] + combined + identity_titles[1:]
 
 
 def work_identity_title_inputs(work: ResolvedWork, related: list[ParsedFacts]) -> list[str]:
@@ -372,6 +430,12 @@ def plan_work_candidates(
                     evidence="verified_path_binding",
                     confidence="high",
                     status="confirmed",
+                    # 仅完整命中单标题核验规则才把本地名作为可信别名。
+                    # 路径包含某个 marker 不等于整个路径标题都是该作品别名。
+                    aliases=(work.preferred_title,) if (
+                        len(binding.markers) == 1
+                        and _normalize_title(work.preferred_title) == _normalize_title(binding.markers[0])
+                    ) else (),
                 ),
             )
         # 3) 在线/测试搜索候选（含 sidecar NFO 标题输入）。
@@ -483,7 +547,10 @@ def merge_map_from_candidates(
     graph: ResolvedMediaGraph,
     candidates_by_key: dict[str, list[WorkCandidate]],
 ) -> dict[str, str]:
-    """按候选标题确定性选择同一 Provider 身份的主 Work。"""
+    """在线 ID 只提供候选范围；同名或明确别名证据才允许合并本地作品。"""
+
+    from app.media_v4.resolution.identity_policy import can_merge_provider_identity
+    from app.recognition.verified_titles import titles_share_verified_alias
 
     works_by_key = {work.work_key: work for work in graph.works}
     identity_members: dict[tuple[str, str, str], list[tuple[str, WorkCandidate]]] = {}
@@ -494,34 +561,59 @@ def merge_map_from_candidates(
             identity = (item.provider, item.media_type, item.provider_id)
             identity_members.setdefault(identity, []).append((work.work_key, item))
 
-    merge_map: dict[str, str] = {}
+    compatible: set[frozenset[str]] = set()
     for members in identity_members.values():
-        if len(members) < 2:
-            continue
+        # 先把成员按 Work 归组一次。判据只关心这一对 Work 的候选，逐对重扫整组成员
+        # 会让同一身份下的成本从 O(k²) 退化成 O(k³)（k = 共享该身份的本地作品数）。
+        members_by_key: dict[str, list[WorkCandidate]] = {}
+        for key, candidate in members:
+            members_by_key.setdefault(key, []).append(candidate)
+        keys = sorted(members_by_key)
+        for index, left in enumerate(keys):
+            for right in keys[index + 1:]:
+                # 边界判定只需这两个作品，避免每个候选对重复扫描整个媒体图。
+                pair_graph = ResolvedMediaGraph(works=(works_by_key[left], works_by_key[right]))
+                if not can_merge_provider_identity(pair_graph, {left, right}):
+                    continue
+                titles = {_normalize_title(works_by_key[key].preferred_title) for key in (left, right)}
+                if "" in titles:
+                    continue
+                # 证据来自明确核验的译名表，或一份候选自己覆盖两个本地名；
+                # 两侧分别同名命中同一个 ID 不足以证明译名，不能据此拼接别名链。
+                verified_alias = titles_share_verified_alias(
+                    works_by_key[left].preferred_title, works_by_key[right].preferred_title,
+                )
+                if len(titles) == 1 or verified_alias or any(
+                    titles <= {
+                        _normalize_title(candidate.title),
+                        _normalize_title(candidate.original_title),
+                        *(_normalize_title(alias) for alias in candidate.aliases),
+                    }
+                    for candidate in (*members_by_key[left], *members_by_key[right])
+                ):
+                    compatible.add(frozenset((left, right)))
 
-        from app.media_v4.resolution.identity_policy import can_merge_provider_identity
+    # 完全链接分组：A=B、B=C 不代表 A=C。跨提供方也使用同一组约束，避免链式污染。
+    groups: list[list[str]] = []
+    # 未出现在任何兼容对中的作品必然独立，不进入分组探测；纯离线大库保持线性。
+    for key in sorted({key for pair in compatible for key in pair}):
+        group = next((group for group in groups
+                      if all(frozenset((key, other)) in compatible for other in group)), None)
+        if group is None:
+            groups.append([key])
+        else:
+            group.append(key)
 
-        if not can_merge_provider_identity(
-            graph,
-            {work_key for work_key, _item in members},
-        ):
-            continue
+    def owner_rank(key: str) -> tuple[int, int, str]:
+        title = _normalize_title(works_by_key[key].preferred_title)
+        exact = any(item.status == "confirmed" and title == _normalize_title(item.title)
+                    for item in candidates_by_key.get(key, []))
+        return (0 if title and exact else 1, len(title), key)
 
-        def owner_rank(member: tuple[str, WorkCandidate]) -> tuple[int, int, str]:
-            work_key, candidate = member
-            work = works_by_key[work_key]
-            work_title = _normalize_title(work.preferred_title)
-            candidate_title = _normalize_title(candidate.title)
-            return (
-                0 if work_title and work_title == candidate_title else 1,
-                len(work_title),
-                work_key,
-            )
-
-        owner = min(members, key=owner_rank)[0]
-        for work_key, _item in members:
-            if work_key != owner:
-                merge_map[work_key] = owner
+    merge_map: dict[str, str] = {}
+    for group in groups:
+        owner = min(group, key=owner_rank)
+        merge_map.update({key: owner for key in group if key != owner})
     return merge_map
 
 
