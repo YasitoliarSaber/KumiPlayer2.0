@@ -416,6 +416,29 @@ def _tree_relative_paths(text: str, *, provider: str = "") -> list[tuple[str, st
     return results
 
 
+def _strip_selected_root_prefix(relative: str, source_root: str) -> str:
+    """相对路径若以"导入时选中的根目录名"开头，就剥掉它。
+
+    用户实测（重复出现两次）：树文件从 `根目录/动画/…` 开始，而导入时选中的根就是
+    `K:\\115网盘\\动画`，于是 `source_root + relative` 拼成
+    `K:\\115网盘\\动画\\动画\\…`（多出一层），strm 内容因此指向不存在的路径。
+    正确语义（用户明确说明）：**根目录由"选中的那个路径"决定**，树文件里与选中根同名的
+    那一层属于根本身，必须剥掉；这是通用规则，与具体分类名（动画/番剧/…）无关。
+    """
+
+    cleaned_root = (source_root or "").replace("\\", "/").rstrip("/")
+    root_name = PurePosixPath(cleaned_root).name if cleaned_root else ""
+    parts = [part for part in PurePosixPath(relative).parts if part]
+    if not parts:
+        return relative
+    # 树文件可能多包一层"根目录/root"之类的占位外壳。
+    while parts and parts[0].casefold() in {"根目录", "根文件夹", "root"}:
+        parts.pop(0)
+    if root_name and parts and parts[0].casefold() == root_name.casefold():
+        parts.pop(0)
+    return str(PurePosixPath(*parts)) if parts else relative
+
+
 def build_directory_tree_evidence(
     text: str,
     *,
@@ -435,6 +458,12 @@ def build_directory_tree_evidence(
     evidence = []
     pending: list = []
     entries = _tree_relative_paths(text, provider=provider)
+    # 按"选中的根目录"对齐相对路径：剥掉与根同名的第一层，避免 source_root 拼接后
+    # 出现 `动画\动画`（用户实测重复两层；同时避免作品身份被这一层占位目录污染）。
+    entries = [
+        (_strip_selected_root_prefix(relative, source_root), kind)
+        for relative, kind in entries
+    ]
     effective_batch_size = max(1, int(batch_size))
     for index, (relative, kind) in enumerate(entries, start=1):
         if should_cancel is not None and should_cancel():
