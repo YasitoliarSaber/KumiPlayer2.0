@@ -49,29 +49,47 @@ local state = {
     default_quality = "balanced",
     session_mode = nil,     -- 当前视频临时模式（nil=用永久默认）
     session_quality = nil,  -- 当前视频临时质量
-    base_shaders = {},      -- 文件载入时记录的基础 glsl-shaders
-    applied = false,        -- 当前文件是否已应用 Anime4K
+    base_shaders = {},      -- 脚本加载时记录的基础 glsl-shaders（只记录一次）
+    base_captured = false,  -- 基础列表是否已记录
+    applied = false,        -- 当前是否已应用 Anime4K
+    applied_key = nil,      -- 已应用链的 "mode|quality"，用于避免重复重挂
 }
 
--- 读取后端注入的永久默认值：
--- 后端通过 --script-opts=kumiplayer_anime4k.default_mode=a 注入，
--- 脚本内用 mp.get_opt 读取命令行/配置文件中的脚本选项。
-local function read_injected_defaults()
-    local mode = mp.get_opt("default_mode")
-    local quality = mp.get_opt("default_quality")
-    if mode and VALID_MODES[mode] then
-        state.default_mode = mode
-    end
-    if quality and VALID_QUALITIES[quality] then
-        state.default_quality = quality
-    end
-    mp.msg.info("loaded with script-opts default_mode=" .. state.default_mode .. " default_quality=" .. state.default_quality)
-end
-read_injected_defaults()
+-- 读取永久默认值。
+-- 取值来自两处，由 mp.options 统一合并：配置文件
+-- script-opts/kumiplayer_anime4k.conf，以及后端命令行注入的
+-- --script-opt=kumiplayer_anime4k-default_mode=...（命令行覆盖配置文件）。
+--
+-- 键名前缀必须是 `<脚本名>-`（mp.options 内部用 identifier.."-" 匹配），
+-- 不能写成点号 `kumiplayer_anime4k.default_mode`：点号形式会被静默忽略。
+-- 也不能用 mp.get_opt("default_mode")：mp.get_opt 只按全键直查
+-- （mpv 的 defaults.lua 中实现为 opts[key]），裸键永远取不到值——
+-- 这正是此前「播放器调节页保存的 Anime4K 默认效果不生效」的根因。
+local options = {
+    default_mode = state.default_mode,
+    default_quality = state.default_quality,
+}
 
 local function log_warn(message)
     mp.msg.warn("[kumiplayer_anime4k] " .. message)
 end
+
+local function read_injected_defaults()
+    require("mp.options").read_options(options, "kumiplayer_anime4k")
+    if VALID_MODES[options.default_mode] then
+        state.default_mode = options.default_mode
+    else
+        log_warn("invalid default_mode in script-opts: " .. tostring(options.default_mode))
+    end
+    if VALID_QUALITIES[options.default_quality] then
+        state.default_quality = options.default_quality
+    else
+        log_warn("invalid default_quality in script-opts: " .. tostring(options.default_quality))
+    end
+    mp.msg.info("[kumiplayer_anime4k] loaded with script-opts default_mode="
+        .. state.default_mode .. " default_quality=" .. state.default_quality)
+end
+read_injected_defaults()
 
 -- 从基础列表构建附加链：Append 方式保证不覆盖基础 shader
 local function build_chain(mode, quality)
@@ -133,6 +151,13 @@ local function apply_anime4k()
     if mode == "off" or not VALID_MODES[mode] then
         return
     end
+    local key = mode .. "|" .. quality
+    if state.applied and state.applied_key == key then
+        -- 同一条链已经在生效：不要再 clr/append。
+        -- mpv 的 glsl-shaders 是全局属性、会跨文件保持，切集时重复重挂整条链
+        -- 只会带来无谓的着色器列表重建（起播顿挫的嫌疑点之一）。
+        return
+    end
     local chain = build_chain(mode, quality)
     -- 先清除本脚本可能已追加的旧链，再追加新链
     mp.commandv("change-list", "glsl-shaders", "clr", "")
@@ -140,6 +165,7 @@ local function apply_anime4k()
         mp.commandv("change-list", "glsl-shaders", "append", shader)
     end
     state.applied = true
+    state.applied_key = key
     mp.msg.info("[kumiplayer_anime4k] applied mode=" .. mode .. " quality=" .. quality .. " shaders=" .. #chain)
 end
 
@@ -150,6 +176,7 @@ local function clear_anime4k()
         mp.commandv("change-list", "glsl-shaders", "append", shader)
     end
     state.applied = false
+    state.applied_key = nil
     mp.msg.info("[kumiplayer_anime4k] restored base shaders")
 end
 
@@ -200,11 +227,18 @@ mp.register_script_message("get-state", function()
         tostring(state.applied))
 end)
 
--- 事件：文件载入时记录基础 shader 并清空临时覆盖，按永久默认应用
-mp.register_event("file-loaded", function()
-    -- 记录当前基础 glsl-shaders（可能是上次 Anime4K 已追加的，先清空后记录纯基础）
-    local current = mp.get_property("glsl-shaders")
+-- 记录“基础” shader 列表，且**只记录一次**（必须在 file-loaded 处理函数之前定义，
+-- 否则闭包会把它解析成未定义的全局名）。
+-- 早期实现放在 file-loaded 里每次重新记录，第二次起会把本脚本上一次追加的
+-- Anime4K 链当成基础列表；此后切到 off 时 clear 完又把这些链“恢复”回来，
+-- 表现为关闭 Anime4K 后画面依旧被处理（链残留）。
+local function capture_base_shaders()
+    if state.base_captured then
+        return
+    end
+    state.base_captured = true
     state.base_shaders = {}
+    local current = mp.get_property("glsl-shaders")
     if current then
         for item in (current .. "; "):gmatch("(.-);%s*") do
             if item ~= "" then
@@ -212,9 +246,15 @@ mp.register_event("file-loaded", function()
             end
         end
     end
+end
+
+-- 事件：文件载入时清空临时覆盖，按永久默认应用
+mp.register_event("file-loaded", function()
+    capture_base_shaders()
     state.session_mode = nil
     state.session_quality = nil
-    state.applied = false
+    -- 不重置 state.applied：glsl-shaders 是全局属性、链会跨文件保持，
+    -- 是否需要重挂交给 apply_anime4k() 用 applied_key 判断。
     refresh()
 end)
 

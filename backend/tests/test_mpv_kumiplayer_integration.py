@@ -141,7 +141,7 @@ def test_builtin_mpv_uses_config_dir_and_auto_loads_scripts_without_scripts_appe
     assert any(arg.startswith("--demuxer-cache-dir=") for arg in args)
     assert any(arg.startswith("--log-file=") for arg in args)
     # thumbfast 缩略图缓存也必须隔离到 KumiPlayer 状态目录（追加式注入）
-    assert any(arg.startswith("--script-opt=thumbfast.thumbnail=") for arg in args)
+    assert any(arg.startswith("--script-opt=thumbfast-thumbnail=") for arg in args)
 
 
 def test_never_use_the_overwriting_script_opts_flag():
@@ -161,10 +161,33 @@ def test_never_use_the_overwriting_script_opts_flag():
         "禁止使用覆盖式 --script-opts：会丢掉同一命令行上更早注入的键"
     )
     append_form = [arg for arg in args if arg.startswith("--script-opt=")]
-    assert any(arg.startswith("--script-opt=thumbfast.thumbnail=") for arg in append_form)
+    assert any(arg.startswith("--script-opt=thumbfast-thumbnail=") for arg in append_form)
     # 同一个键不能被注入两次（否则说明仍有人在用覆盖式写法叠加）
     keys = [arg.split("=", 1)[1].split("=", 1)[0] for arg in append_form]
     assert len(keys) == len(set(keys))
+
+
+def test_script_opt_keys_must_use_dash_prefix_not_dot():
+    """script-opt 的键前缀是 `<脚本名>-`，不是 `<脚本名>.`。
+
+    mpv 官方 player/lua/options.lua 用 ``identifier.."-"`` 匹配键名，点号形式会被
+    静默忽略。实测（v0.41.0 + 捆绑脚本）：``--script-opt=thumbfast.thumbnail=X``
+    解析结果仍是配置文件里的空值，改成 ``thumbfast-thumbnail=X`` 才拿到 X；
+    Anime4K 的 default_mode/default_quality 同理。这条断言用于防止点号写法回归。
+    """
+
+    from app.playback import mpv
+
+    args = mpv._build_mpv_args(Path("mpv.exe"), "episode.strm")
+    script_opts = [arg for arg in args if arg.startswith("--script-opt=")]
+    assert script_opts, "必须注入 script-opt（thumbfast 缓存目录与 Anime4K 默认值）"
+    for arg in script_opts:
+        key = arg[len("--script-opt="):].split("=", 1)[0]
+        assert "." not in key, (
+            f"script-opt 键名不得使用点号（{key}）：mp.options 按 identifier..\"-\" 匹配，"
+            "点号形式会被静默忽略"
+        )
+        assert "-" in key, f"script-opt 键名必须带 `<脚本名>-` 前缀（{key}）"
 
 
 def test_builtin_mpv_playback_args_preserve_window_and_media_title():

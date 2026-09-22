@@ -30,8 +30,8 @@ TH32CS_SNAPPROCESS = 0x00000002
 INVALID_HANDLE_VALUE = -1
 MAX_TITLE_LENGTH = 160
 ASFW_ANY = -1
-VK_MENU = 0x12
-KEYEVENTF_KEYUP = 0x0002
+DWMWA_BORDER_COLOR = 34
+DWMWA_COLOR_NONE = 0xFFFFFFFE
 _KUMIPLAYER_MPV_SCRIPTS = ("screenshot_to_video_dir.lua",)
 
 
@@ -306,15 +306,44 @@ def _focus_mpv_window(pid: int, window_title: str = "") -> None:
     user32 = ctypes.windll.user32
     deadline = time.monotonic() + FOREGROUND_RETRY_SECONDS
     related_pids = {pid}
+    border_stripped = False
 
     while time.monotonic() < deadline:
         related_pids.update(_child_process_ids(pid))
         hwnd = _find_main_window_for_pid(user32, related_pids, window_title)
         if hwnd:
+            if not border_stripped:
+                _strip_dwm_border(hwnd)
+                border_stripped = True
             _force_window_to_front(user32, hwnd, pid)
             if user32.GetForegroundWindow() == hwnd:
                 return
         time.sleep(0.1)
+
+
+def _strip_dwm_border(hwnd: int) -> None:
+    """去掉 Windows 11 给无边框窗口画的 1px 边框。
+
+    ``--border=no`` 时 mpv 的窗口样式仍是 ``WS_THICKFRAME``（可缩放）但没有
+    ``WS_CAPTION``，DWM 因此仍会绘制一圈可见边框（实测窗口样式 ``0x140E0000``、
+    ``DWMWA_VISIBLE_FRAME_BORDER_THICKNESS == 1``），表现为画面四周一圈浅色
+    “白边”。``--window-corners=donotround`` 无法消除（实测该值仍为 1），
+    mpv 也没有对应选项，只能由调用方把边框颜色设为 ``DWMWA_COLOR_NONE``。
+
+    实测（本机）：``DwmSetWindowAttribute`` 返回 S_OK；``DwmGetWindowAttribute``
+    对该属性返回 E_INVALIDARG（本机构建不支持读取），因此无法回读校验，
+    需要在真机上肉眼确认边框是否消失。失败时静默忽略，不影响播放。
+    """
+    try:
+        value = ctypes.c_uint(DWMWA_COLOR_NONE)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            ctypes.c_void_p(hwnd),
+            DWMWA_BORDER_COLOR,
+            ctypes.byref(value),
+            ctypes.sizeof(value),
+        )
+    except (AttributeError, OSError):
+        pass
 
 
 def _find_main_window_for_pid(user32, pids: set[int], window_title: str = "") -> int:
@@ -385,19 +414,22 @@ def _force_window_to_front(user32, hwnd: int, pid: int = 0) -> None:
 
 
 def _allow_foreground_activation(user32, pid: int = 0) -> None:
-    """Give Windows a user-input hint so SetForegroundWindow is less likely to be ignored."""
+    """尝试为 mpv 进程争取前台窗口权限。
+
+    注意：``AllowSetForegroundWindow`` 只对**前台进程自身**的调用有效；
+    KumiPlayer 的后端是 Tauri 应用的子进程、并非前台进程，因此这里的调用
+    多数情况下不生效（返回值被忽略）。真正起作用的是后续
+    ``AttachThreadInput`` + ``SetForegroundWindow`` 那一段。
+
+    这里**不再模拟 Alt 按键**：自 Vista 起 Windows 只认真实输入，
+    ``keybd_event`` 合成的按键无法解除前台锁定，反而会把一个 Alt 事件丢给
+    当时的前台窗口（用户侧的「首次交互被吞掉」）。属实测无效的手法，已移除。
+    """
     try:
         if pid > 0:
             user32.AllowSetForegroundWindow(pid)
         else:
             user32.AllowSetForegroundWindow(ASFW_ANY)
-    except AttributeError:
-        pass
-    try:
-        # Pressing and releasing Alt is a common, harmless way to unlock the
-        # foreground-window restriction for the current process.
-        user32.keybd_event(VK_MENU, 0, 0, 0)
-        user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
     except AttributeError:
         pass
 

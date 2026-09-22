@@ -1,5 +1,6 @@
 """kumiplayer_anime4k.lua 链映射验证：所有模式×质量组合引用的 shader 必须随包存在。"""
 
+import re
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -8,6 +9,16 @@ SHADER_DIR = PROJECT_ROOT / "resources/mpv-runtime/portable_config/shaders/anime
 
 MODES = ("a", "b", "c", "a+a", "b+b", "c+a")
 QUALITIES = {"light": ("M", "S"), "balanced": ("L", "M"), "high": ("VL", "M")}
+
+
+def strip_lua_comments(text: str) -> str:
+    """剥离 Lua 行注释与块注释。
+
+    契约断言只看可执行代码：注释里可能为了解释踩过的坑而提到被禁用的 API
+    （例如 `mp.get_opt`），不应据此判定违规。
+    """
+    without_block = re.sub(r"--\[\[.*?\]\]", "", text, flags=re.S)
+    return "\n".join(line.split("--", 1)[0] for line in without_block.splitlines())
 
 
 def _build_chain(mode: str, quality: str) -> list[str]:
@@ -86,3 +97,23 @@ def test_anime4k_lua_declares_script_message_contract():
         assert mode in text, f"缺少模式 {mode}"
     for quality in QUALITIES:
         assert quality in text, f"缺少质量 {quality}"
+
+
+def test_anime4k_lua_reads_defaults_through_mp_options():
+    """永久默认值必须经 mp.options.read_options 读取，且键前缀带短横。
+
+    两个已实测的坑：
+    1. ``mp.get_opt("default_mode")`` 只做全键直查（mpv 的 defaults.lua 实现为
+       ``opts[key]``），裸键永远返回 nil，脚本会一直停在硬编码的 off/balanced；
+    2. mp.options 按 ``identifier.."-"`` 匹配键名，所以后端注入必须是
+       ``--script-opt=kumiplayer_anime4k-default_mode=...``（短横），点号形式无效。
+
+    这两点合起来就是「播放器调节页保存的 Anime4K 默认效果不生效」的根因。
+    """
+    text = LUA_PATH.read_text(encoding="utf-8")
+    code = strip_lua_comments(text)
+    assert "read_options" in code, "必须用 mp.options.read_options 读取脚本选项"
+    assert '"kumiplayer_anime4k"' in code, "read_options 的 identifier 必须是 kumiplayer_anime4k"
+    assert "mp.get_opt(" not in code, (
+        "不得使用 mp.get_opt：它是全键直查，裸键取不到值（改用 mp.options.read_options）"
+    )

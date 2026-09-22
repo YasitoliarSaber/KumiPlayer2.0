@@ -467,7 +467,11 @@ def build_mpv_playback_args(
     #     --script-opts=...  →  [b=2]        （a=1 丢失）
     #     --script-opt=...   →  [a=1,b=2]    （追加）
     # 这正是"Anime4K 默认模式与 thumbfast 缓存目录都不生效"的根因。
-    args.append(f"--script-opt=thumbfast.thumbnail={state_dir / 'thumbfast'}")
+    # 键名前缀必须是 `<脚本名>-`，不是 `<脚本名>.`：mp.options 内部用
+    # `identifier.."-"` 匹配键名（mpv 官方 player/lua/options.lua），点号形式会被
+    # 静默忽略。实测：`--script-opt=thumbfast.thumbnail=X` 解析结果仍是配置文件里的
+    # 空值，改为 `thumbfast-thumbnail=X` 后 read_options 才拿到 X。
+    args.append(f"--script-opt=thumbfast-thumbnail={state_dir / 'thumbfast'}")
     # Anime4K 永久默认值：启动时注入，右键临时切换不影响
     try:
         from app.core.config import load_config
@@ -478,8 +482,10 @@ def build_mpv_playback_args(
             _mode = "off"
         if _quality not in {"light", "balanced", "high"}:
             _quality = "balanced"
-        args.append(f"--script-opt=kumiplayer_anime4k.default_mode={_mode}")
-        args.append(f"--script-opt=kumiplayer_anime4k.default_quality={_quality}")
+        # 同样使用 `<脚本名>-` 前缀；脚本侧改为 mp.options.read_options 读取，
+        # 因此这里的命令行值会覆盖 kumiplayer_anime4k.conf 的静态默认值。
+        args.append(f"--script-opt=kumiplayer_anime4k-default_mode={_mode}")
+        args.append(f"--script-opt=kumiplayer_anime4k-default_quality={_quality}")
     except Exception:
         # 配置读取失败不影响播放启动，使用默认值
         pass

@@ -297,9 +297,11 @@ def _cjk_episode_number_and_title(stem: str) -> tuple[int | None, str]:
 
 
 def _cjk_trailing_title(raw: str) -> str:
-    """取编号后的正文标题：去掉开头分隔符，过短则视为没有标题。"""
+    """取编号后的正文标题：去掉开头分隔符与残留的"集/话/回"，过短则视为没有标题。"""
 
     title = re.sub(r"^[\s._\-—·、,:：;；!！?？。]+", "", raw or "").strip()
+    # 形如 `21集刺尾虫…`：编号与标题之间的"集"要一起去掉，否则标题会以"集"开头。
+    title = re.sub(r"^[集话話回]\s*", "", title).strip()
     if len(title) < 2:
         return ""
     return title
@@ -615,9 +617,36 @@ class V4Parser:
         group_type = guess.group_type or "unknown"
         resolved_media_type = guess.media_type
         resolved_card_type = guess.card_type
-        if cjk_episode is not None and str(guess.media_type or "").casefold() in {"movie", "unknown", ""}:
-            # 找到中文集号时，把"电影"纠正为剧集季：中文命名的 TV 动画没有 SxxExx，
-            # 否则会被当成电影（实测 275 文件的《无印篇》显示为"电影 · 1 集"）。
+        # 公共规则（所有来源通用：OpenList / 目录树 / 本地）：
+        # **文件里出现了明确的集号**（中文编号，或 `【01】`/`[01]`/`- 01`/尾随 `01`
+        # 这类绝对集号），就说明它属于一部**剧集**，不能继续停在 movie。
+        # 实测：目录树里的 `【Top o Nerae! GunBuster】【01】【BDrip】….mkv` 集号能识别，
+        # 但媒体类型仍是 movie，整季在导入页显示成「电影 · N 个文件」；
+        # OpenList 里的 `[VCB-Studio] … [01][Ma10p].mkv` 同理。
+        #
+        # 守卫：剧场版/OVA/特别篇/总集篇上下文**不**参与升级——它们本来就该是独立作品
+        # 或特别篇（实测 `Re：从零开始…/2.…雪之回忆.[OVA].2018` 曾被错误并进 136 集正片）。
+        _path_dirs = [
+            part
+            for part in evidence.relative_path.replace("\\", "/").split("/")[:-1]
+            if part
+        ]
+        from app.recognition.media import _looks_like_specials_dir
+
+        _stem_for_markers = PurePosixPath(filename).stem
+        _special_context = (
+            str(guess.group_type or "").casefold() in {"special", "auxiliary", "ignored"}
+            or any(_looks_like_specials_dir(part) for part in _path_dirs)
+            or any(
+                marker in _stem_for_markers
+                for marker in ("剧场版", "劇場版", "总集篇", "總集篇", "新编撰", "新編撰")
+            )
+        )
+        if (
+            (cjk_episode is not None or absolute_candidate is not None)
+            and not _special_context
+            and str(guess.media_type or "").casefold() in {"movie", "unknown", ""}
+        ):
             resolved_media_type = "tv"
             group_type = "season"
             resolved_card_type = "main_series"
