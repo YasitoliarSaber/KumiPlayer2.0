@@ -313,6 +313,47 @@ def test_cjk_episode_numbering_is_recognized():
         assert facts.episode_candidate is None, f"{title} 不得被误判为集号"
 
 
+def test_cjk_episode_title_is_filled_without_overwriting():
+    """中文命名必须同时补**集标题**（否则整季显示"未命名"）。
+
+    实测（用户真实库 + 规划方复核）：`155盆才怪与忍者学园!!.mp4` 只拿到了集号 155，
+    正文丢失 → 界面"未命名"；只有编号的 `第002集.mp4` 也应显示「第 2 集」。
+    关键约束：**只在既有集标题为空时填充**，绝不覆盖已解析出的标题。
+    """
+
+    parser = V4Parser()
+    cases = {
+        "夸克网盘/动画/宝可梦国语三/超世代/155盆才怪与忍者学园!!.mp4": (155, "盆才怪与忍者学园"),
+        "夸克网盘/动画/宝可梦国语三/无印篇/114 再见了，拉普拉斯！.MP4": (114, "再见了，拉普拉斯"),
+        "夸克网盘/动画/宝可梦国语三/无印篇/01宝可梦，就决定是你了！.MP4": (1, "宝可梦"),
+        "夸克网盘/动画/宝可梦国语三/超世代/[Group] 121热斗！大型庆典(2)!!.mp4": (121, "热斗"),
+    }
+    for index, (rel, (expected_number, expected_text)) in enumerate(cases.items()):
+        facts = parser.parse(_evidence(index, rel), root_container="/夸克网盘")
+        recognized = {facts.episode_candidate, facts.absolute_episode_candidate}
+        assert expected_number in recognized, f"{rel} 的集号应为 {expected_number}"
+        assert (facts.episode_title or "").strip(), f"{rel} 不应再是未命名"
+        assert expected_text in facts.episode_title, (
+            f"{rel} 的集标题应包含正文 {expected_text!r}，实际 {facts.episode_title!r}"
+        )
+
+    # 只有编号、没有正文的文件：标题回退为「第 N 集」，而不是"未命名"。
+    bare = parser.parse(
+        _evidence(30, "夸克网盘/动画/宝可梦国语三/超级愿望/第002集.mp4"),
+        root_container="/夸克网盘",
+    )
+    assert bare.episode_title == "第 2 集", f"实际 {bare.episode_title!r}"
+
+    # 既有拉丁集标题不能被中文规则覆盖（有 SxxExx 的文件仍走原逻辑）。
+    latin = parser.parse(
+        _evidence(31, "夸克网盘/动画/某作品/[Group] Show - S01E03 - 不要再来总集篇啦 ！.mkv"),
+        root_container="/夸克网盘",
+    )
+    assert "不要再来总集篇" in (latin.episode_title or ""), (
+        f"拉丁命名集标题不应被覆盖，实际 {latin.episode_title!r}"
+    )
+
+
 def test_missing_identity_still_produces_local_work():
     """GREEN：没有身份线索时仍必须生成本地 Work（阶段 1 的既有契约）。"""
 

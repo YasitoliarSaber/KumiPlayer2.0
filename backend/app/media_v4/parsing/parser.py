@@ -271,32 +271,44 @@ _CJK_EPISODE_TOKEN = re.compile(r"第\s*0*(\d{1,4})\s*(?:[集话話回]|(?=[\u4e
 _CJK_LEADING_EPISODE = re.compile(r"^0*(\d{2,4})\s*(?=[\u4e00-\u9fff])")
 
 
-def _cjk_episode_number(stem: str) -> int | None:
-    """中文命名的集号（**追加**识别，不影响既有拉丁 SxxExx/绝对集号规则）。
+def _cjk_episode_number_and_title(stem: str) -> tuple[int | None, str]:
+    """中文命名的集号 + 编号后的**正文标题**。
 
-    支持两种形态：
-    - ``第002集`` / ``第 12 话`` / ``第3回``，以及 ``第062第`` 这类"第N + 中文"（命名手误）；
-    - ``146栎树林，寻找大葱鸭``、``114 再见了，拉普拉斯！``（前导 2–4 位数字，
-      后面可有空格，再紧跟中文）。
-
-    前导数字要求 2–4 位，因此项目保护的真人标题
-    （``86-不存在的战区-``、``91Days``、``22/7``、``3月的狮子``）不会被误判为集号。
+    实测（用户真实库）：`155盆才怪与忍者学园!!.mp4` 只补了编号 155，
+    正文"盆才怪与忍者学园"没有进入集标题，界面显示为"未命名"。
+    这里在返回编号的同时返回编号之后的正文（去掉前缀标签、开头分隔符）；
+    正文不足 2 字视为没有标题（例如 `第062第.mp4` 只会在编号后留下一个"第"），
+    由调用方回退成「第 N 集」。
     """
 
-    match = _CJK_EPISODE_TOKEN.search(stem or "")
+    text = stem or ""
+    match = _CJK_EPISODE_TOKEN.search(text)
     if match:
         value = int(match.group(1))
         if 0 < value <= 9999:
-            return value
-    # 去掉开头的发布组/标签块（`[Group]`、`【组】`、`{组}`）后再找前导数字：
-    # 实测 `[Group] 121热斗！大型庆典(2)!!.mp4` 因前缀而未被识别。
-    stripped = re.sub(r"^(?:\[[^\]]*\]|【[^】]*】|\{[^}]*\})\s*", "", stem or "")
+            return value, _cjk_trailing_title(text[match.end():])
+    stripped = re.sub(r"^(?:\[[^\]]*\]|【[^】]*】|\{[^}]*\})\s*", "", text)
     match = _CJK_LEADING_EPISODE.match(stripped)
     if match:
         value = int(match.group(1))
         if 0 < value <= 999:
-            return value
-    return None
+            return value, _cjk_trailing_title(stripped[match.end():])
+    return None, ""
+
+
+def _cjk_trailing_title(raw: str) -> str:
+    """取编号后的正文标题：去掉开头分隔符，过短则视为没有标题。"""
+
+    title = re.sub(r"^[\s._\-—·、,:：;；!！?？。]+", "", raw or "").strip()
+    if len(title) < 2:
+        return ""
+    return title
+
+
+def _cjk_episode_number(stem: str) -> int | None:
+    """只取中文命名的集号（保留原接口，供探针与既有调用方使用）。"""
+
+    return _cjk_episode_number_and_title(stem)[0]
 
 
 def _sanitize_episode_title(value: str) -> str:
@@ -585,9 +597,12 @@ class V4Parser:
         # 因此既有 `[13]` / `EP13` / `- 13` / 尾随 ` 13` 等绝对集号完全不受影响
         # （test_v4_parser_golden.py 有 golden 断言保护）。
         cjk_episode = None
+        cjk_episode_title = ""
         absolute_candidate = None
         if not episode_match:
-            cjk_episode = _cjk_episode_number(PurePosixPath(filename).stem)
+            cjk_episode, cjk_episode_title = _cjk_episode_number_and_title(
+                PurePosixPath(filename).stem
+            )
             if cjk_episode is not None:
                 episode_token = str(cjk_episode)
             else:
@@ -659,6 +674,11 @@ class V4Parser:
         # 第 4 步最终校验：普通与特别篇分支都可能残留方括号碎片或纯发布参数
         # （实测 `…[S01E01][Ma10p_2160p][x265_flac_ass].mkv` → 标题 `]`）。
         episode_title = _sanitize_episode_title(episode_title)
+        # 中文命名补标题：**只在既有标题为空时**填充，绝不覆盖已解析出的标题。
+        # 编号后带正文的用正文（`155盆才怪与忍者学园!!` → `盆才怪与忍者学园!!`）；
+        # 只有编号的（`第002集.mp4`）显示「第 2 集」，避免整季都叫"未命名"。
+        if not episode_title and cjk_episode is not None:
+            episode_title = cjk_episode_title or f"第 {cjk_episode} 集"
         return ParsedFacts(
             parsed_fact_id="facts_" + evidence.evidence_id,
             evidence_id=evidence.evidence_id,
