@@ -14389,3 +14389,61 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
   aspect-ratio: 2 / 3;
   height: auto;
 }
+
+/* 设置页版式归一化（用户反馈"文字重叠"）：
+   设置页历史上被大量 !important 规则层层覆盖（5204→12062 行）：区块间距被拉到 62px，
+   区块标题字号被放大到 clamp(25px,2.4vw,34px)，加上 .settings-outline 的绝对定位，
+   结果是标题互相挤压、正文像被"叠"在一起。这里在文件末尾统一收敛：
+   单列流式布局 + 固定字号/行高 + 常规间距 + 取消设置页内的绝对定位。 */
+.settings-shell-settings .settings-unified-stack {
+  display: grid !important;
+  gap: 28px !important;
+}
+
+.settings-shell-settings .settings-anchor-section {
+  scroll-margin-top: 24px !important;
+}
+
+.settings-shell-settings .settings-anchor-section > h2,
+.settings-shell-settings .settings-section-head h3 {
+  margin: 0 0 4px !important;
+  font-size: 18px !important;
+  line-height: 1.4 !important;
+}
+
+.settings-shell-settings .settings-intro h2 {
+  margin: 0 !important;
+  font-size: 22px !important;
+  line-height: 1.35 !important;
+}
+
+.settings-shell-settings .settings-intro p {
+  margin: 0 !important;
+  line-height: 1.5 !important;
+}
+
+.settings-shell-settings .settings-section-head {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  min-height: 0 !important;
+}
+
+.settings-shell-settings .settings-section {
+  padding: 14px 16px !important;
+}
+
+.settings-shell-settings .settings-content {
+  position: static !important;
+}
+
+/* 设置页内的浮层/大纲不得覆盖正文（绝对定位是"文字重叠"的常见来源）。 */
+.settings-shell-settings .settings-outline,
+.settings-shell-settings .settings-outline-popover-wrap,
+.settings-shell-settings .settings-outline-popover {
+  position: static !important;
+  top: auto !important;
+  right: auto !important;
+  left: auto !important;
+  bottom: auto !important;
+}
