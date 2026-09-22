@@ -13253,6 +13253,38 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
   font-size: 13px;
   font-weight: 600;
 }
+/* 播放器调节页的 Fluent 控件兜底。
+ *
+ * 为什么需要：本页曾反馈"下拉展开后文字重叠""保存按钮不像按钮"。Fluent 的浮层
+ * 底色与主按钮底色都取自主题变量（--colorNeutralBackground1 / --colorBrandBackground）；
+ * 一旦主题变量未解析，声明会在计算值阶段失效 → 浮层背景变透明，叠在下层卡片
+ * 文字上就表现为"文字重叠"，主按钮也会丢掉底色而像纯文本。
+ * 实测（删除 Fluent 主题变量定义后）：浮层与主按钮底色都会变成 rgba(0,0,0,0)。
+ *
+ * 这里用「token 优先 + 项目自有变量兜底」：正常时取值与 Fluent 完全一致，
+ * 异常时至少保证浮层是不透明的浮层、主按钮仍有可辨识的按钮外形。
+ * 兜底值只用项目自有变量（--surface-raised / --accent-strong），定义在 index.css
+ * 的 :root 上，不依赖 Fluent 主题。
+ *
+ * 必须带 !important：griffel 的原子规则在运行时注入，注入时机晚于本文件；
+ * 实测浮层规则特异性与之打平（都是两个类），不加 !important 会被 griffel 覆盖，
+ * 兜底失效（按钮规则因特异性更高而侥幸生效，浮层则不会）。
+ */
+.player-tuning-page .fui-Dropdown__listbox,
+.player-tuning-page [role='listbox'] {
+  background-color: var(--colorNeutralBackground1, var(--surface-raised, #ffffff)) !important;
+  border: 1px solid var(--colorNeutralStroke1, var(--border, #d0d0d0)) !important;
+  box-shadow: var(--shadow-float, 0 8px 18px rgb(0 0 0 / 18%)) !important;
+}
+.player-tuning-actions .fui-Button {
+  background-color: var(--colorBrandBackground, var(--accent-strong)) !important;
+  color: var(--colorNeutralForegroundOnBrand, #ffffff) !important;
+  border: 1px solid var(--colorBrandBackground, var(--accent-strong)) !important;
+  border-radius: 6px;
+  min-height: 32px;
+  padding: 0 14px;
+  font-weight: 650;
+}
 /* 外部播放器路径：长 Windows 路径必须能完整显示，不能被压窄。 */
 .player-tuning-path-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .player-tuning-path-row input {
@@ -14446,4 +14478,70 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
   right: auto !important;
   left: auto !important;
   bottom: auto !important;
+}
+
+/* 「选择正确作品」弹窗版式收紧（用户反馈：文字全部挤在一起、看不到文件名）。
+   候选列表改为卡片式：标题/副标题分行、候选之间留白、错误提示醒目。 */
+.media-v4-metadata-dialog .fui-DialogTitle {
+  margin: 0 0 6px !important;
+  font-size: 18px !important;
+  line-height: 1.4 !important;
+}
+
+.media-v4-metadata-dialog .fui-DialogContent {
+  display: grid !important;
+  gap: 12px !important;
+}
+
+.media-v4-metadata-dialog .fui-DialogContent > p {
+  margin: 0 !important;
+  line-height: 1.55 !important;
+  color: var(--text-muted);
+}
+
+.media-v4-metadata-search-row {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  gap: 8px !important;
+  align-items: center !important;
+}
+
+.media-v4-metadata-dialog-error {
+  margin: 0 !important;
+  color: var(--danger, #c42b1c) !important;
+  line-height: 1.5 !important;
+}
+
+.media-v4-metadata-candidate-list {
+  display: grid !important;
+  gap: 8px !important;
+  max-height: min(46vh, 420px) !important;
+  overflow: auto !important;
+  padding-right: 4px !important;
+}
+
+.media-v4-metadata-candidate {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) !important;
+  gap: 4px !important;
+  height: auto !important;
+  min-height: 0 !important;
+  padding: 10px 12px !important;
+  text-align: left !important;
+  white-space: normal !important;
+  line-height: 1.45 !important;
+}
+
+.media-v4-metadata-candidate + .media-v4-metadata-candidate {
+  margin-top: 0 !important;
+}
+
+.media-v4-metadata-candidate-meta,
+.media-v4-metadata-candidate-evidence {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 6px 10px !important;
+  font-size: 12px !important;
+  line-height: 1.4 !important;
+  color: var(--text-muted);
 }

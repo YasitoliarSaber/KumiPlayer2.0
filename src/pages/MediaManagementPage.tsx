@@ -1606,6 +1606,11 @@ export default function MediaManagementPage() {
                     重新搜索
                   </Button>
                 </div>
+                {/* 用户反馈："重新搜索"没反应 —— 失败原因此前只写在页面顶部、被弹窗挡住。
+                    现在直接显示在弹窗内。 */}
+                {error && (
+                  <p role="alert" className="media-v4-metadata-dialog-error">搜索失败：{error}</p>
+                )}
                 <div className="media-v4-metadata-candidate-list">
                   {metadataRecovery.candidates.length > 0 ? [...metadataRecovery.candidates].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).map((candidate) => (
                     <Button key={candidate.candidate_id} appearance="secondary" className="media-v4-metadata-candidate" disabled={metadataRecoveryBusy !== ''} onClick={() => { void confirmMetadataRecovery(candidate) }}>

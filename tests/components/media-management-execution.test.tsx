@@ -546,7 +546,8 @@ test('展开已完成作品后读取并显示作品信息、镜像结果与剧�
   fireEvent.click(screen.getByRole('button', { name: /完成作品/ }))
 
   expect(await screen.findByText('作品信息')).toBeVisible()
-  expect(screen.getByText('镜像结果')).toBeVisible()
+  // 用户反馈：镜像结果不需要展示（"知道生成了就行"），因此该区块已被移除。
+  expect(screen.queryByText('镜像结果')).toBeNull()
   expect(screen.getByText(/剧集结果（1 集）/)).toBeVisible()
   expect(screen.getByText('季度结构')).toBeVisible()
   expect(screen.getByText('第 1 季 · 1 集')).toBeVisible()

@@ -125,9 +125,6 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
   useEffect(() => {
     if (expanded && !workIsPending) requestWorkDetail(unit.work_id, detailCacheKey)
   }, [expanded, workIsPending, unit.work_id, detailCacheKey, requestWorkDetail])
-  const mirrorStatusLabel: Record<string, string> = {
-    succeeded: '镜像已完成', failed: '镜像失败', running: '正在生成镜像', queued: '等待生成镜像', cancelled: '镜像已取消',
-  }
   const metadataStateLabels: Record<string, string> = {
     ready: '媒体信息已就绪', waiting_review: '使用本地信息，可补齐在线资料', waiting_metadata: '缺少在线资料配置',
     source_unavailable: '在线资料服务暂不可用', failed: '获取媒体信息失败',
@@ -325,19 +322,15 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                   </div>}
                 </div>
               )}
-              <div className="media-v4-work-detail-section">
-                <h4>镜像结果</h4>
-                <div className="media-v4-work-detail-facts">
-                  <span>{mirrorStatusLabel[detail.detail.mirror.status] ?? detail.detail.mirror.status}</span>
-                  <span>{detail.detail.mirror.artifact_count} 个播放文件</span>
-                </div>
-                {detail.detail.mirror.error && <div className="media-v4-job-error" role="alert">{detail.detail.mirror.error}</div>}
-              </div>
+              {/* 用户反馈：镜像结果不需要展示——"知道生成了就行"。镜像失败仍会显示错误。 */}
+              {detail.detail.mirror.error && (
+                <div className="media-v4-job-error" role="alert">{detail.detail.mirror.error}</div>
+              )}
+              {/* 用户反馈：没有剧集结果时不要展示空块（失败作品尤其没必要）。 */}
+              {detailEpisodes.length > 0 && (
               <div className="media-v4-work-detail-section">
                 <h4>剧集结果{detail.detail.episode_total > 0 ? `（${detail.detail.episode_total} 集）` : ''}</h4>
-                {detailEpisodes.length === 0 ? (
-                  <div className="media-v4-work-detail-empty">本次任务未生成剧集结果。</div>
-                ) : (
+                {(
                   <>
                   <div className="media-v4-work-detail-episodes">
                     {detailEpisodes.map((episode) => (
@@ -374,6 +367,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                   </>
                 )}
               </div>
+              )}
             </div>
           )}
         </div>
