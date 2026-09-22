@@ -559,7 +559,8 @@ test('展开已完成作品后读取并显示作品信息、镜像结果与剧�
   expect(screen.getByText('远程第一集全名')).toBeVisible()
   expect(screen.getByText('S01E01')).toBeVisible()
   expect(screen.queryByText('S01E01-abc.strm')).not.toBeInTheDocument()
-  expect(screen.getByText('1 个播放文件')).toBeVisible()
+  // 镜像结果区块已按用户要求移除，其"1 个播放文件"文案不再出现。
+  expect(screen.queryByText('1 个播放文件')).toBeNull()
   expect(screen.getByText('这一集的刮削简介。')).toBeVisible()
   expect(screen.getByText('TMDB ID 9001')).toBeVisible()
   expect(screen.getByText('已映射')).toBeVisible()
