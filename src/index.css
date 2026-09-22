@@ -12609,6 +12609,63 @@ body,
   }
 }
 
+/* 无图特别篇保持单列阅读顺序，图片只是可选的行内信息。 */
+.detail-page .detail-special-list { display: grid; gap: 6px; padding: 4px; }
+.detail-page .detail-special-row { min-width: 0; border: 1px solid var(--border); border-radius: 6px; background: color-mix(in srgb, var(--surface-raised) 82%, transparent); }
+.detail-page .detail-special-play { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 66px; padding: 10px 12px; border: 0; border-radius: inherit; background: transparent; color: var(--text); text-align: left; font: inherit; cursor: pointer; }
+.detail-page .detail-special-row:hover { background: var(--surface-soft); }
+.detail-page .detail-special-row.current { border-inline-start: 3px solid var(--accent-strong); }
+.detail-page .detail-special-number { flex: 0 0 26px; color: var(--text-muted); font-size: 13px; font-variant-numeric: tabular-nums; text-align: center; }
+.detail-page .detail-special-thumb { flex: 0 0 72px; width: 72px; height: 44px; border-radius: 4px; object-fit: cover; }
+.detail-page .detail-special-copy { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.detail-page .detail-special-copy strong { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; font-size: 14px; line-height: 1.45; }
+.detail-page .detail-special-meta { display: flex; flex-wrap: wrap; gap: 10px; color: var(--text-muted); font-size: 12px; }
+.detail-page .detail-special-status { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; color: var(--text-muted); font-size: 12px; }
+.detail-page .detail-special-row.watched .detail-special-status { color: var(--accent-strong); }
+.detail-page .detail-special-play:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+
+/* 海报与文字分层；两个区块共享 2:3 比例，不再给整张卡叠加黑色遮罩。 */
+.detail-page.detail-classic-page .detail-related-grid,
+.detail-page.detail-classic-page .detail-similar-row { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)) !important; gap: 18px !important; align-items: start; }
+.detail-page.detail-classic-page .detail-related-card,
+.detail-page.detail-classic-page .detail-similar-card { display: block; min-width: 0; min-height: 0; padding: 0; overflow: visible; aspect-ratio: auto; border: 0 !important; border-radius: 6px; background: transparent !important; color: var(--text) !important; box-shadow: none !important; }
+.detail-page.detail-classic-page .detail-related-card:is(:hover, :focus-visible),
+.detail-page.detail-classic-page .detail-similar-card:is(:hover, :focus-visible) { transform: none !important; box-shadow: none !important; filter: none; }
+.detail-page.detail-classic-page .detail-similar-card::after { content: none; }
+.detail-page.detail-classic-page .detail-poster-artwork { position: relative; display: block; width: 100%; aspect-ratio: 2 / 3; overflow: hidden; border-radius: 6px; background: var(--surface-raised); }
+.detail-page.detail-classic-page .detail-poster-artwork img { position: absolute; inset: 0; width: 100%; height: 100%; aspect-ratio: 2 / 3; object-fit: cover; border-radius: inherit; }
+.detail-page.detail-classic-page .detail-related-fallback { box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 10px; width: 100%; height: 100%; padding: 12px; background: var(--surface-raised); color: var(--text-muted); font-size: 13px; }
+.detail-page.detail-classic-page .detail-related-copy { position: static; display: flex; align-items: baseline; flex-wrap: wrap; justify-content: space-between; gap: 4px 8px; min-height: 0; padding: 9px 0 0; background: transparent; text-shadow: none; }
+.detail-page.detail-classic-page .detail-related-copy strong,
+.detail-page.detail-classic-page .detail-similar-card > strong { position: static; display: block; margin: 0; color: var(--detail-cast-name, rgb(255 255 255 / .96)) !important; font-size: 14px; text-shadow: var(--detail-cast-text-shadow, 0 1px 3px rgb(0 0 0 / .96)); }
+.detail-page.detail-classic-page .detail-similar-card > strong { margin-top: 9px; }
+.detail-page.detail-classic-page .detail-related-copy span,
+.detail-page.detail-classic-page .detail-similar-card > small { position: static; margin-top: 4px; color: var(--detail-cast-name, rgb(255 255 255 / .96)) !important; text-shadow: var(--detail-cast-text-shadow, 0 1px 3px rgb(0 0 0 / .96)); }
+.detail-page.detail-classic-page .detail-related-card:focus-visible,
+.detail-page.detail-classic-page .detail-similar-card:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 4px; }
+.detail-page.detail-classic-page .detail-related-card:hover .detail-poster-artwork,
+.detail-page.detail-classic-page .detail-similar-card:hover .detail-poster-artwork { outline: 1px solid var(--border); outline-offset: 1px; }
+@media (max-width: 680px) {
+  .detail-page.detail-classic-page .detail-related-grid,
+  .detail-page.detail-classic-page .detail-similar-row { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 12px !important; }
+  .detail-page .detail-special-play { gap: 8px; padding: 8px; flex-wrap: wrap; }
+  .detail-page .detail-special-status { margin-inline-start: auto; }
+  .detail-page .detail-special-thumb { flex-basis: 52px; width: 52px; height: 34px; }
+}
+@media (forced-colors: active) {
+  .detail-page .detail-special-row,
+  .detail-page.detail-classic-page .detail-poster-artwork { border: 1px solid CanvasText; background: Canvas; color: CanvasText; }
+  .detail-page.detail-classic-page .detail-related-fallback { background: Canvas; color: CanvasText; }
+  .detail-page.detail-classic-page .detail-related-copy strong,
+  .detail-page.detail-classic-page .detail-related-copy span,
+  .detail-page.detail-classic-page .detail-similar-card > strong,
+  .detail-page.detail-classic-page .detail-similar-card > small { color: CanvasText !important; text-shadow: none; }
+  .detail-page .detail-special-row.current { border-inline-start: 3px solid Highlight; }
+  .detail-page .detail-special-play:focus-visible,
+  .detail-page.detail-classic-page .detail-related-card:focus-visible,
+  .detail-page.detail-classic-page .detail-similar-card:focus-visible { outline-color: Highlight; }
+}
+
 /* Dismissible detail tools use a quiet elevated layer over immersive artwork. */
 :root[data-theme='fluent'] {
   --detail-tool-surface: rgb(26 31 35 / .90);
@@ -14305,4 +14362,30 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
   .media-v4-maintenance-confirm-actions { align-items: stretch; flex-direction: column; }
   .media-v4-maintenance-confirm-actions .fui-Button { width: 100%; }
   .media-v4-completed-heading { align-items: flex-start; flex-direction: column; gap: 3px; }
+}
+
+/* 用户反馈（§14 / §14.7）：关联作品与相关推荐改为竖版海报，并去掉悬浮时的深色背景框。
+   现状（实测 CSS）：.detail-related-card / .detail-similar-card 在
+   `:is(:hover, :focus-visible)` 下被 12552 / 12559 行赋予
+   `box-shadow: 0 12px 28px rgb(0 0 0 / .25)`，即用户看到的"明显深色背景框"。
+   这里与剧集列表保持同量级反馈（极淡阴影、无实心底色），并把海报统一为 2:3 竖版。
+   规则追加在文件末尾，确保在既有各主题/媒体查询之后生效。 */
+.detail-page.detail-classic-page .detail-related-card,
+.detail-page.detail-classic-page .detail-similar-card {
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+
+.detail-page.detail-classic-page .detail-related-card:is(:hover, :focus-visible),
+.detail-page.detail-classic-page .detail-similar-card:is(:hover, :focus-visible) {
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: 0 8px 18px rgba(28, 28, 28, 0.04) !important;
+}
+
+.detail-page.detail-classic-page .detail-related-card .detail-poster-artwork,
+.detail-page.detail-classic-page .detail-similar-card .detail-poster-artwork {
+  aspect-ratio: 2 / 3;
+  height: auto;
 }
