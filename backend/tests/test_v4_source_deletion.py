@@ -366,3 +366,43 @@ def test_deletion_never_invokes_recognition(tmp_path, monkeypatch):
     result = V4JobRunner(database).process_job(job_id, mirror_root=mirror)
 
     assert result.status == "succeeded", result
+
+
+def test_queued_jobs_do_not_block_source_deletion(tmp_path):
+    """排队中的同源作业不得永久阻断"按来源删除媒体库"（用户真实故障）。
+
+    实测（用户库，只读核对）：来源卡停在"0/8 待处理"，该来源的排队作业长期不动，
+    于是每次点"确认删除媒体库"都被 409 拒绝、**根本没有入队**——
+    jobs 表里 delete_source_library 只有 2 条且都是 succeeded。
+
+    规则：**queued** 作业让路并被取消（它们尚未开始，删除会把整个来源媒体库带走）；
+    **running** 的作业仍然阻断删除（在途任务不得互相踩）。
+    """
+
+    from app.media_v4.maintenance.source_deletion import enqueue_source_deletion
+
+    database, _mirror = _two_sources(tmp_path)
+    with database.connect() as conn:
+        revision = conn.execute(
+            "SELECT revision_id FROM import_revisions WHERE root_id = 'root-a' "
+            "AND status = 'confirmed' ORDER BY created_at DESC, revision_id DESC LIMIT 1"
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO jobs(job_id, job_type, revision_id, work_id, idempotency_key, "
+            "status, created_at, updated_at) "
+            "VALUES ('job-queued', 'scrape_work', ?, '', 'queued-key', 'queued', ?, ?)",
+            (
+                str(revision["revision_id"]),
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+
+    job_id = enqueue_source_deletion(database, "root-a")  # 不得抛 ValueError
+
+    assert job_id.startswith("job_")
+    with database.connect() as conn:
+        queued_status = conn.execute(
+            "SELECT status FROM jobs WHERE job_id = 'job-queued'"
+        ).fetchone()["status"]
+    assert str(queued_status) == "cancelled", "排队作业必须让路并被取消"

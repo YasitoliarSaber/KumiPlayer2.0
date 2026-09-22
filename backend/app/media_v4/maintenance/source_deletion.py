@@ -359,6 +359,27 @@ def enqueue_source_deletion(database, root_id: str) -> str:
             raise KeyError(root_id)
         blockers = _blockers(conn, root_id)
         if blockers:
+            # 用户主动"按来源删除媒体库"时，**排队中（queued）**的同源作业必须让路：
+            # 它们还没开始执行，而删除会把该来源的整个媒体库带走，继续跑没有意义。
+            # 实测（用户真实库）：来源卡停在"0/8 待处理"，该来源的排队作业长期不动，
+            # 于是每次点"确认删除媒体库"都被 409 拒绝、**根本没有入队**
+            # （jobs 表里 delete_source_library 只有 2 条且都是 succeeded）。
+            # 仍在 **running** 的作业不在此列：删除必须继续拒绝，避免与在途任务互相踩。
+            queued_jobs = conn.execute(
+                """
+                SELECT job.job_id FROM jobs job
+                JOIN import_revisions revision ON revision.revision_id = job.revision_id
+                WHERE revision.root_id = ? AND job.status = 'queued' AND job.job_id != ?
+                """,
+                (root_id, ""),
+            ).fetchall()
+            for row in queued_jobs:
+                conn.execute(
+                    "UPDATE jobs SET status = 'cancelled', updated_at = ? WHERE job_id = ?",
+                    (now, str(row["job_id"])),
+                )
+            blockers = _blockers(conn, root_id)
+        if blockers:
             raise ValueError(blockers[0])
         revision = conn.execute(
             "SELECT revision_id FROM import_revisions WHERE root_id = ? AND status = 'confirmed' "
