@@ -112,28 +112,35 @@ def test_differently_named_series_entries_are_separate_works():
 
 
 def test_differently_named_works_are_separate_works():
-    """不同名条目现已各自成 Work（容器修复保证）；合并门槛的加强**留待**来源结构证据。
+    """真实目录解析后的独立条目，即使共享在线系列资料也不能重新合并。
 
-    本节记录三种**已实测证伪**的加强方案，避免后续重复走（都会破坏跨语言同一作品）：
-    A. 在 `can_merge_provider_identity` 里要求"标题必须互为变体"（前缀）→ 破坏
-       `test_v4_hierarchy_inheritance` 辉夜大小姐 2 项 + `sample_corpus` 1 项；
-    B. 在同一门里要求"年份一致且都有年份"→ 破坏 6 项（含语料 4 项）；
-    C. 在 `candidates.merge_map_from_candidates` 里要求"成员的本地标题必须出现在
-       它自己的候选 title/original_title/aliases 中"→ 破坏 4 项（辉夜大小姐 2 项 +
-       kaguya 特别篇 + Lycoris 短片并入主系列）。
+    合并门槛的历史教训（不要重复走）：
 
-    根因：上述既有契约中，**合法合并的双方标题本来就不同，且夹具候选没有别名证据**，
-    因此仅靠标题/年份/候选元数据无法区分"跨语言同一作品"与"名字不同的不同作品"。
-    按规格 §2 不变量 2，自动合并需要"**同一来源结构边界 + 同一作品身份**"的强证据，
-    属于独立设计（本轮不实现）。用户可见的重复卡问题改由
-    容器修复（本次）、标题投影（第 3 步）与展示层（P1）分别处理。
+    - “标题互为前缀”（在 can_merge_provider_identity 里加）与“要求双方年份齐全”
+      都已被实测证伪，会破坏合法合并，不要重新引入。
+    - 逐对要求标题证据是可行方向，但必须同时接入显式译名证据：单条候选自己
+      覆盖两个本地名，或已核验译名表
+      （recognition/verified_titles.titles_share_verified_alias）。
+      只按“共享在线 ID”拒绝合并会打掉跨语言同一作品的既有契约
+      （test_v4_p001_rework.py::test_pre_confirm_candidate_resolution_merges_cross_language_titles）。
+    - 反向边界同样锁死：“共享 ID + 双方各自命中自身标题”不得当成译名证据
+      （test_v4_provider_merge_boundaries.py::test_matching_each_local_name_to_shared_id_is_not_translation_evidence）。
     """
+
+    from app.media_v4.resolution.candidates import WorkCandidate, merge_graph, merge_map_from_candidates
 
     graph = _resolve_paths(MONOGATARI_PATHS, MOUNT_ROOT)
     keys = {work.work_key for work in graph.works}
 
     assert len(keys) >= 2, "名字不同的条目必须得到不同的 Work 键"
     assert len(graph.works) == len(keys), "每个 Work 键对应一个独立作品卡"
+    candidates = {work.work_key: [WorkCandidate(
+        work.work_key, "tmdb", "46195", "tv", "物语系列", None, "search", "high",
+        status="confirmed",
+    )] for work in graph.works}
+    merged = merge_graph(graph, merge_map_from_candidates(graph, candidates))
+    assert {work.work_key for work in merged.works} == keys
+    assert merged.episodes == graph.episodes
 
 
 # --------------------------------------------------------------------------
@@ -254,6 +261,36 @@ def test_library_card_title_keeps_local_identity_over_online_title():
     assert _card_payload(card)["title"] == "化物语", "本地标题必须优先于在线标题"
     assert _card_payload(card, {"title": "我的标题"})["title"] == "我的标题", "手动覆盖优先级最高"
     assert _card_payload(dict(card, title=""))["title"] == "物语系列", "本地无标题时才用在线标题"
+
+
+def test_cjk_episode_numbering_is_recognized():
+    """中文命名（OpenList 中文库）必须识别集号，否则整部作品只剩 1 集。
+
+    实测（用户截图）：宝可梦国语三的四部子作品各 144/191/275/189 个文件，
+    却都显示为「电影 · 1 集 · N 个文件」，因为文件名是 `第002集.mp4`、
+    `146栎树林，寻找大葱鸭.MP4` 这类**中文集号**，既有拉丁集号规则不认。
+    同时必须保证项目保护的真标题（86-不存在的战区- / 91Days / 22/7 / 3月的狮子）
+    不被误判为集号。
+    """
+
+    parser = V4Parser()
+    cases = {
+        "夸克网盘/动画/宝可梦国语三/无印篇/146栎树林，寻找大葱鸭.MP4": 146,
+        "夸克网盘/动画/宝可梦国语三/超级愿望/第002集.mp4": 2,
+        "夸克网盘/动画/宝可梦国语三/超世代/155盆才怪与忍者学园!!.mp4": 155,
+        "夸克网盘/动画/宝可梦国语三/钻石与珍珠/123樱花宝！让人心疼的对战.mp4": 123,
+    }
+    for index, (rel, expected) in enumerate(cases.items()):
+        facts = parser.parse(_evidence(index, rel), root_container="/夸克网盘")
+        assert facts.episode_candidate == expected, f"{rel} 的集号应为 {expected}"
+        assert (facts.media_type or "").casefold() == "tv", f"{rel} 应判为剧集而非电影"
+
+    for index, title in enumerate(("86-不存在的战区-", "91Days", "22／7", "3月的狮子"), start=90):
+        facts = parser.parse(
+            _evidence(index, f"夸克网盘/动画/{title}/[Group] {title} [Ma10p_2160p].mkv"),
+            root_container="/夸克网盘",
+        )
+        assert facts.episode_candidate is None, f"{title} 不得被误判为集号"
 
 
 def test_missing_identity_still_produces_local_work():

@@ -267,6 +267,34 @@ _EPISODE_TITLE_RELEASE_ONLY = re.compile(
 )
 
 
+_CJK_EPISODE_TOKEN = re.compile(r"第\s*0*(\d{1,4})\s*[集话話回]")
+_CJK_LEADING_EPISODE = re.compile(r"^0*(\d{2,4})(?=[\u4e00-\u9fff])")
+
+
+def _cjk_episode_number(stem: str) -> int | None:
+    """中文命名的集号（**追加**识别，不影响既有拉丁 SxxExx/绝对集号规则）。
+
+    支持两种形态：
+    - ``第002集`` / ``第 12 话`` / ``第3回``；
+    - ``146栎树林，寻找大葱鸭``（前导 2–4 位数字**紧跟中文**）。
+
+    前导数字要求 2–4 位且紧跟中文，因此项目保护的真人标题
+    （``86-不存在的战区-``、``91Days``、``22/7``、``3月的狮子``）不会被误判为集号。
+    """
+
+    match = _CJK_EPISODE_TOKEN.search(stem or "")
+    if match:
+        value = int(match.group(1))
+        if 0 < value <= 9999:
+            return value
+    match = _CJK_LEADING_EPISODE.match(stem or "")
+    if match:
+        value = int(match.group(1))
+        if 0 < value <= 999:
+            return value
+    return None
+
+
 def _sanitize_episode_title(value: str) -> str:
     """集标题的**最终校验**（规格 §5 第 4 步）。
 
@@ -554,7 +582,25 @@ class V4Parser:
                 absolute_candidate = int(raw_absolute)
                 episode_token = absolute_match.group(0).strip()
 
+        # 中文命名的集号（**追加**识别，不改变既有拉丁 SxxExx / 绝对集号规则）：
+        #   `第002集.mp4`、`第 12 话`、`146栎树林，寻找大葱鸭.MP4`（前导数字 + 中文标题）
+        # 实测（OpenList 中文库如"宝可梦国语三/无印篇"）：这类命名没有 SxxExx，
+        # 会让整部作品折叠成"电影 · 1 集 · N 个文件"，275 个文件只剩 1 集。
+        cjk_episode = None
+        if not episode_match and absolute_candidate is None:
+            cjk_episode = _cjk_episode_number(PurePosixPath(filename).stem)
+            if cjk_episode is not None:
+                episode_token = str(cjk_episode)
+
         group_type = guess.group_type or "unknown"
+        resolved_media_type = guess.media_type
+        resolved_card_type = guess.card_type
+        if cjk_episode is not None and str(guess.media_type or "").casefold() in {"movie", "unknown", ""}:
+            # 找到中文集号时，把"电影"纠正为剧集季：中文命名的 TV 动画没有 SxxExx，
+            # 否则会被当成电影（实测 275 文件的《无印篇》显示为"电影 · 1 集"）。
+            resolved_media_type = "tv"
+            group_type = "season"
+            resolved_card_type = "main_series"
         is_auxiliary = group_type in {"auxiliary", "ignored"}
         stem = PurePosixPath(filename).stem
         quality_tags = tuple(
@@ -613,12 +659,12 @@ class V4Parser:
             evidence_id=evidence.evidence_id,
             parser_version=self.VERSION,
             resource_type=evidence.entry_kind,
-            media_type=guess.media_type,
+            media_type=resolved_media_type,
             group_type=group_type,
             work_title=guess.work_title,
             original_title=guess.original_title,
             series_group=resolved_series_group,
-            card_type=guess.card_type,
+            card_type=resolved_card_type,
             relation_type=resolved_relation_type,
             show_type=show_type_from_import_family(
                 evidence.import_family,
@@ -630,7 +676,9 @@ class V4Parser:
             episode_token_raw=episode_token,
             episode_title=episode_title,
             season_candidate=guess.season_number,
-            episode_candidate=guess.episode_number,
+            episode_candidate=(
+                guess.episode_number if guess.episode_number is not None else cjk_episode
+            ),
             absolute_episode_candidate=absolute_candidate,
             special_candidate=group_type == "special",
             episode_range=episode_range,
