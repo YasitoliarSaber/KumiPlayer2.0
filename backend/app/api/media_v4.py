@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
@@ -291,6 +292,28 @@ def _configured_cloud_roots(config) -> list[str]:
     return [root for root in roots if root.strip()]
 
 
+def _collapse_repeated_segment(path: str, segment: str) -> str:
+    """折叠路径中**连续重复**的同一段：`…\\115网盘\\动画\\动画\\作品…` → `…\\115网盘\\动画\\作品…`。
+
+    用户实测（115 网盘目录树导入，**重复出现两次**）：生成的 strm 路径多出一层"动画"。
+    根因是 `remote_root` 已经以分类目录结尾（如 `/动画`）、路由的 `remote_prefix` 又是
+    `动画`，两次拼接得到 `动画/动画`。这里做幂等折叠：无论重复发生在末尾还是中间都合并，
+    对不含重复的路径完全无影响（不改变既有正确路径）。
+    """
+
+    cleaned = (segment or "").strip().strip("/\\")
+    if not cleaned or not path:
+        return path
+    pattern = re.compile(
+        r"(?i)([\\/])" + re.escape(cleaned) + r"\1" + re.escape(cleaned) + r"(?=[\\/]|$)"
+    )
+    while True:
+        collapsed = pattern.sub(lambda match: match.group(1) + cleaned, path)
+        if collapsed == path:
+            return path
+        path = collapsed
+
+
 def _configured_tree_roots(config, provider: str) -> list[str]:
     roots: list[str] = []
     if provider == "pan115":
@@ -305,7 +328,12 @@ def _configured_tree_roots(config, provider: str) -> list[str]:
             enabled = route.get("enabled", True) if isinstance(route, dict) else getattr(route, "enabled", True)
             prefix = route.get("remote_prefix", "") if isinstance(route, dict) else getattr(route, "remote_prefix", "")
             if enabled and route_provider == provider and prefix:
-                roots.append(derive_local_path(mount_root, remote_root, str(prefix)))
+                roots.append(
+                    _collapse_repeated_segment(
+                        derive_local_path(mount_root, remote_root, str(prefix)),
+                        str(prefix),
+                    )
+                )
     unique: dict[str, str] = {}
     for root in roots:
         value = root.strip().rstrip("\\/")
