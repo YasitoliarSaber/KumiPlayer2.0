@@ -8,6 +8,7 @@ revision_id + draft_work_key 在确认前持久化；高置信唯一身份用于
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -119,9 +120,71 @@ def build_query_inputs(
         ]
     else:
         related = related_facts
-    return _with_series_search_context(
-        work_identity_title_inputs(work, related), work, entries, related
-    )[:8]
+    identity_titles = work_identity_title_inputs(work, related)
+    # 检索变体（剥版本标记 + 按分隔符拆分）**只进检索**，不进身份边界。
+    expanded: list[str] = []
+    for title in identity_titles:
+        for variant in _query_variants(title):
+            if variant not in expanded:
+                expanded.append(variant)
+    return _with_series_search_context(expanded, work, entries, related)[:8]
+
+
+_EDITION_MARKERS = (
+    "剧场版",
+    "劇場版",
+    "总集篇",
+    "總集篇",
+    "特别篇",
+    "特別篇",
+    "电影版",
+    "電影版",
+    "movie edition",
+    "the movie",
+    "special edition",
+    "ova",
+    "oad",
+)
+# 分隔符：句点/下划线/与号/冒号/顿号/竖线/斜杠，以及"两侧有空格的短横线"。
+# 注意不拆 `Ressha-hen` 这类自带连字符的标题（`-` 两侧无空格）。
+_QUERY_SEPARATORS = re.compile(r"[.．_&＆：:、·|/\\]+|\s[-–—]\s+")
+
+
+def _query_variants(title: str) -> list[str]:
+    """生成检索变体：先剥"版本标记"，再按分隔符拆分（检索专用）。
+
+    联网核对的业界做法（2026-09-22，见 commit 说明与来源）：
+    - Radarr / Sonarr 在"Rename → Remove Words"或 release profile 里用
+      `\\s*(剧场版|OVA|总集篇|Movie Edition)$` 之类正则**先清洗再交给媒体服务器匹配**；
+    - Jellyfin / Emby 再配合 TMDB/TVDB 的 **alternate titles** 提高命中率。
+
+    用户实测（本地库）：`魔法禁书目录剧场版：恩底弥翁的奇迹`、`东京教父.Tokyo.Godfathers`、
+    `红猪.Porco.Rosso`、`刀剑神域 剧场版：序列之争` 这些名字**只按原样搜一次必然搜不到**。
+    这里只生成**检索词**；身份边界仍由 `work_identity_title_inputs()` 决定，互不影响。
+    """
+
+    value = (title or "").strip()
+    if not value:
+        return []
+    variants: list[str] = []
+
+    def push(candidate: str) -> None:
+        text = (candidate or "").strip(" ._-·、:：|/\\")
+        if len(text) >= 2 and text not in variants:
+            variants.append(text)
+
+    push(value)
+    stripped = value
+    for marker in _EDITION_MARKERS:
+        stripped = re.sub(re.escape(marker), " ", stripped, flags=re.IGNORECASE)
+    # 去掉"版本标记"后常留下多余空格与分隔符前空格：`魔法禁书目录 剧场版：X` → `魔法禁书目录：X`
+    stripped = re.sub(r"\s+([：:、·|])", r"\1", stripped)
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+    push(stripped)
+    for base in (value, stripped):
+        for part in _QUERY_SEPARATORS.split(base):
+            push(part)
+    return variants
 
 
 def _with_series_search_context(
