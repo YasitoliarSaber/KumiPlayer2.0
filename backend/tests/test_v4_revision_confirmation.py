@@ -219,13 +219,33 @@ def test_confirmation_does_not_reuse_bindings_created_earlier_in_same_revision(t
 
         with database.connect() as conn:
             works = conn.execute(
-                "SELECT preferred_title FROM works ORDER BY preferred_title"
+                "SELECT work_id, preferred_title FROM works ORDER BY preferred_title"
+            ).fetchall()
+            episodes = conn.execute(
+                "SELECT episodes.work_id, seasons.local_season_number, seasons.season_kind, "
+                "       episodes.local_episode_number, episodes.special_number "
+                "FROM episodes JOIN seasons ON seasons.season_id = episodes.season_id"
+            ).fetchall()
+            bindings = conn.execute(
+                "SELECT DISTINCT work_id, structural_key FROM work_source_bindings"
             ).fetchall()
 
-        assert [str(row["preferred_title"]) for row in works] == [
-            "Yuru Camp",
-            "Yuru Camp Season 2",
-        ]
+        # 作品边界规则 R2：`Yuru Camp Season 2` 这类尾部季标记不再进入身份标题，
+        # 季度目录与主系列是同一部作品。这里原先断言 "Yuru Camp" +
+        # "Yuru Camp Season 2" 两条，那是旧契约按季度目录拆卡的结果；标记
+        # 剥离后三份证据必须收口为一个 Work（与输入顺序无关）。
+        assert [str(row["preferred_title"]) for row in works] == ["Yuru Camp"]
+        # 保留季号/集号/身份断言：第二季的正片仍在 Season 2（季号不因合并丢失），
+        # 两个 SP 仍在 special season，且所有结构绑定都只指向这一个 Work。
+        assert sorted(
+            (int(row["local_season_number"]), str(row["season_kind"]), row["local_episode_number"], row["special_number"])
+            for row in episodes
+        ) == [(0, "special", None, 1), (2, "regular", 1, None)]
+        assert {str(row["structural_key"]) for row in bindings} >= {
+            "path:动画/yuru camp season 2:tv",
+            "work:yuru camp season 2:tv",
+        }
+        assert {str(row["work_id"]) for row in bindings} == {str(works[0]["work_id"])}
 
 
 def test_ambiguous_existing_structural_bindings_block_confirmation(tmp_path):

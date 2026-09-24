@@ -19,12 +19,15 @@ from app.media_v4.domain.models import (
 )
 from app.media_v4.generic_container import is_generic_container_title
 from app.media_v4.parsing.episode_titles import ensure_special_title_number
+from app.media_v4.resolution.candidates import strip_season_marker
 from app.media_v4.resolution.title_norm import normalize_identity_title
 from app.media_v4.sources.adapters import provider_to_source
 from app.recognition.media import (
     _extract_work_container,
     _is_bracket_heavy,
     _is_series_container,
+    _looks_like_plain_season_dir,
+    _looks_like_specials_dir,
     _parse_work_title_and_year,
 )
 
@@ -47,6 +50,179 @@ def _normalize_title(value: str) -> str:
 
 def _is_placeholder_title(value: str) -> bool:
     return is_generic_container_title(value)
+
+
+#: 中日韩文字（含假名、谚文、片假名中点）。
+_CJK_CHAR_CLASS = (
+    "\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af"
+    "\u3005\u3006\u30fb\uff01\uff1f"
+)
+#: 中日韩文本**内部**的空格：`天元突破 红莲螺岩` 与 `天元突破红莲螺岩` 是同一部作品。
+#: 只收敛夹在两个字之间的空白，拉丁词之间的空格（`Love Live`）必须保留。
+_CJK_INNER_SPACE = re.compile(rf"(?<=[{_CJK_CHAR_CLASS}])[ \t]+(?=[{_CJK_CHAR_CLASS}])")
+
+
+def _boundary_key_title(value: str | None) -> str:
+    """作品**边界键**专用的标题归一化（身份语义 + 忽略中日韩内部空格）。
+
+    同一部作品的两份物理目录常把空格写成 `天元突破 红莲螺岩` / `天元突破红莲螺岩`；
+    这是命名差异，不是两个作品。该差异只允许在**边界键**上收敛：
+    `title_norm.normalize_identity_title` 是共享身份语义，不能被放宽。
+    """
+
+    return _CJK_INNER_SPACE.sub("", normalize_identity_title(value))
+
+
+#: 容器/季目录名**首部**的季度标记：`S3 辉夜大小姐想让我告白…`、`第2季 某作品`。
+#: 标记后面必须是分隔符或行尾，避免把 `S1m0ne` 这类真标题当成季度。
+_BOUNDARY_SEASON_PREFIX = re.compile(
+    r"^(?:s(\d{1,2})|season\s*(\d+)|第\s*([一二三四五六七八九十百零〇0-9]+)\s*[季期部])"
+    r"(?:[\s._\-—–~～:：·]|$)",
+    re.IGNORECASE,
+)
+#: 容器/季目录名**尾部**的季度标记：`暗杀教室第二季`、`赛马娘 第三季`、`Show S2`、
+#: `2nd Season`、`灵能百分百 路人超能100 Ⅲ`。
+_BOUNDARY_SEASON_SUFFIX = re.compile(
+    r"[\s._\-—–~～:：·（）()【】]*"
+    r"(?:"
+    r"第\s*([一二三四五六七八九十百零〇0-9]+)\s*[季期部]"
+    r"|season\s*(\d+)"
+    r"|(\d+)(?:st|nd|rd|th)\s*season"
+    r"|s(\d{1,2})"
+    r"|([ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ])"
+    r"|[\s._\-—–~～:：·]+(ii|iii|iv|vi|vii|viii|ix|xi|xii)"
+    r")(\s*)$",
+    re.IGNORECASE,
+)
+#: 罗马数字季度号（`灵能百分百 路人超能100 Ⅲ`）——`strip_season_marker` 不处理它。
+_ROMAN_SEASON_SUFFIX = re.compile(
+    r"[\s._\-—–~～:：·]*(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]|(?:ii|iii|iv|vi|vii|viii|ix|xi|xii))\s*$",
+    re.IGNORECASE,
+)
+_ROMAN_NUMERALS = {
+    "Ⅰ": 1, "Ⅱ": 2, "Ⅲ": 3, "Ⅳ": 4, "Ⅴ": 5, "Ⅵ": 6,
+    "Ⅶ": 7, "Ⅷ": 8, "Ⅸ": 9, "Ⅹ": 10, "Ⅺ": 11, "Ⅻ": 12,
+    "ii": 2, "iii": 3, "iv": 4, "vi": 6, "vii": 7, "viii": 8,
+    "ix": 9, "xi": 11, "xii": 12,
+}
+_CN_DIGITS = {
+    "零": 0, "〇": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10, "百": 100,
+}
+
+
+def _season_index_from_token(token: str) -> int | None:
+    """`一`/`二`/`十一`/`2`/`II`/`Ⅲ` 形式的季号 → 整数。"""
+
+    text = str(token or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    lowered = text.casefold()
+    if lowered in _ROMAN_NUMERALS:
+        return _ROMAN_NUMERALS[lowered]
+    # 全角罗马数字大小写不同码位：`Ⅲ`.casefold() → `ⅲ`，需再按大写查一次。
+    upper = text.upper()
+    if upper in _ROMAN_NUMERALS:
+        return _ROMAN_NUMERALS[upper]
+    if all(char in _CN_DIGITS for char in text):
+        if text == "十":
+            return 10
+        if "十" in text:
+            high, _, low = text.partition("十")
+            return (_CN_DIGITS.get(high, 1) if high else 1) * 10 + (_CN_DIGITS.get(low, 0) if low else 0)
+        value = 0
+        for char in text:
+            value = value * 10 + _CN_DIGITS[char]
+        return value
+    return None
+
+
+def _season_index_from_name(value: str) -> int | None:
+    """目录名里的季标记序号（`第二季`/`S2`/`Season 2`/`Ⅲ`）；无标记返回 None。"""
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for pattern in (_BOUNDARY_SEASON_PREFIX, _BOUNDARY_SEASON_SUFFIX):
+        match = pattern.match(text) if pattern is _BOUNDARY_SEASON_PREFIX else pattern.search(text)
+        if not match:
+            continue
+        for group in match.groups():
+            if group is None:
+                continue
+            try:
+                index = int(group)
+            except ValueError:
+                index = None
+            if index is None:
+                index = _season_index_from_token(group)
+            if index is not None:
+                return index
+    return None
+
+
+def _boundary_season_indexes(evidence: SourceEvidence, container: str) -> list[int]:
+    """作品容器及其下方季目录里出现的**全部**季标记序号。
+
+    纯结构季目录（`Season 1` / `S01` / `第一季` / `Specials`）不参与：
+    它们不携带作品名，只是本地组织方式；把它们算作季标记会让
+    `AIR.2005/Season 1/…` 与 `AIR.2015/Season 1/…` 因年份被抹掉而错误合并。
+    """
+
+    names = [container]
+    directories = list(PurePosixPath(evidence.relative_path.replace("\\", "/")).parts[:-1])
+    if container in directories:
+        index = len(directories) - 1 - directories[::-1].index(container)
+        names.extend(directories[index + 1:])
+    indexes = []
+    for name in names:
+        if _looks_like_plain_season_dir(name) or _looks_like_specials_dir(name):
+            continue
+        season = _season_index_from_name(name)
+        if season is not None:
+            indexes.append(season)
+    return indexes
+
+
+def _has_boundary_season_marker(value: str) -> bool:
+    """目录名是否带**明确**季度标记（首部 `S3 ` / `第2季 ` 或尾部 `第二季` / `S2` / `Ⅲ`）。"""
+
+    return _season_index_from_name(value) is not None
+
+
+def _strip_boundary_season_marker(title: str) -> str:
+    """剥离季标记得到基名；剥完为空或过短时返回原值（只做单向收缩）。"""
+
+    base = strip_season_marker(title)
+    stripped = _ROMAN_SEASON_SUFFIX.sub("", base).strip(" ._-·、:：|/\\")
+    if stripped != base and len(stripped) >= 2:
+        return stripped
+    return base
+
+
+def _boundary_season_scoped(evidence: SourceEvidence, facts: ParsedFacts, container: str) -> bool:
+    """本条目是否落在**带季度标记的目录**里，且该标记已经落到本地季号上。
+
+    两种真实结构都要覆盖：
+    - 标记就在作品容器上（`A 4k 暗杀教室/暗杀教室第一季/…`、`S1 灵能百分百…/…`）；
+    - 容器只是作品名，标记在它下面的季目录上
+      （`辉夜大小姐想让我告白/辉夜大小姐想让我告白/S3 …（2022）/…`、
+      `命运石之门/命运石之门/S1 命运石之门（2011）/…`）。
+
+    这两种情况下容器名解析出的年份都是**本季播出年**，不是作品身份的一部分。
+
+    **季号一致是前提**：只有当标记序号与本地季号相同（`第二季` ↔ `season_candidate=2`）
+    才能合并。否则（实测 `P 4k 排球少年/排球少年第二季/…` 的本地季号仍是 1——
+    文件名没有 SxxEyy 也没有季 token）合并会把四季的集号全部撞在一起，
+    85 集塔缩成 25 集。这种情形需要 Season 层补季号，不属于作品边界层。
+    """
+
+    indexes = _boundary_season_indexes(evidence, container)
+    if not indexes:
+        return False
+    return all(index == facts.season_candidate for index in indexes)
 
 
 def _effective_media_type(facts: ParsedFacts) -> str:
@@ -82,7 +258,7 @@ def _main_series_identity_title(facts: ParsedFacts) -> str:
     if facts.relation_type == "main":
         return series
     work = (facts.work_title or "").strip()
-    if _normalize_title(series) != _normalize_title(work):
+    if _boundary_key_title(series) != _boundary_key_title(work):
         return series
     original = facts.original_title or ""
     # 明确的多季度/合集容器即使第一季标题与系列名相同，也仍是系列身份。
@@ -108,11 +284,18 @@ def _boundary_work_key(evidence: SourceEvidence, facts: ParsedFacts) -> str:
     if not container or is_generic_container_title(container):
         return ""
     title, year = _parse_work_title_and_year(container)
-    normalized = _normalize_title(title)
+    # 带季度标记的容器/季目录：目录名里的标题是"本季的写法"，年份是本季播出年。
+    # 两者都不能进入作品身份，否则同一部作品的多季会被拆成多个 Work。
+    season_scoped = _boundary_season_scoped(evidence, facts, container)
+    if season_scoped:
+        title = _strip_boundary_season_marker(title)
+        year = None
+    normalized = _boundary_key_title(title)
     if not normalized or _is_placeholder_title(normalized):
         return ""
     media_type = _effective_media_type(facts)
-    resolved_series = _normalize_title(facts.series_group)
+    resolved_series = _boundary_key_title(facts.series_group)
+    key_year = "" if season_scoped else str(year or facts.year_candidate or "")
     if (
         facts.group_type == "special"
         and facts.card_type != "standalone"
@@ -122,14 +305,14 @@ def _boundary_work_key(evidence: SourceEvidence, facts: ParsedFacts) -> str:
     ):
         # 特别篇副标题可能成为独立目录名；当识别器已经通过通用副标题规则
         # 收口到主系列时，边界键必须消费该事实，不能再用原目录全名拆卡。
-        return f"title:{resolved_series}:{facts.year_candidate or year or ''}:{media_type}"
+        return f"title:{resolved_series}:{key_year}:{media_type}"
     explicit_collection = bool(
         (_is_series_container(container) and not _is_bracket_heavy(container))
         or re.search(r"(?i)(?:系列|合集|\bseries\b|\bcollection\b)\s*$", container)
     )
     if explicit_collection:
         return f"series:{normalized}:{media_type}"
-    return f"title:{normalized}:{year or facts.year_candidate or ''}:{media_type}"
+    return f"title:{normalized}:{key_year}:{media_type}"
 
 
 def _work_key(facts: ParsedFacts, evidence: SourceEvidence | None = None) -> str:
@@ -149,7 +332,7 @@ def _work_key(facts: ParsedFacts, evidence: SourceEvidence | None = None) -> str
             return boundary_key
     series_title = _main_series_identity_title(facts)
     if series_title:
-        return f"series:{_normalize_title(series_title)}:{_effective_media_type(facts)}"
+        return f"series:{_boundary_key_title(series_title)}:{_effective_media_type(facts)}"
     # 当前作品身份优先：独立/外传/电影子作品用 work_title；只有 work_title
     # 是通用容器/占位时才用稳定的 series_group 聚合（P-001 7.3.C）。
     identity_title = facts.work_title or (facts.title_candidates or ("",))[0]
@@ -158,7 +341,12 @@ def _work_key(facts: ParsedFacts, evidence: SourceEvidence | None = None) -> str
             if candidate and not is_generic_container_title(candidate):
                 identity_title = candidate
                 break
-    title = _normalize_title(identity_title)
+    # 无容器可用时标题只能来自事实本身；此时若标题自带季标记，同样按基名收口
+    # （年份同理不入键），否则它会与有容器的那份目录算成两个作品。
+    season_marker = _has_boundary_season_marker(identity_title)
+    if season_marker:
+        identity_title = _strip_boundary_season_marker(identity_title)
+    title = _boundary_key_title(identity_title)
     if _is_placeholder_title(title):
         # Provider hint 只在本地事实无法形成 Work 身份时兜底。它是外部
         # 映射，不得优先于目录结构、作品标题或主系列关系；否则错误 hint
@@ -167,8 +355,17 @@ def _work_key(facts: ParsedFacts, evidence: SourceEvidence | None = None) -> str
             return f"provider:{facts.tmdb_hint_type.casefold()}:{facts.tmdb_hint_id}"
         return ""
     media_type = _effective_media_type(facts)
-    year = str(facts.year_candidate or "")
+    year = "" if season_marker else str(facts.year_candidate or "")
     return f"title:{title}:{year}:{media_type}"
+
+
+def _boundary_title_from_key(key: str) -> tuple[str, str, str] | None:
+    """拆开 `title:<标题>:<年份>:<类型>` 边界键；不是边界键时返回 None。"""
+
+    if not key.startswith("title:"):
+        return None
+    title, year, media_type = key[len("title:"):].rsplit(":", 2)
+    return title, year, media_type
 
 
 def _relation_work_key_from_row(row: dict) -> str:
@@ -200,10 +397,10 @@ def _relation_work_key_from_row(row: dict) -> str:
     # 不等于子类型，抑制失效，会造出永远查不到的 series:<自己>:tv。
     # 而显式给出不同 relation_media_type（例如同名电影确实有 TV 主系列）时
     # 仍然保留父子关系。
-    if (_normalize_title(series_group) == _normalize_title(str(row.get("title") or ""))
+    if (_boundary_key_title(series_group) == _boundary_key_title(str(row.get("title") or ""))
             and (media_type == child_media_type or forced_tv_parent)):
         return ""
-    return f"series:{_normalize_title(series_group)}:{media_type}"
+    return f"series:{_boundary_key_title(series_group)}:{media_type}"
 
 
 def _edition_key(facts: ParsedFacts) -> str:
@@ -285,7 +482,7 @@ def _resolved_entry_work_key(
     # series_group 都是"京阿尼合集"，但它们是**不同作品**。把系列提升应用在合集上
     # 会把 200+ 个不同动画的文件并成同一部作品的剧集（身份、刮削、剧集编号全错），
     # 因此合集不参与系列归并（见 resolve() 里的 collection_series 判定）。
-    normalized_group = _normalize_title(facts.series_group)
+    normalized_group = _boundary_key_title(facts.series_group)
     if (
         facts.relation_type == "main"
         and normalized_group
@@ -296,7 +493,7 @@ def _resolved_entry_work_key(
     matching_series = next(
         (
             normalized
-            for normalized in (_normalize_title(facts.work_title),)
+            for normalized in (_boundary_key_title(facts.work_title),)
             if (normalized, media_type) in structural_series_identities
         ),
         "",
@@ -319,6 +516,42 @@ def _preferred_work_title(facts: ParsedFacts, work_key: str) -> str:
         if series_title and not is_generic_container_title(series_title):
             return series_title
     return (facts.work_title or (facts.title_candidates or ("",))[0]).strip()
+
+
+def _coalesce_missing_year_keys(
+    entries: list[tuple[SourceEvidence, ParsedFacts]], entry_keys: dict[str, str],
+) -> None:
+    """同一来源、同一作品标题下，缺年份不构成另一个作品。
+
+    作用域是 ``root_id + 边界标题 + 媒体类型``，不再是"同一个实际作品目录"：
+    同一部作品的两份物理目录本来就常一侧写年份、一侧不写
+    （``天元突破红莲螺岩.2007`` 与 ``T 4k 天元突破 红莲螺岩``、
+    ``命运石之门/命运石之门 0`` 与 ``命运石之门 [KissSub&MAI]/3.命运石之门 0``）。
+
+    只有该标题下**唯一**一个已知年份时才补齐；两侧都带年份且不同
+    （同一标题的 1999 版与 2011 版）必须继续是两条。只改本地键，
+    不改 ParsedFacts，也不跨 root 借用标题或 Provider。
+    """
+    scopes: dict[tuple[str, str, str], list[tuple[str, str, str]]] = defaultdict(list)
+    for evidence, facts in entries:
+        key = entry_keys[evidence.evidence_id]
+        if not key.startswith("title:") or facts.card_type in {"standalone", "movie"}:
+            continue
+        if facts.relation_type not in {"", "main"}:
+            continue
+        parsed = _boundary_title_from_key(key)
+        if parsed is None:
+            continue
+        title, year, media_type = parsed
+        scopes[(evidence.root_id, title, media_type)].append((evidence.evidence_id, key, year))
+    for members in scopes.values():
+        dated_keys = {key for _eid, key, year in members if year}
+        if len(dated_keys) != 1:
+            continue
+        canonical = next(iter(dated_keys))
+        for evidence_id, _key, year in members:
+            if not year:
+                entry_keys[evidence_id] = canonical
 
 
 _LOCAL_SPECIAL_TOKEN = re.compile(
@@ -370,7 +603,7 @@ class MediaResolver:
         # Season/Special 条目声明的主系列身份。只采用 relation_type=main
         # 的结构事实，外传/电影的父系列关系不能反向吞并当前作品。
         structural_series_identities = {
-            (_normalize_title(facts.series_group), _effective_media_type(facts))
+            (_boundary_key_title(facts.series_group), _effective_media_type(facts))
             for _evidence, facts in entries
             if facts.card_type != "standalone"
             and facts.relation_type == "main"
@@ -388,7 +621,7 @@ class MediaResolver:
         for evidence, facts in entries:
             if facts.card_type == "standalone":
                 continue
-            group = _normalize_title(facts.series_group)
+            group = _boundary_key_title(facts.series_group)
             if not group or is_generic_container_title(facts.series_group):
                 continue
             container = _extract_work_container(
@@ -410,10 +643,17 @@ class MediaResolver:
             if len({_series_base_title(child) for child in children}) > 1
             and _looks_like_collection_name(str(series_key[0]))
         }
+        entry_work_keys = {
+            evidence.evidence_id: _resolved_entry_work_key(
+                evidence, facts, structural_series_identities, collection_series,
+            )
+            for evidence, facts in entries
+        }
+        _coalesce_missing_year_keys(entries, entry_work_keys)
         for evidence, facts in entries:
             if facts.group_type != "special" and not facts.special_candidate:
                 continue
-            key = _resolved_entry_work_key(evidence, facts, structural_series_identities, collection_series)
+            key = entry_work_keys[evidence.evidence_id]
             local_identity = _local_special_identity(evidence, facts)
             if key and local_identity is not None:
                 local_special_identities[key].add(local_identity)
@@ -471,7 +711,7 @@ class MediaResolver:
                 continue
             if (facts.special_number or facts.episode_candidate or 0) > 0:
                 continue
-            key = _resolved_entry_work_key(evidence, facts, structural_series_identities, collection_series)
+            key = entry_work_keys[evidence.evidence_id]
             if not key:
                 continue
             title_identity = _normalize_title(facts.episode_title) or _normalize_title(
@@ -493,7 +733,7 @@ class MediaResolver:
             if not facts.is_importable or facts.is_auxiliary:
                 continue
             identity_title = facts.work_title or (facts.title_candidates or ("",))[0]
-            key = _resolved_entry_work_key(evidence, facts, structural_series_identities, collection_series)
+            key = entry_work_keys[evidence.evidence_id]
             # 阶段 1（架构方案）：身份无法确定的条目得到"本地兜底键"，**不再被丢弃**。
             local_fallback = key.startswith("local:")
             if facts.needs_review:
@@ -542,6 +782,16 @@ class MediaResolver:
             )
             if evidence.evidence_id not in work["evidence_ids"]:
                 work["evidence_ids"].append(evidence.evidence_id)
+            if facts.year_candidate is not None:
+                # 同一 Work 出现多个年份时取最早的一年（系列起始年）。之前是
+                # "先出现的赢"，会让作品年份随条目顺序变化，与
+                # _preferred_work_title 声明的顺序无关不一致。
+                current_year = work["year"]
+                work["year"] = (
+                    facts.year_candidate
+                    if current_year is None
+                    else min(current_year, facts.year_candidate)
+                )
 
             edition_key = _edition_key(facts)
             if _effective_media_type(facts) == "movie":
