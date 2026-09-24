@@ -13,7 +13,7 @@
       },
       "commit": "d124c2c930d69446448022851373e00ae592390d",
       "bundled_files": [
-        "mpv/config/portable_config/scripts/uosc.lua",
+        "mpv/config/portable_config/scripts/uosc/",
         "mpv/config/portable_config/fonts/uosc_icons.otf",
         "mpv/config/portable_config/fonts/uosc_textures.ttf",
         "mpv/config/portable_config/script-opts/uosc.conf"
