@@ -154,6 +154,16 @@ def normalize_batch_parsed_facts(
                 ),
                 special_candidate=season_number == 0 or facts.special_candidate,
                 special_number=episode_number if season_number == 0 else facts.special_number,
+                # 用户规则（2026-09-24）：特别篇不得入库。已核验 Provider 季度把文件
+                # 改写成 S00/special 时，**必须同步刷新** is_importable / is_auxiliary，
+                # 否则这批文件会绕过“特殊篇不入库”规则继续进入 Work/Episode/Asset 图
+                # （子会话实测：辉夜『First Kiss wa Owaranai』４ 个文件就是此缺口）。
+                is_importable=(
+                    (not facts.is_importable or facts.is_auxiliary)
+                    if season_number == 0
+                    else facts.is_importable
+                ),
+                is_auxiliary=(facts.is_auxiliary or season_number == 0),
                 episode_title=(
                     clean_special_episode_title(
                         evidence.relative_path,

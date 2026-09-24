@@ -469,8 +469,13 @@ def test_verified_absolute_release_is_mapped_to_provider_season_without_guessing
     assert [facts.absolute_episode_candidate for _evidence, facts in normalized] == list(range(13, 25))
 
 
-def test_verified_kaguya_episodic_movie_stays_playable_as_series_specials():
-    """四段流媒体版不能冒充第一季，也不能压成一个电影 Asset。"""
+def test_verified_kaguya_episodic_movie_is_excluded_by_special_rule():
+    """四段流媒体版既不冒充第一季，也不压成一个电影 Asset。
+
+    用户规则（2026-09-24）：特别篇不再入库。已核验 Provider 季度把文件改写成 S00
+    时也必须同步刷新 is_importable/is_auxiliary（旧实现只改 group_type，这批文件会
+    绕过规则继续进入 Work/Episode/Asset 图），因此这里反向断言它们被排除。
+    """
 
     from app.media_v4.parsing.parser import normalize_batch_parsed_facts
 
@@ -490,10 +495,16 @@ def test_verified_kaguya_episodic_movie_stays_playable_as_series_specials():
 
     assert all(facts.group_type == "special" for _evidence, facts in normalized)
     assert all(facts.season_candidate == 0 for _evidence, facts in normalized)
-    assert len(graph.works) == 1
-    assert len(graph.episodes) == 4
-    assert all(episode.episode_kind == "special" for episode in graph.episodes)
-    assert len({episode.special_number for episode in graph.episodes}) == 4
+    # 新契约核心：S00 改写同样要落成“不可导入”，不产生任何 Work/Episode。
+    assert all(facts.is_importable is False for _evidence, facts in normalized)
+    assert all(facts.is_auxiliary is True for _evidence, facts in normalized)
+    assert not graph.episodes
+    assigned = {
+        evidence_id for episode in graph.episodes for evidence_id in episode.asset_evidence_ids
+    } | {
+        evidence_id for asset in graph.work_assets for evidence_id in asset.asset_evidence_ids
+    }
+    assert assigned.isdisjoint({evidence.evidence_id for evidence, _facts in normalized})
 
 
 def test_verified_kaguya_stairway_cross_language_release_maps_to_explicit_fourth_season():
