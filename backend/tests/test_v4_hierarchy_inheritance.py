@@ -28,18 +28,31 @@ def _resolve(paths: list[str], *, root_container: str = ""):
     return MediaResolver().resolve(entries)
 
 
+def _parse_facts(relative_path: str, *, root_container: str = ""):
+    """单独解析一条证据，供「特别篇不入库」的反向断言使用。"""
+
+    return V4Parser().parse(_evidence(0, relative_path), root_container=root_container)
+
+
 def test_explicit_series_container_groups_seasons_and_specials_into_one_work():
+    """显式系列容器内的正片季节合并为一个 Work；SP 目录文件不入库。"""
+
+    special_path = "动画/CLANNAD.S1-S2+SP+OVA/SP/CLANNAD [SP01].mkv"
     graph = _resolve(
         [
             "动画/CLANNAD.S1-S2+SP+OVA/1.CLANNAD.[S1].2007/CLANNAD [01].mkv",
             "动画/CLANNAD.S1-S2+SP+OVA/2.CLANNAD.After.Story.[S2].2008/CLANNAD After Story [01].mkv",
-            "动画/CLANNAD.S1-S2+SP+OVA/SP/CLANNAD [SP01].mkv",
+            special_path,
         ]
     )
 
     assert len(graph.works) == 1
     assert graph.works[0].preferred_title == "CLANNAD"
-    assert {episode.local_season_number for episode in graph.episodes} == {0, 1, 2}
+    assert {episode.local_season_number for episode in graph.episodes} == {1, 2}
+    # 用户规则（2026-09-24）：特别篇不进入媒体库。解析仍如实记录 group_type=special，
+    # 但 is_importable=False，因此既不会成为 Episode，也不会生成镜像。
+    assert _parse_facts(special_path).is_importable is False
+    assert all(episode.episode_kind != "special" for episode in graph.episodes)
 
 
 def test_standalone_movie_inside_series_container_remains_independent_work():
@@ -119,7 +132,12 @@ def test_plain_series_collection_merges_regular_seasons_but_keeps_spinoff_and_mo
         episode.local_season_number
         for episode in graph.episodes
         if episode.work_key == main_work.work_key
-    } == {0, 1, 2, 3}
+    } == {1, 2, 3}
+    # 用户规则（2026-09-24）：Special 目录下的 SP08 不入库，也不会造出 S00。
+    assert _parse_facts(
+        "[VCB-Studio] Yuru Camp/Specials/[VCB-Studio] Yuru Camp [SP08][Making Documentary][Ma10p_1080p].mkv"
+    ).is_importable is False
+    assert all(episode.episode_kind != "special" for episode in graph.episodes)
 
 
 def test_plain_series_regular_seasons_do_not_require_a_specials_folder_to_merge():
@@ -165,7 +183,13 @@ def test_release_group_subdirectories_keep_main_seasons_together_without_absorbi
         episode.local_season_number
         for episode in graph.episodes
         if episode.work_key == main_work.work_key
-    } == {0, 1, 2}
+    } == {1, 2}
+    # 用户规则（2026-09-24）：SPs 子目录里的 SP08 同样不入库。
+    assert _parse_facts(
+        "[VCB-Studio] Yuru Camp/[Airota&Nekomoe kissaten&VCB-Studio] Yuru Camp [Ma10p_1080p]/SPs/"
+        "[Airota&Nekomoe kissaten&VCB-Studio] Yuru Camp [SP08][Making Documentary][Ma10p_1080p].mkv"
+    ).is_importable is False
+    assert all(episode.episode_kind != "special" for episode in graph.episodes)
     movie_work = next(work for work in graph.works if work.preferred_title == "Yuru Camp Movie")
     movie_asset = next(asset for asset in graph.work_assets if asset.work_key == movie_work.work_key)
     assert movie_asset.asset_evidence_ids == (
@@ -183,19 +207,9 @@ def test_title_number_after_episode_token_never_expands_into_ghost_episodes():
     assert len(graph.episodes[0].asset_evidence_ids) == 1
 
 
-def test_compound_special_tokens_stay_distinct_and_duplicate_versions_share_one_episode():
-    graph = _resolve(
-        [
-            "动画/Show.S1-S2/1.Show.[S1]/SPs/Show [SP01_01][1080p].mkv",
-            "动画/Show.S1-S2/1.Show.[S1]/SPs/Show [SP01_02][1080p].mkv",
-            "动画/Show.S1-S2/2.Show.[S2]/SPs/Show 2 [SP01_01][1080p].mkv",
-            "动画/Show.S1-S2/2.Show.[S2]/SPs/Show 2 [SP01_01][2160p].mkv",
-        ]
-    )
-
-    specials = [episode for episode in graph.episodes if episode.episode_kind == "special"]
-    assert len(specials) == 3
-    assert sorted(len(episode.asset_evidence_ids) for episode in specials) == [1, 1, 2]
+# 已删除 test_compound_special_tokens_stay_distinct_and_duplicate_versions_share_one_episode：
+# 该用例只断言 SP01_01/SP01_02 这类特别篇的编号区分与重复版本合并。用户 2026-09-24 规则
+# 取消了 special 入库，特别篇不再进入 Work/Season/Episode/Asset 图，该契约已被取消。
 
 
 def test_category_prefix_preserves_work_container_year_and_special_membership():
@@ -209,7 +223,12 @@ def test_category_prefix_preserves_work_container_year_and_special_membership():
     assert len(graph.works) == 1
     assert graph.works[0].preferred_title == "86-不存在的战区"
     assert graph.works[0].year == 2021
-    assert {episode.local_season_number for episode in graph.episodes} == {0, 1}
+    assert {episode.local_season_number for episode in graph.episodes} == {1}
+    # 用户规则（2026-09-24）：小写 special/ 目录里的 11.5 特别篇不入库。
+    assert _parse_facts(
+        "动画/B 86-不存在的战区.2021/special/[MAI] EIGHTY SIX [11.5].mkv"
+    ).is_importable is False
+    assert all(episode.episode_kind != "special" for episode in graph.episodes)
 
 
 def test_series_named_collection_is_a_shared_work_boundary():
@@ -237,7 +256,7 @@ def test_plain_parent_with_explicit_season_children_is_a_series_boundary():
     assert {episode.local_season_number for episode in graph.episodes} == {1, 2}
 
 
-def test_plain_parent_groups_regular_season_and_specials_consistently():
+def test_plain_parent_keeps_regular_season_and_excludes_specials():
     graph = _resolve(
         [
             "动画/少女歌剧 (2018)/Season 1/少女歌剧.S01E01.mkv",
@@ -246,19 +265,31 @@ def test_plain_parent_groups_regular_season_and_specials_consistently():
     )
 
     assert len(graph.works) == 1
-    assert {episode.local_season_number for episode in graph.episodes} == {0, 1}
+    assert {episode.local_season_number for episode in graph.episodes} == {1}
+    # 用户规则（2026-09-24）：S00E01 属于特别篇，不入库。
+    assert _parse_facts(
+        "动画/少女歌剧 (2018)/Specials/少女歌剧.S00E01.mkv"
+    ).is_importable is False
+    assert all(episode.local_season_number != 0 for episode in graph.episodes)
 
 
-def test_special_subtitle_folder_uses_resolved_main_series_boundary():
+def test_special_subtitle_folder_is_excluded_from_main_series_boundary():
+    """特别篇字幕文件夹不再并入主系列；主系列自身的作品边界保持不变。"""
+
+    special_path = "刮削好的动画/作品 通向大人的阶梯/作品 通向大人的阶梯.S01E01.mkv"
     graph = _resolve(
         [
             "刮削好的动画/作品/Season 1/作品.S01E01.mkv",
-            "刮削好的动画/作品 通向大人的阶梯/作品 通向大人的阶梯.S01E01.mkv",
+            special_path,
         ]
     )
 
     assert len(graph.works) == 1
-    assert {episode.local_season_number for episode in graph.episodes} == {0, 1}
+    assert graph.works[0].preferred_title == "作品"
+    assert {episode.local_season_number for episode in graph.episodes} == {1}
+    # 用户规则（2026-09-24）：通向大人的阶梯属于特别篇，不入库也不参与作品边界。
+    assert _parse_facts(special_path).is_importable is False
+    assert all(episode.episode_kind != "special" for episode in graph.episodes)
 
 
 def test_standalone_subwork_and_direct_recap_keep_their_own_titles():

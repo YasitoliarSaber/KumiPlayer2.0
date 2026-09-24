@@ -408,17 +408,19 @@ def test_txt_offline_scan_preview_confirm_mirror(tmp_path, monkeypatch):
         assert result.status == "succeeded", result
 
     strm_files = sorted((mirror_root).rglob("*.strm"))
-    # OP/ED 等辅助视频保留证据但不得生成普通剧集镜像：正片 2 + 特别篇 1 + 电影 1。
-    assert len(strm_files) == 4
+    # OP/ED 等辅助视频保留证据但不得生成普通剧集镜像：正片 2 + 电影 1。
+    # 用户规则（2026-09-24）：特别篇 / OVA / 番外 同样不入库、不生成镜像。
+    assert len(strm_files) == 3
     contents = {path.read_text(encoding="utf-8") for path in strm_files}
     assert contents == {
         rf"{source_root}\01动画\Show\Season 1\Show.S01E01.mkv",
         rf"{source_root}\01动画\Show\Season 1\Show.S01E02.mkv",
-        rf"{source_root}\01动画\Show\Specials\Show.SP01.mkv",
         rf"{source_root}\01动画\Movie\Movie.mkv",
     }
+    # 反向断言：特别篇路径不得出现在任何镜像内容里。
+    assert not any("Specials" in content for content in contents)
     with database.connect() as conn:
         artifacts = conn.execute(
             "SELECT COUNT(*) FROM artifacts WHERE revision_id = 'rev-txt-e2e' AND artifact_type = 'mirror'"
         ).fetchone()[0]
-    assert artifacts == 4
+    assert artifacts == 3

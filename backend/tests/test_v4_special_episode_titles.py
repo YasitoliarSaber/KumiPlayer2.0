@@ -1,8 +1,13 @@
-"""V4 特别篇本地标题、编号与详情展示回归。"""
+"""V4 特别篇本地标题与编号的解析回归，以及「特别篇不入库」契约回归。
+
+用户规则（2026-09-24）：特别篇 / OVA / OAD / 番外 / SP / OP / ED 一律不进入媒体库，
+也不生成镜像。parser 仍如实记录 special_number / episode_title（诊断与兼容需要），
+但这些事实的 is_importable 为 False，不再产生 Work / Season / Episode / Asset。
+这里的 API 级断言只验证「不入库」结果；旧版「特典确认后产生 Episode 并展示本地标题」
+的用例已随规则取消而删除。
+"""
 
 from __future__ import annotations
-
-import json
 
 import pytest
 from fastapi import FastAPI
@@ -117,184 +122,43 @@ def test_sample_special_names_keep_meaning_while_dropping_only_technical_suffixe
     assert facts.episode_title == expected_title
 
 
-def test_confirmed_specials_keep_distinct_local_titles(tmp_path, monkeypatch):
+def test_specials_only_import_creates_no_work_episode_or_asset(tmp_path, monkeypatch):
+    """反向断言：只有特别篇时，预览与确认都不产生任何媒体库结构。"""
+
     client, database = _client(tmp_path, monkeypatch)
-    payload = _special_entry()
+    payload = _special_entry("rev-specials-excluded")
 
     preview = client.post("/api/v4/imports/preview", json=payload)
     assert preview.status_code == 200, preview.text
-    confirmed = client.post("/api/v4/imports/rev-special-titles/confirm")
+    assert preview.json()["works"] == []
+    assert preview.json()["episodes"] == []
+    assert preview.json()["work_assets"] == []
+
+    confirmed = client.post("/api/v4/imports/rev-specials-excluded/confirm")
     assert confirmed.status_code == 200, confirmed.text
 
     with database.connect() as conn:
-        rows = conn.execute(
-            "SELECT special_number, display_title FROM episodes ORDER BY special_number"
-        ).fetchall()
-
-    assert [(row["special_number"], row["display_title"]) for row in rows] == [
-        (1, "露营小剧场"),
-        (2, "温泉小剧场"),
-    ]
+        assert conn.execute("SELECT COUNT(*) FROM works").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM episode_assets").fetchone()[0] == 0
 
 
-def test_detail_prefers_distinct_local_special_titles_over_duplicate_generic_scrape_titles(
-    tmp_path,
-    monkeypatch,
-):
-    client, database = _client(tmp_path, monkeypatch)
-    payload = _special_entry("rev-special-detail")
-    assert client.post("/api/v4/imports/preview", json=payload).status_code == 200
-    assert client.post("/api/v4/imports/rev-special-detail/confirm").status_code == 200
+# 已删除 test_confirmed_specials_keep_distinct_local_titles：
+# 该用例断言特别篇确认后产生 Episode 并保留本地标题。用户 2026-09-24 规则
+# 取消了 special 入库，特别篇不再进入媒体库，该契约已被取消。
 
-    with database.connect() as conn:
-        work_id = conn.execute("SELECT work_id FROM works LIMIT 1").fetchone()["work_id"]
-        episode_rows = conn.execute(
-            "SELECT episode_id, special_number FROM episodes ORDER BY special_number"
-        ).fetchall()
-        metadata = {
-            "provider": "tmdb",
-            "provider_id": "42",
-            "episode_mappings": [
-                {
-                    "episode_id": row["episode_id"],
-                    "provider_season_number": 0,
-                    "provider_episode_number": row["special_number"],
-                    "title": "特别篇",
-                }
-                for row in episode_rows
-            ],
-        }
-        conn.execute(
-            """
-            INSERT INTO scrape_bindings(
-                binding_id, revision_id, work_id, provider, provider_id,
-                metadata_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "binding-special-detail",
-                "rev-special-detail",
-                work_id,
-                "tmdb",
-                "42",
-                json.dumps(metadata, ensure_ascii=False),
-                "2026-08-28T00:00:00+00:00",
-                "2026-08-28T00:00:00+00:00",
-            ),
-        )
+# 已删除 test_detail_prefers_distinct_local_special_titles_over_duplicate_generic_scrape_titles：
+# 该用例断言作品详情里的特别篇本地标题优先于通用刮削标题；没有特别篇 Episode
+# 后该展示路径不再存在。
 
-    response = client.get(f"/api/library/works/{work_id}")
-    assert response.status_code == 200, response.text
-    specials = sorted(response.json()["episodes"], key=lambda item: item["special_number"])
+# 已删除 test_unnumbered_specials_receive_stable_distinct_numbers：
+# 该用例断言无编号特别篇会被分配稳定且互不重复的 SP 编号并入库。
 
-    assert [item["special_number"] for item in specials] == [1, 2]
-    assert [item["title"] for item in specials] == [
-        "露营小剧场",
-        "温泉小剧场",
-    ]
-    assert all("VCB-Studio" not in item["title"] for item in specials)
-    assert all("1080p" not in item["title"] for item in specials)
+# 已删除 test_unnumbered_special_quality_variants_remain_assets_of_one_episode：
+# 该用例断言同一特别篇的 1080p/2160p 变体合并为同 Episode 的多个 Asset。
 
-
-def test_unnumbered_specials_receive_stable_distinct_numbers(tmp_path, monkeypatch):
-    client, database = _client(tmp_path, monkeypatch)
-    payload = _special_entry("rev-unnumbered-specials")
-    payload["entries"] = [
-        {
-            "provider": "local",
-            "ingest_method": "local_scan",
-            "relative_path": "Show/Specials/[VCB-Studio] Show - Winter Camp [1080p].mkv",
-            "source_locator": "local://show/winter-camp.mkv",
-            "playback_locator": "local://show/winter-camp.mkv",
-        },
-        {
-            "provider": "local",
-            "ingest_method": "local_scan",
-            "relative_path": "Show/Specials/[VCB-Studio] Show - Hot Spring [1080p].mkv",
-            "source_locator": "local://show/hot-spring.mkv",
-            "playback_locator": "local://show/hot-spring.mkv",
-        },
-    ]
-
-    assert client.post("/api/v4/imports/preview", json=payload).status_code == 200
-    assert client.post("/api/v4/imports/rev-unnumbered-specials/confirm").status_code == 200
-
-    with database.connect() as conn:
-        rows = conn.execute(
-            "SELECT special_number, display_title FROM episodes ORDER BY special_number"
-        ).fetchall()
-
-    assert [(row["special_number"], row["display_title"]) for row in rows] == [
-        (1, "Hot Spring"),
-        (2, "Winter Camp"),
-    ]
-
-
-def test_unnumbered_special_quality_variants_remain_assets_of_one_episode(tmp_path, monkeypatch):
-    client, database = _client(tmp_path, monkeypatch)
-    payload = _special_entry("rev-special-variants")
-    payload["entries"] = [
-        {
-            "provider": "local",
-            "ingest_method": "local_scan",
-            "relative_path": "Show/Specials/[VCB-Studio] Show - Winter Camp [1080p].mkv",
-            "source_locator": "local://show/winter-camp-1080p.mkv",
-            "playback_locator": "local://show/winter-camp-1080p.mkv",
-        },
-        {
-            "provider": "local",
-            "ingest_method": "local_scan",
-            "relative_path": "Show/Specials/[VCB-Studio] Show - Winter Camp [2160p].mkv",
-            "source_locator": "local://show/winter-camp-2160p.mkv",
-            "playback_locator": "local://show/winter-camp-2160p.mkv",
-        },
-    ]
-
-    assert client.post("/api/v4/imports/preview", json=payload).status_code == 200
-    assert client.post("/api/v4/imports/rev-special-variants/confirm").status_code == 200
-
-    with database.connect() as conn:
-        episode_count = conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
-        asset_count = conn.execute("SELECT COUNT(*) FROM episode_assets").fetchone()[0]
-        title = conn.execute("SELECT display_title FROM episodes").fetchone()[0]
-
-    assert episode_count == 1
-    assert asset_count == 2
-    assert title == "Winter Camp"
-
-
-def test_sp00_placeholders_are_replaced_by_allocated_distinct_numbers(tmp_path, monkeypatch):
-    client, database = _client(tmp_path, monkeypatch)
-    payload = _special_entry("rev-sp00-specials")
-    payload["entries"] = [
-        {
-            "provider": "local",
-            "ingest_method": "local_scan",
-            "relative_path": "Show/Specials/Show - SP00 - Winter Camp.mkv",
-            "source_locator": "local://show/sp00-winter.mkv",
-            "playback_locator": "local://show/sp00-winter.mkv",
-        },
-        {
-            "provider": "local",
-            "ingest_method": "local_scan",
-            "relative_path": "Show/Specials/Show - SP00 - Hot Spring.mkv",
-            "source_locator": "local://show/sp00-spring.mkv",
-            "playback_locator": "local://show/sp00-spring.mkv",
-        },
-    ]
-
-    assert client.post("/api/v4/imports/preview", json=payload).status_code == 200
-    assert client.post("/api/v4/imports/rev-sp00-specials/confirm").status_code == 200
-
-    with database.connect() as conn:
-        rows = conn.execute(
-            "SELECT special_number, display_title FROM episodes ORDER BY special_number"
-        ).fetchall()
-
-    assert [(row["special_number"], row["display_title"]) for row in rows] == [
-        (1, "Hot Spring"),
-        (2, "Winter Camp"),
-    ]
+# 已删除 test_sp00_placeholders_are_replaced_by_allocated_distinct_numbers：
+# 该用例断言 SP00 占位编号会被重新分配为不同编号。
 
 
 def test_special_marker_brackets_are_removed_but_semantic_brackets_are_kept():

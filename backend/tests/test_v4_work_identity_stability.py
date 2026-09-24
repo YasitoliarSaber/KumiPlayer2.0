@@ -69,6 +69,19 @@ def _make_evidence(index: int, relative_path: str, scan_id: str) -> SourceEviden
     )
 
 
+def _parsed_facts_for_source_paths() -> list[tuple[SourceEvidence, ParsedFacts]]:
+    """单独解析脱敏样本，供「特别篇不入库」的反向断言复用。"""
+
+    parser = V4Parser()
+    evidence = [
+        _make_evidence(index, path, "scan-specials")
+        for index, path in enumerate(YURU_CAMP_SOURCE_PATHS)
+    ]
+    return normalize_batch_parsed_facts(
+        [(item, parser.parse(item, root_container="Yuru Camp")) for item in evidence]
+    )
+
+
 def _import_round(database: V4Database, revision_id: str, scan_id: str):
     """一轮完整导入：扫描证据 → 解析 → 草稿 → 确认。"""
 
@@ -277,22 +290,30 @@ def test_two_rounds_of_import_keep_three_semantic_works_stable(tmp_path):
     main_after_first = next(work for work in after_first["works"] if work["preferred_title"] == "Yuru Camp")
     assert main["identity_key"] == main_after_first["identity_key"]
 
-    # 主系列季度归属：特别篇归 S0，常规季 1/2/3 都挂在主系列下且有集绑定。
+    # 主系列季度归属：常规季 1/2/3 都挂在主系列下且有集绑定。
+    # 用户规则（2026-09-24）：特别篇 / OVA / 番外 / OP / ED 不入库，因此不再有 S0。
     main_seasons = sorted(
         item["season_number"] for item in after_second["seasons"] if item["work_id"] == main["work_id"]
     )
-    assert main_seasons == [0, 1, 2, 3]
+    assert main_seasons == [1, 2, 3]
     for number in (1, 2, 3):
         season = next(
             item for item in after_second["seasons"]
             if item["work_id"] == main["work_id"] and item["season_number"] == number
         )
         assert season["episode_count"] > 0
-    specials = next(
-        item for item in after_second["seasons"]
-        if item["work_id"] == main["work_id"] and item["season_number"] == 0
-    )
-    assert specials["episode_count"] >= 5  # IV01 + Survival Camp + S2 的 SPs
+
+    # 反向断言：本样本的 SPs / IV 特典 / 制作特典均已标记为不可导入，
+    # 不会成为 Episode 或 Asset，也不会生成镜像。
+    parsed_specials = _parsed_facts_for_source_paths()
+    excluded_facts = [
+        facts
+        for _evidence_item, facts in parsed_specials
+        if facts.group_type in {"special", "auxiliary", "ignored"}
+    ]
+    assert excluded_facts
+    assert all(facts.is_importable is False for facts in excluded_facts)
+    assert all(facts.is_auxiliary is True for facts in excluded_facts)
 
     # 外传与电影是独立 Work，主系列季列表里没有它们的集。
     heya = next(work for work in after_second["works"] if work["preferred_title"] == "Heya Camp")

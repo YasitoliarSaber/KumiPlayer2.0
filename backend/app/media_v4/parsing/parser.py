@@ -650,7 +650,19 @@ class V4Parser:
             resolved_media_type = "tv"
             group_type = "season"
             resolved_card_type = "main_series"
-        is_auxiliary = group_type in {"auxiliary", "ignored"}
+        # 用户规则（2026-09-24）：特别篇 / OVA / OAD / 番外 / SP / OP / ED 一律**不进入媒体库**。
+        #
+        # 这些文件既不是正片、也不参与刮削，更不该生成镜像（用户明确要求：
+        # "OP、ED、SP 这些东西连镜像都没必要生成"）。它们混进正片的季/集结构
+        # 是"识别重复、集数对不上、需要人工处理"的主要来源之一：2400+ 个特典类
+        # 文件会把季号/集号拉歪，并让季度映射大面积失败。
+        #
+        # 实现上仍如实记录 `group_type="special"` 供诊断，但把 is_auxiliary 置真，
+        # 使 `resolver.py:534` 在构建 Work/Season/Episode/Asset 图时直接跳过——
+        # 这是所有来源（本地 / 目录树 / OpenList、115 / 百度 / 夸克）共用的同一条规则，
+        # 不按来源分支。
+        is_special_excluded = group_type == "special"
+        is_auxiliary = group_type in {"auxiliary", "ignored"} or is_special_excluded
         stem = PurePosixPath(filename).stem
         quality_tags = tuple(
             dict.fromkeys(match.group(1).lower() for match in _QUALITY_TOKENS.finditer(stem))
@@ -750,5 +762,7 @@ class V4Parser:
             is_importable=not is_auxiliary,
             is_auxiliary=is_auxiliary,
             reasons=tuple(guess.reasons),
-            warnings=tuple(guess.warnings),
+            warnings=tuple(guess.warnings) + (
+                ("特别篇/OVA/番外按规则不进入媒体库，不会生成镜像",) if is_special_excluded else ()
+            ),
         )
