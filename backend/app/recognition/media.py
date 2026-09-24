@@ -995,14 +995,25 @@ def _check_local_collection_subwork(
 
 
 def _clean_standalone_dir_title(dirname: str) -> str:
-    """清理独立卡片目录名前缀。"""
+    """清理独立卡片目录名前缀（**必须与 title_cleaner 同一套规则**）。
+
+    历史缺陷：这里曾无条件执行 ``re.sub(r"^\d+[.．]\s*", "", dirname)``，把
+    ``13.5 伤物语 -历与吸血鬼-`` 截成 ``5 伤物语 -历与吸血鬼-``（序号带小数点时
+    只吃掉 ``13.`` 一段），作品名被永久写坏、在线匹配必然失败。序号剥离只有
+    ``title_cleaner.strip_ordering_prefix`` 一套带反例保护的实现（保护 ``2.5次元``、
+    ``86``、``3月的狮子`` 这类真标题），这里改为复用，不再自行去数字。
+    """
+
     if not dirname:
         return ""
-    title = re.sub(r"^\d+[.．]\s*", "", dirname).strip()
+    from app.recognition.title_cleaner import (
+        clean_work_title_container,
+        strip_ordering_prefix,
+    )
+
+    title = strip_ordering_prefix(dirname).strip()
     title = re.sub(r"[.．]\d{4}$", "", title).strip()
     try:
-        from app.recognition.title_cleaner import clean_work_title_container
-
         cleaned = clean_work_title_container(_strip_tmdb_hint(title)).title
         return cleaned or title
     except Exception:

@@ -9,6 +9,7 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from app.core.config import load_config
+from app.media_v4.resolution.candidates import query_variants, strip_season_marker
 from app.media_v4.resolution.ranker import CandidateRanker, RankedCandidate
 from app.scrape.tmdb_client import (
     TMDBAuthError,
@@ -325,6 +326,10 @@ def _rank_metadata_candidates(
             "media_type": media_type,
             "year": target.get("year"),
             "show_type": target.get("show_type") or "",
+            # 季度基名：本地是"某作品的第 N 季"时，在线条目是整部作品，
+            # 标题必然不等值；基名等值 + tv 类型允许自动采用（见 `_season_base_titles`）。
+            "season_base_titles": _season_base_titles(_target_titles(target)),
+            "season_numbers": _local_season_numbers(target),
         },
         candidates,
     )
@@ -352,6 +357,75 @@ def _target_titles(target: dict) -> list[str]:
             titles.append(value)
             seen.add(normalized)
     return titles
+
+
+#: 在线检索词上限：再多只会拖慢每部作品的刮削，收益已经归零。
+_SEARCH_TITLE_LIMIT = 8
+
+
+def _search_titles(target: dict) -> list[str]:
+    """在 `_target_titles` 之后追加**检索变体**（发布目录前缀 / 季度标记）。
+
+    为什么必须追加：本地目录名带着不属于作品名的组织信息，原样送给 TMDB 会
+    直接返回 0 条结果——实测 `暗杀教室第二季`、`终物语第二季`、`赛马娘 第二季`、
+    `K 4k Kanon`、`1.化物语`、`C 4k 吹响吧！上低音号` 全部 0 命中，而清洗后的
+    基名一次命中。变体只做单向清洗，不引入任何候选侧信息（用候选标题回搜
+    已被 commit fbcf790 证明会破坏身份契约，此处不予采用）。
+
+    第一个词永远是 `_target_titles` 的首个标题，保证主标题不被挤出额度。
+    """
+
+    titles = _target_titles(target)
+    seen = {_normalize_title(value) for value in titles}
+    expanded: list[str] = []
+    for title in titles:
+        for variant in query_variants(title):
+            normalized = _normalize_title(variant)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            expanded.append(variant)
+    return (titles[:1] + expanded + titles[1:])[:_SEARCH_TITLE_LIMIT]
+
+
+def _season_base_titles(titles: list[str]) -> list[str]:
+    """季度基名：`暗杀教室第二季` → `暗杀教室`、`LoveLive! Superstar!! S2` → `LoveLive! Superstar!!`。
+
+    在线库（TMDB）把一部作品的多季放在**一个条目**下，所以"本地某一季"与
+    "在线整部作品"标题必然不同；基名等值只在本地确实带季度标记时成立。
+    季号到在线季号的对应仍由 `_build_tv_episode_mappings` 按本地季号完成。
+    """
+
+    bases: list[str] = []
+    seen = {_normalize_title(value) for value in titles}
+    for title in titles:
+        base = strip_season_marker(title)
+        normalized = _normalize_title(base)
+        if base == title or not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        bases.append(base)
+    return bases
+
+
+def _local_season_numbers(target: dict) -> list[int]:
+    """本地季号集合（只取正数）：用于判断"本地年份是不是某一季的播出年"。"""
+
+    numbers: set[int] = set()
+    for episode in target.get("episodes") or []:
+        if not isinstance(episode, dict):
+            continue
+        value = _positive_int(episode.get("local_season_number"))
+        if value:
+            numbers.add(value)
+    return sorted(numbers)
+
+
+#: 单个本地季内允许的"尾集"数量：本地多出的特别篇/番外通常是 1–3 个（实测：AIR 2 个、
+#: 化物语 3 个、暗杀教室第 1 季 1 个），而"本地一个季装了两个在线季"时缺的是一整段
+#: （实测：3 月的狮子 22 个、轻音少女 15 个）。用这个阈值把"本地多出尾集"与"真实映射缺陷"分开：
+#: 前者作品资料已完整（不应报错、也不应要求重试），后者仍然需要处理。
+_LOCAL_EXTRA_EPISODE_LIMIT = 3
 
 
 def _has_local_episodes(target: dict) -> bool:
@@ -638,7 +712,7 @@ def default_metadata_provider(target: dict) -> dict:
                     "ranked_candidates": [],
                 }
             else:
-                titles = _target_titles(target)
+                titles = _search_titles(target)
                 attempted_queries: list[dict] = []
                 results_by_id: dict[str, dict] = {}
                 search_errors: list[TMDBClientError] = []
@@ -816,17 +890,69 @@ def default_metadata_provider(target: dict) -> dict:
                         "retryable": False,
                     })
                 elif season_results:
-                    result.update({
-                        "metadata_state": "source_unavailable",
-                        "reason": "部分剧集资料暂不可用，已保留作品信息，可稍后重试",
-                        "reason_code": "episode_mapping_incomplete",
-                        "season_results": season_results,
-                        "identity_status": "confirmed",
-                        "work_metadata_status": "ready",
-                        "episode_mapping_status": "partial",
-                        "failure_stage": "season_detail",
-                        "retryable": any(item.get("retryable") for item in season_results),
-                    })
+                    # 必须区分两件完全不同的事（否则 20 部作品被误报成“服务不可用”）：
+                    #   1) 季度请求本身失败/超时 → 真的是在线服务不可用，要重试；
+                    #   2) 季度读取成功，但本地集号与在线条目对不上（本地多出特别篇/
+                    #      番外，或整部作品的集号被连续编号）→ 作品资料其实已经完整，
+                    #      重试一百次也不会变。
+                    # 实测（2026-09-24，186 部作品库）：20 部 episode_mapping_incomplete
+                    # 全部属于第 2 类，用户界面上却全部显示“在线资料服务暂不可用”。
+                    service_outage = any(
+                        str(item.get("status") or "") == "source_unavailable"
+                        for item in season_results
+                    )
+                    if service_outage:
+                        result.update({
+                            "metadata_state": "source_unavailable",
+                            "reason": "部分剧集资料暂不可用，已保留作品信息，可稍后重试",
+                            "reason_code": "episode_mapping_incomplete",
+                            "season_results": season_results,
+                            "identity_status": "confirmed",
+                            "work_metadata_status": "ready",
+                            "episode_mapping_status": "partial",
+                            "failure_stage": "season_detail",
+                            "retryable": any(item.get("retryable") for item in season_results),
+                        })
+                    else:
+                        # 真正的"本地多出尾集"：每个本地季内未映射的正片数量都在允许范围内。
+                        # 超过阈值（例如本地一个季装了两个在线季）则是真实映射缺陷，仍需处理。
+                        worst_season_gap = 0
+                        for _season_key, grouped in unmapped_by_season.items():
+                            regular = [
+                                episode for episode in grouped
+                                if not _is_special_episode(episode)
+                            ]
+                            worst_season_gap = max(worst_season_gap, len(regular))
+                        if worst_season_gap <= _LOCAL_EXTRA_EPISODE_LIMIT:
+                            result.update({
+                                "metadata_state": "ready",
+                                "metadata_warning": (
+                                    f"本地有 {worst_season_gap} 集没有对应的在线条目（多为特别篇/番外），"
+                                    "正片资料已获取，可正常浏览与播放。"
+                                ),
+                                "reason_code": "episode_mapping_incomplete",
+                                "season_results": season_results,
+                                "identity_status": "confirmed",
+                                "work_metadata_status": "ready",
+                                "episode_mapping_status": "partial",
+                                "failure_stage": "season_detail",
+                                "retryable": False,
+                            })
+                        else:
+                            result.update({
+                                "metadata_state": "source_unavailable",
+                                "reason": (
+                                    f"本地季内最多有 {worst_season_gap} 集没有匹配到在线条目；"
+                                    "这通常意味着本地把多个在线季合在了一个季里，需要按季对应关系处理。"
+                                ),
+                                "reason_code": "episode_mapping_incomplete",
+                                "season_results": season_results,
+                                "identity_status": "confirmed",
+                                "work_metadata_status": "ready",
+                                "episode_mapping_status": "partial",
+                                "failure_stage": "season_detail",
+                                "retryable": False,
+                            })
                 else:
                     result.update({
                         "identity_status": "confirmed",

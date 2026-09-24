@@ -211,6 +211,24 @@ def score_candidate(
     ]
     target_titles = [value for value in target_titles if value.strip()]
     target_media_type = str(target.get("media_type") or "tv")
+    # 季度基名（`暗杀教室第二季` → `暗杀教室`）：在线库把一部作品的多季放在一个
+    # 条目下，所以本地某一季与在线条目**必然**标题不等值。基名等值只在 tv 下
+    # 构成身份证据（movie 不存在"季"）；季号对应仍由本地季号驱动。
+    season_base_titles = [
+        str(item).strip()
+        for item in (target.get("season_base_titles") or ())
+        if str(item).strip()
+    ]
+    if target_media_type == "tv":
+        target_titles = [*target_titles, *season_base_titles]
+    # "本地年份是某一季的播出年"：标题带季度标记，或本地确实存在第 2 季以上的季号。
+    season_scoped = target_media_type == "tv" and (
+        bool(season_base_titles)
+        or any(
+            isinstance(item, int) and item > 1
+            for item in (target.get("season_numbers") or ())
+        )
+    )
 
     reasons: list[str] = []
     score = 0.0
@@ -228,6 +246,12 @@ def score_candidate(
         reasons.append(identity_reason)
 
     year_level, year_reason = _year_level(target.get("year"), candidate.get("year"))
+    if year_level == -1 and season_scoped:
+        # 本地是"某作品的第 N 季"时，本地年份是**该季的播出年**，而 TMDB 条目的
+        # 年份是整个系列的首播年（第一季）。相差 2 年以上是正常情况（实测：
+        # 辉夜大小姐 S3 本地 2022 / TMDB 2019），不能当成年份硬冲突，否则这部
+        # 作品永远无法自动采用。
+        year_level, year_reason = 0, ""
     if year_level == 2:
         score += 8.0
         reasons.append(year_reason)

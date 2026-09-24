@@ -101,6 +101,7 @@ class TMDBClient:
         self._timeout = max(3, min(int(raw_timeout or 10), 12))
         self._client = _http_client
         self._owned_client: httpx.Client | None = None
+        self._proxy_disabled = False
         self._last_request_time = 0.0
         self._response_cache: dict[tuple[str, str, tuple[tuple[str, str], ...]], dict] = {}
 
@@ -112,7 +113,7 @@ class TMDBClient:
             return self._client
         if self._owned_client is None:
             config = load_config()
-            proxy = config.proxy_url or None
+            proxy = None if self._proxy_disabled else (config.proxy_url or None)
             if proxy:
                 self._owned_client = httpx.Client(
                     timeout=self._timeout,
@@ -121,6 +122,27 @@ class TMDBClient:
             else:
                 self._owned_client = httpx.Client(timeout=self._timeout)
         return self._owned_client
+
+    def _fallback_to_direct(self) -> bool:
+        """本地代理连不上时降级为直连（每一步只做一次）。
+
+        实测（2026-09-24，用户机器）：配置里的本地代理 `http://127.0.0.1:7890`
+        处于拒绝连接状态，而 `api.themoviedb.org` **可以直连**。结果是每一部作品的
+        每一次搜索都变成 `source_unavailable`，用户库里 20 部作品因此被报成
+        “在线资料服务暂不可用”。代理只是可选加速手段，它挂了不应该让整库刮削失败。
+
+        只对连接类失败生效，并且注入的 httpx 客户端（测试用）永不触发。
+        """
+
+        if self._client is not None or self._proxy_disabled:
+            return False
+        config = load_config()
+        if not str(config.proxy_url or "").strip():
+            return False
+        self._proxy_disabled = True
+        self.close()
+        logger.warning("TMDB：配置的本地代理连接失败，已降级为直连并重试一次")
+        return True
 
     def close(self) -> None:
         if self._owned_client is not None:
@@ -177,7 +199,8 @@ class TMDBClient:
             return deepcopy(self._response_cache[cache_key])
 
         last_error = None
-        for attempt in range(self._max_retries):
+        # 多留一轮给「代理不可用 → 直连」降级（`_fallback_to_direct` 自身有一次性守卫）。
+        for attempt in range(self._max_retries + 1):
             self._rate_limit_wait()
             try:
                 client = self._get_client()
@@ -286,6 +309,8 @@ class TMDBClient:
                     reason_code="source_unavailable",
                     retryable=True,
                 )
+                if self._fallback_to_direct():
+                    continue
                 if attempt < self._max_retries - 1:
                     time.sleep(2 ** attempt)
                     continue
@@ -298,6 +323,9 @@ class TMDBClient:
                     reason_code="source_unavailable",
                     retryable=True,
                 )
+                # httpx.ProxyError 走这里：代理自己出错时同样降级直连。
+                if self._fallback_to_direct():
+                    continue
                 if attempt < self._max_retries - 1:
                     time.sleep(2 ** attempt)
                     continue

@@ -29,6 +29,9 @@ from app.media_v4.resolution.title_norm import normalize_identity_title, normali
 
 _SUPPORTED_PROVIDERS = frozenset({"tmdb", "anilist", "bangumi"})
 
+#: 与 title_cleaner._RE_HAS_WORD_CHAR 同义：查询词必须含字母或中日韩文字。
+_RE_HAS_WORD_CHAR_LATIN = re.compile(r"[A-Za-z\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+
 
 @dataclass(frozen=True, slots=True)
 class WorkCandidate:
@@ -149,6 +152,67 @@ _EDITION_MARKERS = (
 # 注意不拆 `Ressha-hen` 这类自带连字符的标题（`-` 两侧无空格）。
 _QUERY_SEPARATORS = re.compile(r"[.．_&＆：:、·|/\\]+|\s[-–—]\s+")
 
+#: 季度标记（尾部）：本地目录常把"第二季 / S2 / 2nd Season"写进作品名，而在线库
+#: （TMDB）把同一部作品的多季放在**一个条目**下；照原样检索必然搜不到。
+#: 实测：`暗杀教室第二季`、`终物语第二季`、`赛马娘 第二季/第三季`、`排球少年第二季`、
+#: `LoveLive! Superstar!! S2` 全部返回 0 条结果，而剥离季标记后的基名一次命中。
+#: 只生成**检索/基名变体**；季号本身仍由解析层（`S\d+E\d+`、`第N季` 目录）决定。
+_SEASON_SUFFIX_PATTERN = re.compile(
+    r"[\s._\-—–~～:：（）()【】]*"
+    r"(?:"
+    r"第\s*[一二三四五六七八九十百零〇0-9]+\s*[季期部]"
+    r"|season\s*\d+"
+    r"|\d+(?:st|nd|rd|th)\s*season"
+    r"|s\d{1,2}"
+    r")\s*$",
+    re.IGNORECASE,
+)
+
+#: 季度标记（首部）：实测目录名形如 `S1 灵能百分百 路人超能100（2016）`、
+#: `S3 辉夜大小姐想让我告白-超级浪漫-（2022）`——分区前缀属于发布目录的组织信息。
+_SEASON_PREFIX_PATTERN = re.compile(
+    r"^(?:s\d{1,2}|season\s*\d+|第\s*[一二三四五六七八九十0-9]+\s*[季期])\s*[\s._\-—–~～:：]*",
+    re.IGNORECASE,
+)
+
+
+def strip_season_marker(title: str) -> str:
+    """剥离首/尾部季度标记，返回可用于检索与基名等值比较的标题。
+
+    只做单向收缩：剥完为空、或剥完不含文字字符时返回原值，绝不产生空查询词。
+    """
+
+    value = str(title or "").strip()
+    if not value:
+        return value
+    candidate = _SEASON_PREFIX_PATTERN.sub("", value, count=1).strip(" ._-·、:：|/\\")
+    candidate = _SEASON_SUFFIX_PATTERN.sub("", candidate).strip(" ._-·、:：|/\\")
+    if candidate != value:
+        return candidate if len(candidate) >= 2 else value
+    without_suffix = _SEASON_SUFFIX_PATTERN.sub("", value).strip(" ._-·、:：|/\\")
+    if without_suffix != value and len(without_suffix) >= 2:
+        return without_suffix
+    return value
+
+
+def clean_search_title(title: str) -> str:
+    """剥离发布目录的前置装饰（`C 4k ` / `14.` / `4k`）——只用于检索。
+
+    与 `title_cleaner` 共用同一套带反例保护的规则（保护 `2.5次元的诱惑`、
+    `86-不存在的战区-`、`3月的狮子`），不自行去数字。
+    """
+
+    from app.recognition.title_cleaner import (
+        strip_leading_decoration_run,
+        strip_ordering_prefix,
+    )
+
+    value = str(title or "").strip()
+    if not value:
+        return value
+    cleaned = strip_leading_decoration_run(strip_ordering_prefix(value)).strip()
+    return cleaned if len(cleaned) >= 2 else value
+
 
 def _query_variants(title: str) -> list[str]:
     """生成检索变体：先剥"版本标记"，再按分隔符拆分（检索专用）。
@@ -168,12 +232,23 @@ def _query_variants(title: str) -> list[str]:
         return []
     variants: list[str] = []
 
-    def push(candidate: str) -> None:
+    def push(candidate: str, *, strict: bool = False) -> None:
         text = (candidate or "").strip(" ._-·、:：|/\\")
-        if len(text) >= 2 and text not in variants:
-            variants.append(text)
+        # 拆出来的片段如果是纯数字（`14`）就没有检索价值，只会把在线搜索引到
+        # 无关条目（strict=True 的片段才受此限制）；整标题本身不限制，
+        # 否则 `22/7` 这类真标题会被整条丢掉。
+        if len(text) < 2 or text in variants:
+            return
+        if strict and not _RE_HAS_WORD_CHAR_LATIN.search(text):
+            return
+        variants.append(text)
 
     push(value)
+    # 发布目录组织信息（`C 4k Clannad`、`14.终物语第二季`、`4k偶像大师…`）与
+    # 季度标记（`暗杀教室第二季`、`S1 灵能百分百…`）都不属于作品名。两者先各自
+    # 剥一次，再把「清洗 + 剥季度」的组合加入检索词，保证基名一定被搜到。
+    cleaned = clean_search_title(value)
+    push(cleaned)
     stripped = value
     for marker in _EDITION_MARKERS:
         stripped = re.sub(re.escape(marker), " ", stripped, flags=re.IGNORECASE)
@@ -181,10 +256,32 @@ def _query_variants(title: str) -> list[str]:
     stripped = re.sub(r"\s+([：:、·|])", r"\1", stripped)
     stripped = re.sub(r"\s+", " ", stripped).strip()
     push(stripped)
-    for base in (value, stripped):
-        for part in _QUERY_SEPARATORS.split(base):
-            push(part)
+    for base in (value, stripped, cleaned):
+        season_base = strip_season_marker(base)
+        push(season_base)
+        push(clean_search_title(season_base))
+    for base in (value, stripped, cleaned):
+        for part in _split_query_parts(base):
+            push(part, strict=True)
     return variants
+
+
+def query_variants(title: str) -> list[str]:
+    """`_query_variants` 的公开入口：草稿候选与刮削必须用同一套检索词规则。"""
+
+    return _query_variants(title)
+
+
+def _split_query_parts(base: str) -> list[str]:
+    """按分隔符拆检索词，但**不拆开小数**（`2.5次元的诱惑` / `13.5 伤物语`）。
+
+    历史行为：逐字按 `[.．_]` 拆分会把 `2.5次元的诱惑` 拆成 `5次元的诱惑`，
+    把 `13.5 伤物语 -历与吸血鬼-` 拆成 `5 伤物语 -历与吸血鬼-`——两个都是
+    不存在的标题，却会被当成正式查询词发给在线库。
+    """
+
+    protected = re.sub(r"(?<=\d)[.．](?=\d)", "\u0000", base)
+    return [part.replace("\u0000", ".") for part in _QUERY_SEPARATORS.split(protected)]
 
 
 def _retry_titles_from_candidates(
