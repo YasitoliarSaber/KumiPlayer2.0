@@ -6,10 +6,13 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $resolvedRoot = [IO.Path]::GetFullPath($ProjectRoot)
-$runtimeSource = [IO.Path]::GetFullPath((Join-Path $resolvedRoot 'third_party\mpv\runtime'))
-$configSource = [IO.Path]::GetFullPath((Join-Path $resolvedRoot 'resources\mpv-runtime\portable_config'))
-$layerSource = [IO.Path]::GetFullPath((Join-Path $resolvedRoot 'resources\mpv-runtime\kumiplayer'))
-$manifestSource = [IO.Path]::GetFullPath((Join-Path $resolvedRoot 'third_party\mpv\runtime-manifest.json'))
+# 源：内置 MPV 统一目录 mpv/（二进制 + 配置源 + 清单）
+$runtimeSource = [IO.Path]::GetFullPath((Join-Path $resolvedRoot 'mpv\runtime'))
+$configSource = [IO.Path]::GetFullPath((Join-Path $resolvedRoot 'mpv\config\portable_config'))
+$layerSource = [IO.Path]::GetFullPath((Join-Path $resolvedRoot 'mpv\config\kumiplayer'))
+$manifestSource = [IO.Path]::GetFullPath((Join-Path $resolvedRoot 'mpv\runtime-manifest.json'))
+# 目标：安装版运行时布局 packaging/runtime/mpv/（mpv.exe 与 portable_config 同级，
+# 符合 mpv 自带的 portable_config 约定；源码层的 config/ 外壳不进入安装包）。
 $runtimeRoot = [IO.Path]::GetFullPath((Join-Path $resolvedRoot 'packaging\runtime'))
 $target = [IO.Path]::GetFullPath((Join-Path $runtimeRoot 'mpv'))
 $staging = [IO.Path]::GetFullPath((Join-Path $runtimeRoot '.mpv-runtime-staging'))

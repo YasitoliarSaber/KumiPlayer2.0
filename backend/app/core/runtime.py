@@ -59,7 +59,7 @@ def _uses_packaged_runtime() -> bool:
 def get_mpv_runtime_dir() -> Path:
     """返回 KumiPlayer 内置干净 MPV 运行文件目录（含 mpv.exe）。
 
-    源码模式使用项目 third_party；安装模式使用桌面运行时目录下的 mpv/。
+    源码模式使用项目 mpv/runtime；安装模式使用桌面运行时目录下的 mpv/。
     测试可通过 KUMIPLAYER_MPV_RUNTIME_DIR 覆盖，但不得读取真实用户目录。
     """
     override = os.environ.get("KUMIPLAYER_MPV_RUNTIME_DIR", "").strip()
@@ -67,7 +67,7 @@ def get_mpv_runtime_dir() -> Path:
         return Path(override).expanduser()
     if _uses_packaged_runtime():
         return get_runtime_dir() / "mpv"
-    return get_project_root() / "third_party" / "mpv" / "runtime"
+    return get_project_root() / "mpv" / "runtime"
 
 
 def get_mpv_executable() -> Path:
@@ -79,31 +79,33 @@ def get_mpv_executable() -> Path:
 
 
 def get_mpv_config_dir() -> Path:
-    """返回 KumiPlayer 自有的 MPV 配置目录（portable_config）。
+    """返回 KumiPlayer 内置 MPV 的默认套件配置目录（可替换层 portable_config）。
 
-    源码模式使用项目 resources/mpv-runtime；安装模式使用运行时目录下的 mpv/portable_config。
-    测试可通过 KUMIPLAYER_MPV_CONFIG_DIR 覆盖。
+    源码模式使用项目 mpv/config/portable_config；安装模式使用运行时目录下的
+    mpv/portable_config。测试可通过 KUMIPLAYER_MPV_CONFIG_DIR 覆盖。
     """
     override = os.environ.get("KUMIPLAYER_MPV_CONFIG_DIR", "").strip()
     if override:
         return Path(override).expanduser()
     if _uses_packaged_runtime():
         return get_runtime_dir() / "mpv" / "portable_config"
-    return get_project_root() / "resources" / "mpv-runtime" / "portable_config"
+    return get_project_root() / "mpv" / "config" / "portable_config"
 
 
 def get_kumiplayer_layer_dir() -> Path:
-    """返回 KumiPlayer 自有插件层目录（kumiplayer）。
+    """返回 KumiPlayer 自有层目录（kumiplayer）。
 
     与 portable_config（可替换的整合包层）分离：本目录随应用分发、不可替换，
-    承载 KumiPlayer 自有脚本与强制配置。测试可通过 KUMIPLAYER_MPV_LAYER_DIR 覆盖。
+    承载 KumiPlayer 自有脚本、强制配置与自有资源（shaders 等），设计目标是可以
+    用官方追加式语法（--script / --script-opt）叠加到任意内置或外部整合包上。
+    测试可通过 KUMIPLAYER_MPV_LAYER_DIR 覆盖。
     """
     override = os.environ.get("KUMIPLAYER_MPV_LAYER_DIR", "").strip()
     if override:
         return Path(override).expanduser()
     if _uses_packaged_runtime():
         return get_runtime_dir() / "mpv" / "kumiplayer"
-    return get_project_root() / "resources" / "mpv-runtime" / "kumiplayer"
+    return get_project_root() / "mpv" / "config" / "kumiplayer"
 
 
 def get_mpv_state_dir() -> Path:
@@ -114,8 +116,9 @@ def get_mpv_state_dir() -> Path:
 def get_kumiplayer_mpv_plugins_dir() -> Path:
     """返回 KumiPlayer 自有的 MPV 脚本目录。
 
-    分层架构（2026-08-12）：KumiPlayer 自有脚本位于 kumiplayer/scripts/
-    （不可替换层）；旧路径 resources/mpv-plugins 与 portable_config/scripts
-    已废弃。本函数重定向到自有层，保留兼容调用，不再返回旧路径或整合包路径。
+    分层架构（2026-08-12 建立，2026-09-24 随目录整合迁入 mpv/）：KumiPlayer
+    自有脚本位于自有层 kumiplayer/scripts/（不可替换层）；旧路径
+    resources/mpv-plugins 与 portable_config/scripts 已废弃。本函数重定向到
+    自有层，保留兼容调用，不再返回旧路径或整合包路径。
     """
     return get_kumiplayer_layer_dir() / "scripts"

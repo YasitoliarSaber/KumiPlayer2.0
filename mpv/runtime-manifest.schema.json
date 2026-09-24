@@ -106,7 +106,7 @@
     },
     "configuration_version": {
       "type": "string",
-      "description": "配套的 KumiPlayer 配置版本，指向 resources/mpv-runtime 下配置的版本标识。"
+      "description": "配套的 KumiPlayer 配置版本，指向 mpv/config 下配置的版本标识（如 mpv-runtime-config-2026-09-24-r19）。"
     },
     "distribution_status": {
       "type": "string",

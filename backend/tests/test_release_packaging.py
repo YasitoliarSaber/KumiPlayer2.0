@@ -136,8 +136,9 @@ def test_installer_build_stages_builtin_mpv_but_blocks_development_only_release(
     assert "data\\" not in script
 
     # 暂存器必须把内置 MPV 运行时（含 27 文件、portable_config、manifest）放到 packaging/runtime/mpv
-    assert "third_party\\mpv\\runtime" in stager
-    assert "mpv-runtime\\portable_config" in stager
+    # 源码统一在 mpv/ 下（mpv/runtime + mpv/config/*）。
+    assert "mpv\\runtime" in stager
+    assert "config\\portable_config" in stager
     assert "runtime-manifest.json" in stager
     assert "packaging\\runtime" in stager
     assert "'mpv'" in stager or 'mpv' in stager
@@ -190,20 +191,20 @@ def test_builds_only_stop_verified_orphaned_kumiplayer_backends():
 def test_mpv_staging_refuses_development_only_runtime(tmp_path):
     """development-only 状态的内置 MPV 不得被暂存进正式安装包目录。"""
     # 构造一个最小但真实的第三方运行时 + 清单（development-only）
-    source = tmp_path / "third_party" / "mpv" / "runtime"
+    source = tmp_path / "mpv" / "runtime"
     source.mkdir(parents=True)
     (source / "mpv.exe").write_bytes(b"exe")
     (source / "mpv.com").write_bytes(b"com")
-    config_source = tmp_path / "resources" / "mpv-runtime" / "portable_config"
+    config_source = tmp_path / "mpv" / "config" / "portable_config"
     config_source.mkdir(parents=True)
     (config_source / "mpv.conf").write_text("# test\n", encoding="utf-8")
     (config_source / "input.conf").write_text("# test\n", encoding="utf-8")
-    layer_source = tmp_path / "resources" / "mpv-runtime" / "kumiplayer"
+    layer_source = tmp_path / "mpv" / "config" / "kumiplayer"
     layer_source.mkdir(parents=True)
     (layer_source / "mpv.conf").write_text("hwdec=auto-safe\n", encoding="utf-8")
     (layer_source / "scripts").mkdir()
     (layer_source / "scripts" / "screenshot_to_video_dir.lua").write_text("-- test\n", encoding="utf-8")
-    manifest_dir = tmp_path / "third_party" / "mpv"
+    manifest_dir = tmp_path / "mpv"
     manifest_dir.mkdir(parents=True, exist_ok=True)
     import json
     (manifest_dir / "runtime-manifest.json").write_text(

@@ -68,7 +68,7 @@ release\KumiPlayer.exe
 release\WebView2Loader.dll
 ```
 
-开发版会使用当前项目的 `backend/`、`data/`、`dist/` 和 `third_party/mpv/runtime/`，本机需要可用的 Python 后端环境。
+开发版会使用当前项目的 `backend/`、`data/`、`dist/` 和 `mpv/runtime/`，本机需要可用的 Python 后端环境。
 
 ### 普通用户安装版
 

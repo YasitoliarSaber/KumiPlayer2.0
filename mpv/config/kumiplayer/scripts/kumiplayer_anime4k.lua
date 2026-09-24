@@ -20,7 +20,17 @@
 local mp = require "mp"
 local utils = require "mp.utils"
 
-local ANIME4K_DIR = "~~/shaders/anime4k-v4.0.1/"
+-- Anime4K 着色器目录（KumiPlayer 自有层资源）。
+--
+-- 默认值 `~~/shaders/anime4k-v4.0.1/` 会解析到**当前 mpv 的配置目录**（内置模式
+-- 就是 portable_config），这在分层架构下是错的：着色器属于 KumiPlayer 自有层
+-- （kumiplayer/shaders/），一旦用户把 portable_config 整体替换成第三方整合包，
+-- `~~/shaders/` 就指向整合包自己的目录，Anime4K 菜单照常出现但链全部加载失败。
+-- 因此后端在启动时用追加式官方语法注入绝对路径：
+--   --script-opt=kumiplayer_anime4k-shaders_dir=<自有层 shaders 绝对路径>
+-- 下面的 `~~/shaders/` 仅作为手工裸跑 mpv（无后端注入）时的兜底。
+local ANIME4K_SUBDIR = "anime4k-v4.0.1"
+local anime4k_dir = "~~/shaders/" .. ANIME4K_SUBDIR .. "/"
 
 -- 模式链：官方 v4 多 shader 链（不含 Clamp_Highlights 与 AutoDownscalePre，统一追加）
 -- 每个模式一个 {restore, upscale, extra} 结构，质量档位只替换 CNN 变体后缀。
@@ -68,6 +78,7 @@ local state = {
 local options = {
     default_mode = state.default_mode,
     default_quality = state.default_quality,
+    shaders_dir = "",
 }
 
 local function log_warn(message)
@@ -86,8 +97,18 @@ local function read_injected_defaults()
     else
         log_warn("invalid default_quality in script-opts: " .. tostring(options.default_quality))
     end
+    -- 自有层着色器目录：后端注入的是 Windows 绝对路径，统一成正斜杠并补尾斜杠，
+    -- 因为链里的条目会用字符串拼接到 glsl-shaders 属性上。
+    if options.shaders_dir ~= "" then
+        local dir = tostring(options.shaders_dir):gsub("\\", "/")
+        if dir:sub(-1) ~= "/" then
+            dir = dir .. "/"
+        end
+        anime4k_dir = dir .. ANIME4K_SUBDIR .. "/"
+    end
     mp.msg.info("[kumiplayer_anime4k] loaded with script-opts default_mode="
-        .. state.default_mode .. " default_quality=" .. state.default_quality)
+        .. state.default_mode .. " default_quality=" .. state.default_quality
+        .. " shaders_dir=" .. anime4k_dir)
 end
 read_injected_defaults()
 
@@ -98,7 +119,7 @@ local function build_chain(mode, quality)
     local chain = {}
 
     local function add(name)
-        table.insert(chain, ANIME4K_DIR .. name)
+        table.insert(chain, anime4k_dir .. name)
     end
 
     -- 统一首段 Clamp_Highlights

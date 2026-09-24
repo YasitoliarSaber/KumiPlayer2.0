@@ -1,12 +1,12 @@
 """内置 MPV 运行时的统一解析、健康检查与启动参数构造。
 
 本模块是 KumiPlayer 内置干净 MPV 的唯一事实来源：
-- 解析内置 MPV 路径（源码 third_party / 安装 runtime/mpv）；
+- 解析内置 MPV 路径（源码 mpv/runtime / 安装 runtime/mpv）；
 - 校验运行时清单（runtime-manifest.json）与 27 个运行文件；
 - 构造 KumiPlayer 自有配置与隔离状态参数；
 - 提供首次引导、设置页与播放共用的健康检查结果。
 
-不读取系统 PATH、旧整合包 mpv/、用户 %APPDATA%\\mpv 或 config.json 中的 mpv_path。
+不读取系统 PATH、外部整合包、用户 %APPDATA%\\mpv 或 config.json 中的 mpv_path。
 """
 
 import hashlib
@@ -472,6 +472,11 @@ def build_mpv_playback_args(
     # 静默忽略。实测：`--script-opt=thumbfast.thumbnail=X` 解析结果仍是配置文件里的
     # 空值，改为 `thumbfast-thumbnail=X` 后 read_options 才拿到 X。
     args.append(f"--script-opt=thumbfast-thumbnail={state_dir / 'thumbfast'}")
+    # Anime4K 着色器是 KumiPlayer 自有层资源（layer_dir/shaders/），必须用绝对路径
+    # 注入，不能让脚本用 `~~/shaders/` 自解析：`~~` 指向当前 mpv 的配置目录
+    # （内置模式是 portable_config），一旦用户替换 portable_config 整合包，
+    # 就会去整合包的目录里找 KumiPlayer 的 Anime4K 链，表现为菜单可用但链加载失败。
+    args.append(f"--script-opt=kumiplayer_anime4k-shaders_dir={layer_dir / 'shaders'}")
     # Anime4K 永久默认值：启动时注入，右键临时切换不影响
     try:
         from app.core.config import load_config

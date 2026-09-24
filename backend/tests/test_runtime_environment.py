@@ -43,8 +43,8 @@ def test_source_desktop_runtime_uses_project_owned_plugins(tmp_path, monkeypatch
 
     assert get_kumiplayer_mpv_plugins_dir() == (
         core_runtime.get_project_root()
-        / "resources"
-        / "mpv-runtime"
+        / "mpv"
+        / "config"
         / "kumiplayer"
         / "scripts"
     )
@@ -57,8 +57,8 @@ def test_source_backend_uses_project_owned_plugins(monkeypatch):
 
     assert get_kumiplayer_mpv_plugins_dir() == (
         core_runtime.get_project_root()
-        / "resources"
-        / "mpv-runtime"
+        / "mpv"
+        / "config"
         / "kumiplayer"
         / "scripts"
     )

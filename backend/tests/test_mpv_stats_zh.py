@@ -3,10 +3,10 @@
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS_DIR = PROJECT_ROOT / "resources/mpv-runtime/portable_config/scripts"
+SCRIPTS_DIR = PROJECT_ROOT / "mpv/config/portable_config/scripts"
 STATS_LUA = SCRIPTS_DIR / "stats.lua"
-MPV_CONF = PROJECT_ROOT / "resources/mpv-runtime/portable_config/mpv.conf"
-STATS_CONF = PROJECT_ROOT / "resources/mpv-runtime/portable_config/script-opts/stats.conf"
+MPV_CONF = PROJECT_ROOT / "mpv/config/portable_config/mpv.conf"
+STATS_CONF = PROJECT_ROOT / "mpv/config/portable_config/script-opts/stats.conf"
 
 
 def test_stats_zh_installed():

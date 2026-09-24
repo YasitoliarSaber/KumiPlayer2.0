@@ -6,7 +6,7 @@
 --    （MPV 官方手册：input.conf 覆盖脚本弱绑定），老手自定义不受影响；
 -- 3. 安全屏蔽：Ctrl+v 剪贴板加载必须忽略（防绕过 KumiPlayer 受控队列）。
 --
--- 注意：本脚本属于 KumiPlayer 自有层（resources/mpv-runtime/kumiplayer/），
+-- 注意：本脚本属于 KumiPlayer 自有层（mpv/config/kumiplayer/），
 -- 用户替换 portable_config 整合包后依然加载，保证 KumiPlayer 功能不受影响。
 
 local mp = require "mp"

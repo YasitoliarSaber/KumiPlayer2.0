@@ -190,6 +190,33 @@ def test_script_opt_keys_must_use_dash_prefix_not_dot():
         assert "-" in key, f"script-opt 键名必须带 `<脚本名>-` 前缀（{key}）"
 
 
+def test_anime4k_shaders_are_injected_from_the_owned_layer():
+    """Anime4K 着色器必须由自有层经 `--script-opt` 绝对路径注入。
+
+    着色器原先放在可替换层 `portable_config/shaders/`，脚本用 `~~/shaders/` 自解析；
+    `~~` 指向**当前 mpv 的配置目录**，用户按设计把 portable_config 整体替换成第三方
+    整合包后就会指到整合包自己的目录，表现为 Anime4K 菜单可用但整条链加载失败。
+    2026-09-24 起资源归入自有层 `config/kumiplayer/shaders/`，由后端注入绝对路径。
+    """
+
+    from app.core.runtime import get_kumiplayer_layer_dir
+    from app.playback import mpv
+
+    args = mpv._build_mpv_args(Path("mpv.exe"), "episode.strm")
+    injected = [
+        arg for arg in args
+        if arg.startswith("--script-opt=kumiplayer_anime4k-shaders_dir=")
+    ]
+    assert len(injected) == 1, "必须且只能注入一次 Anime4K 着色器目录"
+    shaders_root = Path(injected[0].split("=", 2)[2])
+    assert shaders_root == get_kumiplayer_layer_dir() / "shaders"
+    shader_dir = shaders_root / "anime4k-v4.0.1"
+    assert shader_dir.is_dir(), f"自有层 Anime4K 着色器目录不存在: {shader_dir}"
+    assert (shader_dir / "Anime4K_Clamp_Highlights.glsl").is_file()
+    # 可替换层不再承载自有着色器：替换整合包不应带走 KumiPlayer 的 Anime4K
+    assert not (ROOT / "mpv/config/portable_config/shaders/anime4k-v4.0.1").exists()
+
+
 def test_builtin_mpv_playback_args_preserve_window_and_media_title():
     from app.playback import mpv
 
@@ -207,7 +234,7 @@ def test_builtin_mpv_playback_args_preserve_window_and_media_title():
     assert "--no-terminal" in args
 
 
-_REAL_MPV_EXE = ROOT / "third_party" / "mpv" / "runtime" / "mpv.exe"
+_REAL_MPV_EXE = ROOT / "mpv" / "runtime" / "mpv.exe"
 
 
 @pytest.mark.skipif(
@@ -292,8 +319,8 @@ def test_kumiplayer_mpv_integration_reports_builtin_runtime_status(
 def test_screenshot_plugin_uses_weak_hotkeys_and_self_contained_options():
     plugin = (
         ROOT
-        / "resources"
-        / "mpv-runtime"
+        / "mpv"
+        / "config"
         / "kumiplayer"
         / "scripts"
         / "screenshot_to_video_dir.lua"
@@ -313,8 +340,8 @@ def test_screenshot_plugin_uses_weak_hotkeys_and_self_contained_options():
 def test_screenshot_uses_scraped_title_folder_and_millisecond_filename_without_sequence():
     plugin = (
         ROOT
-        / "resources"
-        / "mpv-runtime"
+        / "mpv"
+        / "config"
         / "kumiplayer"
         / "scripts"
         / "screenshot_to_video_dir.lua"
@@ -332,8 +359,8 @@ def test_screenshot_uses_scraped_title_folder_and_millisecond_filename_without_s
 def test_kumiplayer_mpv_plugin_is_strict_utf8_without_bom():
     path = (
         ROOT
-        / "resources"
-        / "mpv-runtime"
+        / "mpv"
+        / "config"
         / "kumiplayer"
         / "scripts"
         / "screenshot_to_video_dir.lua"
@@ -984,7 +1011,7 @@ def test_real_mpv_anime4k_menu_click_forwards_set_session(tmp_path):
     """
     import subprocess as _subprocess
 
-    scripts_dir = ROOT / "resources/mpv-runtime/kumiplayer/scripts"
+    scripts_dir = ROOT / "mpv/config/kumiplayer/scripts"
     log_path = tmp_path / "mpv-menu-smoke.log"
 
     # 测试辅助脚本：模拟 uosc 点击「Anime4K Mode B」
@@ -1045,8 +1072,8 @@ def test_real_mpv_right_click_actually_opens_the_uosc_menu(tmp_path):
 
     import subprocess as _subprocess
 
-    config_dir = ROOT / "resources/mpv-runtime/portable_config"
-    scripts_dir = ROOT / "resources/mpv-runtime/kumiplayer/scripts"
+    config_dir = ROOT / "mpv/config/portable_config"
+    scripts_dir = ROOT / "mpv/config/kumiplayer/scripts"
     trigger = tmp_path / "trigger_open_menu.lua"
     trigger.write_text(
         'mp.register_event("file-loaded", function()\n'
@@ -1100,7 +1127,63 @@ def test_uosc_pause_indicator_is_disabled_in_controlled_config():
     与时间轴/控制条重复且遮挡画面；本项由用户明确反馈后关闭。
     """
 
-    config = (ROOT / "resources/mpv-runtime/portable_config/script-opts/uosc.conf").read_text(
+    config = (ROOT / "mpv/config/portable_config/script-opts/uosc.conf").read_text(
         encoding="utf-8"
     )
     assert "pause_indicator=no" in config
+
+
+@pytest.mark.skipif(
+    not _REAL_MPV_EXE.is_file(),
+    reason="内置 MPV 二进制不存在，跳过真实二进制冒烟测试",
+)
+def test_real_mpv_mounts_anime4k_chain_from_injected_owned_layer(tmp_path):
+    """真实 mpv 必须能从注入的自有层绝对路径挂上完整 Anime4K 链。
+
+    覆盖 2026-09-24 的改动：`kumiplayer_anime4k.lua` 不再用 `~~/shaders/` 自解析，
+    改为读取后端注入的 `--script-opt=kumiplayer_anime4k-shaders_dir=`。这里用真实
+    二进制 + 真实脚本，断言脚本读到了注入目录，并按 mode a 挂上 6 段官方链。
+    """
+
+    import subprocess as _subprocess
+
+    from app.core.runtime import get_kumiplayer_layer_dir
+
+    layer_dir = get_kumiplayer_layer_dir()
+    config_dir = ROOT / "mpv/config/portable_config"
+    log_path = tmp_path / "mpv-anime4k-shaders.log"
+
+    proc = _subprocess.Popen(
+        [
+            str(_REAL_MPV_EXE),
+            "--no-terminal",
+            "--force-window=no",
+            "--vo=null",
+            "--no-audio",
+            f"--config-dir={config_dir}",
+            f"--script={layer_dir / 'scripts' / 'kumiplayer_anime4k.lua'}",
+            "--script-opt=kumiplayer_anime4k-default_mode=a",
+            "--script-opt=kumiplayer_anime4k-default_quality=balanced",
+            f"--script-opt=kumiplayer_anime4k-shaders_dir={layer_dir / 'shaders'}",
+            "av://lavfi:testsrc=duration=2",
+            f"--log-file={log_path}",
+            "-v",
+        ],
+        stdout=_subprocess.DEVNULL,
+        stderr=_subprocess.DEVNULL,
+        creationflags=getattr(_subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    try:
+        proc.wait(timeout=90)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+    # mpv 日志里的 Windows 路径统一成正斜杠后再断言
+    log = log_path.read_text(encoding="utf-8", errors="replace").replace(chr(92), "/")
+    assert "applied mode=a quality=balanced shaders=6" in log, (
+        "Anime4K 链没有按注入的自有层目录挂上；mpv 日志：" + chr(10) + log[-1500:]
+    )
+    assert f"shaders_dir={layer_dir.as_posix()}/shaders/anime4k-v4.0.1/" in log, (
+        "脚本没有读到后端注入的 shaders_dir；mpv 日志：" + chr(10) + log[-1500:]
+    )

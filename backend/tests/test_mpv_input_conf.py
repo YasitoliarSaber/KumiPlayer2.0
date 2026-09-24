@@ -10,8 +10,8 @@
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-INPUT_CONF = PROJECT_ROOT / "resources/mpv-runtime/portable_config/input.conf"
-BINDINGS_LUA = PROJECT_ROOT / "resources/mpv-runtime/kumiplayer/scripts/kumiplayer_bindings.lua"
+INPUT_CONF = PROJECT_ROOT / "mpv/config/portable_config/input.conf"
+BINDINGS_LUA = PROJECT_ROOT / "mpv/config/kumiplayer/scripts/kumiplayer_bindings.lua"
 
 
 def test_input_conf_exists_and_readable():
@@ -77,7 +77,7 @@ def test_default_key_hints_documented():
 
 def test_mpv_conf_disables_builtin_bindings():
     """默认套件 mpv.conf 禁用二进制内置键位（可替换层默认方案）。"""
-    mpv_conf = PROJECT_ROOT / "resources/mpv-runtime/portable_config/mpv.conf"
+    mpv_conf = PROJECT_ROOT / "mpv/config/portable_config/mpv.conf"
     text = mpv_conf.read_text(encoding="utf-8")
     assert "input-builtin-bindings=no" in text
     # 绝不能使用会连脚本弱绑定一起屏蔽的选项（只查实际配置行，注释警告允许出现）
@@ -91,7 +91,7 @@ def test_mpv_conf_disables_builtin_bindings():
 
 def test_kumiplayer_forced_config_exists():
     """自有层强制配置（--include 追加）必须存在且含应用必需项。"""
-    forced = PROJECT_ROOT / "resources/mpv-runtime/kumiplayer/mpv.conf"
+    forced = PROJECT_ROOT / "mpv/config/kumiplayer/mpv.conf"
     assert forced.is_file()
     text = forced.read_text(encoding="utf-8")
     assert "hwdec=auto-safe" in text

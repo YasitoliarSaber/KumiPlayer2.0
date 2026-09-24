@@ -3,11 +3,11 @@
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-MENU_LUA = PROJECT_ROOT / "resources/mpv-runtime/kumiplayer/scripts/kumiplayer_uosc_menu.lua"
-ANIME4K_LUA = PROJECT_ROOT / "resources/mpv-runtime/kumiplayer/scripts/kumiplayer_anime4k.lua"
-INPUT_CONF = PROJECT_ROOT / "resources/mpv-runtime/portable_config/input.conf"
-UOSC_CONF = PROJECT_ROOT / "resources/mpv-runtime/portable_config/script-opts/uosc.conf"
-MPV_CONF = PROJECT_ROOT / "resources/mpv-runtime/portable_config/mpv.conf"
+MENU_LUA = PROJECT_ROOT / "mpv/config/kumiplayer/scripts/kumiplayer_uosc_menu.lua"
+ANIME4K_LUA = PROJECT_ROOT / "mpv/config/kumiplayer/scripts/kumiplayer_anime4k.lua"
+INPUT_CONF = PROJECT_ROOT / "mpv/config/portable_config/input.conf"
+UOSC_CONF = PROJECT_ROOT / "mpv/config/portable_config/script-opts/uosc.conf"
+MPV_CONF = PROJECT_ROOT / "mpv/config/portable_config/mpv.conf"
 
 
 def test_menu_lua_exists_and_declares_open_entry():
@@ -100,7 +100,7 @@ def test_mpv_uses_safe_hardware_decode_fallback():
 def test_input_conf_binds_right_click_to_anime4k_menu():
     """右键菜单入口由 KumiPlayer 自有层 bindings.lua 弱绑定提供（分层架构）。"""
     from pathlib import Path as _Path
-    bindings = _Path(__file__).resolve().parents[2] / "resources/mpv-runtime/kumiplayer/scripts/kumiplayer_bindings.lua"
+    bindings = _Path(__file__).resolve().parents[2] / "mpv/config/kumiplayer/scripts/kumiplayer_bindings.lua"
     text = bindings.read_text(encoding="utf-8")
     assert "MBTN_RIGHT" in text
     assert "open-anime4k-menu" in text
