@@ -71,7 +71,12 @@ test('导入工作台使用全宽单列轨道，空媒体库有紧凑的引导�
 
 test('第三步总体摘要位于建立媒体库页头右侧，详情展开保留实际刮削结果', () => {
   assert.match(page, /media-v4-execution-header-summary/)
-  assert.match(page, /executeProgress\.work_units\.length/)
+  // 主指标是“已正确刮削的作品数”；镜像只是次要信息（用户 2026-09-24 要求：
+  // 镜像不会失败，完成量不反映质量，不能占据头号位置）。
+  assert.match(page, /executionWorkScraped/)
+  assert.match(page, /部已正确刮削/)
+  assert.match(page, /media-v4-execution-header-mirror/)
+  assert.match(styles, /\.media-v4-execution-header-mirror\s*\{[^}]*font-size:\s*12px/s)
   assert.match(execution, /刮削结果/)
   assert.match(execution, /季度结构/)
   assert.match(execution, /episode\.scraped_plot/)

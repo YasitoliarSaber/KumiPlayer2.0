@@ -79,6 +79,7 @@ function seasonFailureReason(result: SeasonResult): string {
     episode_not_found: '在线集数未匹配',
     invalid_response: '在线资料响应异常',
     source_unavailable: '在线资料服务暂不可用',
+    episode_mapping_incomplete: '在线集数未完全匹配',
   }
   return labels[result.reason_code] ?? '在线资料需要处理'
 }
@@ -128,6 +129,14 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
   const metadataStateLabels: Record<string, string> = {
     ready: '媒体信息已就绪', waiting_review: '使用本地信息，可补齐在线资料', waiting_metadata: '缺少在线资料配置',
     source_unavailable: '在线资料服务暂不可用', failed: '获取媒体信息失败',
+  }
+  // 「部分剧集未匹配」不是“服务不可用”：说清楚真实原因，用户才不会去重试一个
+  // 本来就不会变的网络问题（旧行为把这 20 部作品全写成“在线资料服务暂不可用”）。
+  const metadataStateText = (state: string, reasonCode?: string) => {
+    if (reasonCode === 'episode_mapping_incomplete') return '在线集数未完全匹配'
+    if (reasonCode === 'special_episode_metadata_incomplete') return '部分特别篇缺少在线资料'
+    if (reasonCode === 'artifact_incomplete') return '部分媒体图片未下载'
+    return metadataStateLabels[state] ?? state
   }
   const loadedDetail = detail?.status === 'loaded' ? detail.detail : null
   // 保持对旧后端/旧缓存响应的兼容：新增详情字段缺失时仍显示已有结果，
@@ -238,7 +247,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                 <div className="media-v4-work-detail-facts">
                   <span>{detail.detail.work.title}</span>
                   <span>{detail.detail.work.provider === 'tmdb' ? `TMDB ${detail.detail.work.provider_id}` : detail.detail.work.provider || '未关联在线作品'}</span>
-                  <span>{metadataStateLabels[detail.detail.work.metadata_state] ?? detail.detail.work.metadata_state}</span>
+                  <span>{metadataStateText(detail.detail.work.metadata_state, detail.detail.work.metadata_reason_code)}</span>
                 </div>
                 {unit.overall_status !== 'needs_attention' && <>
                 {detail.detail.work.metadata_reason && <div className="media-v4-job-error" role="status">{detail.detail.work.metadata_reason}</div>}
@@ -268,7 +277,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                     {scrape.rating != null && <span>评分 {scrape.rating.toFixed(1)}</span>}
                     {detailRuntimeLabel(scrape.runtime) && <span>{detailRuntimeLabel(scrape.runtime)}</span>}
                     {scrape.premiered && <span>首播 {scrape.premiered}</span>}
-                    {scrape.metadata_state && <span>{metadataStateLabels[scrape.metadata_state] ?? scrape.metadata_state}</span>}
+                    {scrape.metadata_state && <span>{metadataStateText(scrape.metadata_state, scrape.metadata_reason_code)}</span>}
                   </div>
                   {scrape.plot && <p className="media-v4-work-detail-plot">{scrape.plot}</p>}
                   {scrape.metadata_warning && <div className="media-v4-job-info" role="status">{scrape.metadata_warning}</div>}

@@ -412,6 +412,20 @@ export default function MediaManagementPage() {
       + executeProgress.stage_summary.mirror.failed
       + executeProgress.stage_summary.mirror.cancelled
     : 0
+  // 进度主指标是「已正确刮削的作品」而不是镜像搬运量（用户 2026-09-24 明确要求）：
+  // 镜像只是按已确认的播放路径搬运文件，不存在“搬错”这种失败，完成量本身不反映质量；
+  // 真正需要盯住的是“多少部作品拿到了正确的在线资料、一个错误都没有”。
+  // 已知会降级的代码（集数未完全匹配 / 部分图片缺失）不计入“正确”。
+  const SCRAPE_DEFECT_CODES = ['episode_mapping_incomplete', 'special_episode_metadata_incomplete', 'artifact_incomplete']
+  const executionWorkTotal = executeProgress?.work_units.length ?? 0
+  const executionWorkScraped = executeProgress
+    ? executeProgress.work_units.filter((unit) => unit.metadata_state === 'ready'
+        && !SCRAPE_DEFECT_CODES.includes(unit.metadata_reason_code ?? '')).length
+    : 0
+  const executionWorkNeedsAttention = executeProgress
+    ? executeProgress.work_units.filter((unit) => unit.overall_status === 'needs_attention'
+        || unit.overall_status === 'failed').length
+    : 0
   useEffect(() => {
     if (!revisionId || !hasActiveJobs) return
     let cancelled = false
@@ -1326,6 +1340,17 @@ export default function MediaManagementPage() {
                 <div className="media-v4-source-card-stats"><span>{card.work_count} 部作品</span><span>{card.asset_count} 个文件</span></div>
                 <div className="media-v4-source-card-status">
                 <div className="media-v4-source-card-progress" role="status"><span>{progressLabel}</span></div>
+                {/* 用户 2026-09-24 要求：来源卡也要以「已正确刮削的作品数」为主指标。
+                    镜像只是搬运、不会失败，完成量不反映质量；需要盯的是「有多少部作品
+                    拿到了正确的在线资料」。work_count - attention_count 就是后端已确认
+                    的作品数（attention_count 覆盖 waiting_review / source_unavailable /
+                    failed 三类需要处理的绑定）。 */}
+                {card.work_count > 0 && (
+                  <div className="media-v4-source-card-scrape">
+                    <strong>{Math.max(0, card.work_count - card.attention_count)}</strong>
+                    <span>/ {card.work_count} 部已正确刮削</span>
+                  </div>
+                )}
                 {card.attention_count > 0 && <span className="media-v4-source-card-attention">有 {card.attention_count} 个待处理事项</span>}
                 {(card.relation_pending_count ?? 0) > 0 && <span className="media-v4-source-card-notice">{card.relation_pending_count} 项关联信息待补全，不影响入库和播放</span>}
                 </div>
@@ -1574,10 +1599,13 @@ export default function MediaManagementPage() {
           <div className="media-stage-heading"><span className="media-stage-icon" aria-hidden="true"><Database24Regular /></span><div><span className="media-stage-eyebrow">第 3 步</span><h2>建立媒体库</h2><p>可以离开此页面；返回后会继续显示当前导入进度。</p></div></div>
           <div className="media-v4-execute-stage-header-side">
             {executeProgress && <div className="media-v4-execution-header-summary" aria-label="建立媒体库总体进度">
-              <strong>{executeProgress.work_units.length}</strong>
-              <span>部作品</span>
-              <span aria-hidden="true">·</span>
-              <span>{executionMirrorDone}/{executionMirrorTotal} 已完成镜像</span>
+              <strong>{executionWorkScraped}</strong>
+              <span>/ {executionWorkTotal} 部已正确刮削</span>
+              {executionWorkNeedsAttention > 0 && <>
+                <span aria-hidden="true">·</span>
+                <span className="media-v4-execution-header-attention">{executionWorkNeedsAttention} 部需要处理</span>
+              </>}
+              <span className="media-v4-execution-header-mirror">镜像 {executionMirrorDone}/{executionMirrorTotal}</span>
             </div>}
             {preview && <details className="media-v4-review-details"><summary>查看本次识别摘要</summary><div className="media-v4-review-details-body">
               <V4RecognitionSummary
@@ -1611,6 +1639,12 @@ export default function MediaManagementPage() {
       {metadataRecovery && (
         <Dialog open onOpenChange={(_, data) => { if (!data.open && metadataRecoveryBusy === '') setMetadataRecovery(null) }}>
           <DialogSurface className="media-v4-metadata-dialog" aria-describedby={undefined}>
+            {/* Fluent v9 的 Dialog 走 Portal 挂到 body 下，而 provider 的 design token
+                是以 CSS 变量形式定义在 provider 那个 DOM 节点上的：Portal 里的节点
+                拿不到变量，Input/Button 就会退回浅色默认值（用户截图里的输入框与
+                “重新搜索”看不到边框、像纯文本）。与同文件的删除/重命名弹窗一致，
+                在 Portal 内重建同一套主题。 */}
+            <FluentProvider theme={getKumiFluentTheme(appearanceMode)} className="media-v4-metadata-dialog-provider">
             <DialogBody>
               <DialogTitle>确认“{metadataRecovery.workTitle}”的在线作品</DialogTitle>
               <DialogContent>
@@ -1663,6 +1697,7 @@ export default function MediaManagementPage() {
                 <Button appearance="secondary" disabled={metadataRecoveryBusy !== ''} onClick={() => setMetadataRecovery(null)}>暂不处理</Button>
               </DialogActions>
             </DialogBody>
+            </FluentProvider>
           </DialogSurface>
         </Dialog>
       )}

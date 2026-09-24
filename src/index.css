@@ -13649,6 +13649,9 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-source-card-stats span { padding: 4px 8px; border-radius: 5px; color: var(--text-secondary); background: color-mix(in srgb, var(--text) 5%, transparent); font-size: 12px; font-variant-numeric: tabular-nums; }
 .media-v4-source-card-status { display: grid; gap: 5px; padding-block: 4px 8px; }
 .media-v4-source-card-attention { color: var(--danger, #c42b1c); font-size: 13px; line-height: 1.5; }
+/* 来源卡主指标：已正确刮削的作品数 / 总作品数（镜像不是主指标）。 */
+.media-v4-source-card-scrape { display: flex; align-items: baseline; gap: 5px; color: var(--text-secondary); font-size: 13px; font-variant-numeric: tabular-nums; }
+.media-v4-source-card-scrape strong { color: var(--text); font-size: 20px; font-weight: 700; line-height: 1.1; }
 .media-v4-source-card-notice { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .media-v4-source-card-progress { display: flex; min-height: 20px; align-items: center; color: var(--text-secondary); font-size: 12px; }
 .media-v4-source-card-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; gap: 8px; margin-top: 1px; }
@@ -13981,6 +13984,9 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 /* 3.5：第三步摘要属于页面标题区，避免和任务列表重复占位。 */
 .media-v4-execution-header-summary { display: flex; align-items: baseline; justify-content: flex-end; justify-self: end; gap: 7px; min-height: 32px; color: var(--text-secondary); font-size: 14px; font-variant-numeric: tabular-nums; }
 .media-v4-execution-header-summary strong { color: var(--text); font-size: 28px; font-weight: 700; line-height: 1; }
+/* 次要信息：镜像只是搬运量，不再和主指标同尺寸。 */
+.media-v4-execution-header-mirror { color: var(--text-muted); font-size: 12px; }
+.media-v4-execution-header-attention { color: var(--warning, #c45b52); }
 .media-v4-execution-head { display: flex; align-items: center; min-height: 24px; }
 .media-v4-execution-status { font-size: 16px; }
 .media-v4-stage-pills { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
