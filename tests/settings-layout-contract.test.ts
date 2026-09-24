@@ -13,10 +13,27 @@ test('设置页：末尾必须有版式归一化覆盖块（否则被历史 !imp
   assert.match(block, /\.settings-section-head h3[\s\S]{0,120}font-size: 18px !important;/, '区块标题字号应固定')
 })
 
-test('设置页：不得保留会导致文字重叠的绝对定位', () => {
+test('设置页：左侧目录必须常驻，弹层气泡不得绝对定位', () => {
+  // 用户反馈（2026-09-24）：设置页往下滑就看不到左边导航栏。
+  // 历史原因：为修"文字重叠"，末尾把目录包裹层也一并压成 position: static!important，
+  // 连带取消了它的常驻（滚动容器是 .app-main）。现在目录必须是 sticky。
   assert.match(
     block,
-    /\.settings-outline-popover-wrap[\s\S]{0,200}position: static !important;/,
-    '设置页大纲浮层必须取消绝对定位',
+    /\.settings-outline-popover-wrap\s*\{[\s\S]{0,240}?position:\s*sticky !important;/,
+    '设置页左侧目录必须常驻（sticky）',
+  )
+  assert.match(
+    block,
+    /\.settings-outline-popover-wrap\s*\{[\s\S]{0,240}?top:\s*\d+px !important;/,
+    '常驻偏移必须是固定像素值',
+  )
+  // 要压的是"浮层气泡"，目录本体不能再被列进 static 列表（回归护栏）。
+  const staticRule = block.match(
+    /\.settings-shell-settings \.settings-outline,[\s\S]{0,160}?\{\s*position:\s*static !important;/,
+  )
+  assert.ok(staticRule, '弹层气泡仍需取消绝对定位')
+  assert.ok(
+    !staticRule![0].includes('settings-outline-popover-wrap'),
+    '目录包裹层不得再被压成 static（会导致导航栏随页面滚走）',
   )
 })

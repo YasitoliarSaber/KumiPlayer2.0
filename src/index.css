@@ -14477,8 +14477,20 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 }
 
 /* 设置页内的浮层/大纲不得覆盖正文（绝对定位是"文字重叠"的常见来源）。 */
+/* 目录本体必须常驻（2026-09-24 用户反馈"往下滑就看不到左边导航栏"）：
+   包裹层原先被下面这条规则一并压成 static，于是它跟着 .app-main 一起滚走。
+   滚动容器是 .app-main（top:40px、padding-top:20px），top:24px 与内容首行对齐；
+   包裹层是 grid item，align-self:start 让它小于整行高度，sticky 才有可移动空间。 */
+.settings-shell-settings .settings-outline-popover-wrap {
+  position: sticky !important;
+  top: 24px !important;
+  align-self: start !important;
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
 .settings-shell-settings .settings-outline,
-.settings-shell-settings .settings-outline-popover-wrap,
 .settings-shell-settings .settings-outline-popover {
   position: static !important;
   top: auto !important;
