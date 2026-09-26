@@ -426,6 +426,22 @@ test('图片产物缺失时显示非阻断提示与重新下载入口', () => {
   expect(artifacts).toHaveBeenCalledWith('w-degraded')
 })
 
+test('执行详情保留未知季，并将已知季度排在未分季之前', async () => {
+  const work = { title: '未知季作品', media_type: 'unknown', metadata_state: 'waiting_review' }
+  const { container } = render(<V4ExecutionProgress
+    progress={makeProgress([workUnit('w-null', '未知季作品', 'needs_attention', work)])}
+    busyRetryId="" onRetry={vi.fn()} resolvingWorkId="" onResolveMetadata={vi.fn()}
+    fetchWorkDetail={vi.fn().mockResolvedValue({ work, mirror: { status: 'succeeded', artifact_count: 2 },
+      seasons: [
+        { season_id: 'unknown-scope', season_number: null, season_kind: 'unassigned', title: '', episode_count: 1 },
+        { season_id: 'known-season', season_number: 2, season_kind: 'regular', title: '', episode_count: 1 },
+      ], episodes: [], episode_total: 2, has_detail: true })}
+  />)
+  await screen.findByText('未分季 · 1 集')
+  expect(container.querySelector('.media-v4-work-detail-seasons')?.textContent).toBe('第 2 季 · 1 集未分季 · 1 集')
+  expect(screen.queryByText('第 0 季 · 1 集')).not.toBeInTheDocument()
+})
+
 test.each(['check_settings', 'retry_metadata', 'review_identity'])('恢复入口在详情加载后保持唯一：%s', async (action) => {
   const retry = vi.fn()
   const resolve = vi.fn()

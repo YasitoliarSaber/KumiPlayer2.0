@@ -92,7 +92,7 @@ def test_v20_provider_binding_rows_survive_migration_and_can_be_shared(tmp_path)
     database.initialize()
 
     with database.connect() as conn:
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == V4_SCHEMA_VERSION == 22
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == V4_SCHEMA_VERSION
         assert _primary_key_columns(conn) == ("work_id", "provider", "media_type")
         assert _binding_rows(conn) == before
         assert _index_unique(conn, "idx_v4_provider_bindings_identity") == 0
@@ -126,7 +126,7 @@ def test_real_v19_structure_reaches_v21_after_legacy_chain(tmp_path):
     database.initialize()
 
     with database.connect() as conn:
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == V4_SCHEMA_VERSION == 22
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == V4_SCHEMA_VERSION
         assert _primary_key_columns(conn) == ("work_id", "provider", "media_type")
         assert _binding_rows(conn) == before
         assert _index_unique(conn, "idx_v4_provider_bindings_identity") == 0
@@ -138,6 +138,6 @@ def test_fresh_database_uses_v21_provider_binding_contract(tmp_path):
     database.initialize()
 
     with database.connect() as conn:
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == V4_SCHEMA_VERSION == 22
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == V4_SCHEMA_VERSION
         assert _primary_key_columns(conn) == ("work_id", "provider", "media_type")
         assert _index_unique(conn, "idx_v4_provider_bindings_identity") == 0

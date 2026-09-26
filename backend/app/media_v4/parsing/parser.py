@@ -7,15 +7,28 @@
 from __future__ import annotations
 
 import re
-from collections import defaultdict
-from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
+from app.media_v4.domain.identity import (
+    CONTENT_CLASS_ATTACHED_SPECIAL,
+    CONTENT_CLASS_MOVIE,
+    NON_IMPORTABLE_CONTENT_CLASSES,
+    DecisionTrace,
+)
 from app.media_v4.domain.models import ParsedFacts, SourceEvidence
 from app.media_v4.generic_container import is_generic_container_name
 from app.media_v4.parsing.episode_titles import (
     clean_special_episode_title,
     extract_special_episode_number,
+)
+from app.media_v4.parsing.evidence_policy import (
+    arbitrate_hint,
+    arbitrate_title,
+    classify_content,
+    collect_nearest_semantic_directory_tokens,
+    group_type_for,
+    parse_numbering,
+    tokenize_filename,
 )
 from app.media_v4.sources.adapters import provider_to_source
 from app.recognition.media import (
@@ -105,152 +118,19 @@ def _explicit_season_from_path(relative_path: str) -> int | None:
 def normalize_batch_parsed_facts(
     entries: list[tuple[SourceEvidence, ParsedFacts]],
 ) -> list[tuple[SourceEvidence, ParsedFacts]]:
-    """继承旧版的明确后续季绝对集号归一化，但不改变原始证据。
+    """兼容入口：单个文件事实不再被批次成员改写。
 
-    少数目录会把第二季写成 ``S02E13``、``S02E14``……；当同一作品、同一
-    显式季度目录内的编号连续且从 10 以上开始时，它们明确是跨季绝对编号，
-    因而在 ParsedFacts 首次持久化前换算为本季 E01、E02……。不连续、未显式
-    标季或作品边界不清的条目一律保持原样，交由人工确认。
+    历史上这里会做三件事，全部与 C-002/C-004 冲突，已删除：
+
+    - 用目录显式季号**覆盖**文件里的明确季号（文件证据才是权威）；
+    - 按"最小编号 - 1"把 ``S02E13`` 改写成 ``E01``（缺集不能被当成整季起点）；
+    - 用已核验 Provider 季度放置**改写本地编号/类别**（Provider 映射只属于
+      映射阶段，不能反向修改已解析的本地事实）。
+
+    保留函数签名供既有调用点平滑过渡；集合级归属统一留给 Resolver。
     """
 
-    # 已核验 Provider 例外只在批量语义阶段参与季度放置，不进入纯 parser，
-    # 因而不会让确认后的可变状态污染初始路径/文件名事实。
-    from app.recognition.verified_titles import (
-        match_verified_tmdb_binding,
-        match_verified_tmdb_episode_placement,
-    )
-
-    normalized = list(entries)
-    for index, (evidence, facts) in enumerate(normalized):
-        if facts.group_type != "season" or facts.episode_candidate is None:
-            continue
-        binding = match_verified_tmdb_binding(evidence.relative_path)
-        if binding is None or binding.tmdb_type != "tv":
-            continue
-        placement = match_verified_tmdb_episode_placement(
-            binding.tmdb_id,
-            evidence.relative_path,
-            int(facts.episode_candidate),
-        )
-        if placement is None:
-            continue
-        season_number, episode_number = placement
-        if (season_number, episode_number) == (
-            facts.season_candidate,
-            facts.episode_candidate,
-        ):
-            continue
-        normalized[index] = (
-            evidence,
-            replace(
-                facts,
-                group_type="special" if season_number == 0 else facts.group_type,
-                season_candidate=season_number,
-                episode_candidate=None if season_number == 0 else episode_number,
-                absolute_episode_candidate=(
-                    facts.absolute_episode_candidate
-                    if facts.absolute_episode_candidate is not None
-                    else int(facts.episode_candidate)
-                ),
-                special_candidate=season_number == 0 or facts.special_candidate,
-                special_number=episode_number if season_number == 0 else facts.special_number,
-                # 用户规则（2026-09-24）：特别篇不得入库。已核验 Provider 季度把文件
-                # 改写成 S00/special 时，**必须同步刷新** is_importable / is_auxiliary，
-                # 否则这批文件会绕过“特殊篇不入库”规则继续进入 Work/Episode/Asset 图
-                # （子会话实测：辉夜『First Kiss wa Owaranai』４ 个文件就是此缺口）。
-                is_importable=(
-                    (not facts.is_importable or facts.is_auxiliary)
-                    if season_number == 0
-                    else facts.is_importable
-                ),
-                is_auxiliary=(facts.is_auxiliary or season_number == 0),
-                episode_title=(
-                    clean_special_episode_title(
-                        evidence.relative_path,
-                        work_title=facts.work_title,
-                        original_title=facts.original_title,
-                        series_group=facts.series_group,
-                        special_number=episode_number,
-                    )
-                    if season_number == 0
-                    else facts.episode_title
-                ),
-                reasons=(*facts.reasons, "已核验 Provider 季度映射覆盖绝对集号"),
-            ),
-        )
-
-    # 目录层级是整批文件共享的结构证据。文件名可能沿用绝对编号，甚至仍写
-    # S01；只要最近目录明确声明 [S2]/Season 2/第2季，就先校正季度，再判断
-    # 是否需要把累计集号换算为季内集号。
-    for index, (evidence, facts) in enumerate(normalized):
-        if facts.group_type != "season":
-            continue
-        explicit_season = _explicit_season_from_path(evidence.relative_path)
-        if explicit_season is None or explicit_season == facts.season_candidate:
-            continue
-        binding = match_verified_tmdb_binding(evidence.relative_path)
-        placement = (
-            match_verified_tmdb_episode_placement(
-                binding.tmdb_id,
-                evidence.relative_path,
-                int(facts.episode_candidate),
-            )
-            if binding is not None
-            and binding.tmdb_type == "tv"
-            and facts.episode_candidate is not None
-            else None
-        )
-        if placement is not None and placement[0] != explicit_season:
-            # 本地目录可使用篇章号（如 S1.1/S2），已核验 Provider 映射才是
-            # 跨发布包合并所需的季度身份，不能被本地篇章标签反向覆盖。
-            continue
-        normalized[index] = (
-            evidence,
-            replace(
-                facts,
-                season_candidate=explicit_season,
-                reasons=(*facts.reasons, f"目录明确声明第{explicit_season}季，覆盖文件名季度"),
-            ),
-        )
-
-    groups: dict[tuple[str, str, int, str], list[int]] = defaultdict(list)
-    for index, (evidence, facts) in enumerate(normalized):
-        season = int(facts.season_candidate or 0)
-        if (
-            facts.group_type != "season"
-            or season <= 1
-            or facts.episode_candidate is None
-            or not _batch_work_identity(facts)
-            or not _path_has_explicit_season(evidence.relative_path, season)
-        ):
-            continue
-        parent = str(PurePosixPath(evidence.relative_path.replace("\\", "/")).parent)
-        groups[(evidence.provider, _batch_work_identity(facts), season, parent)].append(index)
-
-    for (_provider, _work, season, _parent), indexes in groups.items():
-        numbers = sorted({int(normalized[index][1].episode_candidate or 0) for index in indexes})
-        if len(numbers) < 2 or numbers[0] < 10:
-            continue
-        if numbers != list(range(numbers[0], numbers[-1] + 1)):
-            continue
-        offset = numbers[0] - 1
-        for index in indexes:
-            evidence, facts = normalized[index]
-            episode_number = int(facts.episode_candidate or 0) - offset
-            normalized[index] = (
-                evidence,
-                replace(
-                    facts,
-                    episode_candidate=episode_number,
-                    absolute_episode_candidate=(
-                        facts.absolute_episode_candidate
-                        if facts.absolute_episode_candidate is not None
-                        else int(facts.episode_candidate or 0)
-                    ),
-                    reasons=(*facts.reasons, f"明确第{season}季目录使用连续绝对集号，按季内第{episode_number}集归一化"),
-                ),
-            )
-    return normalized
+    return list(entries)
 
 
 def _unique_non_empty(values: tuple[str, ...]) -> tuple[str, ...]:
@@ -608,6 +488,11 @@ class V4Parser:
         if episode_match and episode_match.group(2):
             episode_range = (int(episode_match.group(1)[1:]), int(episode_match.group(2)))
 
+        # C-002/C-004：单文件事实由 evidence_policy 统一仲裁；provider 与批量成员
+        # 数量不再改变类别、标题或编号。
+        tokens = tokenize_filename(evidence.relative_path)
+        directory = collect_nearest_semantic_directory_tokens(evidence.relative_path)
+
         # 中文命名的集号**优先**于 `_ABSOLUTE_TOKEN` 的括号/尾随数字形态。
         # 实测：`[Group] 121热斗！大型庆典(2)!!.mp4` 会被 `_ABSOLUTE_TOKEN` 的
         # `(2)` 抢先判成"绝对集号 2"，而正确集号是开头的 121（联网核对：该系列共 191 集）。
@@ -616,7 +501,6 @@ class V4Parser:
         # （test_v4_parser_golden.py 有 golden 断言保护）。
         cjk_episode = None
         cjk_episode_title = ""
-        absolute_candidate = None
         if not episode_match:
             cjk_episode, cjk_episode_title = _cjk_episode_number_and_title(
                 PurePosixPath(filename).stem
@@ -626,59 +510,31 @@ class V4Parser:
             else:
                 absolute_match = _ABSOLUTE_TOKEN.search(PurePosixPath(filename).stem)
                 if absolute_match:
-                    raw_absolute = next(value for value in absolute_match.groupdict().values() if value)
-                    absolute_candidate = int(raw_absolute)
                     episode_token = absolute_match.group(0).strip()
 
-        group_type = guess.group_type or "unknown"
-        resolved_media_type = guess.media_type
-        resolved_card_type = guess.card_type
-        # 公共规则（所有来源通用：OpenList / 目录树 / 本地）：
-        # **文件里出现了明确的集号**（中文编号，或 `【01】`/`[01]`/`- 01`/尾随 `01`
-        # 这类绝对集号），就说明它属于一部**剧集**，不能继续停在 movie。
-        # 实测：目录树里的 `【Top o Nerae! GunBuster】【01】【BDrip】….mkv` 集号能识别，
-        # 但媒体类型仍是 movie，整季在导入页显示成「电影 · N 个文件」；
-        # OpenList 里的 `[VCB-Studio] … [01][Ma10p].mkv` 同理。
-        #
-        # 守卫：剧场版/OVA/特别篇/总集篇上下文**不**参与升级——它们本来就该是独立作品
-        # 或特别篇（实测 `Re：从零开始…/2.…雪之回忆.[OVA].2018` 曾被错误并进 136 集正片）。
-        _path_dirs = [
-            part
-            for part in evidence.relative_path.replace("\\", "/").split("/")[:-1]
-            if part
-        ]
-        from app.recognition.media import _looks_like_specials_dir
-
-        _stem_for_markers = PurePosixPath(filename).stem
-        _special_context = (
-            str(guess.group_type or "").casefold() in {"special", "auxiliary", "ignored"}
-            or any(_looks_like_specials_dir(part) for part in _path_dirs)
-            or any(
-                marker in _stem_for_markers
-                for marker in ("剧场版", "劇場版", "总集篇", "總集篇", "新编撰", "新編撰")
-            )
+        # C-002：内容类别、媒体类型与准入判定以统一仲裁为准。旧的"按 guess
+        # media_type/group_type 再升级"分支已删除，避免同一事实有两个来源。
+        numbering = parse_numbering(
+            tokens, directory, cjk_episode=cjk_episode, provisional_season=guess.season_number
         )
-        if (
-            (cjk_episode is not None or absolute_candidate is not None)
-            and not _special_context
-            and str(guess.media_type or "").casefold() in {"movie", "unknown", ""}
-        ):
-            resolved_media_type = "tv"
-            group_type = "season"
-            resolved_card_type = "main_series"
-        # 用户规则（2026-09-24）：特别篇 / OVA / OAD / 番外 / SP / OP / ED 一律**不进入媒体库**。
-        #
-        # 这些文件既不是正片、也不参与刮削，更不该生成镜像（用户明确要求：
-        # "OP、ED、SP 这些东西连镜像都没必要生成"）。它们混进正片的季/集结构
-        # 是"识别重复、集数对不上、需要人工处理"的主要来源之一：2400+ 个特典类
-        # 文件会把季号/集号拉歪，并让季度映射大面积失败。
-        #
-        # 实现上仍如实记录 `group_type="special"` 供诊断，但把 is_auxiliary 置真，
-        # 使 `resolver.py:534` 在构建 Work/Season/Episode/Asset 图时直接跳过——
-        # 这是所有来源（本地 / 目录树 / OpenList、115 / 百度 / 夸克）共用的同一条规则，
-        # 不按来源分支。
-        is_special_excluded = group_type == "special"
-        is_auxiliary = group_type in {"auxiliary", "ignored"} or is_special_excluded
+        classification = classify_content(
+            tokens,
+            directory,
+            numbering,
+            provisional_movie=str(guess.group_type or "").casefold() == "movie",
+            provisional_special=str(guess.group_type or "").casefold() == "special",
+        )
+        hint_decision = arbitrate_hint(
+            filename_hint=(guess.tmdb_hint_id, guess.tmdb_hint_type),
+            structured_hint=(evidence.tmdb_hint_id, evidence.tmdb_hint_type),
+            classification=classification,
+        )
+        group_type = group_type_for(
+            classification.content_class, numbering, classification.media_type
+        )
+        resolved_media_type = classification.media_type
+        resolved_card_type = guess.card_type if classification.content_class != CONTENT_CLASS_MOVIE else guess.card_type
+        is_auxiliary = classification.is_auxiliary
         stem = PurePosixPath(filename).stem
         quality_tags = tuple(
             dict.fromkeys(match.group(1).lower() for match in _QUALITY_TOKENS.finditer(stem))
@@ -736,6 +592,40 @@ class V4Parser:
         # 只有编号的（`第002集.mp4`）显示「第 2 集」，避免整季都叫"未命名"。
         if not episode_title and cjk_episode is not None:
             episode_title = cjk_episode_title or f"第 {cjk_episode} 集"
+        # 标题优先级：明确文件作品标题 > 最近非结构目录的唯一标题 > 识别器候选。
+        title_decision = arbitrate_title(
+            tokens,
+            directory,
+            classification,
+            provisional_title=guess.work_title,
+            provisional_original=guess.original_title,
+            provisional_series_group=resolved_series_group,
+        )
+        resolved_work_title = guess.work_title or title_decision.work_title
+        if (
+            not resolved_series_group
+            and title_decision.series_group
+            and not title_decision.only_from_directory_hint
+        ):
+            resolved_series_group = title_decision.series_group
+        decision_trace = (
+            *classification.traces,
+            *title_decision.traces,
+            *hint_decision.traces,
+            DecisionTrace(
+                field="numbering",
+                value={
+                    "season": numbering.season,
+                    "episode": numbering.episode,
+                    "absolute": numbering.absolute,
+                    "episode_origin": numbering.episode_origin,
+                },
+                origin=numbering.numbering.episode_origin,
+                scope=numbering.numbering.scope_key or "local",
+                rule_id="numbering_lexical",
+                alternatives=numbering.conflicts,
+            ),
+        )
         return ParsedFacts(
             parsed_fact_id=self._parsed_fact_id(evidence),
             evidence_id=evidence.evidence_id,
@@ -743,30 +633,28 @@ class V4Parser:
             resource_type=evidence.entry_kind,
             media_type=resolved_media_type,
             group_type=group_type,
-            work_title=guess.work_title,
-            original_title=guess.original_title,
+            work_title=resolved_work_title,
+            original_title=title_decision.original_title or guess.original_title,
             series_group=resolved_series_group,
             card_type=resolved_card_type,
             relation_type=resolved_relation_type,
             show_type=show_type_from_import_family(
                 evidence.import_family,
-                guess.media_type,
+                resolved_media_type,
             ),
             title_candidates=title_candidates,
             year_candidate=guess.year,
             season_token_raw=season_token,
             episode_token_raw=episode_token,
             episode_title=episode_title,
-            season_candidate=guess.season_number,
-            episode_candidate=(
-                guess.episode_number if guess.episode_number is not None else cjk_episode
-            ),
-            absolute_episode_candidate=absolute_candidate,
-            special_candidate=group_type == "special",
-            episode_range=episode_range,
+            season_candidate=numbering.season,
+            episode_candidate=numbering.episode,
+            absolute_episode_candidate=numbering.absolute,
+            special_candidate=classification.content_class == CONTENT_CLASS_ATTACHED_SPECIAL,
+            episode_range=numbering.episode_range or episode_range,
             special_number=special_number,
-            tmdb_hint_id=guess.tmdb_hint_id,
-            tmdb_hint_type=guess.tmdb_hint_type,
+            tmdb_hint_id=hint_decision.tmdb_id,
+            tmdb_hint_type=hint_decision.tmdb_type,
             release_group=release_match.group(1) if release_match else "",
             edition_tags=edition_tags,
             quality_tags=quality_tags,
@@ -775,10 +663,21 @@ class V4Parser:
             # 系列身份已经从目录层级得到。此时作品身份是已知的，不能再标记复核，
             # 否则 12 集正常 + 1 个特别篇文件会把整批导入卡死。
             needs_review=guess.needs_review and not resolved_series_group,
-            is_importable=not is_auxiliary,
+            is_importable=classification.is_importable,
             is_auxiliary=is_auxiliary,
-            reasons=tuple(guess.reasons),
-            warnings=tuple(guess.warnings) + (
-                ("特别篇/OVA/番外按规则不进入媒体库，不会生成镜像",) if is_special_excluded else ()
+            reasons=(
+                *guess.reasons,
+                *classification.reasons,
+                *numbering.conflicts,
+                *hint_decision.reasons,
             ),
+            warnings=tuple(guess.warnings) + (
+                ("特别篇/附属内容按规则不进入媒体库，不会生成镜像",)
+                if classification.content_class in NON_IMPORTABLE_CONTENT_CLASSES
+                else ()
+            ),
+            content_class=classification.content_class,
+            classification_state=classification.classification_state,
+            decision_trace=decision_trace,
+            numbering=numbering.numbering,
         )

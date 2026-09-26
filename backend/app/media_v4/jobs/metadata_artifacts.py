@@ -7,12 +7,17 @@ import os
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 
 import httpx
 
 from app.core.config import load_config
+from app.media_v4.jobs.artifact_paths import (
+    episode_nfo_relative_path,
+    episode_thumb_relative_path,
+    work_nfo_relative_path,
+)
 from app.media_v4.jobs.paths import work_directory_name
 from app.media_v4.parsing.episode_titles import (
     ensure_special_title_number,
@@ -29,6 +34,12 @@ def _now() -> str:
 def _add(parent: ET.Element, name: str, value) -> None:
     if value is not None and value != "":
         ET.SubElement(parent, name).text = str(value)
+
+
+def _resolve_relative(mirror_root: str | Path, relative_path: str) -> Path:
+    """把 ``artifact_paths`` 的 POSIX 相对名拼成受管根下的真实路径。"""
+
+    return Path(mirror_root).joinpath(*PurePosixPath(str(relative_path)).parts)
 
 
 def _work_nfo(target: dict, metadata: dict) -> bytes:
@@ -52,13 +63,42 @@ def _work_nfo(target: dict, metadata: dict) -> bytes:
     return ET.tostring(root, encoding="utf-8", xml_declaration=True) + b"\n"
 
 
+def _episode_numbers(episode: dict) -> tuple[int | None, int | None]:
+    """NFO 的 ``(season, episode)``：未知字段省略，不写 0、不用电影兜底（C-006）。
+
+    - 明确特别篇沿用旧的 ``S00`` 约定，集号取特别篇号；
+    - 已知普通季 + 已知集号写真实值；
+    - 未分季、只有绝对编号或完全未知时只保留确有证据的字段（或不写）。
+    """
+
+    season_kind = str(episode.get("season_kind") or "").strip().casefold()
+    season = _safe_int(episode.get("local_season_number"))
+    number = _safe_int(episode.get("local_episode_number"))
+    special = _safe_int(episode.get("special_number"))
+    episode_kind = str(episode.get("episode_kind") or "").strip().casefold()
+    is_special = season_kind == "special" or (
+        not season_kind and season == 0 and (special is not None or episode_kind == "special")
+    )
+    if is_special:
+        return 0, special or number
+    return (season if season and season > 0 else None), (number if number and number > 0 else None)
+
+
+def _safe_int(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _episode_nfo(episode: dict) -> bytes:
     root = ET.Element("episodedetails")
-    season = int(episode.get("local_season_number") or 0)
-    number = int(episode.get("local_episode_number") or episode.get("special_number") or 0)
+    season, number = _episode_numbers(episode)
+    season_kind = str(episode.get("season_kind") or "").strip().casefold()
     local_title = str(episode.get("display_title") or "").strip()
     scraped_title = str(episode.get("title") or "").strip()
-    is_special = season == 0 or episode.get("season_kind") == "special"
+    is_special = season_kind == "special" or season == 0
+    number = number or 0
     if is_special:
         if local_title and not (
             is_special_marker_only(local_title) or is_generic_special_title(local_title)
@@ -71,8 +111,10 @@ def _episode_nfo(episode: dict) -> bytes:
     else:
         title = scraped_title or local_title or f"第 {number} 集"
     _add(root, "title", title)
-    _add(root, "season", season)
-    _add(root, "episode", number)
+    if season is not None:
+        _add(root, "season", season)
+    if number:
+        _add(root, "episode", number)
     _add(root, "plot", episode.get("plot"))
     _add(root, "runtime", episode.get("runtime"))
     ET.indent(root, space="  ")
@@ -119,13 +161,6 @@ def _artwork_filename(artifact_type: str, source_file_path: str) -> str:
     if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".svg"}:
         suffix = ".jpg" if artifact_type in {"poster", "fanart"} else ".png"
     return f"{artifact_type}{suffix}"
-
-
-def _episode_thumb_filename(season: int, number: int, source_url: str) -> str:
-    suffix = Path(urlparse(source_url).path).suffix.lower()
-    if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
-        suffix = ".jpg"
-    return f"S{season:02d}E{number:02d}-thumb{suffix}"
 
 
 def _published_artifacts(database, revision_id: str, work_id: str) -> dict[tuple[str, str], str]:
@@ -180,6 +215,8 @@ def _artifact_digest(
 def _materialize_local_artwork(
     *,
     config,
+    work_id: str,
+    mirror_root: str | Path,
     work_dir: Path,
     target: dict,
     metadata: dict,
@@ -211,10 +248,21 @@ def _materialize_local_artwork(
                 still_url = str(scraped.get("still_url") or "")
                 if not still_url:
                     continue
-                season = int(episode.get("local_season_number") or 0)
-                number = int(episode.get("local_episode_number") or episode.get("special_number") or 0)
-                season_dir = "Specials" if season == 0 or episode.get("season_kind") == "special" else f"Season {season:02d}"
-                thumb_path = work_dir / season_dir / _episode_thumb_filename(season, number, still_url)
+                # 目标名只由 artifact_paths 计算：未知季/集进 Unassigned，不再写 Specials/S00E00。
+                thumb_path = _resolve_relative(
+                    mirror_root,
+                    episode_thumb_relative_path(
+                        work_id=work_id,
+                        source_url=still_url,
+                        season_kind=episode.get("season_kind"),
+                        local_season_number=episode.get("local_season_number"),
+                        local_episode_number=episode.get("local_episode_number"),
+                        absolute_episode_number=episode.get("absolute_episode_number"),
+                        special_number=episode.get("special_number"),
+                    ),
+                )
+                if target.get('metadata_snapshot_id'):
+                    thumb_path = work_dir / f"episode-{episode['episode_id']}-thumb.jpg"
                 if take_existing("episode_thumb", thumb_path):
                     scraped["local_thumb_path"] = str(thumb_path)
                     continue
@@ -259,10 +307,28 @@ def publish_metadata_artifacts(
     metadata: dict,
     mirror_root: str | Path,
     on_progress=None,
-) -> None:
+    snapshot_id: str | None = None,
+) -> tuple[str, ...]:
+    """本轮实际写入/更新的产物 artifact_id（供 job 结果如实上报）。"""
     work_dir = Path(mirror_root) / work_directory_name(work_id)
+    final_dir = None
+    if snapshot_id:
+        if str(uuid.UUID(snapshot_id)) != snapshot_id:
+            raise ValueError('invalid metadata snapshot ID')
+        final_dir = work_dir / '.metadata' / snapshot_id
+        work_dir = final_dir.with_name('.pending-' + snapshot_id)
+        managed_root = Path(mirror_root).resolve(strict=False)
+        for directory in (work_dir, final_dir):
+            if managed_root not in directory.resolve(strict=False).parents:
+                raise ValueError('metadata generation is outside managed root')
+        target = {**target, 'metadata_snapshot_id': snapshot_id}
     is_series = target.get("work_type") == "series"
-    nfo_path = work_dir / ("tvshow.nfo" if is_series else "movie.nfo")
+    nfo_path = _resolve_relative(
+        mirror_root,
+        work_nfo_relative_path(work_id=work_id, is_movie=not is_series),
+    )
+    if snapshot_id:
+        nfo_path = work_dir / 'work.nfo'
     # 已发布产物集合：重试路径据此跳过"没必要再动"的下载与写盘。
     published = _published_artifacts(database, revision_id, work_id)
     artifacts = [(
@@ -284,14 +350,23 @@ def publish_metadata_artifacts(
     download_local_artwork = config.artwork_storage_mode != "remote"
     if is_series:
         for episode in target.get("episodes") or []:
-            season = int(episode.get("local_season_number") or 0)
-            number = int(episode.get("local_episode_number") or episode.get("special_number") or 0)
-            if season == 0 or episode.get("season_kind") == "special":
-                season_dir = "Specials"
-            else:
-                season_dir = f"Season {season:02d}"
-            episode_path = work_dir / season_dir / f"S{season:02d}E{number:02d}.nfo"
+            # 目标名只由 artifact_paths 计算；未知季/集落在 Unassigned，不用 S00E00 兜底。
+            episode_path = _resolve_relative(
+                mirror_root,
+                episode_nfo_relative_path(
+                    work_id=work_id,
+                    season_kind=episode.get("season_kind"),
+                    local_season_number=episode.get("local_season_number"),
+                    local_episode_number=episode.get("local_episode_number"),
+                    absolute_episode_number=episode.get("absolute_episode_number"),
+                    special_number=episode.get("special_number"),
+                ),
+            )
             scraped = episode_metadata.get(str(episode.get("episode_id")), {})
+            if snapshot_id:
+                if not scraped:
+                    continue
+                episode_path = work_dir / f"episode-{episode['episode_id']}.nfo"
             episode_payload = _episode_nfo({**episode, **scraped})
             artifacts.append((
                 "episode_nfo",
@@ -307,6 +382,8 @@ def publish_metadata_artifacts(
     if download_local_artwork:
         _materialize_local_artwork(
             config=config,
+            work_id=work_id,
+            mirror_root=mirror_root,
             work_dir=work_dir,
             target=target,
             metadata=metadata,
@@ -316,9 +393,29 @@ def publish_metadata_artifacts(
             on_progress=on_progress,
         )
 
+    if final_dir is not None:
+        # 整代文件准备好后移动到唯一目标目录，任何旧代次均不参与覆盖。
+        os.rename(work_dir, final_dir)
+        artifacts = [(kind, final_dir / path.relative_to(work_dir), digest) for kind, path, digest in artifacts]
+        def relocate(value):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key.startswith('local_') and isinstance(item, str):
+                        try:
+                            value[key] = str(final_dir / Path(item).relative_to(work_dir))
+                        except ValueError:
+                            pass
+                    elif isinstance(item, (dict, list)):
+                        relocate(item)
+            elif isinstance(value, list):
+                for item in value:
+                    relocate(item)
+        relocate(metadata)
     now = _now()
+    produced_ids: list[str] = []
     with database.connect() as conn:
         for artifact_type, path, digest in artifacts:
+            artifact_id = str(uuid.uuid4())
             conn.execute(
                 """
                 INSERT INTO artifacts(
@@ -328,5 +425,12 @@ def publish_metadata_artifacts(
                 ON CONFLICT(revision_id, artifact_type, target_path) DO UPDATE SET
                     digest = excluded.digest, status = 'published', updated_at = excluded.updated_at
                 """,
-                (str(uuid.uuid4()), revision_id, work_id, artifact_type, str(path), digest, now, now),
+                (artifact_id, revision_id, work_id, artifact_type, str(path), digest, now, now),
             )
+            stored = conn.execute(
+                "SELECT artifact_id FROM artifacts "
+                "WHERE revision_id = ? AND artifact_type = ? AND target_path = ?",
+                (revision_id, artifact_type, str(path)),
+            ).fetchone()
+            produced_ids.append(str(stored["artifact_id"]) if stored is not None else artifact_id)
+    return tuple(produced_ids)

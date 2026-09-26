@@ -90,6 +90,7 @@ function setCacheEntry(key: string, data: AuxiliarySnapshot) {
 }
 
 function seasonOptionKey(season: any) {
+  if (season?.season_number == null) return `unassigned:${season?.season_id || ''}`;
   return `${season?.group_type || 'season'}:${Number(season?.season_number ?? 0)}`;
 }
 
@@ -577,6 +578,7 @@ export default function WorkDetailPage() {
       || null;
     return (work?.episodes || []).filter((episode: any) => {
       if (!selectedSeason) return selectedSeasonNumber == null;
+      if (selectedSeason.season_id && episode.season_id) return episode.season_id === selectedSeason.season_id;
       return (
         episode.season_number === selectedSeason.season_number &&
         normalizedGroupType(episode.group_type) === normalizedGroupType(selectedSeason.group_type)
@@ -766,7 +768,8 @@ export default function WorkDetailPage() {
   const isMovie = work.media_type === 'movie'
     || work.show_type === 'anime_movie'
     || work.show_type === 'live_movie';
-  const isSeries = !isMovie && (work.show_type === 'anime_series' || work.show_type === 'live_series');
+  const isSeries = !isMovie && (work.media_type === 'tv' || (work.episodes || []).length > 0
+    || work.show_type === 'anime_series' || work.show_type === 'live_series');
   const continueEpisodeTitle = continueTarget
     ? cleanDisplayTitle(continueTarget.title || '', episodeFallbackTitle(continueTarget))
     : '';
@@ -856,7 +859,7 @@ export default function WorkDetailPage() {
 
   const selectDetailSeason = (key: string) => {
     const season = seasons.find((item: any) => seasonOptionKey(item) === key);
-    const seasonNumber = season ? Number(season.season_number ?? 0) : null;
+    const seasonNumber = season?.season_number == null ? null : Number(season.season_number);
     setSelectedSeasonKey(key);
     selectSeason(seasonNumber);
     rememberWorkSeason(work.work_id, { seasonNumber, seasonKey: key });
@@ -1350,6 +1353,8 @@ export default function WorkDetailPage() {
         <div className="detail-hero-meta">
           {work.year && <span>{work.year}</span>}
           <span>{categoryLabel(work.show_type)}</span>
+          {work.metadata_source === 'retained' && work.refresh_status === 'failed' && <span>资料已保留，刷新失败</span>}
+          {work.episode_mapping_status === 'partial' && <span>剧集资料 {work.mapped_count || 0}/{work.total_count || 0}</span>}
           {isSeries && <span>{seasons.length} 季</span>}
           {isSeries && <span>{work.episode_count || work.episodes?.length || 0} 集</span>}
           {work.rating > 0 && <span><Star size={15} fill="currentColor" /> {work.rating.toFixed(1)}</span>}
@@ -1976,7 +1981,8 @@ function categoryLabel(showType: string) {
   if (showType === 'anime_series') return '番剧';
   if (showType === 'anime_movie') return '动画电影';
   if (showType === 'live_series') return '剧集';
-  return '电影';
+  if (showType === 'live_movie') return '电影';
+  return '未确定类型';
 }
 
 function manualEpisodeStatusLabel(status: ManualEpisodePreviewItem['status']) {
@@ -1985,6 +1991,8 @@ function manualEpisodeStatusLabel(status: ManualEpisodePreviewItem['status']) {
 
 function formatEpisodeCode(episode: any) {
   if (isSpecialEpisode(episode)) return '';
+  if (typeof episode?.episode_number !== 'number') return '';
+  if (episode?.season_number == null) return `E${String(episode.episode_number).padStart(2, '0')}`;
   const season = Math.max(0, Number(episode?.season_number || 0));
   const number = Math.max(0, Number(episode?.episode_number || 0));
   return `S${String(season).padStart(2, '0')}E${String(number).padStart(2, '0')}`;
@@ -1998,6 +2006,7 @@ function isSpecialEpisode(episode: any) {
 
 function episodeNumberLabel(episode: any) {
   if (isSpecialEpisode(episode)) return '';
+  if (typeof episode?.episode_number !== 'number') return '';
   return String(Math.max(0, Number(episode?.episode_number || 0))).padStart(2, '0');
 }
 
@@ -2129,8 +2138,9 @@ function resolveInitialSeason(work: any, workId: string) {
 
 function orderDetailSeasons(seasons: any[]) {
   return [...seasons].sort((left, right) => {
-    const leftSpecial = normalizedGroupType(left?.group_type) === 'special' || Number(left?.season_number ?? 0) === 0;
-    const rightSpecial = normalizedGroupType(right?.group_type) === 'special' || Number(right?.season_number ?? 0) === 0;
+    if ((left?.season_number == null) !== (right?.season_number == null)) return left?.season_number == null ? 1 : -1;
+    const leftSpecial = normalizedGroupType(left?.group_type) === 'special' || left?.season_number === 0;
+    const rightSpecial = normalizedGroupType(right?.group_type) === 'special' || right?.season_number === 0;
     if (leftSpecial !== rightSpecial) return leftSpecial ? 1 : -1;
     const seasonDiff = Number(left?.season_number ?? 0) - Number(right?.season_number ?? 0);
     if (seasonDiff !== 0) return seasonDiff;

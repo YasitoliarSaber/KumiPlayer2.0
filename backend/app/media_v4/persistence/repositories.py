@@ -432,7 +432,11 @@ class V4Repository:
         return found
 
     def list_confirmed_work_facts(self, revision_id: str, work_id: str, *, conn) -> list[ParsedFacts]:
-        """读取本次已确认成员及其确认时覆盖，不重解析，也不复用历史别名。"""
+        """读取本次已确认成员及其确认时覆盖，不重解析，也不复用历史别名。
+
+        ``revision_id`` 必须是**已确认**的那一代；确认事务重建上一代连续槽位的
+        Work 边界时用自己的 confirmed revision id 调用，不把草稿候选当成既成事实。
+        """
 
         rows = conn.execute(
             """
@@ -446,6 +450,38 @@ class V4Repository:
             ORDER BY pf.evidence_id
             """,
             (revision_id, work_id),
+        ).fetchall()
+        facts = []
+        for row in rows:
+            overrides = json.loads(row["confirmed_override_json"] or "{}")
+            for key in ("title_candidates", "edition_tags"):
+                if key in overrides:
+                    overrides[key] = tuple(overrides[key] or ())
+            facts.append(replace(self._row_to_parsed_facts(row), **overrides))
+        return facts
+
+    def list_live_work_facts(self, work_id: str, *, conn) -> list[ParsedFacts]:
+        """读取某个 Work 当前活动来源的已确认成员事实（跨来源身份比较用）。
+
+        与 ``list_confirmed_work_facts`` 的差别只在检索范围：这里不限定 revision，
+        而是取该 Work 在**未退役来源**上的 confirmed 事实，供 C-003 的
+        ``strong_same_work`` 检查现有 Work 的标题/类型/年份边界。退役来源与
+        superseded revision 的旧事实不进入比较，也不拿去认领新文件。
+        """
+
+        rows = conn.execute(
+            """
+            SELECT DISTINCT pf.*, rb.override_json AS confirmed_override_json
+            FROM revision_bindings rb
+            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            JOIN revision_evidence re
+              ON re.revision_id = rb.revision_id AND re.evidence_id = rb.evidence_id
+            JOIN parsed_facts pf ON pf.parsed_fact_id = re.parsed_fact_id
+            WHERE rb.work_id = ? AND ir.status = 'confirmed' AND sr.retired_at = ''
+            ORDER BY pf.evidence_id
+            """,
+            (work_id,),
         ).fetchall()
         facts = []
         for row in rows:

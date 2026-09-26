@@ -188,11 +188,12 @@ def test_draft_graph_keeps_movie_specials_in_one_movie_work(tmp_path):
         "spin_off",
         "tv",
     )
-    assert (movie_special_facts.card_type, movie_special_facts.relation_type, movie_special_facts.media_type) == (
+    # 电影附带的 SP 是附属内容（不可导入），其 media_type 只作诊断信息。
+    assert (movie_special_facts.card_type, movie_special_facts.relation_type) == (
         "standalone",
         "movie",
-        "movie",
     )
+    assert movie_special_facts.is_importable is False
 
     graph = _import_round(database, "rev-draft-graph", "scan-draft-graph")
 

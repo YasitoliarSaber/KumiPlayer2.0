@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import re
 import uuid
@@ -11,6 +12,7 @@ from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
+from app.media_v4.domain.identity import canonical_json
 from app.media_v4.domain.models import (
     ParsedFacts,
     ResolutionIssue,
@@ -19,11 +21,26 @@ from app.media_v4.domain.models import (
 )
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.persistence.repositories import V4Repository
+from app.media_v4.persistence.source_identity import (
+    IdentityContext,
+    SourceIdentityRepository,
+    content_version_key,
+    observed_from_evidence,
+)
 from app.media_v4.resolution import candidates as candidate_service
 from app.media_v4.resolution.candidates import CandidateSearch
+from app.media_v4.resolution.identity_contract import (
+    WorkFacts,
+    boundary_compatible,
+    strong_same_work,
+)
 from app.media_v4.resolution.identity_policy import historical_identity_conflict
 from app.media_v4.resolution.resolver import MediaResolver
 from app.media_v4.resolution.title_norm import normalize_identity_title
+from app.media_v4.sources.file_identity import (
+    continuity_reuses_asset,
+    decide_source_identity,
+)
 from app.recognition.media import _extract_work_container
 
 
@@ -900,7 +917,159 @@ def _source_bound_work_ids(
     }
 
 
+def _resolver_accepts_identity_context(resolver) -> bool:
+    """Resolver 是否已支持 C-003 的上一代身份上下文参数。
+
+    另一个并行施工单元负责给 ``MediaResolver.resolve`` 增加
+    ``identity_context``；本模块只按能力探测传参，不自行实现第二套 Resolver 接口，
+    也不把参数差异降级为静默行为差异。
+    """
+
+    try:
+        parameters = inspect.signature(resolver.resolve).parameters
+    except (TypeError, ValueError):
+        return False
+    return "identity_context" in parameters
+
+
+def _is_excluded_facts(facts: ParsedFacts) -> bool:
+    """C-002：不可导入或附属内容；不产生媒体实体、镜像与刮削。"""
+
+    return not facts.is_importable or facts.is_auxiliary
+
+
+def _work_facts_from_graph(
+    work,
+    related_entries: list[tuple[SourceEvidence, ParsedFacts]],
+) -> WorkFacts:
+    """从本地媒体图构造跨来源比较事实；不含任何观察 ID。"""
+
+    titles = sorted(_work_identity_titles(work, related_entries))
+    title = normalize_identity_title(work.preferred_title or "")
+    if not title and titles:
+        title = titles[0]
+    aliases = tuple(item for item in titles if item and item != title)
+    provider, provider_id = _provider_slot_from_entries(related_entries)
+    return WorkFacts(
+        title=title,
+        aliases=aliases,
+        media_type=str(work.media_type or "") or "unknown",
+        year=work.year,
+        card_type=str(getattr(work, "card_type", "") or ""),
+        relation_type=str(getattr(work, "relation_type", "") or ""),
+        provider=provider,
+        provider_id=provider_id,
+    )
+
+
+#: 只有这两个候选证据来源算“已确认的 Provider 身份”（C-003 的“双方已确认”）：
+#: 已存在的 provider binding 与只读已核验表。文件名里的 TMDB 提示、sidecar 与
+#: 在线搜索命中只是候选（C-004），不能单独授权跨来源吞并本地 Work。
+_CONFIRMED_PROVIDER_EVIDENCE = frozenset({
+    "existing_provider_binding",
+    "verified_path_binding",
+})
+
+
+def _confirmed_provider_slot(candidates: list | None) -> tuple[str, str]:
+    """本次草稿里唯一“已确认”的 Provider 坐标；不唯一则不声称任何坐标。"""
+
+    slots: set[tuple[str, str]] = set()
+    for candidate in candidates or []:
+        if str(getattr(candidate, "status", "") or "") != "confirmed":
+            continue
+        if str(getattr(candidate, "evidence", "") or "") not in _CONFIRMED_PROVIDER_EVIDENCE:
+            continue
+        provider = str(getattr(candidate, "provider", "") or "")
+        provider_id = str(getattr(candidate, "provider_id", "") or "")
+        if provider and provider_id:
+            slots.add((provider, provider_id))
+    if len(slots) != 1:
+        return "", ""
+    return next(iter(slots))
+
+
+def _provider_slot_from_entries(
+    related_entries: list[tuple[SourceEvidence, ParsedFacts]],
+    candidates: list | None = None,
+) -> tuple[str, str]:
+    """本次证据里唯一可信的 Provider 坐标；不唯一则不声称任何坐标。"""
+
+    slots: set[tuple[str, str]] = set()
+    for _evidence, facts in related_entries:
+        hinted_type = str(facts.tmdb_hint_type or "").casefold()
+        if facts.tmdb_hint_id and hinted_type in {"tv", "movie"}:
+            slots.add(("tmdb", str(facts.tmdb_hint_id)))
+    for candidate in candidates or []:
+        if (
+            candidate.provider
+            and candidate.provider_id
+            and candidate.status == "confirmed"
+            and candidate.confidence == "high"
+        ):
+            slots.add((str(candidate.provider), str(candidate.provider_id)))
+    if len(slots) != 1:
+        return "", ""
+    provider, provider_id = next(iter(slots))
+    return provider, provider_id
+
+
+def _work_facts_from_rows(conn, work_id: str, facts: list[ParsedFacts]) -> WorkFacts:
+    """从已确认数据库事实构造某个既有 Work 的比较事实。"""
+
+    row = conn.execute("SELECT * FROM works WHERE work_id = ?", (work_id,)).fetchone()
+    if row is None:
+        return WorkFacts()
+    media_type = {"series": "tv", "movie": "movie"}.get(str(row["work_type"]), "unknown")
+    aliases: list[str] = [
+        normalize_identity_title(str(item["normalized_title"] or ""))
+        for item in conn.execute(
+            "SELECT normalized_title FROM work_aliases WHERE work_id = ? ORDER BY normalized_title",
+            (work_id,),
+        ).fetchall()
+    ]
+    titles: list[str] = [normalize_identity_title(str(row["preferred_title"] or ""))]
+    for item in facts:
+        titles.extend(
+            normalize_identity_title(value)
+            for value in (
+                item.work_title,
+                item.series_group,
+                *(item.title_candidates or ()),
+                *(item.edition_tags or ()),
+            )
+            if value
+        )
+    titles = [item for item in titles if item]
+    provider_slots = {
+        (str(item["provider"]), str(item["provider_id"]))
+        for item in conn.execute(
+            "SELECT provider, provider_id FROM provider_bindings WHERE work_id = ? "
+            "ORDER BY provider, provider_id",
+            (work_id,),
+        ).fetchall()
+    }
+    provider, provider_id = ("", "")
+    if len(provider_slots) == 1:
+        provider, provider_id = next(iter(provider_slots))
+    primary = titles[0] if titles else ""
+    return WorkFacts(
+        title=primary,
+        aliases=tuple(
+            sorted({item for item in (*titles[1:], *aliases) if item and item != primary})
+        ),
+        media_type=media_type,
+        year=row["year"],
+        card_type=str(row["card_type"] or ""),
+        relation_type="",
+        provider=provider,
+        provider_id=provider_id,
+    )
+
+
 def _lookup_work_by_key(conn, work_key: str, *, exclude_work_id: str = "") -> str:
+    """按 identity_key 或已持久化别名唯一确定既有 Work；不唯一则返回空串。"""
+
     row = conn.execute(
         "SELECT work_id FROM works WHERE identity_key = ? AND status = 'active'", (work_key,)
     ).fetchone()
@@ -1101,6 +1270,8 @@ class V4RevisionService:
         self.database = database
         self.repository = V4Repository(database)
         self.resolver = MediaResolver()
+        # C-001：来源文件槽位、观察关联与连续性判定的唯一仓储。
+        self.source_identity = SourceIdentityRepository(database)
 
     _OVERRIDE_FIELDS = frozenset({
         "work_title",
@@ -1209,6 +1380,216 @@ class V4RevisionService:
 
         return []
 
+    def _load_identity_context(self, conn, root_id: str, entries):
+        """C-001：在同一写事务里重读上一代槽位与观察。
+
+        预览与客户端给出的 file/asset ID 只是提示，不能成为权威；这里始终以
+        数据库中的 current/baseline 观察重新计算连续性。
+        """
+
+        provider = ""
+        row = conn.execute(
+            "SELECT provider FROM source_roots WHERE root_id = ?",
+            (root_id,),
+        ).fetchone()
+        if row is not None:
+            provider = str(row["provider"] or "")
+        return self.source_identity.load_identity_context(
+            root_id, provider=provider, conn=conn
+        )
+
+    def _resolve_graph(self, entries, identity_context=None) -> ResolvedMediaGraph:
+        """按同一合同重算媒体图；Resolver 支持身份上下文时交给它。"""
+
+        if identity_context is not None and _resolver_accepts_identity_context(self.resolver):
+            return self.resolver.resolve(entries, identity_context=identity_context)
+        return self.resolver.resolve(entries)
+
+    def _decide_observations(self, entries, identity_context) -> dict:
+        """每个观察的连续性判定（C-001）；返回值按 evidence_id 索引。"""
+
+        decisions: dict = {}
+        for evidence, _facts in entries:
+            observation = observed_from_evidence(
+                evidence,
+                namespace=identity_context.namespace,
+                namespace_kind_name=identity_context.identity_kind_name,
+            )
+            decisions[evidence.evidence_id] = decide_source_identity(
+                observation,
+                identity_context.previous_observations,
+                namespace=identity_context.namespace,
+            )
+        return decisions
+
+    def _previous_confirmed_revision_id(
+        self, conn, root_id: str, revision_id: str
+    ) -> str | None:
+        """同一来源根最近一次已确认（或被替代）的 revision，用于跨代复用。"""
+
+        row = conn.execute(
+            """
+            SELECT revision_id FROM import_revisions
+            WHERE root_id = ? AND revision_id != ? AND status IN ('confirmed', 'superseded')
+            ORDER BY COALESCE(NULLIF(confirmed_at, ''), created_at) DESC, revision_id DESC
+            LIMIT 1
+            """,
+            (root_id, revision_id),
+        ).fetchone()
+        return str(row["revision_id"]) if row is not None else None
+
+    def _validate_input_outcomes(self, graph: ResolvedMediaGraph, entries) -> None:
+        """内部不变量：每个输入 evidence 都必须有一个可追踪去向。"""
+
+        bound = {evidence_id for work in graph.works for evidence_id in work.source_evidence_ids}
+        bound |= {evidence_id for episode in graph.episodes for evidence_id in episode.asset_evidence_ids}
+        bound |= {evidence_id for asset in graph.work_assets for evidence_id in asset.asset_evidence_ids}
+        for evidence, facts in entries:
+            # 排除项（特别篇/附属/元数据）本来就不进图，它们的去向是"被排除"，
+            # 不是缺失去向；只有准入视频必须有可追踪的 Work/Episode/Asset。
+            if not facts.is_importable or facts.is_auxiliary:
+                continue
+            if evidence.entry_kind != "video":
+                continue
+            if evidence.evidence_id not in bound:
+                raise ValueError(f"图缺少输入去向: {evidence.evidence_id}")
+
+    def _owner_boundary_compatible(self, conn, work_id: str, work) -> bool:
+        """候选 owner 必须是与本次草稿边界兼容的活动 Work。"""
+
+        row = conn.execute(
+            "SELECT * FROM works WHERE work_id = ?", (work_id,)
+        ).fetchone()
+        if row is None or str(row["status"] or "") != "active":
+            return False
+        work_type = str(row["work_type"] or "")
+        existing = WorkFacts(
+            title=str(row["preferred_title"] or ""),
+            media_type=(
+                "movie" if work_type == "movie"
+                else "tv" if work_type == "series"
+                else "unknown"
+            ),
+            year=row["year"],
+            card_type=str(row["card_type"] or ""),
+        )
+        draft = WorkFacts(
+            title=work.preferred_title,
+            media_type=work.media_type,
+            year=work.year,
+            card_type=work.card_type,
+            relation_type=work.relation_type,
+        )
+        return boundary_compatible(existing, draft)
+
+    def _strong_same_work_owner(self, conn, work_id: str, draft: WorkFacts) -> bool:
+        """C-003：跨来源只在双方存在已确认的同 Provider/type/ID 且标题/已核验别名
+        覆盖两边时复用；仅同名、仅同 ID、分别搜索命中同 ID 都不充分。
+
+        既有 Work 的边界事实只取未退役来源上的 confirmed 成员，superseded 的旧
+        事实不参与认领，也不把退役来源当作同作品证据。
+        """
+
+        if not draft.provider or not draft.provider_id:
+            return False
+        live_facts = self.repository.list_live_work_facts(work_id, conn=conn)
+        existing = _work_facts_from_rows(conn, work_id, live_facts)
+        return strong_same_work(existing, draft)
+
+    def _reuse_work_owner(
+        self,
+        conn,
+        *,
+        work,
+        related_entries,
+        decisions,
+        identity_context,
+        slot_owners,
+        previous_revision_id,
+        structural_binding_snapshot,
+        candidates_by_key,
+    ):
+        """C-003 复用顺序，任一级都必须唯一且边界兼容。
+
+        1. 同 root 的连续 SourceFile 已绑定的唯一 Work；
+        2. 同 root 当前 confirmed 结构绑定（``_source_bound_work_ids``）；
+        3. 跨 root 唯一 strong_same_work（同 Provider/type/ID + 完整标题/别名）。
+        多个候选不合并、不取最早 UUID，返回 ambiguity issue 并新建 Work。
+        """
+
+        slot_candidates: set[str] = set()
+        for evidence, _facts in related_entries:
+            decision = decisions.get(evidence.evidence_id)
+            source_file_id = str(getattr(decision, "source_file_id", "") or "")
+            if source_file_id:
+                slot_candidates |= set(slot_owners.get(source_file_id, set()))
+        structural_candidates = _source_bound_work_ids(conn, work, related_entries)
+
+        confirmed_pairs = {
+            (str(getattr(item, "provider", "") or ""), str(getattr(item, "provider_id", "") or ""))
+            for item in (candidates_by_key.get(work.work_key) or [])
+            if str(getattr(item, "status", "") or "") == "confirmed"
+            and str(getattr(item, "provider_id", "") or "")
+        }
+        cross_root: set[str] = set()
+        for provider, provider_id in sorted(confirmed_pairs):
+            for row in conn.execute(
+                """
+                SELECT pb.work_id FROM provider_bindings pb
+                JOIN works w ON w.work_id = pb.work_id
+                WHERE pb.provider = ? AND pb.provider_id = ? AND w.status = 'active'
+                """,
+                (provider, provider_id),
+            ).fetchall():
+                cross_root.add(str(row["work_id"]))
+
+        draft_titles = _work_identity_titles(work, related_entries)
+        confirmed_provider, confirmed_provider_id = _confirmed_provider_slot(
+            candidates_by_key.get(work.work_key) or []
+        )
+        draft = _work_facts_from_graph(work, related_entries)
+        draft = replace(
+            draft,
+            aliases=tuple(sorted(draft_titles)),
+            provider=confirmed_provider,
+            provider_id=confirmed_provider_id,
+        )
+
+        ambiguity: tuple[str, ResolutionIssue] | None = None
+        for level_index, (level, code) in enumerate((
+            (slot_candidates, "work_owner_ambiguous"),
+            (structural_candidates, "work_owner_ambiguous"),
+            (cross_root, "cross_source_identity_ambiguous"),
+        )):
+            compatible = sorted(
+                candidate
+                for candidate in level
+                if self._owner_boundary_compatible(conn, candidate, work)
+                and (
+                    level_index != 2
+                    or self._strong_same_work_owner(conn, candidate, draft)
+                )
+            )
+            if len(compatible) == 1:
+                return compatible[0], None
+            if len(compatible) > 1:
+                ambiguity = (
+                    code,
+                    ResolutionIssue(
+                        code=code,
+                        evidence_id=(
+                            related_entries[0][0].evidence_id if related_entries else ""
+                        ),
+                        message=(
+                            f"作品「{work.preferred_title}」有多个边界兼容的既有 Work，"
+                            "已新建独立 Work 并保留原事实，需人工合并"
+                        ),
+                    ),
+                )
+        if ambiguity is not None:
+            return None, ambiguity[1]
+        return None, None
+
     def _evaluate_draft(
         self,
         entries: list[tuple[SourceEvidence, ParsedFacts]],
@@ -1216,6 +1597,7 @@ class V4RevisionService:
         conn,
         frozen_candidates: dict[str, list] | None = None,
         candidate_search: CandidateSearch | None = None,
+        identity_context: IdentityContext | None = None,
     ) -> tuple[ResolvedMediaGraph, dict[str, list]]:
         """在调用方事务快照内重算草稿图、候选和全部身份检查。
 
@@ -1223,7 +1605,7 @@ class V4RevisionService:
         修正导致 Work key 改变时，旧 key 没有候选会自然回到待确认状态。
         """
 
-        graph = self.resolver.resolve(entries)
+        graph = self._resolve_graph(entries, identity_context)
         if frozen_candidates is not None:
             def search(work_key, _queries, _year, _media_type):
                 return frozen_candidates.get(work_key, [])
@@ -1453,11 +1835,20 @@ class V4RevisionService:
                     ).fetchone()
                     if current_revision is None:
                         raise KeyError(revision_id)
+                    if current_revision["status"] == "confirmed":
+                        # 并发/重复确认：已经 confirmed 的 revision 幂等返回，
+                        # 不再注册实体、不再重复入队任务，也不重写已验证快照。
+                        idempotent_entries = self._load_revision_entries(revision_id, conn=conn)
+                        conn.rollback()
+                        return self._resolve_graph(idempotent_entries, None)
                     if current_revision["status"] != "draft":
                         raise ValueError(f"revision 已经不是可重建草稿: {revision_id}")
                     entries = self._load_revision_entries(revision_id, conn=conn)
                     candidates_by_key = self._load_draft_candidates(revision_id, conn=conn)
-                    current_graph = self.resolver.resolve(entries)
+                    # C-001/C-003：上一代成员与文件槽位必须在同一写事务里重读。
+                    # 预览与客户端给出的 file/asset ID 只是提示，不能成为权威。
+                    identity_context = self._load_identity_context(conn, root_id, entries)
+                    current_graph = self._resolve_graph(entries, identity_context)
                     release_retired_source_identities(
                         conn, root_id, created_at,
                         work_keys={work.work_key for work in current_graph.works},
@@ -1475,6 +1866,7 @@ class V4RevisionService:
                         entries,
                         conn=conn,
                         frozen_candidates=candidates_by_key,
+                        identity_context=identity_context,
                     )
                     root_id = str(current_revision["root_id"] or root_id)
                     scan_id = str(current_revision["scan_id"] or scan_id)
@@ -1554,43 +1946,68 @@ class V4RevisionService:
                     conn.commit()
                     return graph
 
+                # 来源文件槽位、连续性与 Asset 复用必须在同一事务快照内完成；
+                # 排除条目只保留槽位与观察（asset_id 为空），绝不创建媒体实体。
+                decisions = self._decide_observations(entries, identity_context)
+                self._validate_input_outcomes(graph, entries)
+                previous_revision_id = self._previous_confirmed_revision_id(
+                    conn, root_id, revision_id
+                )
+                slot_owners: dict[str, set[str]] = {}
+                for confirmed_binding in self.source_identity.load_confirmed_slot_bindings(
+                    root_id, conn=conn
+                ):
+                    slot_owners.setdefault(confirmed_binding.source_file_id, set()).add(
+                        confirmed_binding.work_id
+                    )
+                source_file_ids: dict[str, str] = {}
+                for evidence, _entry_facts in entries:
+                    decision = decisions.get(evidence.evidence_id)
+                    if decision is None:
+                        continue
+                    source_file_ids[evidence.evidence_id] = self.source_identity.register_source_file(
+                        evidence=evidence,
+                        decision=decision,
+                        namespace=identity_context.namespace,
+                        conn=conn,
+                        created_at=created_at,
+                    )
+
                 # 来源结构绑定只用于跨 revision 复用。冻结快照后再处理本图，
                 # 避免当前事务刚写入的目录绑定参与后续 Work 匹配。
                 structural_binding_snapshot = _snapshot_structural_bindings(conn, root_id)
+                publish_issues: list[ResolutionIssue] = []
                 work_ids: dict[str, str] = {}
+                #: Work 级坐标（媒体类型/边界）供 resolved_json 写入。
+                work_media_type: dict[str, str] = {}
+                work_boundary_by_key: dict[str, str] = {}
                 for work in graph.works:
                     related_entries = [
                         (evidence, facts)
                         for evidence, facts in entries
                         if evidence.evidence_id in work.source_evidence_ids
                     ]
-                    work_type = "series" if work.media_type == "tv" else "movie"
-                    # 本地 Work 只能沿同一来源根的当前 confirmed 结构绑定续接。
-                    # 历史标题、别名和 Provider owner 都可能来自旧误识别，只能用于补资料，
-                    # 不能决定本次本地身份；找不到精确续接时新建记录并继续导入。
-                    source_work_ids: set[str] = set()
-                    for evidence, facts in related_entries:
-                        structural_keys = _structural_keys(
-                            evidence.relative_path,
-                            facts=facts,
-                            work_key=work.work_key,
-                        )
-                        for structural_key in structural_keys:
-                            for binding in structural_binding_snapshot.get(structural_key, []):
-                                if binding["work_type"] != work_type:
-                                    continue
-                                binding_year = binding["year"]
-                                if (
-                                    binding_year is not None
-                                    and work.year is not None
-                                    and int(binding_year) != int(work.year)
-                                ):
-                                    continue
-                                source_work_ids.add(binding["work_id"])
-                    if len(source_work_ids) == 1:
+                    work_type = {'tv': 'series', 'movie': 'movie'}.get(work.media_type, 'unknown')
+                    # C-003 复用顺序：同 root 连续 SourceFile > 同 root 结构候选 >
+                    # 跨 root 唯一 strong_same_work。每一级都必须边界兼容且唯一；
+                    # 多个候选不合并、不取最早 UUID，也不静默新建重复卡。
+                    owner_id, owner_issue = self._reuse_work_owner(
+                        conn,
+                        work=work,
+                        related_entries=related_entries,
+                        decisions=decisions,
+                        identity_context=identity_context,
+                        slot_owners=slot_owners,
+                        previous_revision_id=previous_revision_id,
+                        structural_binding_snapshot=structural_binding_snapshot,
+                        candidates_by_key=candidates_by_key,
+                    )
+                    if owner_issue is not None:
+                        publish_issues.append(owner_issue)
+                    if owner_id:
                         existing_work = conn.execute(
                             "SELECT * FROM works WHERE work_id = ?",
-                            (next(iter(source_work_ids)),),
+                            (owner_id,),
                         ).fetchone()
                     else:
                         existing_work = None
@@ -1674,6 +2091,18 @@ class V4RevisionService:
                         )
 
                     work_ids[work.work_key] = work_id
+                    # C-004：resolved_json 的 Work 级坐标在落 binding 时逐条写入，
+                    # 后续的镜像/资料/投影只读它，不重新调用 Parser。
+                    work_media_type[work.work_key] = str(work.media_type or "unknown")
+                    work_boundary_by_key[work.work_key] = canonical_json(
+                        {
+                            "title": work.preferred_title,
+                            "year": work.year,
+                            "media_type": work.media_type,
+                            "card_type": work.card_type,
+                            "relation_type": work.relation_type,
+                        }
+                    )
                     for evidence, facts in related_entries:
                         for structural_key in _structural_keys(
                             evidence.relative_path, facts=facts, work_key=work.work_key
@@ -1781,8 +2210,20 @@ class V4RevisionService:
                 season_ids: dict[tuple[str, int | None, str], str] = {}
                 edition_ids: dict[tuple[str, str], str | None] = {}
                 asset_ids: dict[tuple[str, str], str] = {}
+                #: 本次确认每个观察的 Asset；排除条目永不进入这张表。
+                asset_id_by_evidence: dict[str, str] = {}
 
                 def ensure_asset(evidence_id: str) -> str:
+                    """按 (source_file_id, content_version_key) 复用或创建 Asset。
+
+                    C-001：``unchanged``/``renamed`` 沿用原 Asset 行（同一 Asset、
+                    新观察，进度自然续接）；``new``/``replaced``/``uncertain`` 创建
+                    新内容代次，不复制秒级进度。出生观察保留在 ``assets.evidence_id``。
+                    """
+
+                    cached = asset_id_by_evidence.get(evidence_id)
+                    if cached:
+                        return cached
                     evidence_row = conn.execute(
                         "SELECT * FROM source_evidence WHERE evidence_id = ?",
                         (evidence_id,),
@@ -1794,76 +2235,154 @@ class V4RevisionService:
                         (evidence_id,),
                     ).fetchone()
                     if asset_row is not None:
-                        return str(asset_row["asset_id"])
+                        asset_id_by_evidence[evidence_id] = str(asset_row["asset_id"])
+                        return asset_id_by_evidence[evidence_id]
                     facts = facts_by_evidence[evidence_id]
-                    asset_id = str(uuid.uuid4())
-                    conn.execute(
-                        """
-                        INSERT INTO assets(
-                            asset_id, evidence_id, root_id, source_locator,
-                            playback_locator, fingerprint, size, mtime,
-                            resolution, release_group, version_tags_json,
-                            availability_state
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            asset_id,
-                            evidence_id,
-                            evidence_row["root_id"],
-                            evidence_row["source_locator"],
-                            evidence_row["playback_locator"],
-                            evidence_row["fingerprint"],
-                            evidence_row["size"],
-                            evidence_row["mtime"],
-                            facts.quality_tags[0] if facts.quality_tags else "",
-                            facts.release_group,
-                            json.dumps(facts.quality_tags, ensure_ascii=False),
-                            "available" if evidence_row["presence_state"] == "present" else "missing",
-                        ),
-                    )
+                    decision = decisions[evidence_id]
+                    source_file_id = source_file_ids[evidence_id]
+                    asset_id = ""
+                    if continuity_reuses_asset(decision.continuity):
+                        previous = identity_context.observation_for_evidence(
+                            decision.previous_evidence_id or ""
+                        )
+                        if previous is None:
+                            previous = identity_context.observation_for_slot(source_file_id)
+                        if previous is not None and previous.asset_id:
+                            asset_id = str(previous.asset_id)
+                    if not asset_id:
+                        asset_id = str(uuid.uuid4())
+                        version_key = content_version_key()
+                        conn.execute(
+                            """
+                            INSERT INTO assets(
+                                asset_id, evidence_id, root_id, source_locator,
+                                playback_locator, fingerprint, size, mtime,
+                                resolution, release_group, version_tags_json,
+                                availability_state, source_file_id, content_version_key
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                asset_id,
+                                evidence_id,
+                                evidence_row["root_id"],
+                                evidence_row["source_locator"],
+                                evidence_row["playback_locator"],
+                                evidence_row["fingerprint"],
+                                evidence_row["size"],
+                                evidence_row["mtime"],
+                                facts.quality_tags[0] if facts.quality_tags else "",
+                                facts.release_group,
+                                json.dumps(facts.quality_tags, ensure_ascii=False),
+                                "available" if evidence_row["presence_state"] == "present" else "missing",
+                                source_file_id,
+                                version_key,
+                            ),
+                        )
+                    asset_id_by_evidence[evidence_id] = asset_id
                     return asset_id
+
+                from app.media_v4.resolution.identity_contract import (
+                    episode_identity_key,
+                    season_identity_key,
+                )
 
                 for episode in graph.episodes:
                     work_id = work_ids[episode.work_key]
                     season_key = (episode.work_key, episode.local_season_number, episode.season_kind)
+                    # 与 Resolver 使用同一实现：图已给出 identity_key 时直接采用，
+                    # 只有旧图未携带时才按同一函数补算，绝不另造一套 SQL 身份语义。
+                    season_identity = getattr(episode, "season_identity_key", "") or (
+                        season_identity_key(
+                            local_season_number=episode.local_season_number,
+                            season_kind=episode.season_kind,
+                            work_key=episode.work_key,
+                        )
+                    )
+                    fallback_slot = next(
+                        (
+                            source_file_ids[evidence_id]
+                            for evidence_id in episode.asset_evidence_ids
+                            if evidence_id in source_file_ids
+                        ),
+                        episode.episode_key,
+                    )
+                    season_episode_identity = getattr(episode, "identity_key", "") or (
+                        episode_identity_key(
+                            season_key=season_identity,
+                            local_episode_number=episode.local_episode_number,
+                            absolute_episode_number=episode.absolute_episode_number,
+                            fallback_key=fallback_slot,
+                        )
+                    )
                     season_id = season_ids.get(season_key)
                     if season_id is None:
                         season_row = conn.execute(
-                            """
-                            SELECT season_id FROM seasons
-                            WHERE work_id = ? AND local_season_number = ? AND season_kind = ?
-                            """,
-                            (work_id, episode.local_season_number or 0, episode.season_kind),
+                            "SELECT season_id FROM seasons WHERE work_id = ? AND identity_key = ?",
+                            (work_id, season_identity),
                         ).fetchone()
+                        if season_row is None:
+                            # 升级前的行没有 identity_key：只在与本次一致的 kind/编号上复用一次，
+                            # 并把稳定 key 补上；旧 regular/0 不在此重写（kind/编号不一致）。
+                            season_row = conn.execute(
+                                """
+                                SELECT season_id FROM seasons
+                                WHERE work_id = ? AND local_season_number IS ?
+                                  AND season_kind = ? AND identity_key = ''
+                                """,
+                                (work_id, episode.local_season_number, episode.season_kind),
+                            ).fetchone()
+                            if season_row is not None:
+                                conn.execute(
+                                    "UPDATE seasons SET identity_key = ? WHERE season_id = ?",
+                                    (season_identity, str(season_row["season_id"])),
+                                )
                         if season_row is None:
                             season_id = str(uuid.uuid4())
                             conn.execute(
                                 """
-                                INSERT INTO seasons(season_id, work_id, local_season_number, season_kind)
-                                VALUES (?, ?, ?, ?)
+                                INSERT INTO seasons(
+                                    season_id, work_id, local_season_number, season_kind, identity_key
+                                ) VALUES (?, ?, ?, ?, ?)
                                 """,
-                                (season_id, work_id, episode.local_season_number or 0, episode.season_kind),
+                                (
+                                    season_id,
+                                    work_id,
+                                    episode.local_season_number,
+                                    episode.season_kind,
+                                    season_identity,
+                                ),
                             )
                         else:
                             season_id = str(season_row["season_id"])
                         season_ids[season_key] = season_id
 
                     episode_row = conn.execute(
-                        """
-                        SELECT episode_id FROM episodes
-                        WHERE work_id = ? AND season_id = ?
-                          AND local_episode_number IS ?
-                          AND special_number IS ?
-                          AND episode_kind = ?
-                        """,
-                        (
-                            work_id,
-                            season_id,
-                            episode.local_episode_number,
-                            episode.special_number,
-                            episode.episode_kind,
-                        ),
+                        "SELECT episode_id FROM episodes WHERE work_id = ? AND identity_key = ?",
+                        (work_id, season_episode_identity),
                     ).fetchone()
+                    if episode_row is None:
+                        # 升级前的行 identity_key 为空：按原字段完全相等复用一次并补 key。
+                        episode_row = conn.execute(
+                            """
+                            SELECT episode_id FROM episodes
+                            WHERE work_id = ? AND season_id = ?
+                              AND local_episode_number IS ?
+                              AND special_number IS ?
+                              AND episode_kind = ? AND identity_key = ''
+                            """,
+                            (
+                                work_id,
+                                season_id,
+                                episode.local_episode_number,
+                                episode.special_number,
+                                episode.episode_kind,
+                            ),
+                        ).fetchone()
+                        if episode_row is not None:
+                            conn.execute(
+                                "UPDATE episodes SET identity_key = ? WHERE episode_id = ?",
+                                (season_episode_identity, str(episode_row["episode_id"])),
+                            )
                     if episode_row is None:
                         episode_id = str(uuid.uuid4())
                         conn.execute(
@@ -1871,8 +2390,8 @@ class V4RevisionService:
                             INSERT INTO episodes(
                                 episode_id, work_id, season_id, local_episode_number,
                                 absolute_episode_number, special_number, episode_kind,
-                                display_title
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                display_title, identity_key
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 episode_id,
@@ -1883,6 +2402,7 @@ class V4RevisionService:
                                 episode.special_number,
                                 episode.episode_kind,
                                 episode.display_title,
+                                season_episode_identity,
                             ),
                         )
                     else:
@@ -1999,6 +2519,36 @@ class V4RevisionService:
                             ),
                         )
 
+                # C-001：每一代新证据都要登记观察关联（排除条目的 asset_id 为空）。
+                # 这是下一次扫描重读上一代、复用 SourceFile 槽位与 Asset 的唯一依据；
+                # 准备槽位、Asset 与关联必须在同一事务内完成。
+                for evidence, _facts in entries:
+                    decision = decisions.get(evidence.evidence_id)
+                    source_file_id = source_file_ids.get(evidence.evidence_id, "")
+                    if decision is None or not source_file_id:
+                        continue
+                    observed_assets = {
+                        asset_id
+                        for (episode_key, bound_evidence_id), asset_id in asset_ids.items()
+                        if bound_evidence_id == evidence.evidence_id
+                    } | {
+                        asset_id
+                        for (_work_key, _edition_key, bound_evidence_id), asset_id in work_asset_ids.items()
+                        if bound_evidence_id == evidence.evidence_id
+                    }
+                    if len(observed_assets) > 1:
+                        raise ValueError(
+                            f"一个观察最多映射一个 Asset: {evidence.evidence_id}"
+                        )
+                    self.source_identity.register_observation(
+                        evidence=evidence,
+                        source_file_id=source_file_id,
+                        asset_id=next(iter(observed_assets)) if observed_assets else None,
+                        decision=decision,
+                        conn=conn,
+                        created_at=created_at,
+                    )
+
                 for index, issue in enumerate(graph.issues):
                     conn.execute(
                         """
@@ -2059,6 +2609,16 @@ class V4RevisionService:
                     """,
                     (created_at,),
                 )
+                from app.media_v4.persistence.metadata_lifecycle import (
+                    attach_snapshot_refs,
+                    import_legacy_snapshot,
+                    select_applicable_snapshot,
+                )
+                for work_id in sorted(set(work_ids.values())):
+                    import_legacy_snapshot(conn, work_id)
+                    retained = select_applicable_snapshot(conn, revision_id, work_id)
+                    if retained is not None:
+                        attach_snapshot_refs(conn, revision_id, work_id, retained)
                 self._enqueue_execution_jobs(conn, revision_id, set(work_ids.values()), created_at)
                 conn.commit()
             except Exception:
@@ -2553,6 +3113,16 @@ class V4RevisionService:
                     if isinstance(mapping, dict) and mapping.get("episode_id"):
                         mappings_by_episode.setdefault(str(mapping["episode_id"]), mapping)
 
+        from app.media_v4.persistence.metadata_lifecycle import referenced_metadata
+        with self.database.connect() as conn:
+            retained = referenced_metadata(conn, work_id, revision_id)
+        if retained:
+            metadata = retained
+            metadata_state = 'ready'
+            provider = str(retained.get('provider') or '')
+            provider_id = str(retained.get('provider_id') or '')
+            mappings_by_episode = {str(m['episode_id']): m for m in retained.get('episode_mappings', [])}
+
         file_by_episode: dict[str, dict] = {}
         for row in asset_rows:
             episode_id = str(row["episode_id"])
@@ -2571,7 +3141,7 @@ class V4RevisionService:
         episodes: list[dict] = []
         for row in episode_rows:
             episode_id = str(row["episode_id"])
-            season_number = int(row["season_number"] or 0)
+            season_number = int(row["season_number"]) if row['season_number'] is not None else None
             season_kind = str(row["season_kind"] or "")
             mapping = mappings_by_episode.get(episode_id, {})
             asset_fact = file_by_episode.get(episode_id, {"file_name": "", "playback_ready": False})
@@ -2632,6 +3202,11 @@ class V4RevisionService:
             "identity_status": _safe_detail_text(metadata.get("identity_status")),
             "work_metadata_status": _safe_detail_text(metadata.get("work_metadata_status")),
             "episode_mapping_status": _safe_detail_text(metadata.get("episode_mapping_status")),
+            "metadata_source": _safe_detail_text(metadata.get('metadata_source')),
+            "metadata_snapshot_id": _safe_detail_text(metadata.get('metadata_snapshot_id')),
+            "refresh_status": _safe_detail_text(metadata.get('refresh_status')),
+            "mapped_count": int(metadata.get('mapped_count') or 0),
+            "total_count": int(metadata.get('total_count') or 0),
             "failure_stage": _safe_detail_text(metadata.get("failure_stage")),
             "retryable": bool(metadata.get("retryable")),
             "season_results": _safe_season_results(metadata.get("season_results")),
@@ -2651,7 +3226,7 @@ class V4RevisionService:
             "work_id": work_id,
             "work": {
                 "title": str(work["preferred_title"] or ""),
-                "media_type": "movie" if str(work["work_type"] or "") == "movie" else "tv",
+                "media_type": {'series': 'tv', 'movie': 'movie'}.get(str(work['work_type'] or ''), 'unknown'),
                 "provider": provider,
                 "provider_id": provider_id,
                 "metadata_state": metadata_state,
@@ -2673,7 +3248,8 @@ class V4RevisionService:
             "scrape": scrape_summary,
             "seasons": [
                 {
-                    "season_number": int(row["local_season_number"] or 0),
+                    "season_id": str(row['season_id']),
+                    "season_number": int(row["local_season_number"]) if row['local_season_number'] is not None else None,
                     "season_kind": str(row["season_kind"] or ""),
                     "title": str(row["title"] or ""),
                     "episode_count": season_episode_counts.get(str(row["season_id"]), 0),
@@ -2752,6 +3328,14 @@ class V4RevisionService:
                     "updated_at": str(row["updated_at"] or ""),
                 }
 
+        from app.media_v4.persistence.metadata_lifecycle import referenced_metadata
+        with self.database.connect() as conn:
+            for current_work_id in work_ids:
+                retained = referenced_metadata(conn, current_work_id, revision_id)
+                if retained:
+                    scrape_rows[current_work_id] = {**scrape_rows.get(current_work_id, {}),
+                        'status': 'confirmed', 'binding_status': 'confirmed', 'metadata_state': 'ready',
+                        'metadata': retained}
         jobs_by_work: dict[str, dict] = {}
         stage: dict[str, list[dict]] = {"mirror": [], "metadata": [], "projection": []}
         for row in job_rows:
@@ -2791,7 +3375,7 @@ class V4RevisionService:
             work_units.append({
                 "work_id": work_id,
                 "title": str(work.get("preferred_title") or work_id),
-                "media_type": "movie" if str(work.get("work_type") or "") == "movie" else "tv",
+                "media_type": {'series': 'tv', 'movie': 'movie'}.get(str(work.get('work_type') or ''), 'unknown'),
                 "episode_count": int(next(
                     (row["episode_count"] for row in binding_rows if row["work_id"] == work_id),
                     0,
@@ -2806,6 +3390,8 @@ class V4RevisionService:
                     scrape_status,
                 ),
                 "metadata_state": scrape_status,
+                **{key: scrape.get('metadata', {}).get(key) for key in (
+                    'metadata_source', 'metadata_snapshot_id', 'refresh_status', 'episode_mapping_status', 'mapped_count', 'total_count')},
                 "metadata_reason": metadata_policy["reason"],
                 "metadata_reason_code": str(scrape.get("reason_code") or ""),
                 "artifact_state": artifact_state,

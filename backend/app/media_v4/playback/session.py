@@ -76,6 +76,7 @@ class V4PlaybackManager:
         self._lock = threading.Lock()
         self._process: subprocess.Popen | None = None
         self._session: dict | None = None
+        self._session_bindings: dict[str, dict] = {}
 
     def play(self, work_id: str, episode_id: str, asset_id: str = "") -> dict:
         asset = self._resolve_asset(work_id, episode_id, asset_id)
@@ -87,6 +88,10 @@ class V4PlaybackManager:
         if not ok:
             raise ValueError(reason)
         playlist = self._build_playlist(work_id, asset)
+        store = V4PlaybackStore(self.database)
+        bindings = {(str(item.get('episode_id') or episode_id), item['asset_id']):
+                    store.capture_session_binding(work_id, str(item.get('episode_id') or episode_id), item['asset_id'])
+                    for item in playlist}
         playlist_locators = [item["playback_locator"] or item["source_locator"] for item in playlist]
         strm_path = self.session_dir / f"{asset['asset_id']}.strm"
         self._write_strm(strm_path, locator)
@@ -125,6 +130,7 @@ class V4PlaybackManager:
         with self._lock:
             self._process = process
             self._session = session
+            self._session_bindings[session_id] = bindings
         V4PlaybackStore(self.database).record_activation(
             work_id, episode_id, asset["asset_id"]
         )
@@ -179,6 +185,7 @@ class V4PlaybackManager:
                     JOIN works w ON w.work_id = wa.work_id
                     JOIN source_evidence se ON se.evidence_id = a.evidence_id
                     WHERE wa.work_id = ? AND (? = '' OR a.asset_id = ?)
+                      AND a.availability_state = 'available'
                       AND EXISTS (
                           SELECT 1 FROM revision_bindings rb
                           JOIN import_revisions ir ON ir.revision_id = rb.revision_id
@@ -202,6 +209,7 @@ class V4PlaybackManager:
                 if row is None:
                     raise KeyError((work_id, episode_id, asset_id))
                 asset = dict(row)
+                self._current_observation(conn, asset, work_id, None)
                 asset["preferred_title"] = self._playback_work_title(
                     conn,
                     work_id,
@@ -221,6 +229,7 @@ class V4PlaybackManager:
                 JOIN source_evidence se ON se.evidence_id = a.evidence_id
                 WHERE e.work_id = ? AND e.episode_id = ?
                   AND (? = '' OR a.asset_id = ?)
+                  AND a.availability_state = 'available'
                   AND EXISTS (
                       SELECT 1 FROM revision_bindings rb
                       JOIN import_revisions ir ON ir.revision_id = rb.revision_id
@@ -244,6 +253,7 @@ class V4PlaybackManager:
             if row is None:
                 raise KeyError((work_id, episode_id, asset_id))
             asset = dict(row)
+            self._current_observation(conn, asset, work_id, episode_id)
             asset["preferred_title"] = self._playback_work_title(
                 conn,
                 work_id,
@@ -253,6 +263,21 @@ class V4PlaybackManager:
                 conn, work_id, episode_id
             )
             return asset
+
+    @staticmethod
+    def _current_observation(conn, asset: dict, work_id: str, episode_id: str | None) -> None:
+        row = conn.execute(
+            'SELECT se.playback_locator,se.source_locator,se.size,se.provider,rb.revision_id '
+            'FROM revision_bindings rb JOIN source_evidence se ON se.evidence_id=rb.evidence_id '
+            'JOIN import_revisions ir ON ir.revision_id=rb.revision_id '
+            'JOIN source_roots sr ON sr.root_id=ir.root_id '
+            "WHERE rb.work_id=? AND rb.asset_id=? AND rb.episode_id IS ? AND ir.status='confirmed' "
+            "AND sr.retired_at='' ORDER BY ir.confirmed_at DESC,rb.binding_id LIMIT 1",
+            (work_id, asset['asset_id'], episode_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError((work_id, episode_id, asset['asset_id']))
+        asset.update(dict(row))
 
     @staticmethod
     def _playback_work_title(conn, work_id: str, fallback: str) -> str:
@@ -271,6 +296,10 @@ class V4PlaybackManager:
             if title:
                 return title
 
+        from app.media_v4.persistence.metadata_lifecycle import referenced_metadata
+        retained = referenced_metadata(conn, work_id)
+        if retained and retained.get('title'):
+            return str(retained['title'])
         scrape_row = conn.execute(
             """
             SELECT sb.metadata_json
@@ -296,6 +325,12 @@ class V4PlaybackManager:
     def _playback_episode_title(conn, work_id: str, episode_id: str) -> str:
         """优先使用已确认刮削映射中的完整剧集名；本地标题只作降级。"""
 
+        from app.media_v4.persistence.metadata_lifecycle import referenced_metadata
+        retained = referenced_metadata(conn, work_id)
+        if retained:
+            for mapping in retained.get('episode_mappings', []):
+                if str(mapping.get('episode_id')) == episode_id and mapping.get('title'):
+                    return str(mapping['title'])
         rows = conn.execute(
             """
             SELECT sb.metadata_json
@@ -361,7 +396,7 @@ class V4PlaybackManager:
                 candidate = self._resolve_asset(work_id, str(row["episode_id"]), "")
                 locator = candidate.get("playback_locator") or candidate.get("source_locator")
                 ok, _reason = validate_playback_locator(str(locator or ""))
-                if ok:
+                if ok and candidate['asset_id'] not in {item['asset_id'] for item in playlist}:
                     playlist.append(candidate)
             except (KeyError, ValueError):
                 continue
@@ -495,15 +530,18 @@ class V4PlaybackManager:
         )
         if is_generic_special_title(episode_title) or is_special_marker_only(episode_title):
             episode_title = ""
-        season = int(asset["local_season_number"] or 0)
-        episode = int(asset["local_episode_number"] or 0)
-        if asset["episode_kind"] == "special" or season == 0:
+        season = asset['local_season_number']
+        episode = asset['local_episode_number']
+        if asset["episode_kind"] == "special":
             # SPxx 是内部结构编号，窗口标题只呈现可读的语义标题；无法刮削时
             # 使用带序号的中文兜底，既不泄漏内部码，也不会让多个特别篇同名。
             if episode_title:
                 return f"{title} - {episode_title}"
             return f"{title} - 特别篇 {int(asset['special_number'] or 1)}"
         suffix = f" {episode_title}" if episode_title else ""
+        if season is None or episode is None:
+            number = f' - E{episode:02d}' if episode is not None else ''
+            return f'{title}{number}{suffix}'
         return f"{title} - S{season:02d}E{episode:02d}{suffix}"
 
     def _checkpoint_progress(
@@ -521,6 +559,15 @@ class V4PlaybackManager:
 
         for attempt in range(max(1, attempts)):
             try:
+                token = self._session_bindings.get(str(session.get('session_id')), {}).get((episode_id, asset_id))
+                if token is not None:
+                    if session.get('_binding_ended'):
+                        return True
+                    active = V4PlaybackStore(self.database).save_session_progress(token, position, duration, completed)
+                    if not active:
+                        session['_binding_ended'] = True
+                        send_mpv_quit(session['ipc_server'])
+                    return True
                 V4PlaybackStore(self.database).save_progress(
                     str(session["work_id"]),
                     episode_id,
@@ -651,6 +698,7 @@ class V4PlaybackManager:
             except OSError:
                 pass
             with self._lock:
+                self._session_bindings.pop(str(session.get('session_id')), None)
                 if self._process is process:
                     self._process = None
                     if self._session:

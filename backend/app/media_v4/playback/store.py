@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from app.media_v4.persistence.database import V4Database
@@ -9,6 +10,14 @@ from app.media_v4.persistence.database import V4Database
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+@dataclass(frozen=True)
+class SessionBinding:
+    revision_id: str
+    work_id: str
+    episode_id: str
+    asset_id: str
 
 
 class V4PlaybackStore:
@@ -75,6 +84,48 @@ class V4PlaybackStore:
                 episode_id=episode_id,
                 asset_id=asset_id,
             )
+
+    def capture_session_binding(self, work_id: str, episode_id: str, asset_id: str) -> SessionBinding:
+        """仅由本机播放器启动路径调用，HTTP进度请求不接受此令牌。"""
+        with self.database.connect() as conn:
+            row = conn.execute(
+                "SELECT rb.revision_id FROM revision_bindings rb JOIN import_revisions ir ON ir.revision_id=rb.revision_id "
+                "JOIN source_roots sr ON sr.root_id=ir.root_id AND sr.retired_at='' "
+                "WHERE rb.work_id=? AND rb.asset_id=? AND (rb.episode_id=? OR (rb.episode_id IS NULL AND ?='movie:'||rb.work_id)) "
+                "AND ir.status='confirmed' LIMIT 1", (work_id, asset_id, episode_id, episode_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError((work_id, episode_id, asset_id))
+            return SessionBinding(str(row['revision_id']), work_id, episode_id, asset_id)
+
+    def save_session_progress(self, token: SessionBinding, position: float, duration: float, completed: bool) -> bool:
+        """受控会话结束时保留原键最后采样；返回该成员是否仍然活动。"""
+        if not isinstance(token, SessionBinding):
+            raise ValueError('invalid local session binding')
+        with self.database.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            original = conn.execute(
+                "SELECT 1 FROM revision_bindings rb JOIN import_revisions ir ON ir.revision_id=rb.revision_id "
+                "JOIN source_roots sr ON sr.root_id=ir.root_id AND sr.retired_at='' "
+                "JOIN works w ON w.work_id=rb.work_id AND w.status='active' "
+                "WHERE rb.revision_id=? AND rb.work_id=? AND rb.asset_id=? "
+                "AND (rb.episode_id=? OR (rb.episode_id IS NULL AND ?='movie:'||rb.work_id)) "
+                "AND ir.confirmed_at!=''", (token.revision_id, token.work_id, token.asset_id, token.episode_id, token.episode_id),
+            ).fetchone()
+            if original is None:
+                raise KeyError(token)
+            current = conn.execute(
+                "SELECT 1 FROM revision_bindings rb JOIN import_revisions ir ON ir.revision_id=rb.revision_id "
+                "JOIN source_roots sr ON sr.root_id=ir.root_id AND sr.retired_at='' "
+                "WHERE rb.work_id=? AND rb.asset_id=? AND (rb.episode_id=? OR (rb.episode_id IS NULL AND ?='movie:'||rb.work_id)) "
+                "AND ir.status='confirmed' LIMIT 1", (token.work_id, token.asset_id, token.episode_id, token.episode_id),
+            ).fetchone()
+            conn.execute(
+                'INSERT INTO playback_progress(episode_id,asset_id,work_id,position,duration,completed,updated_at) VALUES (?,?,?,?,?,?,?) '
+                'ON CONFLICT(episode_id,asset_id) DO UPDATE SET position=excluded.position,duration=excluded.duration,completed=excluded.completed,updated_at=excluded.updated_at',
+                (token.episode_id, token.asset_id, token.work_id, position, duration, int(completed), _now()),
+            )
+            return current is not None
 
     def get_progress(self, episode_id: str, asset_id: str) -> dict:
         with self.database.connect() as conn:

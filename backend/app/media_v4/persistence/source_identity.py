@@ -13,7 +13,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 
 from app.media_v4.domain.identity import (
     IDENTITY_KIND_CONTENT_HASH,
@@ -57,6 +58,19 @@ class SourceFileRow:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfirmedSlotBinding:
+    """上一代 confirmed 成员的槽位绑定（C-003 连续性复用的输入）。"""
+
+    source_file_id: str
+    evidence_id: str
+    work_id: str
+    season_id: str | None
+    episode_id: str | None
+    edition_id: str | None
+    asset_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class IdentityContext:
     """一次确认可用的上一代 baseline 与既有槽位。"""
 
@@ -65,12 +79,54 @@ class IdentityContext:
     identity_kind_name: str
     previous_observations: tuple[ObservedFile, ...]
     source_files: dict[str, SourceFileRow]
+    #: 每个槽位最近一次观察；Asset 连续性直接取自这里的 ``asset_id``。
+    latest_by_slot: dict[str, ObservedFile] = field(default_factory=dict)
 
     def observation_for_evidence(self, evidence_id: str) -> ObservedFile | None:
         for item in self.previous_observations:
             if item.evidence_id == evidence_id:
                 return item
         return None
+
+    def observation_for_slot(self, source_file_id: str) -> ObservedFile | None:
+        if not source_file_id:
+            return None
+        observation = self.latest_by_slot.get(source_file_id)
+        if observation is not None:
+            return observation
+        for item in self.previous_observations:
+            if item.source_file_id == source_file_id:
+                return item
+        return None
+
+
+def observed_from_evidence(
+    evidence: SourceEvidence, *, namespace: str, namespace_kind_name: str
+) -> ObservedFile:
+    """把不可变观察映射成连续性输入；不触盘、不算内容哈希。
+
+    ``content_hash`` 只在适配器给出可信内容哈希时才有值。本地扫描的
+    ``fingerprint`` 是 ``stat`` 事实（size+mtime），不是内容哈希，因此不参与
+    "字节相同"的判断，只按 size 比较（C-001 分支 1）。
+    """
+
+    return ObservedFile(
+        evidence_id=evidence.evidence_id,
+        source_key=evidence.source_key,
+        locator=evidence.source_locator or evidence.playback_locator or evidence.source_key,
+        identity_namespace=namespace,
+        namespace_kind_name=namespace_kind_name,
+        size=evidence.size,
+        mtime=evidence.mtime,
+        raw_file_id=evidence.raw_file_id,
+        identity_kind=IDENTITY_KIND_PROVIDER_ID if evidence.raw_file_id else IDENTITY_KIND_LOCATOR,
+        mtime_reliable=str(evidence.ingest_method or "") in _RELIABLE_MTIME_INGESTS,
+    )
+
+
+def content_version_key() -> str:
+    """首次内容代次使用独立UUID；hash/stat只参与连续性判定，不能成为物理主键。"""
+    return str(uuid.uuid4())
 
 
 class SourceIdentityRepository:
@@ -153,13 +209,69 @@ class SourceIdentityRepository:
         finally:
             if owns_connection:
                 connection.close()
+        latest_by_slot = {
+            item.source_file_id: item
+            for item in observations
+            if item.source_file_id
+        }
         return IdentityContext(
             root_id=root_id,
             namespace=target_namespace,
             identity_kind_name=identity_kind_name,
             previous_observations=tuple(observations),
             source_files=source_files,
+            latest_by_slot=latest_by_slot,
         )
+
+    def load_confirmed_slot_bindings(
+        self, root_id: str, *, conn
+    ) -> tuple[ConfirmedSlotBinding, ...]:
+        """读取该来源根当前 confirmed 成员的文件槽位绑定。
+
+        只回答"这个槽位上一代属于哪个 Work/季/集/Asset"，不做语义判断；
+        退役来源、superseded revision 与旧 legacy 空槽位都不会被带进来。
+        """
+
+        rows = conn.execute(
+            """
+            SELECT o.source_file_id, o.evidence_id, o.asset_id AS observation_asset_id,
+                   rb.work_id, rb.season_id, rb.episode_id, rb.edition_id, rb.asset_id
+            FROM source_file_observations o
+            JOIN revision_bindings rb ON rb.evidence_id = o.evidence_id
+            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            WHERE sr.root_id = ? AND ir.status = 'confirmed' AND sr.retired_at = ''
+            ORDER BY o.source_file_id, rb.binding_id
+            """,
+            (root_id,),
+        ).fetchall()
+        bindings: list[ConfirmedSlotBinding] = []
+        seen: set[tuple[str, str, str, str | None, str | None, str | None, str | None]] = set()
+        for row in rows:
+            asset_id = row["asset_id"] or row["observation_asset_id"]
+            item = ConfirmedSlotBinding(
+                source_file_id=str(row["source_file_id"]),
+                evidence_id=str(row["evidence_id"]),
+                work_id=str(row["work_id"]),
+                season_id=str(row["season_id"]) if row["season_id"] else None,
+                episode_id=str(row["episode_id"]) if row["episode_id"] else None,
+                edition_id=str(row["edition_id"]) if row["edition_id"] else None,
+                asset_id=str(asset_id) if asset_id else None,
+            )
+            key = (
+                item.source_file_id,
+                item.work_id,
+                item.evidence_id,
+                item.season_id,
+                item.episode_id,
+                item.edition_id,
+                item.asset_id,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            bindings.append(item)
+        return tuple(bindings)
 
     @staticmethod
     def _legacy_observations(
@@ -259,21 +371,25 @@ class SourceIdentityRepository:
         conn,
         created_at: str,
     ) -> None:
-        """写入观察关联；已存在时只核对决定是否一致，不 UPDATE（表本身禁止）。"""
+        """写入观察关联；已存在时只核对绑定，不 UPDATE（表本身禁止）。
 
-        payload = decision.to_json()
+        C-001：一个证据最多映射一个 SourceFile 与一个 Asset，槽位/Asset 不得改写；
+        但连续性是**每次确认重新决策**的派生值（基线与上一代无关地变化，例如首次
+        为 ``new``、同一 scan 再次确认时为 ``unchanged``），因此重复登记时以先写入
+        的决定为准，不因派生值变化而阻断合法重扫。
+        """
+
         existing = conn.execute(
             "SELECT source_file_id, asset_id, decision_json FROM source_file_observations "
             "WHERE evidence_id = ?",
             (evidence.evidence_id,),
         ).fetchone()
         if existing is not None:
-            same = (
+            same_binding = (
                 str(existing["source_file_id"]) == source_file_id
                 and (str(existing["asset_id"]) if existing["asset_id"] else None) == asset_id
-                and str(existing["decision_json"]) == payload
             )
-            if not same:
+            if not same_binding:
                 raise ValueError(f"不可变观察关联冲突: {evidence.evidence_id}")
             return
         conn.execute(
@@ -282,7 +398,7 @@ class SourceIdentityRepository:
                 evidence_id, source_file_id, asset_id, decision_json, created_at
             ) VALUES (?, ?, ?, ?, ?)
             """,
-            (evidence.evidence_id, source_file_id, asset_id, payload, created_at),
+            (evidence.evidence_id, source_file_id, asset_id, decision.to_json(), created_at),
         )
 
     @staticmethod

@@ -276,8 +276,8 @@ def test_root_sample_provider_identity_merge_has_no_phantom_200_episode_work():
         for work in graph.works
     }
 
-    # 特别篇不入库后，最大的作品是 刀剑神域 / 某科学的超电磁炮 的 73 集。
-    assert max(episode_counts.values()) == 73
+    # OVA / 正片外传不再被发行形式反向排除后，最大的作品是 69 集。
+    assert max(episode_counts.values()) == 69
     assert {title: count for title, count in episode_counts.items() if count > 100} == {}
     # Re:Zero 只保留正片三季 66 集（25+25+16），不再叠加 66 个 S00 特典。
     assert episode_counts["Re：从零开始的异世界生活"] == 66
@@ -295,15 +295,29 @@ def test_root_sample_kaguya_keeps_fourth_season_assets_without_special_episodes(
     assert {
         season: sum(episode.local_season_number == season for episode in episodes)
         for season in (1, 2, 3, 4)
-    } == {1: 12, 2: 12, 3: 13, 4: 2}
+    } == {1: 12, 2: 13, 3: 13, 4: 2}
     season_four = [episode for episode in episodes if episode.local_season_number == 4]
     assert len(season_four) == 2
-    assert all(len(episode.asset_evidence_ids) == 2 for episode in season_four)
-    # 反向断言：S2 目录里的 OVA 特别篇按新规则不入库。
-    # 注："初吻不会结束" 四段仍会经 parser.normalize_batch_parsed_facts 的
-    # 「已核验 Provider 季度映射」改写为 group_type="special"（该路径未同步刷新
-    # is_auxiliary/is_importable，已作为生产缺口上报），因此此处不断言 S00 集数。
-    assert _assert_specials_excluded(parsed, plain_graph, marker="[OVA][Ma10p_2160p][x265_aac_ass]") == 1
+    # C-004：仅文件明确的 S04E01/E02 属于本地第四季；Provider 映射不能重写本地季号。
+    assert {episode.local_episode_number for episode in season_four} == {1, 2}
+    assert all(len(episode.asset_evidence_ids) == 1 for episode in season_four)
+    expected_four = {evidence.evidence_id for evidence, _facts in parsed
+                     if "辉夜大小姐" in evidence.relative_path and ".S04E" in evidence.relative_path}
+    assert {identity for episode in season_four for identity in episode.asset_evidence_ids} == expected_four
+    # C-002：单发 `[OVA]` 是发行形式而不是附属关系声明，不再反向排除；
+    # 它作为本地可播放内容入库，Provider 侧是否算特别篇由映射层决定。
+    ova_entries = [
+        (evidence, facts)
+        for evidence, facts in parsed
+        if "[OVA][Ma10p_2160p][x265_aac_ass]" in evidence.relative_path
+    ]
+    assert ova_entries, "样本中应存在该 OVA 条目"
+    assert all(
+        facts.is_importable is True and facts.is_auxiliary is False
+        for _evidence, facts in ova_entries
+    )
+    # 制作特典与明确 S00 附属内容仍然不入库。
+    assert _assert_specials_excluded(parsed, plain_graph, marker="Hyouka [11.5]") == 1
 
 
 def test_root_sample_lycoris_short_movies_do_not_create_extra_work_cards():

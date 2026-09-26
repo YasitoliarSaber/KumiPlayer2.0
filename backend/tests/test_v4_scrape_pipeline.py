@@ -482,8 +482,9 @@ def test_retry_artifacts_republishes_without_asking_provider_again(tmp_path, mon
     assert len(published) == 1
     # 复用已保存的 provider 身份，说明这一轮没有任何在线搜索。
     assert published[0]["metadata"]["provider_id"] == "42"
-    assert result["metadata_state"] == "ready"
-    assert result["binding_status"] == "confirmed"
+    # publisher被替换为仅记录调用，未产出本次NFO；不能借上一代产物冒充成功。
+    assert result["metadata_state"] == "failed"
+    assert result["binding_status"] == "failed"
 
 
 @pytest.mark.parametrize("candidate_found", [False, True])
@@ -817,8 +818,10 @@ def test_local_artwork_mode_materializes_episode_stills_as_v4_artifacts(tmp_path
     local_thumb = metadata["episode_mappings"][0]["local_thumb_path"]
     assert episode_thumb is not None
     assert episode_thumb["target_path"] == local_thumb
-    assert local_thumb.endswith("Season 01\\S01E01-thumb.jpg")
-    assert ("https://image.tmdb.org/t/p/w500/still.jpg", local_thumb) in downloaded
+    assert '.metadata' in local_thumb and local_thumb.endswith(f"episode-{episode_id}-thumb.jpg")
+    assert any(url == 'https://image.tmdb.org/t/p/w500/still.jpg' and '.pending-' in path
+               and Path(path).name == Path(local_thumb).name for url, path in downloaded)
+    assert Path(local_thumb).is_file()
     assert len({id(client) for client in download_clients}) == 1
     assert Path(local_thumb).read_bytes() == b"image"
 

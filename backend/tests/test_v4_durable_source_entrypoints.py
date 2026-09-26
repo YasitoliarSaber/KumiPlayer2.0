@@ -376,7 +376,8 @@ def test_durable_finalizer_normalizes_one_season_across_persistence_batches(tmp_
             "FROM parsed_facts WHERE evidence_id = ?",
             (evidence[-1].evidence_id,),
         ).fetchone()
-    assert tuple(last) == (2, 129, 140)
+    # C-004：取消"最小编号 - 1"的减偏移推断，文件里的编号原样保留。
+    assert tuple(last) == (2, 140, None)
 
 
 def test_tree_durable_entrypoint_resolves_identity_before_task_creation(tmp_path, monkeypatch):

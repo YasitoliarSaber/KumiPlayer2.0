@@ -422,8 +422,10 @@ def test_batch_parser_rebases_continuous_absolute_numbers_in_later_season():
 
     normalized = normalize_batch_parsed_facts(entries)
 
+    # C-004：取消"最小编号 - 1"的减偏移推断。缺集不能被当成整季起点，
+    # 文件里写的就是 S02E13/E14/E15，就保持 13/14/15。
     assert [facts.season_candidate for _evidence, facts in normalized] == [2, 2, 2]
-    assert [facts.episode_candidate for _evidence, facts in normalized] == [1, 2, 3]
+    assert [facts.episode_candidate for _evidence, facts in normalized] == [13, 14, 15]
 
 
 def test_batch_parser_prefers_explicit_season_directory_over_stale_filename_season():
@@ -442,9 +444,14 @@ def test_batch_parser_prefers_explicit_season_directory_over_stale_filename_seas
 
     normalized = normalize_batch_parsed_facts(entries)
 
-    assert [facts.season_candidate for _evidence, facts in normalized] == [2] * 13
-    assert [facts.episode_candidate for _evidence, facts in normalized] == list(range(1, 14))
-    assert all(facts.absolute_episode_candidate == number for number, (_evidence, facts) in zip(range(12, 25), normalized, strict=True))
+    # C-004：文件级显式季号优先于目录声明；目录与本文件冲突时记录
+    # season_evidence_conflict，但**不改写**文件里的本地编号。
+    assert [facts.season_candidate for _evidence, facts in normalized] == [1] * 13
+    assert [facts.episode_candidate for _evidence, facts in normalized] == list(range(12, 25))
+    assert all(
+        "season_evidence_conflict" in facts.reasons or "season_evidence_conflict" in facts.numbering.basis
+        for _evidence, facts in normalized
+    )
 
 
 def test_verified_absolute_release_is_mapped_to_provider_season_without_guessing():
@@ -464,9 +471,11 @@ def test_verified_absolute_release_is_mapped_to_provider_season_without_guessing
 
     normalized = normalize_batch_parsed_facts(entries)
 
-    assert [facts.season_candidate for _evidence, facts in normalized] == [2] * 12
-    assert [facts.episode_candidate for _evidence, facts in normalized] == list(range(1, 13))
-    assert [facts.absolute_episode_candidate for _evidence, facts in normalized] == list(range(13, 25))
+    # C-004：已核验 Provider 季度只作为**映射输入**，不再改写本地事实。
+    # 发布包没有 S2 标记，就保留本地"第 13..24 集"；绝对编号不再由已核验
+    # 表反向推算，`- 13` 这类完整编号位置就是本地集号。
+    assert [facts.episode_candidate for _evidence, facts in normalized] == list(range(13, 25))
+    assert [facts.absolute_episode_candidate for _evidence, facts in normalized] == [None] * 12
 
 
 def test_verified_kaguya_episodic_movie_is_excluded_by_special_rule():
@@ -493,18 +502,21 @@ def test_verified_kaguya_episodic_movie_is_excluded_by_special_rule():
     normalized = normalize_batch_parsed_facts(entries)
     graph = MediaResolver().resolve(normalized)
 
-    assert all(facts.group_type == "special" for _evidence, facts in normalized)
-    assert all(facts.season_candidate == 0 for _evidence, facts in normalized)
-    # 新契约核心：S00 改写同样要落成“不可导入”，不产生任何 Work/Episode。
-    assert all(facts.is_importable is False for _evidence, facts in normalized)
-    assert all(facts.is_auxiliary is True for _evidence, facts in normalized)
-    assert not graph.episodes
-    assigned = {
-        evidence_id for episode in graph.episodes for evidence_id in episode.asset_evidence_ids
-    } | {
-        evidence_id for asset in graph.work_assets for evidence_id in asset.asset_evidence_ids
-    }
-    assert assigned.isdisjoint({evidence.evidence_id for evidence, _facts in normalized})
+    # C-004：已核验 Provider 季度不再在解析阶段把本地文件改写成 S00。
+    # 没有明确附属关系的发布包保留为可播放的本地内容（本地编号 [01]..[04]），
+    # Provider 侧是否算特别篇属于映射层的事实，反向排除会丢用户的正片外传。
+    assert all(facts.is_importable is True for _evidence, facts in normalized)
+    assert all(facts.is_auxiliary is False for _evidence, facts in normalized)
+    assert sorted(
+        facts.episode_candidate for _evidence, facts in normalized
+    ) == [1, 2, 3, 4]
+    # 这批文件现在是本地可播放的 Episode（Provider 侧算不算特别篇由映射层决定），
+    # 不再被解析阶段反向排除。
+    assert {
+        episode.local_episode_number
+        for episode in graph.episodes
+    } == {1, 2, 3, 4}
+    assert all(episode.episode_kind != "special" for episode in graph.episodes)
 
 
 def test_verified_kaguya_stairway_cross_language_release_maps_to_explicit_fourth_season():
@@ -533,12 +545,18 @@ def test_verified_kaguya_stairway_cross_language_release_maps_to_explicit_fourth
     _candidates, merge_map, issues = plan_work_candidates(graph, entries, lambda *_args: [])
     merged = merge_graph(graph, merge_map)
 
+    # C-004：已核验跨语言身份不再于解析阶段合并本地编号。带 [S4] 目录的条目
+    # 保留 season=4，另一份发布包按本地证据保留第 1 集；同一个主系列边界下
+    # 两季各自成集，不互相覆盖。
     assert issues == []
     assert len(merged.works) == 1
-    assert len(merged.episodes) == 1
-    assert merged.episodes[0].local_season_number == 4
-    assert merged.episodes[0].local_episode_number == 1
-    assert set(merged.episodes[0].asset_evidence_ids) == {item.evidence_id for item in evidence}
+    assert sorted(
+        (episode.local_season_number, episode.local_episode_number)
+        for episode in merged.episodes
+    ) == [(1, 1), (4, 1)]
+    assert {
+        evidence_id for episode in merged.episodes for evidence_id in episode.asset_evidence_ids
+    } == {item.evidence_id for item in evidence}
 
 
 def test_verified_cross_language_identity_merges_duplicate_episode_assets():

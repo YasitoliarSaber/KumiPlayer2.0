@@ -37,38 +37,18 @@ class ProgressMarkRequest(BaseModel):
 def _default_asset(episode_id: str, asset_id: str = "", work_id: str = "") -> dict:
     database = get_database()
     with database.connect() as conn:
-        if episode_id == f"movie:{work_id}":
-            row = conn.execute(
-                """
-                SELECT a.asset_id, a.playback_locator, a.source_locator
-                FROM work_assets wa JOIN assets a ON a.asset_id = wa.asset_id
-                WHERE wa.work_id = ? AND (? = '' OR a.asset_id = ?)
-                ORDER BY wa.preference_rank, a.asset_id LIMIT 1
-                """,
-                (work_id, asset_id, asset_id),
-            ).fetchone()
-        elif asset_id:
-            row = conn.execute(
-                """
-                SELECT a.asset_id, a.playback_locator, a.source_locator
-                FROM episode_assets ea JOIN assets a ON a.asset_id = ea.asset_id
-                WHERE ea.episode_id = ? AND ea.asset_id = ?
-                """,
-                (episode_id, asset_id),
-            ).fetchone()
-        else:
-            row = conn.execute(
-                """
-                SELECT a.asset_id, a.playback_locator, a.source_locator
-                FROM episode_assets ea JOIN assets a ON a.asset_id = ea.asset_id
-                WHERE ea.episode_id = ? ORDER BY ea.edition_id, a.asset_id LIMIT 1
-                """,
-                (episode_id,),
-            ).fetchone()
+        row = conn.execute(
+            "SELECT rb.work_id FROM revision_bindings rb "
+            "JOIN import_revisions ir ON ir.revision_id=rb.revision_id "
+            "JOIN source_roots sr ON sr.root_id=ir.root_id AND sr.retired_at='' "
+            "WHERE ir.status='confirmed' AND (?='' OR rb.work_id=?) "
+            "AND (rb.episode_id=? OR (rb.episode_id IS NULL AND ?='movie:'||rb.work_id)) "
+            "AND (?='' OR rb.asset_id=?) ORDER BY ir.confirmed_at DESC LIMIT 1",
+            (work_id, work_id, episode_id, episode_id, asset_id, asset_id),
+        ).fetchone()
     if row is None:
         raise KeyError((episode_id, asset_id))
-    return dict(row)
-
+    return get_v4_playback_manager(database)._resolve_asset(str(row['work_id']), episode_id, asset_id)
 
 @router.post("/play")
 def play(request: PlayRequest):
@@ -160,13 +140,13 @@ def history(limit: int = 50, work_id: str | None = None):
         progress_by_key: dict[tuple[str, str, str], dict] = {}
         try:
             for row in conn.execute("SELECT * FROM playback_progress").fetchall():
-                data = dict(row)
+                progress_row = dict(row)
                 key = (
-                    str(data.get("work_id") or ""),
-                    str(data.get("episode_id") or ""),
-                    str(data.get("asset_id") or ""),
+                    str(progress_row.get("work_id") or ""),
+                    str(progress_row.get("episode_id") or ""),
+                    str(progress_row.get("asset_id") or ""),
                 )
-                progress_by_key[key] = data
+                progress_by_key[key] = progress_row
         except Exception:  # noqa: BLE001 - 历史列表不得因进度表问题整体失败
             progress_by_key = {}
     items: list[dict] = []

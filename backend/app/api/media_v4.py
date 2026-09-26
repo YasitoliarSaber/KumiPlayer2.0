@@ -160,6 +160,8 @@ class ArtworkUploadRequest(BaseModel):
 class MaintenancePreviewRequest(BaseModel):
     scope: Literal["local", "pan115", "baidu", "quark", "all"] = "all"
     root_ids: list[str] | None = None
+    operation_kind: Literal['library_delete', 'superseded_artifacts'] = 'library_delete'
+    revision_id: str | None = None
 
 
 class MaintenanceResumeRequest(BaseModel):
@@ -1968,6 +1970,8 @@ def library_delete_preview(request: MaintenancePreviewRequest):
             provider=request.scope,
             root_ids=request.root_ids,
             mirror_root=_configured_mirror_root(),
+            operation_kind=request.operation_kind,
+            revision_id=request.revision_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

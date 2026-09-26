@@ -372,7 +372,9 @@ def test_completed_work_returns_work_level_and_episode_results(tmp_path, monkeyp
     assert first["mapped"] is True
     assert first["playback_ready"] is True
     assert first["file_name"].endswith(".mkv")
-    assert body["seasons"] == [{"season_number": 1, "season_kind": "regular", "title": "", "episode_count": 2}]
+    with database.connect() as conn:
+        season_id = conn.execute("SELECT season_id FROM seasons WHERE work_id=?", (work_id,)).fetchone()[0]
+    assert body["seasons"] == [{"season_id": season_id, "season_number": 1, "season_kind": "regular", "title": "", "episode_count": 2}]
     assert body["scrape"]["title"] == "Show"
     assert body["scrape"]["metadata_state"] == "ready"
     assert body["scrape"]["candidate_decision"] is None

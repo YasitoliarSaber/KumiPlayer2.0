@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from app.core.data_lock import DATA_WRITE_LOCK
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.projection.library import V4LibraryProjection
 
@@ -211,7 +212,11 @@ def _validate_requested_roots(database: V4Database, provider: str, root_ids: lis
     return selected
 
 
-def compute_delete_preview(database: V4Database, *, provider: str, root_ids: list[str] | None = None, mirror_root: Path | None = None) -> dict:
+def compute_delete_preview(database: V4Database, *, provider: str, root_ids: list[str] | None = None, mirror_root: Path | None = None, operation_kind: str = 'library_delete', revision_id: str | None = None) -> dict:
+    if operation_kind == 'superseded_artifacts':
+        return _compute_artifact_preview(database, provider, root_ids, mirror_root, revision_id)
+    if operation_kind != 'library_delete':
+        raise ValueError('未知维护操作')
     """后端生成完整清理计划并一次事务写入 operation + 全部 items。
 
     计划项绑定真实 artifacts.artifact_id 与 canonical target path；digest 覆盖
@@ -398,12 +403,68 @@ def compute_delete_preview(database: V4Database, *, provider: str, root_ids: lis
     return _public_preview(preview)
 
 
+def _artifact_preview_state(conn, revision_id: str, mirror_root: Path | None) -> tuple[list[dict], str, list[dict]]:
+    from app.media_v4.persistence.metadata_lifecycle import collect_cleanup_candidates
+    if mirror_root is None:
+        raise ValueError('需要受管镜像根目录')
+    current = conn.execute(
+        "SELECT ir.root_id FROM import_revisions ir JOIN source_roots sr ON sr.root_id=ir.root_id "
+        "WHERE ir.revision_id=? AND ir.status='confirmed' AND sr.retired_at=''", (revision_id,),
+    ).fetchone()
+    if current is None:
+        raise ValueError('revision已变化，请重新预览')
+    candidates = collect_cleanup_candidates(conn, revision_id, mirror_root)
+    jobs = [dict(r) for r in conn.execute(
+        "SELECT job_id,job_type,status FROM jobs WHERE revision_id=? AND status IN ('queued','running') ORDER BY job_id", (revision_id,),
+    )]
+    payload = [revision_id, _mirror_identity(mirror_root), jobs,
+               sorted((r['artifact_id'], r['digest'], r['target_path']) for r in candidates)]
+    digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
+    return candidates, digest, jobs
+
+
+def _compute_artifact_preview(database, provider, root_ids, mirror_root, revision_id):
+    if not revision_id or provider not in PROVIDER_SCOPES:
+        raise ValueError('产物清理需要合法来源范围和revision_id')
+    with database.connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        items, digest, jobs = _artifact_preview_state(conn, revision_id, mirror_root)
+        root = conn.execute('SELECT sr.* FROM source_roots sr JOIN import_revisions ir ON ir.root_id=sr.root_id WHERE ir.revision_id=?', (revision_id,)).fetchone()
+        if (provider != 'all' and root['provider'] != provider) or (root_ids is not None and root['root_id'] not in root_ids):
+            raise ValueError('revision不属于指定来源范围')
+        stamp = _now()
+        preview_id = 'prev_' + uuid.uuid4().hex
+        expires = (datetime.now(UTC) + PREVIEW_TTL).isoformat()
+        preview = {
+            'preview_id': preview_id, 'operation_kind': 'superseded_artifacts', 'revision_id': revision_id,
+            'scope': provider, 'root_ids': [root['root_id']], 'root_count': 1, 'root_names': [],
+            'created_at': stamp, 'expires_at': expires, 'digest': digest, 'work_count': 0,
+            'orphan_work_count': 0, 'mixed_work_count': 0, 'asset_count': 0,
+            'artifact_count': len(items), 'artifact_summaries': [_sanitized_summary(i['target_path'], mirror_root) for i in items][:20],
+            'artifact_digests': {i['artifact_id']: i['digest'] for i in items},
+            'blocked': bool(jobs), 'blocked_job_count': len(jobs), 'blocked_job_types': sorted({j['job_type'] for j in jobs}),
+            'history_count': 0, 'progress_count': 0, 'tracking_count': 0,
+            'warnings': ['只回收已核定且无活动引用的旧产物；来源、媒体事实和个人状态保留'],
+        }
+        conn.execute(
+            "INSERT INTO maintenance_operations(operation_id,scope_provider,status,preview_json,result_json,digest,root_ids_json,mirror_root_identity,expires_at,created_at,updated_at) VALUES (?,?,'preview',?,'{}',?,?,?,?,?,?)",
+            (preview_id, provider, json.dumps(preview, ensure_ascii=False), digest, json.dumps(preview['root_ids']), _mirror_identity(mirror_root), expires, stamp, stamp),
+        )
+        for index, item in enumerate(items):
+            conn.execute(
+                "INSERT INTO maintenance_operation_items(item_id,operation_id,artifact_id,root_id,revision_id,target_path,plan_status,result_status,result_error,updated_at) VALUES (?,?,?,?,?,?,'planned','pending','',?)",
+                (f'item-{preview_id}-{index}', preview_id, item['artifact_id'], root['root_id'], revision_id, item['target_path'], stamp),
+            )
+    return _public_preview(preview)
+
+
 def _public_preview(preview: dict) -> dict:
     """§11.15.3-5：preview DTO 只返回脱敏计数、≤20 条相对镜像根摘要、warnings
     与可读名称；不含 source locator、内部 Work ID、完整执行路径或完整 job 列表。"""
 
     return {
         "preview_id": preview["preview_id"],
+        'operation_kind': preview.get('operation_kind', 'library_delete'),
         "scope": preview["scope"],
         "created_at": preview["created_at"],
         "expires_at": preview["expires_at"],
@@ -464,6 +525,9 @@ def _recompute_digest_for_preview(
     fail-closed。必须在调用方事务内（conn 非空）调用以获得一致性视图。
     """
 
+    if preview.get('operation_kind') == 'superseded_artifacts':
+        with _read_conn(database, conn) as connection:
+            return _artifact_preview_state(connection, str(preview['revision_id']), mirror_root)[1]
     selected_root_ids = set(preview.get("root_ids") or [])
     provider = str(preview.get("scope") or "")
     roots = [root for root in _activity_roots(database, provider, conn=conn) if root["root_id"] in selected_root_ids]
@@ -552,6 +616,8 @@ def _verify_and_claim_tx(
     )
     if cursor.rowcount != 1:
         raise ValueError("该清理预览已被其他请求处理或状态不允许确认，请刷新结果")
+    if preview.get('operation_kind') == 'superseded_artifacts':
+        return {'__completed__': False, 'preview': preview}
     for root in preview.get("roots", []):
         root_cursor = conn.execute(
             "UPDATE source_roots SET retired_at = ?, retired_reason = '用户按来源清理', updated_at = ? "
@@ -598,13 +664,25 @@ def _cleanup_items_tx(
     """
 
     rows = conn.execute(
-        "SELECT item_id, target_path, result_status FROM maintenance_operation_items "
+        "SELECT item_id, artifact_id, target_path, result_status FROM maintenance_operation_items "
         "WHERE operation_id = ? ORDER BY item_id",
         (preview_id,),
     ).fetchall()
     results: list[dict] = []
     has_failure = False
     now = _now()
+    from app.media_v4.persistence.metadata_lifecycle import assert_artifact_unreferenced
+    operation = conn.execute('SELECT preview_json FROM maintenance_operations WHERE operation_id=?', (preview_id,)).fetchone()
+    saved_preview = json.loads(operation['preview_json'])
+    expected_digests = saved_preview.get('artifact_digests', {})
+    eligible_ids = None
+    if saved_preview.get('operation_kind') == 'superseded_artifacts':
+        from app.media_v4.persistence.metadata_lifecycle import collect_cleanup_candidates
+        if mirror_root is None:
+            raise ValueError('清理产物需要受管镜像目录')
+        eligible_ids = {str(item['artifact_id']) for item in collect_cleanup_candidates(
+            conn, str(saved_preview['revision_id']), mirror_root,
+        )}
     for row in rows:
         item_id = str(row["item_id"])
         path_text = str(row["target_path"])
@@ -619,6 +697,12 @@ def _cleanup_items_tx(
         error = ""
         path = Path(path_text)
         try:
+            assert_artifact_unreferenced(conn, str(row['artifact_id']))
+            if eligible_ids is not None and path.exists() and str(row['artifact_id']) not in eligible_ids:
+                raise ValueError('产物不再满足清理条件，请重新预览')
+            if saved_preview.get('operation_kind') == 'superseded_artifacts' and path.exists():
+                if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != expected_digests.get(str(row['artifact_id'])):
+                    raise ValueError('产物内容或引用已变化，请重新预览')
             if mirror_root is not None:
                 resolved = path.resolve(strict=False)
                 root_resolved = mirror_root.resolve(strict=False)
@@ -642,7 +726,7 @@ def _cleanup_items_tx(
                     status = "removed"
                 else:
                     status = "missing"
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             status = "failed"
             error = str(exc)
             has_failure = True
@@ -650,6 +734,8 @@ def _cleanup_items_tx(
             "UPDATE maintenance_operation_items SET result_status = ?, result_error = ?, updated_at = ? WHERE item_id = ?",
             (status, error, now, item_id),
         )
+        if status in {'removed', 'missing'}:
+            conn.execute("UPDATE artifacts SET status='removed',updated_at=? WHERE artifact_id=?", (now, row['artifact_id']))
         results.append({"path": _sanitized_summary(path_text, mirror_root), "status": status, "error": error or None})
     return results, has_failure
 
@@ -703,7 +789,7 @@ def confirm_delete_preview(database: V4Database, *, preview_id: str, scope: str,
     合并为同一个 BEGIN IMMEDIATE 事务；任何变化/行数不符都回滚并抛错（409），
     不得退役任何 root。投影重建在提交后执行（允许 projection_failed 语义）。"""
 
-    with database.connect() as conn:
+    with DATA_WRITE_LOCK, database.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
             outcome = _verify_and_claim_tx(conn, database, preview_id, scope, digest, mirror_root)
@@ -736,7 +822,7 @@ def resume_operation(database: V4Database, *, preview_id: str, mirror_root: Path
     可恢复的条目（pending/failed），blocked/removed/missing 保持终态。
     """
 
-    with database.connect() as conn:
+    with DATA_WRITE_LOCK, database.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
             preview = _load_preview(database, preview_id, conn=conn)
@@ -751,6 +837,10 @@ def resume_operation(database: V4Database, *, preview_id: str, mirror_root: Path
                 raise ValueError("该清理预览当前不可恢复，请刷新结果")
             if _mirror_identity(mirror_root) != preview.get("_stored_mirror_identity"):
                 raise ValueError("镜像根目录已变化，请重新生成删除预览")
+            if preview.get('operation_kind') == 'superseded_artifacts':
+                _candidates, _digest_value, active_jobs = _artifact_preview_state(conn, str(preview['revision_id']), mirror_root)
+                if active_jobs:
+                    raise ValueError('来源存在活动任务，请重新预览')
             now = _now()
             cursor = conn.execute(
                 "UPDATE maintenance_operations SET status = 'pending', updated_at = ? "

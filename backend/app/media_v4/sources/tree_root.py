@@ -220,7 +220,7 @@ class TreePlaybackRootResolver:
         for root in self.configured_roots:
             root_path = _pure(root)
             # 优先采用可由 TXT 位置证明的子库范围。
-            if tree_parent and _is_ancestor(root_path, _pure(str(tree_parent))):
+            if tree_parent and _is_ancestor(str(root_path), str(tree_parent)):
                 add_without_doubled_scope(str(tree_parent))
             elif scope and not entry_has_scope and not _root_has_scope(root, scope):
                 add(str(root_path / scope))

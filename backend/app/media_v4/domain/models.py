@@ -126,6 +126,10 @@ class ResolvedEpisode:
     asset_evidence_ids: tuple[str, ...] = field(default_factory=tuple)
     provider_season_number: int | None = None
     provider_episode_number: int | None = None
+    # C-003：逻辑集身份键（同 Work 下唯一）与它所属季的身份键。同一逻辑集的多个
+    # edition 行共享同一个 identity_key，数据库只创建一个 Episode。
+    identity_key: str = ""
+    season_identity_key: str = ""
 
 
 @dataclass(frozen=True, slots=True)

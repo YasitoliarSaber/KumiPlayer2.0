@@ -241,9 +241,10 @@ class V4JobRunner:
         else:
             return False
         with self.database.connect() as conn:
+            pending = "status IN ('queued', 'running')" if job_type in {'refresh_projection', 'cleanup_superseded_artifacts'} else "status != 'succeeded'"
             blocked = conn.execute(
                 f"SELECT 1 FROM jobs WHERE revision_id = ? AND {predicate} "
-                "AND status != 'succeeded' LIMIT 1",
+                f"AND {pending} LIMIT 1",
                 params,
             ).fetchone()
         return blocked is None

@@ -69,6 +69,22 @@ def assess_metadata_completeness(
     if provider in {"", "local"} or not provider_id:
         reasons.append("缺少真实外部 Provider 身份")
 
+    snapshot_id = metadata.get('metadata_snapshot_id')
+    if snapshot_id:
+        from app.media_v4.persistence.metadata_lifecycle import artifacts_valid, snapshot_requirements_valid
+        with database.connect() as conn:
+            rows = [dict(row) for row in conn.execute(
+                "SELECT * FROM artifacts WHERE revision_id=? AND work_id=? AND status='published'",
+                (revision_id, work_id),
+            ) if Path(row['target_path']).parent.name == snapshot_id]
+        for row in rows:
+            row['role'] = 'work_metadata' if row['artifact_type'] == 'nfo' else row['artifact_type']
+        if not artifacts_valid(rows):
+            reasons.append('本次 Work NFO 或资料产物缺失、摘要不一致')
+        elif not snapshot_requirements_valid(metadata, rows):
+            reasons.append('本次海报或背景图产物不完整')
+        return not reasons, reasons
+
     with database.connect() as conn:
         work_nfo = conn.execute(
             """
@@ -117,7 +133,7 @@ def assess_metadata_completeness(
         if fanart_artifact is None or not _file_ok(fanart_artifact["target_path"]):
             reasons.append("背景图下载或发布失败")
 
-    if str(target.get("work_type") or "") == "series":
+    if str(target.get("work_type") or "") == "series" and not metadata.get('metadata_snapshot_id'):
         with database.connect() as conn:
             episode_total = conn.execute(
                 """
@@ -175,6 +191,10 @@ def assess_persisted_completeness(
     metadata: dict,
 ) -> tuple[bool, list[str]]:
     """投影重建时复查权威完整性：重新检查 artifact 文件，不信任 metadata_json。"""
+
+    if metadata.get('metadata_snapshot_id'):
+        return assess_metadata_completeness(database, revision_id=revision_id, work_id=work_id,
+                                            target={}, metadata=metadata, mirror_root='')
 
     reasons: list[str] = []
     with database.connect() as conn:

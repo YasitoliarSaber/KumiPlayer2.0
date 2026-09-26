@@ -48,6 +48,7 @@ def test_runner_materializes_scrapes_and_publishes_projection(tmp_path):
             "provider_id": "9",
             "title": "Runner Online",
             "plot": "metadata reached the projection",
+            "episode_mappings": [dict(e, provider_season_number=1, provider_episode_number=1) for e in _target['episodes']],
         },
     )
     results = runner.process_available(mirror_root=tmp_path / "mirror")
@@ -69,8 +70,8 @@ def test_runner_materializes_scrapes_and_publishes_projection(tmp_path):
         "refresh_projection": "succeeded",
     }
     assert list((tmp_path / "mirror").rglob("*.strm"))
-    assert list((tmp_path / "mirror").rglob("tvshow.nfo"))
-    assert list((tmp_path / "mirror").rglob("S01E01.nfo"))
+    assert list((tmp_path / "mirror").rglob("work.nfo"))
+    assert list((tmp_path / "mirror").rglob("episode-*.nfo"))
     card = runner.projection.current().cards[0]
     assert card["title"] == "Runner Online"
     assert card["metadata"]["plot"] == "metadata reached the projection"
@@ -210,7 +211,7 @@ def test_failed_scrape_blocks_projection_until_the_failed_job_is_retried(tmp_pat
     with pytest.raises(RuntimeError, match="provider unavailable"):
         runner.process_available(mirror_root=tmp_path / "mirror")
 
-    assert runner.process_available(mirror_root=tmp_path / "mirror") == []
+    assert [r.job_type for r in runner.process_available(mirror_root=tmp_path / "mirror")] == ['refresh_projection']
     with database.connect() as conn:
         statuses = {
             row["job_type"]: row["status"]
@@ -221,7 +222,7 @@ def test_failed_scrape_blocks_projection_until_the_failed_job_is_retried(tmp_pat
     assert statuses == {
         "materialize_mirror": "succeeded",
         "scrape_work": "failed",
-        "refresh_projection": "queued",
+        "refresh_projection": "succeeded",
     }
 
 
@@ -332,9 +333,17 @@ def test_superseded_artifacts_are_cleaned_only_after_empty_revision_is_published
         "refresh_projection",
         "cleanup_superseded_artifacts",
     ]
-    assert not list(mirror_root.rglob("*.*"))
+    assert list(mirror_root.rglob("*.strm"))
     with database.connect() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
+        # C-006：后台任务无删除授权，即使成员清空也保留文件和产物记录。
+        assert conn.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE status = 'removed'"
+        ).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] >= 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM artifact_references WHERE artifact_id IN "
+            "(SELECT artifact_id FROM artifacts WHERE status = 'published')"
+        ).fetchone()[0] >= 1
 
 
 def test_cancelling_a_revision_requests_safe_stop_for_running_job_and_cancels_dependents(tmp_path):

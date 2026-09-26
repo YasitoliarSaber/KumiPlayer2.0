@@ -82,7 +82,12 @@ export interface V4LibraryCard {
   work_id: string
   title: string
   year: number | null
-  media_type: string
+  media_type: 'tv' | 'movie' | 'unknown'
+  metadata_source?: 'current' | 'retained' | 'local'
+  metadata_snapshot_id?: string
+  refresh_status?: string
+  mapped_count?: number
+  total_count?: number
   episode_count: number
   asset_count: number
 }
@@ -372,10 +377,10 @@ export interface V4WorkExecutionDetail {
       }>
     } | null
   }
-  seasons: Array<{ season_number: number; season_kind: string; title: string; episode_count: number }>
+  seasons: Array<{ season_number: number | null; season_kind: string; title: string; episode_count: number }>
   episodes: Array<{
     episode_id: string
-    season_number: number
+    season_number: number | null
     season_kind: string
     episode_number: number | null
     display_title: string
@@ -522,8 +527,8 @@ export const mediaV4Api = {
 
   drafts: () => api.get<{ drafts: V4DraftSummary[] }>('/api/v4/sources/drafts'),
 
-  maintenancePreview: (scope: string) =>
-    api.post<V4MaintenancePreview>('/api/v4/library-maintenance/delete-preview', { scope }),
+  maintenancePreview: (scope: string, options: { operation_kind?: 'library_delete' | 'superseded_artifacts'; revision_id?: string } = {}) =>
+    api.post<V4MaintenancePreview>('/api/v4/library-maintenance/delete-preview', { scope, ...options }),
 
   maintenanceConfirm: (request: { preview_id: string; scope: string; digest: string }) =>
     api.post<V4MaintenanceResult>('/api/v4/library-maintenance/delete-confirm', request),

@@ -170,7 +170,9 @@ def test_parser_does_not_mistake_year_or_explicit_local_episode_for_absolute_num
 
     assert explicit.absolute_episode_candidate is None
     assert uncertain.absolute_episode_candidate is None
-    assert bare.absolute_episode_candidate == 13
+    # C-004：完整编号位置的 `- 13` 是本地未分季集号，不是"全作品绝对编号"。
+    assert bare.episode_candidate == 13
+    assert bare.absolute_episode_candidate is None
     assert bare.episode_token_raw == "- 13"
 
 

@@ -1,16 +1,38 @@
-"""V4 confirmed revision 的镜像物化器。"""
+"""V4 confirmed revision 的镜像物化器。
+
+只消费当前 confirmed binding 的观察定位符（``rb.evidence_id`` 对应的
+``source_evidence``）与 ``rb.asset_id``；``revision_bindings.resolved_json``
+存在时使用其中的 ``content_class``/``media_type``，缺失时走明确 legacy
+分类（只按已有列推导），**禁止**再调用 parser / recognition。
+
+目标名全部由 ``artifact_paths`` 唯一实现；不允许 fingerprint 尾串、截短 ID
+或 ``S00E00`` / ``Specials`` 兜底。
+"""
 
 from __future__ import annotations
 
+import json
 import os
-import re
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
+from app.media_v4.domain.identity import (
+    CONTENT_CLASS_ATTACHED_SPECIAL,
+    CONTENT_CLASS_MOVIE,
+    CONTENT_CLASS_REGULAR,
+    CONTENT_CLASS_UNKNOWN,
+    SEASON_KIND_REGULAR,
+    SEASON_KIND_UNASSIGNED,
+)
+from app.media_v4.jobs.artifact_paths import (
+    NonMaterializableArtifact,
+    guard_target_path,
+    locator_digest,
+    mirror_relative_path,
+)
 from app.media_v4.jobs.control import cancel_requested, claim_running, heartbeat, mark_cancelled
-from app.media_v4.jobs.paths import work_directory_name
 from app.media_v4.path_validation import validate_playback_locator, validate_playback_locator_syntax
 from app.media_v4.persistence.database import V4Database
 
@@ -26,14 +48,13 @@ _LIST_ONLY_INGEST_METHODS = frozenset({
     "openlist_scan",
 })
 
+MEDIA_TYPE_MOVIE = "movie"
+WORK_TYPE_MOVIE = "movie"
+EPISODE_KIND_SPECIAL = "special"
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
-
-
-def _safe_segment(value: str, fallback: str) -> str:
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value or "").strip(" .")
-    return cleaned or fallback
 
 
 def _sample_locators(locators: list[str]) -> list[str]:
@@ -88,8 +109,115 @@ def _publish_target(target: Path, locator: str, created_paths: list[Path]) -> No
 @dataclass(frozen=True, slots=True)
 class MaterializeResult:
     status: str
-    artifact_paths: tuple[str, ...] = field(default_factory=tuple)
-    errors: tuple[str, ...] = field(default_factory=tuple)
+    artifact_paths: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+    outcome: str = ""
+    reason_codes: tuple[str, ...] = ()
+    produced_artifact_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _Classification:
+    """一个 binding 的分类；``legacy=True`` 表示只按旧列推导。"""
+
+    content_class: str
+    is_movie: bool
+    season_kind: str | None
+    local_season_number: int | None
+    local_episode_number: int | None
+    absolute_episode_number: int | None
+    special_number: int | None
+    legacy: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _PlannedMirror:
+    """一个逻辑 Episode 的镜像计划项；``(episode_id, asset_id, locator)`` 是去重单位。"""
+
+    episode_id: str | None
+    asset_id: str
+    evidence_id: str
+    locator: str
+    relative_path: str
+    digest: str
+    is_movie: bool
+
+
+def _parse_resolved(raw) -> dict | None:
+    """只接受 ``contract_version == 1`` 的 resolved_json；其余按 legacy 处理。"""
+
+    try:
+        payload = json.loads(str(raw or "{}"))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        version = int(payload.get("contract_version") or 0)
+    except (TypeError, ValueError):
+        return None
+    if version != 1:
+        return None
+    return payload
+
+
+def _as_int(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _classify(row) -> _Classification:
+    """resolved_json 优先；缺失时走明确 legacy 分类，不重新识别。"""
+
+    resolved = _parse_resolved(row["resolved_json"])
+    legacy = resolved is None
+    content_class = str((resolved or {}).get("content_class") or "") or None
+    media_type = str((resolved or {}).get("media_type") or "") or None
+    work_type = str(row["work_type"] or "")
+    episode_kind = str(row["episode_kind"] or "")
+
+    season_kind = str(row["season_kind"] or "") or None
+    local_season = _as_int(row["local_season_number"])
+    local_episode = _as_int(row["local_episode_number"])
+    absolute_episode = _as_int(row["absolute_episode_number"])
+    special_number = _as_int(row["special_number"])
+
+    is_movie = row["episode_id"] is None and (
+        media_type == MEDIA_TYPE_MOVIE or work_type == WORK_TYPE_MOVIE
+    )
+
+    if content_class is None:
+        if is_movie:
+            content_class = CONTENT_CLASS_MOVIE
+        elif episode_kind == EPISODE_KIND_SPECIAL or season_kind == EPISODE_KIND_SPECIAL:
+            content_class = CONTENT_CLASS_ATTACHED_SPECIAL
+        elif special_number is not None:
+            content_class = CONTENT_CLASS_ATTACHED_SPECIAL
+        elif season_kind == SEASON_KIND_UNASSIGNED or local_season is None:
+            content_class = CONTENT_CLASS_UNKNOWN
+        else:
+            content_class = CONTENT_CLASS_REGULAR
+
+    # C-002/C-008：旧 ``regular/0`` 不是已证明特别篇。既不能按 0 重新分类为
+    # special，也不能继续写 S00E00；这里只把它降为“未知季”。
+    if season_kind == SEASON_KIND_REGULAR and (local_season is None or local_season <= 0):
+        season_kind = SEASON_KIND_UNASSIGNED
+        local_season = None
+
+    return _Classification(
+        content_class=content_class,
+        is_movie=is_movie,
+        season_kind=season_kind,
+        local_season_number=local_season,
+        local_episode_number=local_episode,
+        absolute_episode_number=absolute_episode,
+        special_number=special_number,
+        legacy=legacy,
+    )
 
 
 class V4MirrorMaterializer:
@@ -97,6 +225,32 @@ class V4MirrorMaterializer:
 
     def __init__(self, database: V4Database):
         self.database = database
+
+    def _binding_rows(self, conn, revision_id: str, work_id: str):
+        """locator 来自 ``rb.evidence_id`` 的观察；asset ID 来自 ``rb.asset_id``。"""
+
+        return conn.execute(
+            """
+            SELECT DISTINCT
+                rb.revision_id, rb.work_id, rb.episode_id, rb.asset_id, rb.evidence_id,
+                rb.resolved_json,
+                w.work_type,
+                s.local_season_number, s.season_kind,
+                e.local_episode_number, e.absolute_episode_number,
+                e.special_number, e.episode_kind,
+                COALESCE(se.ingest_method, '') AS ingest_method,
+                se.playback_locator AS observation_playback_locator,
+                se.source_locator AS observation_source_locator
+            FROM revision_bindings rb
+            JOIN works w ON w.work_id = rb.work_id
+            JOIN source_evidence se ON se.evidence_id = rb.evidence_id
+            LEFT JOIN episodes e ON e.episode_id = rb.episode_id
+            LEFT JOIN seasons s ON s.season_id = e.season_id
+            WHERE rb.revision_id = ? AND rb.work_id = ?
+            ORDER BY rb.episode_id, rb.asset_id, rb.evidence_id
+            """,
+            (revision_id, work_id),
+        ).fetchall()
 
     def process(self, job_id: str, mirror_root: str | Path) -> MaterializeResult:
         root = Path(mirror_root)
@@ -120,65 +274,26 @@ class V4MirrorMaterializer:
                     """,
                     (job["revision_id"], job["work_id"]),
                 ).fetchall()
-                return MaterializeResult("succeeded", tuple(row["target_path"] for row in existing_paths))
-            rows = conn.execute(
-                """
-                SELECT DISTINCT
-                    rb.revision_id, rb.work_id, rb.episode_id,
-                    w.preferred_title,
-                    s.local_season_number, s.season_kind,
-                    e.local_episode_number, e.special_number,
-                    a.asset_id, a.fingerprint, a.playback_locator, a.source_locator,
-                    COALESCE(se.ingest_method, '') AS ingest_method,
-                    0 AS is_movie
-                FROM revision_bindings rb
-                JOIN works w ON w.work_id = rb.work_id
-                JOIN episodes e ON e.episode_id = rb.episode_id
-                JOIN seasons s ON s.season_id = e.season_id
-                JOIN assets a ON a.asset_id = rb.asset_id
-                LEFT JOIN source_evidence se ON se.evidence_id = rb.evidence_id
-                WHERE rb.revision_id = ? AND rb.work_id = ?
-                ORDER BY e.episode_id, a.asset_id
-                """,
-                (job["revision_id"], job["work_id"]),
-            ).fetchall()
-            movie_rows = conn.execute(
-                """
-                SELECT DISTINCT
-                    rb.revision_id, rb.work_id, NULL AS episode_id,
-                    w.preferred_title,
-                    NULL AS local_season_number, '' AS season_kind,
-                    NULL AS local_episode_number, NULL AS special_number,
-                    a.asset_id, a.fingerprint, a.playback_locator, a.source_locator,
-                    COALESCE(se.ingest_method, '') AS ingest_method,
-                    1 AS is_movie
-                FROM revision_bindings rb
-                JOIN works w ON w.work_id = rb.work_id
-                JOIN assets a ON a.asset_id = rb.asset_id
-                JOIN work_assets wa ON wa.work_id = rb.work_id AND wa.asset_id = rb.asset_id
-                LEFT JOIN source_evidence se ON se.evidence_id = rb.evidence_id
-                WHERE rb.revision_id = ? AND rb.work_id = ? AND rb.episode_id IS NULL
-                ORDER BY a.asset_id
-                """,
-                (job["revision_id"], job["work_id"]),
-            ).fetchall()
-            rows = [*rows, *movie_rows]
-            if not rows:
-                raise RuntimeError("confirmed revision 没有可物化 Asset")
+                return MaterializeResult(
+                    "succeeded", tuple(row["target_path"] for row in existing_paths)
+                )
+            rows = self._binding_rows(conn, job["revision_id"], job["work_id"])
+
         if not claim_running(self.database, job_id):
             if cancel_requested(self.database, job_id):
                 mark_cancelled(self.database, job_id)
                 return MaterializeResult("cancelled")
             raise RuntimeError("镜像任务已由其他执行器领取")
 
-        paths: list[str] = []
         created_paths: list[Path] = []
+        reason_codes: list[str] = []
+        pending: list[tuple[_PlannedMirror, Path]] = []
+        produced: tuple[str, ...] | None = None
         try:
-            # 写任何 .strm 前，非 TXT 资产按头/中/尾有界抽样复核可达性；样本任一
-            # 不可达即整批失败，不发布任何 Artifact。TXT 资产不做源盘探测，由
-            # 下方逐条纯语法校验兜底。取消检查点保持原有节奏。
+            # 非 TXT/OpenList 资产按头/中/尾有界抽样复核可达性；TXT/OpenList 只做
+            # 语法校验，绝不探测挂载盘。抽样在任何写盘之前完成。
             non_txt_locators = [
-                str(row["playback_locator"] or row["source_locator"] or "")
+                str(row["observation_playback_locator"] or row["observation_source_locator"] or "")
                 for row in rows
                 if str(row["ingest_method"] or "") not in _LIST_ONLY_INGEST_METHODS
             ]
@@ -189,61 +304,98 @@ class V4MirrorMaterializer:
                 ok, reason = validate_playback_locator(locator)
                 if not ok:
                     raise RuntimeError(reason)
+
+            # 先算出全部目标与内容：同路径不同内容立即失败，绝不先写半批。
+            planned: list[_PlannedMirror] = []
             for row in rows:
+                asset_id = str(row["asset_id"] or "")
+                if not asset_id:
+                    # 被排除的附属内容可以保留观察，但没有 Asset → 没有产物。
+                    reason_codes.append("legacy_excluded")
+                    continue
+                classification = _classify(row)
+                locator = str(
+                    row["observation_playback_locator"] or row["observation_source_locator"] or ""
+                )
+                try:
+                    relative_path = mirror_relative_path(
+                        work_id=str(row["work_id"]),
+                        asset_id=asset_id,
+                        playback_locator=locator,
+                        is_movie=classification.is_movie,
+                        content_class=classification.content_class,
+                        season_kind=classification.season_kind,
+                        local_season_number=classification.local_season_number,
+                        local_episode_number=classification.local_episode_number,
+                        absolute_episode_number=classification.absolute_episode_number,
+                        special_number=classification.special_number,
+                    )
+                except NonMaterializableArtifact:
+                    # 旧明确 special/附属 binding：跳过并标注 legacy_excluded，
+                    # 不重新解析路径，也不生成 Specials/S00E00。
+                    reason_codes.append("legacy_excluded")
+                    continue
+                ok, reason = validate_playback_locator_syntax(locator)
+                if not ok:
+                    raise RuntimeError(reason)
+                planned.append(
+                    _PlannedMirror(
+                        episode_id=str(row["episode_id"]) if row["episode_id"] else None,
+                        asset_id=asset_id,
+                        evidence_id=str(row["evidence_id"]),
+                        locator=locator,
+                        relative_path=relative_path,
+                        digest=locator_digest(locator),
+                        is_movie=classification.is_movie,
+                    )
+                )
+
+            unique: list[_PlannedMirror] = []
+            seen: dict[str, str] = {}
+            for entry in planned:
+                existing = seen.get(entry.relative_path)
+                if existing is None:
+                    seen[entry.relative_path] = entry.locator
+                    unique.append(entry)
+                elif existing != entry.locator:
+                    raise RuntimeError(f"镜像目标冲突：同一路径需要不同内容: {entry.relative_path}")
+
+            if not unique:
+                return self._settle_without_products(
+                    job_id,
+                    revision_id=str(job["revision_id"]),
+                    work_id=str(job["work_id"]),
+                    reason_codes=reason_codes,
+                )
+
+            # 目标预先检查：越界/过长名与已存在但内容不一致的目标都在写盘前拦截。
+            for entry in unique:
+                target = root.joinpath(*PurePosixPath(entry.relative_path).parts)
+                guard_target_path(entry.relative_path)
+                if target.exists() and not _existing_target_matches(target, entry.locator):
+                    raise RuntimeError(f"镜像目标已存在且内容不一致: {target}")
+                pending.append((entry, target))
+
+            for entry, target in pending:
                 if cancel_requested(self.database, job_id):
                     _remove_created_paths(created_paths)
                     mark_cancelled(self.database, job_id)
                     return MaterializeResult("cancelled")
-                locator = str(row["playback_locator"] or row["source_locator"] or "")
-                # 分支合同：目录树/TXT/OpenList 与物理扫描由服务端 revision
-                # 证据（source_evidence.ingest_method）区分，不是 provider/扩展名/
-                # 客户端标记。清单来源只做纯语法校验即可发布；物理来源的可达性已经
-                # 在循环前的头/中/尾抽样完成，逐行循环只做语法校验，不得再次
-                # 触碰源盘（否则大库会放大成 N+3 次 I/O）。
-                ok, reason = validate_playback_locator_syntax(locator)
-                if not ok:
-                    raise RuntimeError(reason)
-                work_dir = work_directory_name(str(row["work_id"]))
-                asset_identity = row["fingerprint"] or row["asset_id"]
-                asset_tag = _safe_segment(asset_identity[-10:], "asset")
-                if row["is_movie"]:
-                    target = root / work_dir / f"movie-{asset_tag}.strm"
-                    _publish_target(target, str(locator), created_paths)
-                    paths.append(str(target))
-                    heartbeat(self.database, job_id)
-                    continue
-                season_number = int(row["local_season_number"] or 0)
-                if row["season_kind"] == "special" or season_number == 0:
-                    season_dir = "Specials"
-                    episode_name = f"SP{int(row['special_number'] or 1):02d}"
-                else:
-                    season_dir = f"Season {season_number:02d}"
-                    episode_name = f"S{season_number:02d}E{int(row['local_episode_number'] or 0):02d}"
-                target = root / work_dir / season_dir / f"{episode_name}-{asset_tag}.strm"
-                _publish_target(target, str(locator), created_paths)
-                paths.append(str(target))
+                _publish_target(target, entry.locator, created_paths)
                 heartbeat(self.database, job_id)
             if cancel_requested(self.database, job_id):
                 _remove_created_paths(created_paths)
                 mark_cancelled(self.database, job_id)
                 return MaterializeResult("cancelled")
-            with self.database.connect() as conn:
-                now = _now()
-                for path in paths:
-                    conn.execute(
-                        """
-                        INSERT OR IGNORE INTO artifacts(
-                            artifact_id, revision_id, work_id, artifact_type,
-                            target_path, status, created_at, updated_at
-                        ) VALUES (?, ?, ?, 'mirror', ?, 'published', ?, ?)
-                        """,
-                        (str(uuid.uuid4()), job["revision_id"], job["work_id"], path, now, now),
-                    )
-                conn.execute(
-                    "UPDATE jobs SET status = 'succeeded', updated_at = ?, heartbeat_at = ?, finished_at = ?, last_error = ? WHERE job_id = ?",
-                    (now, now, now, "", job_id),
-                )
-            return MaterializeResult("succeeded", tuple(paths))
+
+            produced = self._register_artifacts(
+                job_id=job_id,
+                revision_id=str(job["revision_id"]),
+                work_id=str(job["work_id"]),
+                pending=pending,
+                created_paths=created_paths,
+                reason_codes=reason_codes,
+            )
         except Exception as exc:
             _remove_created_paths(created_paths)
             with self.database.connect() as conn:
@@ -252,3 +404,138 @@ class V4MirrorMaterializer:
                     (str(exc), _now(), _now(), _now(), job_id),
                 )
             raise
+
+        if produced is None:
+            # 发布事务内发现 cancel_requested：只撤销本次自建文件，再收口 cancelled。
+            _remove_created_paths(created_paths)
+            mark_cancelled(self.database, job_id)
+            return MaterializeResult("cancelled")
+        outcome = "reused" if not created_paths else "published"
+        return MaterializeResult(
+            "succeeded",
+            tuple(str(target) for _entry, target in pending),
+            outcome=outcome,
+            reason_codes=tuple(sorted(set(reason_codes))),
+            produced_artifact_ids=produced,
+        )
+
+    def _settle_without_products(
+        self,
+        job_id: str,
+        *,
+        revision_id: str,
+        work_id: str,
+        reason_codes: list[str],
+    ) -> MaterializeResult:
+        """没有可物化对象（例如只含旧明确 special binding）时如实收口。"""
+
+        codes = tuple(sorted(set(reason_codes) or {"legacy_excluded"}))
+        if cancel_requested(self.database, job_id):
+            mark_cancelled(self.database, job_id)
+            return MaterializeResult("cancelled")
+        with self.database.connect() as conn:
+            row = conn.execute(
+                "SELECT status, cancel_requested FROM jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if row is None or row["status"] != "running":
+                raise RuntimeError("镜像任务不再处于运行状态")
+            if bool(row["cancel_requested"]):
+                return MaterializeResult("cancelled")
+            now = _now()
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'succeeded', last_error = '', updated_at = ?, heartbeat_at = ?,
+                    finished_at = ?, result_json = ?
+                WHERE job_id = ?
+                """,
+                (now, now, now, json.dumps({
+                    "outcome": "skipped",
+                    "revision_id": revision_id,
+                    "work_id": work_id,
+                    "produced_artifact_ids": [],
+                    "reason_codes": list(codes),
+                }, ensure_ascii=False), job_id),
+            )
+        return MaterializeResult("skipped", (), (), outcome="skipped", reason_codes=codes)
+
+    def _register_artifacts(
+        self,
+        *,
+        job_id: str,
+        revision_id: str,
+        work_id: str,
+        pending: list[tuple[_PlannedMirror, Path]],
+        created_paths: list[Path],
+        reason_codes: list[str],
+    ) -> tuple[str, ...] | None:
+        """事务内复查任务/revision/取消标记后再写 artifacts、refs 与 result_json。
+
+        返回 ``None`` 表示发布事务内发现取消请求；调用方负责撤销自建文件并收口
+        cancelled（不在此处嵌套写连接）。
+        """
+
+        now = _now()
+        outcome = "reused" if not created_paths else "published"
+        with self.database.connect() as conn:
+            row = conn.execute(
+                "SELECT status, cancel_requested FROM jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            revision = conn.execute(
+                "SELECT status FROM import_revisions WHERE revision_id = ?", (revision_id,)
+            ).fetchone()
+            if row is not None and bool(row["cancel_requested"]):
+                return None
+            if (
+                row is None
+                or row["status"] != "running"
+                or revision is None
+                or revision["status"] != "confirmed"
+            ):
+                raise RuntimeError("镜像发布前检查失败：任务不再运行或 revision 不再是 confirmed")
+
+            produced: list[str] = []
+            for entry, target in pending:
+                artifact_id = str(uuid.uuid4())
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO artifacts(
+                        artifact_id, revision_id, work_id, artifact_type,
+                        target_path, digest, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, 'mirror', ?, ?, 'published', ?, ?)
+                    """,
+                    (artifact_id, revision_id, work_id, str(target), entry.digest, now, now),
+                )
+                stored = conn.execute(
+                    "SELECT artifact_id FROM artifacts "
+                    "WHERE revision_id = ? AND artifact_type = 'mirror' AND target_path = ?",
+                    (revision_id, str(target)),
+                ).fetchone()
+                stored_id = str(stored["artifact_id"]) if stored is not None else artifact_id
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO artifact_references(
+                        reference_id, artifact_id, revision_id, work_id,
+                        snapshot_id, role, subject_id, created_at
+                    ) VALUES (?, ?, ?, ?, NULL, 'mirror', ?, ?)
+                    """,
+                    (str(uuid.uuid4()), stored_id, revision_id, work_id, entry.asset_id, now),
+                )
+                if stored_id not in produced:
+                    produced.append(stored_id)
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'succeeded', last_error = '', updated_at = ?, heartbeat_at = ?,
+                    finished_at = ?, result_json = ?
+                WHERE job_id = ?
+                """,
+                (now, now, now, json.dumps({
+                    "outcome": outcome,
+                    "revision_id": revision_id,
+                    "work_id": work_id,
+                    "produced_artifact_ids": produced,
+                    "reason_codes": sorted(set(reason_codes)),
+                }, ensure_ascii=False), job_id),
+            )
+        return tuple(produced)

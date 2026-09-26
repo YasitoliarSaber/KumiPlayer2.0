@@ -121,6 +121,11 @@ TRACE_ORIGINS = frozenset(
         ORIGIN_SIDECAR,
         ORIGIN_PARSER_RULE,
         ORIGIN_UNKNOWN,
+        # 编号来源也是合法的 trace 来源，必须可无损落库/读回。
+        ORIGIN_EXPLICIT_FILENAME,
+        ORIGIN_EXPLICIT_DIRECTORY,
+        ORIGIN_EXPLICIT_ABSOLUTE,
+        ORIGIN_LOCAL_UNSCOPED,
     }
 )
 NUMBERING_ORIGINS = frozenset(

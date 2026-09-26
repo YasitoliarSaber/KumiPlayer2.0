@@ -60,3 +60,4 @@ def mark_cancelled(database: V4Database, job_id: str) -> None:
             """,
             (stamp, stamp, stamp, job_id),
         )
+        conn.execute("INSERT OR REPLACE INTO v4_meta(key,value) VALUES ('library_projection_dirty',?)", (stamp,))

@@ -354,7 +354,7 @@ def test_v18_database_is_migrated_to_v19_without_touching_media_facts(tmp_path):
             "SELECT status FROM source_scans WHERE scan_id = 'scan-keep'"
         ).fetchone()
 
-    assert version == V4_SCHEMA_VERSION == 22
+    assert version == V4_SCHEMA_VERSION
     assert "source_scan_directories" in tables
     assert V4Database.REQUIRED_TABLES >= {"source_scan_directories"}
     # 既有媒体事实与来源记录不能被迁移改写。
@@ -482,7 +482,7 @@ def test_v19_database_gains_query_indices_without_touching_media_facts(tmp_path)
             "SELECT display_name FROM source_roots WHERE root_id = 'root-keep'"
         ).fetchone()
 
-    assert version == V4_SCHEMA_VERSION == 22
+    assert version == V4_SCHEMA_VERSION
     assert {"idx_v4_bindings_work", "idx_v4_artifacts_work", "idx_v4_jobs_revision"} <= indices
     assert str(root["display_name"]) == "01动画"
 

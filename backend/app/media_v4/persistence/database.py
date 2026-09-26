@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -29,6 +30,7 @@ from app.media_v4.persistence.schema_v4 import (
     migrate_schema_v19_to_v20,
     migrate_schema_v20_to_v21,
     migrate_schema_v21_to_v22,
+    migrate_schema_v22_to_v23,
 )
 
 
@@ -152,7 +154,7 @@ class V4Database:
         使用字面量；写回后立即读回校验，版本升级时若字面量未同步会立即失败。
         """
 
-        conn.execute("PRAGMA user_version = 22")
+        conn.execute("PRAGMA user_version = 23")
         written = int(conn.execute("PRAGMA user_version").fetchone()[0])
         if written != V4_SCHEMA_VERSION:
             raise RuntimeError(
@@ -181,410 +183,65 @@ class V4Database:
         return row is not None
 
     def initialize(self) -> None:
-        """空库创建 V4；旧库不迁移，高版本拒绝打开。"""
-
+        """逐版迁移和最终校验在同一事务中；失败不提升版本或改写旧事实。"""
+        migrations = {
+            4: migrate_schema_v4_to_v5,
+            5: migrate_schema_v5_to_v6,
+            6: migrate_schema_v6_to_v7,
+            7: migrate_schema_v7_to_v8,
+            8: migrate_schema_v8_to_v9,
+            9: migrate_schema_v9_to_v10,
+            10: migrate_schema_v10_to_v11,
+            11: migrate_schema_v11_to_v12,
+            12: migrate_schema_v12_to_v13,
+            13: migrate_schema_v13_to_v14,
+            14: migrate_schema_v14_to_v15,
+            15: migrate_schema_v15_to_v16,
+            16: migrate_schema_v16_to_v17,
+            17: migrate_schema_v17_to_v18,
+            18: migrate_schema_v18_to_v19,
+            19: migrate_schema_v19_to_v20,
+            20: migrate_schema_v20_to_v21,
+            21: migrate_schema_v21_to_v22,
+            22: migrate_schema_v22_to_v23,
+        }
         with self.connect() as conn:
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])
             if version > self.CURRENT_SCHEMA_VERSION:
                 raise RuntimeError(
                     f"数据库版本 {version} 高于当前程序支持的 {self.CURRENT_SCHEMA_VERSION}，请升级 KumiPlayer"
                 )
-            if version == 13 and self._has_user_tables(conn):
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    migrate_schema_v13_to_v14(conn)
-                    migrate_schema_v14_to_v15(conn)
-                    self._set_user_version(conn)
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    raise V4ResetRequiredError(
-                        "数据库声明为 V4 但物理结构不完整，需要一次性重置；" + str(exc)
-                    ) from exc
-                except Exception:
-                    conn.rollback()
-                    raise
-                version = self.CURRENT_SCHEMA_VERSION
-            if version == 14 and self._has_user_tables(conn):
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    migrate_schema_v14_to_v15(conn)
-                    self._set_user_version(conn)
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    raise V4ResetRequiredError(
-                        "数据库声明为 V4 但物理结构不完整，需要一次性重置；" + str(exc)
-                    ) from exc
-                except Exception:
-                    conn.rollback()
-                    raise
-                version = self.CURRENT_SCHEMA_VERSION
-            if version == 15 and self._has_user_tables(conn):
-                # v15 → v16：仅为既有 jobs outbox 补齐可终止与心跳字段。
-                # 这不是旧媒体库迁移，不能因为版本号落后一位而误触发重置。
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    migrate_schema_v15_to_v16(conn)
-                    self._set_user_version(conn)
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    raise V4ResetRequiredError(
-                        "数据库声明为 V4 但任务结构不完整，需要一次性重置；" + str(exc)
-                    ) from exc
-                except Exception:
-                    conn.rollback()
-                    raise
-                version = self.CURRENT_SCHEMA_VERSION
-            if version == 19 and self._has_user_tables(conn):
-                # v19 → v20：补齐查询索引；加法迁移，不改写任何媒体事实。
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    migrate_schema_v19_to_v20(conn)
-                    self._set_user_version(conn)
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    raise V4ResetRequiredError(
-                        "数据库声明为 V4 但索引结构不完整，需要一次性重置；" + str(exc)
-                    ) from exc
-                except Exception:
-                    conn.rollback()
-                    raise
-                version = self.CURRENT_SCHEMA_VERSION
-            if version == 20 and self._has_user_tables(conn):
-                # v20 → v21：在线资料可被多个本地作品共享；每个作品自身
-                # 的 provider/type 槽位仍保持唯一。迁移重建的只是绑定表，
-                # 不改写媒体事实或已确认 revision。
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    migrate_schema_v20_to_v21(conn)
-                    self._set_user_version(conn)
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    raise V4ResetRequiredError(
-                        "数据库声明为 V4 但在线身份绑定结构不完整，需要一次性重置；" + str(exc)
-                    ) from exc
-                except Exception:
-                    conn.rollback()
-                    raise
-                version = self.CURRENT_SCHEMA_VERSION
-            if version == 21 and self._has_user_tables(conn):
-                # v21 → v22：新增来源文件身份、未知值合同、成功资料代次与
-                # 产物引用；只有 seasons 是等值重建，其余均为加法。
-                # 外键校验与物理结构校验都在同一事务内，失败回滚到旧版本。
-                conn.execute("PRAGMA foreign_keys = OFF")
-                try:
-                    conn.execute("BEGIN IMMEDIATE")
-                    migrate_schema_v21_to_v22(conn)
-                    if conn.execute("PRAGMA foreign_key_check").fetchall():
-                        raise V4ResetRequiredError(
-                            "数据库声明为 V4 但导入合同结构迁移后存在外键违约，需要一次性重置"
-                        )
-                    self._validate_physical_schema(conn)
-                    self._set_user_version(conn)
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    raise V4ResetRequiredError(
-                        "数据库声明为 V4 但导入合同结构不完整，需要一次性重置；" + str(exc)
-                    ) from exc
-                except Exception:
-                    conn.rollback()
-                    raise
-                finally:
-                    conn.execute("PRAGMA foreign_keys = ON")
-                version = self.CURRENT_SCHEMA_VERSION
-            if version == 18 and self._has_user_tables(conn):
-                # v18 → v19：新增扫描目录 frontier（断点续扫状态）；加法迁移，
-                # 不改写任何媒体事实。缺这条分支会让既有 v18 库被判成旧架构重置。
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    migrate_schema_v18_to_v19(conn)
-                    self._set_user_version(conn)
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    raise V4ResetRequiredError(
-                        "数据库声明为 V4 但扫描目录结构不完整，需要一次性重置；" + str(exc)
-                    ) from exc
-                except Exception:
-                    conn.rollback()
-                    raise
-                version = self.CURRENT_SCHEMA_VERSION
-            if version == 17 and self._has_user_tables(conn):
-                # v17 → v18：候选数值证据列；加法迁移，不改写既有候选。
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    migrate_schema_v17_to_v18(conn)
-                    self._set_user_version(conn)
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    raise V4ResetRequiredError(
-                        "数据库声明为 V4 但候选证据结构不完整，需要一次性重置；" + str(exc)
-                    ) from exc
-                except Exception:
-                    conn.rollback()
-                    raise
-                version = self.CURRENT_SCHEMA_VERSION
-            if version == 16 and self._has_user_tables(conn):
-                # v16 → v17：新增 SourceScan 可序列化请求表；加法迁移，
-                # 不改写既有媒体、扫描或证据事实。
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    migrate_schema_v16_to_v17(conn)
-                    self._set_user_version(conn)
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    raise V4ResetRequiredError(
-                        "数据库声明为 V4 但扫描请求结构不完整，需要一次性重置；" + str(exc)
-                    ) from exc
-                except Exception:
-                    conn.rollback()
-                    raise
-                version = self.CURRENT_SCHEMA_VERSION
-            if version == 12 and self._has_user_tables(conn):
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    migrate_schema_v12_to_v13(conn)
-                    migrate_schema_v13_to_v14(conn)
-                    migrate_schema_v14_to_v15(conn)
-                    self._set_user_version(conn)
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    raise V4ResetRequiredError(
-                        "数据库声明为 V4 但物理结构不完整，需要一次性重置；" + str(exc)
-                    ) from exc
-                except Exception:
-                    conn.rollback()
-                    raise
-                version = self.CURRENT_SCHEMA_VERSION
-            if version == 11 and self._has_user_tables(conn):
-                # v11 → v12 增量迁移：操作明细唯一 Artifact 索引。
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    migrate_schema_v11_to_v12(conn)
-                    migrate_schema_v12_to_v13(conn)
-                    migrate_schema_v13_to_v14(conn)
-                    migrate_schema_v14_to_v15(conn)
-                    self._set_user_version(conn)
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    raise V4ResetRequiredError(
-                        "数据库声明为 V4 但物理结构不完整，需要一次性重置；" + str(exc)
-                    ) from exc
-                except Exception:
-                    conn.rollback()
-                    raise
-                version = self.CURRENT_SCHEMA_VERSION
-            if version == 10 and self._has_user_tables(conn):
-                # v10 → v11 增量迁移：维护操作受管列与逐项明细。
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    migrate_schema_v10_to_v11(conn)
-                    migrate_schema_v11_to_v12(conn)
-                    migrate_schema_v12_to_v13(conn)
-                    migrate_schema_v13_to_v14(conn)
-                    migrate_schema_v14_to_v15(conn)
-                    self._set_user_version(conn)
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    raise V4ResetRequiredError(
-                        "数据库声明为 V4 但物理结构不完整，需要一次性重置；" + str(exc)
-                    ) from exc
-                except Exception:
-                    conn.rollback()
-                    raise
-                version = self.CURRENT_SCHEMA_VERSION
-            if version == 9 and self._has_user_tables(conn):
-                # v9 → v10/v11 增量迁移：播放历史/覆盖表，随后维护操作受管列与明细。
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    migrate_schema_v9_to_v10(conn)
-                    migrate_schema_v10_to_v11(conn)
-                    migrate_schema_v11_to_v12(conn)
-                    migrate_schema_v12_to_v13(conn)
-                    migrate_schema_v13_to_v14(conn)
-                    migrate_schema_v14_to_v15(conn)
-                    self._set_user_version(conn)
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    raise V4ResetRequiredError(
-                        "数据库声明为 V4 但物理结构不完整，需要一次性重置；" + str(exc)
-                    ) from exc
-                except Exception:
-                    conn.rollback()
-                    raise
-                version = self.CURRENT_SCHEMA_VERSION
-            if version == 8 and self._has_user_tables(conn):
-                # v8 → v9 增量迁移：来源退役字段与维护操作表。
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    migrate_schema_v8_to_v9(conn)
-                    migrate_schema_v9_to_v10(conn)
-                    migrate_schema_v10_to_v11(conn)
-                    migrate_schema_v11_to_v12(conn)
-                    migrate_schema_v12_to_v13(conn)
-                    migrate_schema_v13_to_v14(conn)
-                    migrate_schema_v14_to_v15(conn)
-                    self._set_user_version(conn)
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    raise V4ResetRequiredError(
-                        "数据库声明为 V4 但物理结构不完整，需要一次性重置；" + str(exc)
-                    ) from exc
-                except Exception:
-                    conn.rollback()
-                    raise
-                version = self.CURRENT_SCHEMA_VERSION
-            if version == 7 and self._has_user_tables(conn):
-                # v7 → v8/v9 增量迁移：来源根级模式字段并回填，随后退役字段与维护表。
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    migrate_schema_v7_to_v8(conn)
-                    migrate_schema_v8_to_v9(conn)
-                    migrate_schema_v9_to_v10(conn)
-                    migrate_schema_v10_to_v11(conn)
-                    migrate_schema_v11_to_v12(conn)
-                    migrate_schema_v12_to_v13(conn)
-                    migrate_schema_v13_to_v14(conn)
-                    migrate_schema_v14_to_v15(conn)
-                    self._set_user_version(conn)
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    raise V4ResetRequiredError(
-                        "数据库声明为 V4 但物理结构不完整，需要一次性重置；" + str(exc)
-                    ) from exc
-                except Exception:
-                    conn.rollback()
-                    raise
-                version = self.CURRENT_SCHEMA_VERSION
-            if version == 6 and self._has_user_tables(conn):
-                # v6 → v7 增量迁移：候选表增加 original_title / aliases_json。
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    migrate_schema_v6_to_v7(conn)
-                    migrate_schema_v7_to_v8(conn)
-                    migrate_schema_v8_to_v9(conn)
-                    migrate_schema_v9_to_v10(conn)
-                    migrate_schema_v10_to_v11(conn)
-                    migrate_schema_v11_to_v12(conn)
-                    migrate_schema_v12_to_v13(conn)
-                    migrate_schema_v13_to_v14(conn)
-                    migrate_schema_v14_to_v15(conn)
-                    self._set_user_version(conn)
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    raise V4ResetRequiredError(
-                        "数据库声明为 V4 但物理结构不完整，需要一次性重置；" + str(exc)
-                    ) from exc
-                except Exception:
-                    conn.rollback()
-                    raise
-                version = self.CURRENT_SCHEMA_VERSION
-            if version == 5 and self._has_user_tables(conn):
-                # v5 → v10 连续迁移：关系/候选表、来源根级模式、退役字段与 v10 表。
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    migrate_schema_v5_to_v6(conn)
-                    migrate_schema_v6_to_v7(conn)
-                    migrate_schema_v7_to_v8(conn)
-                    migrate_schema_v8_to_v9(conn)
-                    migrate_schema_v9_to_v10(conn)
-                    migrate_schema_v10_to_v11(conn)
-                    migrate_schema_v11_to_v12(conn)
-                    migrate_schema_v12_to_v13(conn)
-                    migrate_schema_v13_to_v14(conn)
-                    migrate_schema_v14_to_v15(conn)
-                    self._set_user_version(conn)
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    raise V4ResetRequiredError(
-                        "数据库声明为 V4 但物理结构不完整，需要一次性重置；" + str(exc)
-                    ) from exc
-                except Exception:
-                    conn.rollback()
-                    raise
-                version = self.CURRENT_SCHEMA_VERSION
-            if version == 4 and self._has_user_tables(conn):
-                # v4 → v5 增量迁移：只新增 tree_scan_validation，保留已确认媒体数据。
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    migrate_schema_v4_to_v5(conn)
-                    migrate_schema_v5_to_v6(conn)
-                    migrate_schema_v6_to_v7(conn)
-                    migrate_schema_v7_to_v8(conn)
-                    migrate_schema_v8_to_v9(conn)
-                    migrate_schema_v9_to_v10(conn)
-                    migrate_schema_v10_to_v11(conn)
-                    migrate_schema_v11_to_v12(conn)
-                    migrate_schema_v12_to_v13(conn)
-                    migrate_schema_v13_to_v14(conn)
-                    migrate_schema_v14_to_v15(conn)
-                    self._set_user_version(conn)
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    raise V4ResetRequiredError(
-                        "数据库声明为 V4 但物理结构不完整，需要一次性重置；" + str(exc)
-                    ) from exc
-                except Exception:
-                    conn.rollback()
-                    raise
-                version = self.CURRENT_SCHEMA_VERSION
-            if version < self.CURRENT_SCHEMA_VERSION and self._has_user_tables(conn):
-                raise V4ResetRequiredError(
-                    f"数据库版本 {version} 属于旧后端数据架构，需要一次性重置后才能继续；"
-                    "V4 不执行旧媒体数据迁移"
-                )
-            if version == self.CURRENT_SCHEMA_VERSION and self._has_user_tables(conn):
-                # v15 各条历史迁移链会先收口到当时的完整结构；v16 仅为
-                # outbox 追加可终止/心跳列，迁移幂等且不触碰媒体事实。
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    migrate_schema_v15_to_v16(conn)
-                    migrate_schema_v16_to_v17(conn)
-                    migrate_schema_v17_to_v18(conn)
-                    migrate_schema_v18_to_v19(conn)
-                    migrate_schema_v19_to_v20(conn)
-                    migrate_schema_v20_to_v21(conn)
-                    migrate_schema_v21_to_v22(conn)
-                    conn.commit()
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    raise V4ResetRequiredError(
-                        "数据库声明为 V4 但任务结构不完整，需要一次性重置；" + str(exc)
-                    ) from exc
-                except Exception:
-                    conn.rollback()
-                    raise
+            populated = self._has_user_tables(conn)
+            if populated and version == self.CURRENT_SCHEMA_VERSION:
                 self._validate_physical_schema(conn)
                 self._reconcile_source_root_activity(conn)
                 return
-
-            conn.execute("BEGIN IMMEDIATE")
+            if populated and version not in migrations:
+                raise V4ResetRequiredError(
+                    f"数据库版本 {version} 属于旧后端数据架构，V4 不执行旧媒体数据迁移，需要一次性重置"
+                )
+            # seasons 等值重建需要临时关闭 FK；只在独占初始化连接、事务外设置。
+            conn.execute("PRAGMA foreign_keys = OFF")
             try:
-                create_schema_v4(conn)
-                # 空库创建路径与结构校验使用同一个完整建库函数：
-                # 新结构必须收编进 create_schema_v4，而不是在这里或
-                # _validate_physical_schema 里另调一批 helper。
+                conn.execute("BEGIN IMMEDIATE")
+                if populated:
+                    for source_version in range(version, self.CURRENT_SCHEMA_VERSION):
+                        migrations[source_version](conn)
+                else:
+                    create_schema_v4(conn)
+                if conn.execute("PRAGMA foreign_key_check").fetchall():
+                    raise V4ResetRequiredError("结构迁移存在外键违约，已回滚；原数据保留")
+                self._validate_physical_schema(conn)
                 self._set_user_version(conn)
                 conn.commit()
+            except sqlite3.OperationalError as exc:
+                conn.rollback()
+                raise V4ResetRequiredError("数据库物理结构不完整，迁移已回滚；" + str(exc)) from exc
             except Exception:
                 conn.rollback()
                 raise
+            finally:
+                conn.execute("PRAGMA foreign_keys = ON")
 
     @staticmethod
     def _reconcile_source_root_activity(conn: sqlite3.Connection) -> None:
@@ -716,10 +373,10 @@ class V4Database:
     @staticmethod
     def _index_contract(
         database: sqlite3.Connection, tables: frozenset[str]
-    ) -> tuple[tuple[str, int, tuple[str, ...]], ...]:
+    ) -> tuple[tuple[str, int, tuple[str, ...], str], ...]:
         """受管索引合同：非自动索引的名称、唯一性与列序。"""
 
-        contracts: list[tuple[str, int, tuple[str, ...]]] = []
+        contracts: list[tuple[str, int, tuple[str, ...], str]] = []
         for table in sorted(tables):
             for index in database.execute("SELECT * FROM pragma_index_list(?)", (table,)).fetchall():
                 name = str(index["name"])
@@ -729,7 +386,10 @@ class V4Database:
                     str(row["name"])
                     for row in database.execute("SELECT * FROM pragma_index_info(?)", (name,)).fetchall()
                 )
-                contracts.append((name, int(index["unique"] or 0), columns))
+                sql = str(database.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone()[0] or '')
+                predicate = re.split(r'\bWHERE\b', sql, maxsplit=1, flags=re.IGNORECASE)
+                where = ''.join(predicate[1].split()).rstrip(';') if len(predicate) == 2 else ''
+                contracts.append((name, int(index["unique"] or 0), columns, where))
         return tuple(sorted(contracts))
 
     @staticmethod

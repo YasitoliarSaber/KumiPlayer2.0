@@ -77,10 +77,22 @@ def test_real_v21_rows_and_identifiers_survive_upgrade(tmp_path):
             conn.execute("UPDATE revision_bindings SET resolved_json='{}' WHERE binding_id='b1'")
 
 
-def test_upgrade_validation_failure_rolls_back_ddl_version_and_data(tmp_path, monkeypatch):
+@pytest.mark.parametrize('starting_version', [19, 21, 22])
+def test_upgrade_validation_failure_rolls_back_ddl_version_and_data(tmp_path, monkeypatch, starting_version):
     """CHECK-001B: fail after all DDL, before commit; retry old structure."""
     database = old_database(tmp_path)
     with database.connect() as conn:
+        if starting_version == 22:
+            from app.media_v4.persistence.schema_v4 import create_v22_structures
+            conn.execute('PRAGMA foreign_keys=OFF')
+            create_v22_structures(conn)
+        elif starting_version == 19:
+            conn.execute('DROP TABLE provider_bindings')
+            conn.execute('CREATE TABLE provider_bindings (work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE CASCADE, provider TEXT NOT NULL, media_type TEXT NOT NULL, provider_id TEXT NOT NULL, PRIMARY KEY(provider,media_type,provider_id), UNIQUE(work_id,provider,media_type))')
+            conn.execute("INSERT INTO provider_bindings VALUES ('w1','tmdb','tv','123')")
+            for name in ('idx_v4_bindings_work', 'idx_v4_artifacts_work', 'idx_v4_jobs_revision'):
+                conn.execute(f'DROP INDEX {name}')
+        conn.execute(f'PRAGMA user_version={starting_version}')
         before = snapshot(conn)
         schema_before = list(conn.execute('SELECT name,sql FROM sqlite_master ORDER BY name'))
     original = V4Database._validate_physical_schema
@@ -93,7 +105,7 @@ def test_upgrade_validation_failure_rolls_back_ddl_version_and_data(tmp_path, mo
     with pytest.raises(RuntimeError, match='injected validation failure'):
         database.initialize()
     with database.connect() as conn:
-        assert conn.execute('PRAGMA user_version').fetchone()[0] == 21
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == starting_version
         assert snapshot(conn) == before
         assert list(conn.execute('SELECT name,sql FROM sqlite_master ORDER BY name')) == schema_before
     monkeypatch.setattr(V4Database, '_validate_physical_schema', original)
@@ -109,3 +121,15 @@ def test_high_version_is_rejected_without_mutation(tmp_path):
         database.initialize()
     with database.connect() as conn:
         assert snapshot(conn) == before
+
+
+def test_schema_validation_detects_changed_partial_identity_index(tmp_path):
+    from app.media_v4.persistence.database import V4ResetRequiredError
+    database = V4Database(tmp_path / 'index.db')
+    database.initialize()
+    with database.connect() as conn:
+        sql = conn.execute("SELECT sql FROM sqlite_master WHERE name='uq_v4_episode_local_identity'").fetchone()[0]
+        conn.execute('DROP INDEX uq_v4_episode_local_identity')
+        conn.execute(sql.replace("identity_key = ''", "identity_key != ''"))
+    with pytest.raises(V4ResetRequiredError, match='索引'):
+        database.initialize()

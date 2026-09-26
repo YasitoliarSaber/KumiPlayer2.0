@@ -74,7 +74,13 @@ export interface WorkIndex {
   genres: string[]
   studios: string[]
   show_type: 'anime_series' | 'anime_movie' | 'live_series' | 'live_movie' | ''
-  media_type: 'tv' | 'movie' | ''
+  media_type: 'tv' | 'movie' | 'unknown' | ''
+  metadata_source?: 'current' | 'retained' | 'local'
+  metadata_snapshot_id?: string
+  refresh_status?: 'pending' | 'not_requested' | 'succeeded' | 'partial' | 'failed' | 'cancelled'
+  mapped_count?: number
+  total_count?: number
+  episode_mapping_status?: 'not_applicable' | 'complete' | 'partial' | 'unmapped'
   source: ImportSourceId
   sources?: ImportSourceId[]
   provider_id?: ProviderId
@@ -119,7 +125,8 @@ export interface WorkIndex {
 export interface SeasonIndex {
   season_id: string
   work_id?: string
-  season_number: number
+  season_number: number | null
+  season_kind?: string
   group_type: string
   label: string
   episode_count: number
@@ -131,7 +138,9 @@ export interface EpisodeIndex {
   work_id?: string
   source?: 'pan115' | 'baidu' | 'local' | 'openlist'
   provider_id?: ProviderId
-  season_number: number
+  season_id?: string
+  season_number: number | null
+  numbering_status?: string
   episode_number: number | null
   special_number?: number | null
   title: string

@@ -63,14 +63,14 @@ def _episode_display_title(
 def _card_payload(card: dict, override: dict | None = None) -> dict:
     metadata = card.get("metadata") or {}
     override = override or {}
-    media_type = card["media_type"] if card["media_type"] in {"tv", "movie"} else "tv"
+    media_type = card['media_type'] if card['media_type'] in {'tv', 'movie', 'unknown'} else 'unknown'
     # P-001 7.7 R4：show_type/card_type 以后端持久化权威为准，不再硬编码。
     show_type = str(card.get("show_type") or metadata.get("show_type") or "")
     if not show_type:
-        show_type = "anime_series" if media_type == "tv" else "anime_movie"
+        show_type = {'tv': 'anime_series', 'movie': 'anime_movie'}.get(media_type, '')
     card_type = str(card.get("card_type") or metadata.get("card_type") or "")
     if not card_type:
-        card_type = "main_series" if media_type == "tv" else "standalone"
+        card_type = {'tv': 'main_series', 'movie': 'standalone'}.get(media_type, '')
     sources = metadata.get("sources") or ["local"]
     watch_status = metadata.get("watch_status")
     if watch_status is None:
@@ -220,14 +220,14 @@ def get_work_detail(work_id: str):
                 JOIN episodes e ON e.episode_id = rb.episode_id
                 WHERE e.season_id = s.season_id AND ir.status = 'confirmed'
             )
-            ORDER BY s.local_season_number, s.season_id
+            ORDER BY s.local_season_number IS NULL, s.local_season_number, s.season_id
             """,
             (work_id,),
         ).fetchall()
         episodes = conn.execute(
             """
             SELECT DISTINCT e.*, s.local_season_number, s.season_kind, s.title AS season_title,
-                   a.asset_id, a.root_id, a.playback_locator, a.source_locator,
+                   a.asset_id, a.root_id, se.playback_locator, se.source_locator,
                    a.availability_state, se.provider, se.relative_path
             FROM revision_bindings rb
             JOIN import_revisions ir ON ir.revision_id = rb.revision_id
@@ -235,9 +235,10 @@ def get_work_detail(work_id: str):
             JOIN episodes e ON e.episode_id = rb.episode_id
             JOIN seasons s ON s.season_id = e.season_id
             JOIN assets a ON a.asset_id = rb.asset_id
-            JOIN source_evidence se ON se.evidence_id = a.evidence_id
+            JOIN source_evidence se ON se.evidence_id = rb.evidence_id
             WHERE e.work_id = ? AND ir.status = 'confirmed'
-            ORDER BY s.local_season_number, e.local_episode_number, e.episode_id,
+            ORDER BY s.local_season_number IS NULL, s.local_season_number,
+                     e.local_episode_number IS NULL, e.local_episode_number, e.episode_id,
                      CASE WHEN a.availability_state = 'available' THEN 0 ELSE 1 END,
                      CASE WHEN se.provider = 'local' THEN 0 ELSE 1 END,
                      CASE lower(a.resolution)
@@ -250,13 +251,13 @@ def get_work_detail(work_id: str):
         ).fetchall()
         movie_assets = conn.execute(
             """
-            SELECT a.asset_id, a.playback_locator, a.source_locator,
+            SELECT a.asset_id, se.playback_locator, se.source_locator,
                    a.availability_state, se.provider
             FROM revision_bindings rb
             JOIN import_revisions ir ON ir.revision_id = rb.revision_id
             JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = ''
             JOIN assets a ON a.asset_id = rb.asset_id
-            JOIN source_evidence se ON se.evidence_id = a.evidence_id
+            JOIN source_evidence se ON se.evidence_id = rb.evidence_id
             WHERE rb.work_id = ? AND rb.episode_id IS NULL
               AND rb.asset_id IS NOT NULL AND ir.status = 'confirmed'
             ORDER BY CASE WHEN a.availability_state = 'available' THEN 0 ELSE 1 END,
@@ -289,6 +290,11 @@ def get_work_detail(work_id: str):
         metadata = json.loads(scrape_row["metadata_json"] or "{}") if scrape_row else {}
     except (TypeError, ValueError):
         metadata = {}
+    from app.media_v4.persistence.metadata_lifecycle import referenced_metadata
+    with get_database().connect() as conn:
+        retained_metadata = referenced_metadata(conn, work_id)
+    if retained_metadata is not None:
+        metadata = {**metadata, **retained_metadata}
     episode_metadata = {
         str(item.get("episode_id")): item
         for item in metadata.get("episode_mappings") or []
@@ -315,6 +321,9 @@ def get_work_detail(work_id: str):
                 "episode_id": row["episode_id"],
                 "work_id": work_id,
                 "season_number": row["local_season_number"],
+                'season_id': row['season_id'],
+                'season_kind': row['season_kind'],
+                'numbering_status': 'known' if row['local_episode_number'] is not None else 'unknown',
                 "episode_number": row["local_episode_number"],
                 "absolute_episode_number": row["absolute_episode_number"],
                 "special_number": row["special_number"],
@@ -394,17 +403,17 @@ def get_work_detail(work_id: str):
             "season_number": season["local_season_number"],
             "group_type": "season" if season["season_kind"] == "regular" else season["season_kind"],
             "label": season["title"] or (
-                "特别篇" if season["season_kind"] == "special" else f"第 {season['local_season_number']} 季"
+                "特别篇" if season["season_kind"] == "special" else '未分季' if season['local_season_number'] is None else f"第 {season['local_season_number']} 季"
             ),
             "episode_count": sum(
-                1 for item in episode_payload if item["season_number"] == season["local_season_number"]
+                1 for item in episode_payload if item.get('season_id') == season['season_id']
             ),
-            "episodes": [item for item in episode_payload if item["season_number"] == season["local_season_number"]],
+            "episodes": [item for item in episode_payload if item.get('season_id') == season['season_id']],
         }
         for season in seasons
     ]
-    media_type = "tv" if work["work_type"] == "series" else "movie"
-    show_type = "anime_series" if media_type == "tv" else "anime_movie"
+    media_type = {'series': 'tv', 'movie': 'movie'}.get(work['work_type'], 'unknown')
+    show_type = str(work['show_type'] or '')
     watch_status = _watch_payload(dict(watch_row)) if watch_row else None
     sources = sorted({item["source"] for item in episode_payload}) or ["local"]
     override = _work_overrides_map([work_id]).get(work_id, {})
@@ -426,7 +435,7 @@ def get_work_detail(work_id: str):
         "show_type": show_type,
         "source": sources[0],
         "sources": sources,
-        "card_type": "main_series" if media_type == "tv" else "standalone",
+        "card_type": str(work['card_type'] or ''),
         "episodes": episode_payload,
         "seasons": season_payload,
         "episode_count": len({item["episode_id"] for item in episode_payload}),
@@ -446,6 +455,14 @@ def get_work_detail(work_id: str):
         "certification_country": metadata.get("certification_country") or "",
         "last_played": None,
         "metadata_state": metadata.get("metadata_state") or ("ready" if metadata else "pending"),
+        **{key: metadata.get(key) for key in ('metadata_source', 'metadata_snapshot_id', 'refresh_status',
+                                            'episode_mapping_status', 'mapped_count', 'total_count')},
+        'metadata_source': metadata.get('metadata_source', 'local'),
+        'metadata_snapshot_id': metadata.get('metadata_snapshot_id'),
+        'refresh_status': metadata.get('refresh_status', 'not_requested'),
+        'episode_mapping_status': metadata.get('episode_mapping_status', 'unmapped'),
+        'mapped_count': metadata.get('mapped_count', 0),
+        'total_count': metadata.get('total_count', len(episode_payload)),
         "watch_status": watch_status,
     }
     return payload

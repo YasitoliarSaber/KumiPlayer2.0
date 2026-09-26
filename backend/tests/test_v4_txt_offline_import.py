@@ -194,16 +194,23 @@ def test_txt_mirror_writes_locator_without_source_access(tmp_path, monkeypatch):
     assert artifacts[0]["target_path"] == str(files[0])
 
 
-def test_txt_mirror_covers_special_and_chinese_paths(tmp_path, monkeypatch):
-    """特别篇与中文带空格路径同样按纯语法校验写入。"""
+def test_txt_mirror_handles_chinese_paths_and_skips_special_bindings(tmp_path, monkeypatch):
+    """中文带空格路径按纯语法校验写入；特别篇 binding 不再生成产物。
+
+    C-002/C-006：特别篇不入库、不生成镜像；旧明确 special binding 的执行返回
+    skipped/legacy_excluded，且不能出现 Specials/S00E00 路径。
+    """
 
     from app.media_v4.jobs.mirror import V4MirrorMaterializer
     from app.media_v4.persistence.database import V4Database
 
     database = V4Database(tmp_path / "txt-mirror-special.db")
     database.initialize()
+    chinese_locator = r"Q:\offline-library\摇曳露营\Season 1\摇曳露营 S01E01.mkv"
     special_locator = r"Q:\offline-library\摇曳露营\Specials\SP01.mkv"
     pairs = [
+        (_tree_evidence_with("摇曳露营/Season 1/摇曳露营 S01E01.mkv", chinese_locator),
+         _facts_for("摇曳露营/Season 1/摇曳露营 S01E01.mkv")),
         (_tree_evidence_with("摇曳露营/Specials/SP01.mkv", special_locator),
          _facts_for("摇曳露营/Specials/SP01.mkv", group_type="special",
                     season=0, episode=None, special=1)),
@@ -224,7 +231,25 @@ def test_txt_mirror_covers_special_and_chinese_paths(tmp_path, monkeypatch):
     assert result.status == "succeeded"
     files = list((tmp_path / "mirror").rglob("*.strm"))
     assert len(files) == 1
-    assert files[0].read_text(encoding="utf-8") == special_locator
+    assert files[0].read_text(encoding="utf-8") == chinese_locator
+    assert "Specials" not in str(files[0])
+    assert all("SP01" not in path.name for path in files)
+
+    # 反向对照：只含旧明确特别篇 binding 时如实返回 skipped，不写任何产物。
+    special_only_pairs = [
+        (_tree_evidence_with("摇曳露营/Specials/SP01.mkv", special_locator),
+         _facts_for("摇曳露营/Specials/SP01.mkv", group_type="special",
+                    season=0, episode=None, special=1)),
+    ]
+    special_job = _confirm_tree_revision(
+        database, "rev-txt-mirror-special-only", special_only_pairs
+    )
+    other_root = tmp_path / "mirror-special-only"
+    special_result = V4MirrorMaterializer(database).process(special_job, other_root)
+    assert special_result.status == "skipped"
+    assert special_result.outcome == "skipped"
+    assert "legacy_excluded" in special_result.reason_codes
+    assert list(other_root.rglob("*.strm")) == []
 
 
 def test_txt_mirror_rejects_middle_asset_with_newline(tmp_path):
@@ -278,7 +303,8 @@ def test_existing_mirror_target_is_never_overwritten(tmp_path):
     existing = Path(first.artifact_paths[0])
     existing.write_text("different-content", encoding="utf-8")
     with database.connect() as conn:
-        conn.execute("DELETE FROM artifacts WHERE revision_id = ?", ("rev-txt-mirror-conflict",))
+        # artifacts 行被 artifact_references 引用（RESTRICT），重跑不需要删行：
+        # 只把任务重置为 queued，让镜像按已存在目标的真实内容做 fail-closed 判断。
         conn.execute(
             "UPDATE jobs SET status = 'queued', finished_at = '' WHERE job_id = ?",
             (job_id,),

@@ -98,9 +98,8 @@ REAL_BOUNDARY_CASES = [
     ),
 ]
 
-#: 反例：容器带季标记，但标记**没有**落到本地季号上（`排球少年第二季` 的
-#: 文件名既没有 SxxEyy 也没有季 token，本地季号仍是 1）。此时合并会把四季的
-#: 集号全部撞在一起（实测 85 集塌缩成 25 集），因此必须保持原键不变。
+#: C-003：目录里的明确季标记（`第二季`/`Season 2`/`[S2]`）会补到本地季号上，
+#: 因此标记一致的条目正常收口到主系列键；只有季号无法确定时才保留原键。
 SEASON_MARKER_WITHOUT_LOCAL_SEASON = [
     (
         "P 4k 排球少年/排球少年第一季/[Ygm] Haikyuu!! [13][Ma10p_2160p][x265_flac_ass].mkv",
@@ -109,8 +108,8 @@ SEASON_MARKER_WITHOUT_LOCAL_SEASON = [
     ),
     (
         "P 4k 排球少年/排球少年第二季/[Ygm] Haikyuu!! 2nd Season [20][Ma10p_2160p][x265_flac_ass].mkv",
-        "title:排球少年第二季::tv",
-        1,
+        "title:排球少年::tv",
+        2,
     ),
 ]
 

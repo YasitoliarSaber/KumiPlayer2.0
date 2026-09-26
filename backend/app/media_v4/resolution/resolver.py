@@ -1,12 +1,32 @@
-"""把 ParsedFacts 批量收口为 Work/Season/Episode/Asset 图。"""
+"""把 ParsedFacts 批量收口为 Work/Season/Episode/Asset 图。
+
+C-002/C-003/C-004 的集合级归属全部在这里完成：准入集合、确定性归组、统一
+Episode key。集合级预计算（系列身份、年份借用、标题频率、季号传播、特殊篇编号）
+只吃准入条目；冲突不拦整批（强标题不同拆 Work、编号不明拆 Episode），只有内部
+不变量违背（同 evidence 被分到互斥 Work、未定位集缺 SourceFile 槽位、准入条目
+没有去向）才抛错。
+"""
 
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import OrderedDict, defaultdict
 from collections.abc import Set as AbstractSet
+from dataclasses import dataclass
 from pathlib import PurePosixPath
+from typing import TYPE_CHECKING
 
+from app.media_v4.domain.identity import (
+    NON_IMPORTABLE_CONTENT_CLASSES,
+    ORIGIN_DIRECTORY,
+    ORIGIN_FILENAME,
+    ORIGIN_PARSER_RULE,
+    ORIGIN_SIDECAR,
+    SEASON_KIND_REGULAR,
+    SEASON_KIND_UNASSIGNED,
+    trace_field,
+)
 from app.media_v4.domain.models import (
     ParsedFacts,
     ResolutionIssue,
@@ -20,8 +40,26 @@ from app.media_v4.domain.models import (
 from app.media_v4.generic_container import is_generic_container_title
 from app.media_v4.parsing.episode_titles import ensure_special_title_number
 from app.media_v4.resolution.candidates import strip_season_marker
+from app.media_v4.resolution.identity_contract import (
+    SPECIAL_SEASON_NUMBER,
+    TitleCandidate,
+    episode_identity_key,
+    episode_row_key,
+    season_identity_key,
+    select_canonical_value,
+    select_canonical_work,
+)
 from app.media_v4.resolution.title_norm import normalize_identity_title
 from app.media_v4.sources.adapters import provider_to_source
+from app.media_v4.sources.file_identity import (
+    IDENTITY_KIND_LOCATOR,
+    ObservedFile,
+    decide_source_identity,
+    derived_source_file_id,
+)
+
+if TYPE_CHECKING:
+    from app.media_v4.persistence.source_identity import IdentityContext
 from app.recognition.media import (
     _extract_work_container,
     _is_bracket_heavy,
@@ -591,20 +629,667 @@ def _local_special_identity(
     )
 
 
+#: 准入集合排除的类别（C-002）：附属内容与辅助视频不生成媒体实体。
+_ADMITTED_EXCLUDED_CONTENT_CLASSES = NON_IMPORTABLE_CONTENT_CLASSES
+
+#: 单文件可展开的最大集合集数；与 evidence_policy 的同一上限一致（非法范围不扩张）。
+_MAX_EPISODE_RANGE = 1000
+
+#: 标题证据等级：文件级 > 目录级 > 解析规则兜底。
+_TITLE_EVIDENCE_RANK = {
+    ORIGIN_FILENAME: 3,
+    ORIGIN_DIRECTORY: 2,
+    ORIGIN_SIDECAR: 2,
+    ORIGIN_PARSER_RULE: 1,
+}
+
+
+def _is_admitted(facts: ParsedFacts) -> bool:
+    """条目是否进入集合级计算（C-002 准入集合）。
+
+    兼容升级前的人工/旧 ParsedFacts：``content_class`` 默认 unknown 不构成排除
+    依据（unknown 不等于 special/movie），只按显式的 ``is_importable`` /
+    ``is_auxiliary`` 与明确声明的排除类别过滤。
+    """
+
+    if not facts.is_importable or facts.is_auxiliary:
+        return False
+    return facts.content_class not in _ADMITTED_EXCLUDED_CONTENT_CLASSES
+
+
+def _observed_for_identity(
+    evidence: SourceEvidence, *, namespace: str, namespace_kind_name: str
+) -> ObservedFile:
+    """把一次观察映射为连续性判定的输入（C-001）。
+
+    这里只消费槽位 ID：连续性分类（unchanged/uncertain/replaced）由确认事务的
+    持久化仓储负责，Resolver 不重新判定内容代次，也不访问文件系统。
+    """
+
+    return ObservedFile(
+        evidence_id=evidence.evidence_id,
+        source_key=evidence.source_key,
+        locator=(
+            evidence.source_locator
+            or evidence.playback_locator
+            or evidence.source_key
+            or evidence.relative_path
+        ),
+        identity_namespace=namespace,
+        namespace_kind_name=namespace_kind_name,
+        size=evidence.size,
+        mtime=evidence.mtime,
+        raw_file_id=evidence.raw_file_id,
+        identity_kind=IDENTITY_KIND_LOCATOR,
+    )
+
+
+def _source_file_ids(
+    entries: list[tuple[SourceEvidence, ParsedFacts]],
+    identity_context: IdentityContext | None,
+) -> dict[str, str]:
+    """每条准入证据的 SourceFile 槽位 ID（C-001/C-003 的未定位锚点）。
+
+    传了 ``identity_context`` 就按它的上一代观察做连续槽位判定；没传时由出生观察
+    推导（同一个 evidence 每次得到同一 ID）。两种方式都是确定的，不依赖遍历顺序。
+    """
+
+    if identity_context is None:
+        return {
+            evidence.evidence_id: derived_source_file_id(evidence.evidence_id)
+            for evidence, _facts in entries
+        }
+    previous = tuple(identity_context.previous_observations)
+    namespace = str(getattr(identity_context, "namespace", "") or "")
+    namespace_kind_name = str(getattr(identity_context, "identity_kind_name", "") or "remote")
+    result: dict[str, str] = {}
+    for evidence, _facts in entries:
+        current = _observed_for_identity(
+            evidence, namespace=namespace, namespace_kind_name=namespace_kind_name
+        )
+        decision = decide_source_identity(current, previous, namespace=namespace or None)
+        result[evidence.evidence_id] = decision.source_file_id
+    return result
+
+
+def _work_identity_title(work_key: str) -> str:
+    """取出 Work key 声明的本地身份标题；provider/local 键没有本地身份标题。"""
+
+    if work_key.startswith("series:"):
+        body = work_key[len("series:"):]
+        parts = body.rsplit(":", 1)
+        return parts[0] if len(parts) == 2 else ""
+    if work_key.startswith("title:"):
+        parsed = _boundary_title_from_key(work_key)
+        return parsed[0] if parsed is not None else ""
+    return ""
+
+
+def _title_evidence_rank(facts: ParsedFacts) -> int:
+    """标题的证据等级：来自单文件仲裁的 decision_trace；缺证据记 0（最弱）。"""
+
+    trace = trace_field(facts.decision_trace, "work_title")
+    if trace is None:
+        return 0
+    return _TITLE_EVIDENCE_RANK.get(trace.origin, 0)
+
+
+def _local_episodes(facts: ParsedFacts) -> tuple[int | None, ...]:
+    """单文件覆盖的本地集号；非法范围（反向/超长）不扩张，保留文件级定位。"""
+
+    episode_range = facts.episode_range
+    if episode_range is not None:
+        start, end = int(episode_range[0]), int(episode_range[1])
+        if start <= end and (end - start) <= _MAX_EPISODE_RANGE:
+            return tuple(range(start, end + 1))
+    return (facts.episode_candidate,)
+
+
+@dataclass(frozen=True, slots=True)
+class _EpisodeClaim:
+    """一个准入条目编号后的成员主张（尚未决定最终 Episode 身份）。"""
+
+    evidence_id: str
+    work_key: str
+    source_file_id: str
+    edition_key: str
+    season_kind: str
+    local_season_number: int | None
+    local_episodes: tuple[int | None, ...]
+    absolute_episode_number: int | None
+    special_number: int | None
+    episode_kind: str
+    display_title: str
+    title_norm: str
+    has_provider_identity: bool
+    has_structural_series_identity: bool
+    has_boundary_identity: bool
+
+
+def _entry_issues(
+    evidence: SourceEvidence, facts: ParsedFacts, work_key: str
+) -> list[ResolutionIssue]:
+    """解析不确定信息与本地兜底身份的提示（不阻断确认）。"""
+
+    issues: list[ResolutionIssue] = []
+    if facts.needs_review:
+        local_fallback = work_key.startswith("local:")
+        issues.append(
+            ResolutionIssue(
+                code="parsed_facts_review_hint" if not local_fallback else "parsed_facts_need_review",
+                evidence_id=evidence.evidence_id,
+                message=(
+                    "解析结果包含不确定信息，不影响确认，可稍后核对"
+                    if not local_fallback
+                    else "解析结果标记为需要人工复核，已按清洗后的本地名称入库"
+                ),
+            )
+        )
+    if work_key.startswith("local:"):
+        identity_title = facts.work_title or (facts.title_candidates or ("",))[0]
+        generic = bool(identity_title.strip()) and is_generic_container_title(identity_title)
+        issues.append(
+            ResolutionIssue(
+                code="generic_container_title" if generic else "work_identity_missing",
+                evidence_id=evidence.evidence_id,
+                message=(
+                    "目录/文件只能提供通用容器标题（Season/S01/Specials/分类/纯数字），"
+                    "已按清洗后的本地名称入库，可稍后补充在线资料"
+                    if generic
+                    else "缺少足够的作品标题或 Provider 身份，已按清洗后的本地名称入库，"
+                    "可稍后补充在线资料"
+                ),
+            )
+        )
+    return issues
+
+
+def _build_work_groups(
+    groups: OrderedDict[str, list[tuple[SourceEvidence, ParsedFacts]]],
+) -> tuple[tuple[ResolvedWork, ...], OrderedDict[str, dict]]:
+    """先建组，再用 select_canonical_work 选展示名与类别（C-004）。
+
+    组内取值一律与遍历顺序无关：标题按 ``(证据等级, 独立 SourceFile 支持数,
+    非全大写拉丁拼写, NFC 码点序)`` 选择；年龄/类型/关系等标量取"唯一明确值"，
+    多值冲突按 unknown 处理（不再 setdefault 先到先得）。证据 ID 列表保持输入
+    顺序，供调用方按本批观察读取。
+    """
+
+    works: list[ResolvedWork] = []
+    rows: OrderedDict[str, dict] = OrderedDict()
+    for work_key, members in groups.items():
+        row = _canonical_work_row(work_key, members)
+        rows[work_key] = row
+        works.append(
+            ResolvedWork(
+                work_key=work_key,
+                preferred_title=row["title"],
+                year=row["year"],
+                media_type=row["media_type"],
+                source_evidence_ids=tuple(row["evidence_ids"]),
+                card_type=row["card_type"],
+                show_type=row["show_type"],
+                series_group=row["series_group"],
+                relation_type=row["relation_type"],
+            )
+        )
+    return tuple(works), rows
+
+
+def _canonical_work_row(
+    work_key: str, members: list[tuple[SourceEvidence, ParsedFacts]]
+) -> dict:
+    """一个 Work 组内的规范字段（标题/类别/年份/身份）。"""
+
+    identity_title = _work_identity_title(work_key)
+    spelling_support: dict[str, int] = defaultdict(int)
+    for _evidence, facts in members:
+        title = _preferred_work_title(facts, work_key)
+        if title:
+            spelling_support[unicodedata.normalize("NFC", title.strip())] += 1
+    title_candidates: list[TitleCandidate] = []
+    for _evidence, facts in members:
+        title = _preferred_work_title(facts, work_key)
+        if not title:
+            continue
+        spelling = unicodedata.normalize("NFC", title.strip())
+        rank = (
+            4
+            if identity_title and _boundary_key_title(spelling) == identity_title
+            else _title_evidence_rank(facts)
+        )
+        title_candidates.append(
+            TitleCandidate(
+                title=spelling,
+                evidence_rank=rank,
+                support=spelling_support[spelling],
+            )
+        )
+    canonical_title, _ambiguous = select_canonical_work(title_candidates)
+    media_type, _media_conflict = select_canonical_value(
+        [_effective_media_type(facts) for _evidence, facts in members]
+    )
+    card_type, _card_conflict = select_canonical_value([facts.card_type for _evidence, facts in members])
+    series_group, _series_conflict = select_canonical_value(
+        [facts.series_group for _evidence, facts in members]
+    )
+    relation_type, _relation_conflict = select_canonical_value(
+        [facts.relation_type for _evidence, facts in members]
+    )
+    show_type, _show_conflict = select_canonical_value([facts.show_type for _evidence, facts in members])
+    relation_media_type, _relation_media_conflict = select_canonical_value(
+        [(facts.media_type or facts.group_type or "unknown").casefold() for _evidence, facts in members]
+    )
+    explicit_years = {
+        facts.year_candidate for _evidence, facts in members if facts.year_candidate is not None
+    }
+    evidence_ids: list[str] = []
+    for evidence, _facts in members:
+        if evidence.evidence_id not in evidence_ids:
+            evidence_ids.append(evidence.evidence_id)
+    return {
+        "title": canonical_title or (identity_title and unicodedata.normalize("NFC", identity_title)) or "",
+        # 同组年份取最早的明确年份：年份已参与 Work 身份键，组内不会出现两个
+        # 互不相容的系列起始年（跨 Work 借用另有唯一性约束）。
+        "year": min(explicit_years) if explicit_years else None,
+        "media_type": media_type,
+        "relation_media_type": relation_media_type,
+        "card_type": card_type,
+        "show_type": show_type,
+        "series_group": series_group,
+        "relation_type": relation_type,
+        "evidence_ids": evidence_ids,
+    }
+
+
+def _episode_claim(
+    evidence: SourceEvidence,
+    facts: ParsedFacts,
+    *,
+    work_key: str,
+    edition_key: str,
+    source_file_id: str,
+    allocated_local_specials: dict[tuple[str, tuple[str, int, int | None]], int],
+    allocated_unnumbered_specials: dict[tuple[str, str], int],
+) -> _EpisodeClaim:
+    """把一个准入条目收口为成员主张（特殊篇编号在这里确定）。"""
+
+    identity_title = facts.work_title or (facts.title_candidates or ("",))[0]
+    if facts.group_type == "special" or facts.special_candidate:
+        local_season: int | None = SPECIAL_SEASON_NUMBER
+        local_episodes: tuple[int | None, ...] = (None,)
+        resolved_special_number: int | None
+        local_special_identity = _local_special_identity(evidence, facts)
+        if local_special_identity is not None:
+            resolved_special_number = allocated_local_specials[(work_key, local_special_identity)]
+        else:
+            resolved_special_number = facts.special_number or facts.episode_candidate
+        if resolved_special_number is None or resolved_special_number <= 0:
+            title_identity = _normalize_title(facts.episode_title) or _normalize_title(
+                evidence.relative_path
+            )
+            resolved_special_number = allocated_unnumbered_specials[(work_key, title_identity)]
+        display_title = ensure_special_title_number(facts.episode_title, resolved_special_number)
+        season_kind = "special"
+        episode_kind = "special"
+    else:
+        local_season = facts.season_candidate
+        local_episodes = _local_episodes(facts)
+        resolved_special_number = None
+        display_title = facts.episode_title
+        # C-003：未知季是显式的 unassigned，不默认 S1，也不写 0。
+        season_kind = SEASON_KIND_UNASSIGNED if local_season is None else SEASON_KIND_REGULAR
+        episode_kind = "regular" if facts.group_type == "season" else facts.group_type or "unknown"
+    return _EpisodeClaim(
+        evidence_id=evidence.evidence_id,
+        work_key=work_key,
+        source_file_id=source_file_id,
+        edition_key=edition_key,
+        season_kind=season_kind,
+        local_season_number=local_season,
+        local_episodes=local_episodes,
+        # Local numbering is authoritative. Absolute numbering only participates
+        # in identity when no local episode number exists.
+        absolute_episode_number=facts.absolute_episode_candidate,
+        special_number=resolved_special_number,
+        episode_kind=episode_kind,
+        display_title=display_title,
+        title_norm=_normalize_title(identity_title),
+        has_provider_identity=bool(facts.tmdb_hint_id and facts.tmdb_hint_type),
+        has_structural_series_identity=bool(_main_series_identity_title(facts)),
+        has_boundary_identity=bool(_boundary_work_key(evidence, facts)),
+    )
+
+
+def _build_members(
+    admitted: list[tuple[SourceEvidence, ParsedFacts]],
+    *,
+    entry_work_keys: dict[str, str],
+    source_file_ids: dict[str, str],
+    allocated_local_specials: dict[tuple[str, tuple[str, int, int | None]], int],
+    allocated_unnumbered_specials: dict[tuple[str, str], int],
+) -> tuple[tuple[ResolvedEpisode, ...], tuple[ResolvedWorkAsset, ...], list[ResolutionIssue]]:
+    """把准入条目收口为 Episode 与电影 WorkAsset。
+
+    先收集全部成员主张，再按统一 key 归组：本地编号为主键、绝对编号只作佐证、
+    完全没有编号的条目以 SourceFile 槽位为稳定锚点（两个未知文件因此是两个
+    Episode）。同一 Local 出现互斥绝对号时拆为各 SourceFile 的 provisional
+    Episode，不合并后任取一个绝对号（C-003）。
+    """
+
+    issues: list[ResolutionIssue] = []
+    claims: list[_EpisodeClaim] = []
+    work_asset_rows: OrderedDict[tuple[str, str], list[str]] = OrderedDict()
+    for evidence, facts in admitted:
+        work_key = entry_work_keys[evidence.evidence_id]
+        issues.extend(_entry_issues(evidence, facts, work_key))
+        edition_key = _edition_key(facts)
+        if _effective_media_type(facts) == "movie":
+            movie_assets = work_asset_rows.setdefault((work_key, edition_key), [])
+            if evidence.evidence_id not in movie_assets:
+                movie_assets.append(evidence.evidence_id)
+            continue
+        claims.append(
+            _episode_claim(
+                evidence,
+                facts,
+                work_key=work_key,
+                edition_key=edition_key,
+                source_file_id=source_file_ids[evidence.evidence_id],
+                allocated_local_specials=allocated_local_specials,
+                allocated_unnumbered_specials=allocated_unnumbered_specials,
+            )
+        )
+
+    episode_rows = _episode_rows(claims, issues)
+    episodes = tuple(
+        ResolvedEpisode(
+            episode_key=row["episode_key"],
+            work_key=row["work_key"],
+            local_season_number=row["local_season_number"],
+            local_episode_number=row["local_episode_number"],
+            absolute_episode_number=row["absolute_episode_number"],
+            season_kind=row["season_kind"],
+            episode_kind=row["episode_kind"],
+            special_number=row["special_number"],
+            display_title=row["display_title"],
+            edition_key=row["edition_key"],
+            asset_evidence_ids=tuple(row["asset_ids"]),
+            provider_season_number=row["provider_season_number"],
+            provider_episode_number=row["provider_episode_number"],
+            identity_key=row["identity_key"],
+            season_identity_key=row["season_identity_key"],
+        )
+        for row in episode_rows.values()
+    )
+    work_assets = tuple(
+        ResolvedWorkAsset(
+            work_key=work_key,
+            edition_key=edition_key,
+            asset_evidence_ids=tuple(asset_ids),
+        )
+        for (work_key, edition_key), asset_ids in work_asset_rows.items()
+    )
+    return episodes, work_assets, issues
+
+
+def _episode_rows(
+    claims: list[_EpisodeClaim], issues: list[ResolutionIssue]
+) -> OrderedDict[tuple, dict]:
+    """按统一身份收口 Episode 行；互斥绝对号拆为独立 provisional 行。"""
+
+    absolutes: dict[tuple[str, str, int], set[int]] = defaultdict(set)
+    for claim in claims:
+        if claim.absolute_episode_number is None:
+            continue
+        for local_episode in claim.local_episodes:
+            if local_episode is None:
+                continue
+            season_key = season_identity_key(
+                local_season_number=claim.local_season_number,
+                season_kind=claim.season_kind,
+                work_key=claim.work_key,
+            )
+            absolutes[(claim.work_key, season_key, int(local_episode))].add(
+                int(claim.absolute_episode_number)
+            )
+    conflicted = {identity for identity, values in absolutes.items() if len(values) > 1}
+
+    rows: OrderedDict[tuple, dict] = OrderedDict()
+    for claim in claims:
+        for local_episode in claim.local_episodes:
+            row, conflict = _episode_row_for(claim, local_episode, conflicted)
+            if conflict:
+                issues.append(
+                    ResolutionIssue(
+                        code="absolute_episode_conflict",
+                        evidence_id=claim.evidence_id,
+                        message=(
+                            "同一 Local Episode 出现互斥的绝对集号，已拆为独立的未定位条目并需要复核"
+                        ),
+                    )
+                )
+            row_key = (*row["logical_key"], row["edition_key"])
+            existing = rows.get(row_key)
+            if existing is None:
+                rows[row_key] = row
+                target = row
+            else:
+                _merge_episode_row(existing, row)
+                target = existing
+            _note_episode_identity_titles(target, claim, issues)
+            if claim.evidence_id not in target["asset_ids"]:
+                target["asset_ids"].append(claim.evidence_id)
+    return rows
+
+
+def _episode_row_for(
+    claim: _EpisodeClaim, local_episode: int | None, conflicted: set[tuple[str, str, int]]
+) -> tuple[dict, bool]:
+    """一个成员主张在某集上的行数据与"是否互斥绝对号冲突"。"""
+
+    absolute_episode_number = claim.absolute_episode_number
+    local_season_number = claim.local_season_number
+    season_kind = claim.season_kind
+    episode_kind = claim.episode_kind
+    special_number = claim.special_number
+    conflict = False
+    if local_episode is not None and absolute_episode_number is not None:
+        season_key = season_identity_key(
+            local_season_number=local_season_number,
+            season_kind=season_kind,
+            work_key=claim.work_key,
+        )
+        conflict = (claim.work_key, season_key, int(local_episode)) in conflicted
+    if conflict:
+        # 互斥绝对号：本地编号与绝对编号都不能作为身份，退回 SourceFile 槽位锚点。
+        local_season_number = None
+        local_episode = None
+        absolute_episode_number = None
+        special_number = None
+        season_kind = SEASON_KIND_UNASSIGNED
+        episode_kind = "unknown"
+    season_key = season_identity_key(
+        local_season_number=local_season_number,
+        season_kind=season_kind,
+        work_key=claim.work_key,
+    )
+    absolute_key = absolute_episode_number if local_episode is None else None
+    episode_key = episode_row_key(
+        work_key=claim.work_key,
+        local_season_number=local_season_number,
+        local_episode_number=local_episode,
+        absolute_episode_number=absolute_episode_number,
+        special_number=special_number,
+        source_file_key=claim.source_file_id,
+    )
+    identity_key = episode_identity_key(
+        season_key=season_key,
+        local_episode_number=local_episode,
+        absolute_episode_number=absolute_episode_number,
+        fallback_key=episode_key,
+    )
+    if local_episode is None and absolute_episode_number is None and special_number is None:
+        # 未定位条目：锚点就是 SourceFile 槽位，两个未知文件天然是两个 Episode。
+        logical_key: tuple = (claim.work_key, season_key, None, None, None, claim.source_file_id)
+    else:
+        logical_key = (claim.work_key, season_key, local_episode, absolute_key, special_number, None)
+    return (
+        {
+            "episode_key": episode_key,
+            "identity_key": identity_key,
+            "season_identity_key": season_key,
+            "work_key": claim.work_key,
+            "local_season_number": local_season_number,
+            "local_episode_number": local_episode,
+            "absolute_episode_number": absolute_episode_number,
+            "season_kind": season_kind,
+            "episode_kind": episode_kind,
+            "special_number": special_number,
+            "display_title": claim.display_title,
+            "edition_key": claim.edition_key,
+            "provider_season_number": None,
+            "provider_episode_number": None,
+            "source_file_id": claim.source_file_id,
+            "logical_key": logical_key,
+            "asset_ids": [],
+            "title_norms": set(),
+            "has_provider_identity": claim.has_provider_identity,
+            "has_structural_series_identity": claim.has_structural_series_identity,
+            "has_boundary_identity": claim.has_boundary_identity,
+        },
+        conflict,
+    )
+
+
+def _merge_episode_row(existing: dict, incoming: dict) -> None:
+    """把同一逻辑行（同 edition）的第二个成员并入已有行。"""
+
+    if existing["absolute_episode_number"] is None and incoming["absolute_episode_number"] is not None:
+        existing["absolute_episode_number"] = incoming["absolute_episode_number"]
+    chosen, _ambiguous = select_canonical_work(
+        [existing["display_title"], incoming["display_title"]]
+    )
+    if chosen:
+        existing["display_title"] = chosen
+    for field in ("provider_season_number", "provider_episode_number"):
+        if existing[field] is None and incoming[field] is not None:
+            existing[field] = incoming[field]
+
+
+def _note_episode_identity_titles(
+    target: dict, claim: _EpisodeClaim, issues: list[ResolutionIssue]
+) -> None:
+    """同一集出现不同独立作品标题时提示，不静默当成多版本（P-001 7.3.C）。"""
+
+    title_norm = claim.title_norm
+    if not title_norm or title_norm in target["title_norms"]:
+        return
+    # 该行此前已有另一个标题才算"同一集出现不同独立作品标题"。单个条目首次
+    # 声明标题（例如 override 修正后的唯一文件）不是冲突，不能据此发提示。
+    had_other_title = bool(target["title_norms"])
+    target["title_norms"].add(title_norm)
+    if not had_other_title:
+        return
+    if target["has_structural_series_identity"] or target["has_boundary_identity"]:
+        return
+    if target["has_provider_identity"] and claim.has_provider_identity:
+        return
+    issues.append(
+        ResolutionIssue(
+            code="ambiguous_work_identity",
+            evidence_id=claim.evidence_id,
+            message="同一集出现指向不同独立作品的 Asset，不能自动合并为多版本",
+        )
+    )
+
+
+def _assert_member_outcome(
+    admitted: list[tuple[SourceEvidence, ParsedFacts]],
+    episodes: tuple[ResolvedEpisode, ...],
+    work_assets: tuple[ResolvedWorkAsset, ...],
+) -> None:
+    """内部不变量：每个准入条目必须落到恰好一个 Work，且要么在 Episode、要么在电影 Asset。
+
+    这些是图内部的自洽条件（同 evidence 被分到互斥 Work、未定位集缺 SourceFile
+    槽位、准入条目没有去向），损坏图不允许进入确认；普通识别歧义不在这里抛错。
+    """
+
+    assignment: dict[str, str] = {}
+
+    def assign(evidence_id: str, work_key: str) -> None:
+        previous = assignment.setdefault(evidence_id, work_key)
+        if previous != work_key:
+            raise ValueError(
+                f"内部不变量违背：evidence {evidence_id} 被分配到互斥 Work（{previous} / {work_key}）"
+            )
+
+    for episode in episodes:
+        if (
+            episode.local_episode_number is None
+            and episode.absolute_episode_number is None
+            and episode.special_number is None
+            and not episode.identity_key
+        ):
+            raise ValueError("内部不变量违背：未定位 Episode 缺少 SourceFile 槽位锚点")
+        for evidence_id in episode.asset_evidence_ids:
+            assign(evidence_id, episode.work_key)
+    for asset in work_assets:
+        for evidence_id in asset.asset_evidence_ids:
+            assign(evidence_id, asset.work_key)
+    missing = sorted(
+        evidence.evidence_id
+        for evidence, _facts in admitted
+        if evidence.evidence_id not in assignment
+    )
+    if missing:
+        raise ValueError(f"内部不变量违背：准入条目没有落到 Work/Episode/Asset：{missing}")
+
+
+def _build_relations(work_rows: OrderedDict[str, dict]) -> list[ResolvedWorkRelation]:
+    """由作品行的显式结构事实建立父系列关系；父 Work 可能只存在于数据库。"""
+
+    relations: list[ResolvedWorkRelation] = []
+    for key, row in work_rows.items():
+        parent_key = _relation_work_key_from_row(row)
+        if not parent_key or parent_key == key:
+            continue
+        relations.append(
+            ResolvedWorkRelation(
+                parent_work_key=parent_key,
+                child_work_key=key,
+                relation_type=row["relation_type"] or "related",
+            )
+        )
+    return relations
+
+
 class MediaResolver:
     """Resolver 只负责聚合，不修改输入事实、不淘汰 Asset。"""
 
-    def resolve(self, entries: list[tuple[SourceEvidence, ParsedFacts]]) -> ResolvedMediaGraph:
-        work_rows: OrderedDict[str, dict] = OrderedDict()
-        episode_rows: OrderedDict[tuple, dict] = OrderedDict()
-        work_asset_rows: OrderedDict[tuple[str, str], list[str]] = OrderedDict()
+    def resolve(
+        self,
+        entries: list[tuple[SourceEvidence, ParsedFacts]],
+        *,
+        identity_context: IdentityContext | None = None,
+    ) -> ResolvedMediaGraph:
+        # C-002 准入集合：排除条目保留 source/pf 事实与原因，但不参与系列身份、
+        # 分组、年份借用、标题频率、季号传播、候选查询与关系建图。
+        admitted = [
+            (evidence, facts)
+            for evidence, facts in entries
+            if _is_admitted(facts)
+        ]
+        # 未定位条目以 SourceFile 槽位为稳定锚点：传了上一代 context 就按连续性
+        # 复用槽位，没传时由出生观察推导（两者都确定，重复预览结果一致）。
+        source_file_ids = _source_file_ids(admitted, identity_context)
         issues: list[ResolutionIssue] = []
         # 单文件解析只能看到当前路径；整批图谱则能看到同一目录边界中由
         # Season/Special 条目声明的主系列身份。只采用 relation_type=main
         # 的结构事实，外传/电影的父系列关系不能反向吞并当前作品。
         structural_series_identities = {
             (_boundary_key_title(facts.series_group), _effective_media_type(facts))
-            for _evidence, facts in entries
+            for _evidence, facts in admitted
             if facts.card_type != "standalone"
             and facts.relation_type == "main"
             and facts.series_group
@@ -618,7 +1303,7 @@ class MediaResolver:
         # - ``摇曳露营/第1季/…`` + ``摇曳露营/第2季/…`` → 子作品容器是结构目录
         #   （提取为空），集合里只剩作品自身 → 仍是同一 Work 的多季。
         series_child_containers: dict[tuple[str, str], set[str]] = defaultdict(set)
-        for evidence, facts in entries:
+        for evidence, facts in admitted:
             if facts.card_type == "standalone":
                 continue
             group = _boundary_key_title(facts.series_group)
@@ -647,10 +1332,12 @@ class MediaResolver:
             evidence.evidence_id: _resolved_entry_work_key(
                 evidence, facts, structural_series_identities, collection_series,
             )
-            for evidence, facts in entries
+            for evidence, facts in admitted
         }
-        _coalesce_missing_year_keys(entries, entry_work_keys)
-        for evidence, facts in entries:
+        _coalesce_missing_year_keys(admitted, entry_work_keys)
+        # 特别篇编号分配**只对显式声明附属关系的准入条目**生效：新解析器已把附属
+        # 内容排除在准入集合外，这里服务升级前的人工事实与既有绑定。
+        for evidence, facts in admitted:
             if facts.group_type != "special" and not facts.special_candidate:
                 continue
             key = entry_work_keys[evidence.evidence_id]
@@ -704,7 +1391,7 @@ class MediaResolver:
         }
         allocated_unnumbered_specials: dict[tuple[str, str], int] = {}
         for evidence, facts in sorted(
-            entries,
+            admitted,
             key=lambda item: (item[0].relative_path.casefold(), item[0].evidence_id),
         ):
             if facts.group_type != "special" and not facts.special_candidate:
@@ -729,251 +1416,22 @@ class MediaResolver:
             explicit_special_numbers[key].add(special_number)
             next_special_number[key] = special_number + 1
 
-        for evidence, facts in entries:
-            if not facts.is_importable or facts.is_auxiliary:
-                continue
-            identity_title = facts.work_title or (facts.title_candidates or ("",))[0]
-            key = entry_work_keys[evidence.evidence_id]
-            # 阶段 1（架构方案）：身份无法确定的条目得到"本地兜底键"，**不再被丢弃**。
-            local_fallback = key.startswith("local:")
-            if facts.needs_review:
-                # 身份确实无法确定的条目保留 need_review 语义（供界面提示）；身份已确定的
-                # 解析不确定信息只是提示，不阻断确认。前端据 blocking_issue_count 判断。
-                issues.append(
-                    ResolutionIssue(
-                        code="parsed_facts_review_hint" if not local_fallback else "parsed_facts_need_review",
-                        evidence_id=evidence.evidence_id,
-                        message=(
-                            "解析结果包含不确定信息，不影响确认，可稍后核对"
-                            if not local_fallback
-                            else "解析结果标记为需要人工复核，已按清洗后的本地名称入库"
-                        ),
-                    )
-                )
-            if local_fallback:
-                generic = bool(identity_title.strip()) and is_generic_container_title(identity_title)
-                issues.append(
-                    ResolutionIssue(
-                        code="generic_container_title" if generic else "work_identity_missing",
-                        evidence_id=evidence.evidence_id,
-                        message=(
-                            "目录/文件只能提供通用容器标题（Season/S01/Specials/分类/纯数字），"
-                            "已按清洗后的本地名称入库，可稍后补充在线资料"
-                            if generic
-                            else "缺少足够的作品标题或 Provider 身份，已按清洗后的本地名称入库，"
-                            "可稍后补充在线资料"
-                        ),
-                    )
-                )
-
-            work = work_rows.setdefault(
-                key,
-                {
-                    "title": _preferred_work_title(facts, key),
-                    "year": facts.year_candidate,
-                    "media_type": _effective_media_type(facts),
-                    "relation_media_type": (facts.media_type or facts.group_type or "unknown").casefold(),
-                    "card_type": facts.card_type,
-                    "show_type": facts.show_type,
-                    "series_group": facts.series_group,
-                    "relation_type": facts.relation_type,
-                    "evidence_ids": [],
-                },
+        work_groups: OrderedDict[str, list[tuple[SourceEvidence, ParsedFacts]]] = OrderedDict()
+        for evidence, facts in admitted:
+            work_groups.setdefault(entry_work_keys[evidence.evidence_id], []).append(
+                (evidence, facts)
             )
-            if evidence.evidence_id not in work["evidence_ids"]:
-                work["evidence_ids"].append(evidence.evidence_id)
-            if facts.year_candidate is not None:
-                # 同一 Work 出现多个年份时取最早的一年（系列起始年）。之前是
-                # "先出现的赢"，会让作品年份随条目顺序变化，与
-                # _preferred_work_title 声明的顺序无关不一致。
-                current_year = work["year"]
-                work["year"] = (
-                    facts.year_candidate
-                    if current_year is None
-                    else min(current_year, facts.year_candidate)
-                )
-
-            edition_key = _edition_key(facts)
-            if _effective_media_type(facts) == "movie":
-                movie_assets = work_asset_rows.setdefault((key, edition_key), [])
-                if evidence.evidence_id not in movie_assets:
-                    movie_assets.append(evidence.evidence_id)
-                continue
-
-            local_season: int | None
-            local_episodes: tuple[int | None, ...]
-            resolved_special_number: int | None
-            if facts.group_type == "special" or facts.special_candidate:
-                local_season = 0
-                local_episodes = (None,)
-                local_special_identity = _local_special_identity(evidence, facts)
-                if local_special_identity is not None:
-                    resolved_special_number = allocated_local_specials[
-                        (key, local_special_identity)
-                    ]
-                else:
-                    resolved_special_number = facts.special_number or facts.episode_candidate
-                if resolved_special_number is None or resolved_special_number <= 0:
-                    title_identity = _normalize_title(facts.episode_title) or _normalize_title(
-                        evidence.relative_path
-                    )
-                    resolved_special_number = allocated_unnumbered_specials[(key, title_identity)]
-                display_title = ensure_special_title_number(
-                    facts.episode_title,
-                    resolved_special_number,
-                )
-                season_kind = "special"
-                episode_kind = "special"
-            else:
-                local_season = facts.season_candidate
-                if facts.episode_range and facts.episode_range[0] <= facts.episode_range[1]:
-                    local_episodes = tuple(range(facts.episode_range[0], facts.episode_range[1] + 1))
-                else:
-                    local_episodes = (facts.episode_candidate,)
-                resolved_special_number = None
-                display_title = facts.episode_title
-                season_kind = "regular"
-                episode_kind = "regular" if facts.group_type == "season" else facts.group_type or "unknown"
-
-            for local_episode in local_episodes:
-                # Local numbering is authoritative. Absolute numbering only
-                # participates in identity when no local episode number exists.
-                absolute_group_key = facts.absolute_episode_candidate if local_episode is None else None
-                episode_key = "|".join(
-                    (
-                        key,
-                        str(local_season),
-                        str(local_episode),
-                        str(absolute_group_key),
-                        str(resolved_special_number),
-                    )
-                )
-                episode_identity = (
-                    key,
-                    local_season,
-                    local_episode,
-                    absolute_group_key,
-                    resolved_special_number,
-                    edition_key,
-                )
-                existing_episode = episode_rows.get(episode_identity)
-                if (
-                    existing_episode is not None
-                    and existing_episode["absolute_episode_number"] is not None
-                    and facts.absolute_episode_candidate is not None
-                    and existing_episode["absolute_episode_number"] != facts.absolute_episode_candidate
-                ):
-                    issues.append(
-                        ResolutionIssue(
-                            code="absolute_episode_conflict",
-                            evidence_id=evidence.evidence_id,
-                            message="同一 Local Episode 出现冲突的绝对集号，已保留为独立事实并需要复核",
-                        )
-                    )
-                if (
-                    existing_episode is not None
-                    and existing_episode["absolute_episode_number"] is None
-                    and facts.absolute_episode_candidate is not None
-                ):
-                    existing_episode["absolute_episode_number"] = facts.absolute_episode_candidate
-                episode = episode_rows.setdefault(
-                    episode_identity,
-                    {
-                        "episode_key": episode_key,
-                        "work_key": key,
-                        "local_season_number": local_season,
-                        "local_episode_number": local_episode,
-                        "absolute_episode_number": facts.absolute_episode_candidate,
-                        "season_kind": season_kind,
-                        "episode_kind": episode_kind,
-                        "special_number": resolved_special_number,
-                        "display_title": display_title,
-                        "edition_key": edition_key,
-                        "asset_ids": [],
-                        "title_norms": {_normalize_title(identity_title)},
-                        "has_provider_identity": bool(facts.tmdb_hint_id and facts.tmdb_hint_type),
-                        "has_structural_series_identity": bool(_main_series_identity_title(facts)),
-                        "has_boundary_identity": bool(_boundary_work_key(evidence, facts)),
-                    },
-                )
-                # Episode → Asset 合并的 Work 身份防线：同一 Episode 若出现
-                # 不同非通用作品标题且没有可信 provider 身份串接，必须形成
-                # resolution issue，绝不能静默当成多版本（P-001 7.3.C）。
-                title_norm = _normalize_title(identity_title)
-                if (
-                    title_norm
-                    and title_norm not in episode["title_norms"]
-                    and not (
-                        episode["has_structural_series_identity"]
-                        or episode["has_boundary_identity"]
-                    )
-                    and not (episode["has_provider_identity"] and bool(facts.tmdb_hint_id and facts.tmdb_hint_type))
-                ):
-                    episode["title_norms"].add(title_norm)
-                    issues.append(
-                        ResolutionIssue(
-                            code="ambiguous_work_identity",
-                            evidence_id=evidence.evidence_id,
-                            message="同一集出现指向不同独立作品的 Asset，不能自动合并为多版本",
-                        )
-                    )
-                elif title_norm:
-                    episode["title_norms"].add(title_norm)
-                if evidence.evidence_id not in episode["asset_ids"]:
-                    episode["asset_ids"].append(evidence.evidence_id)
-
-        works = tuple(
-            ResolvedWork(
-                work_key=key,
-                preferred_title=row["title"],
-                year=row["year"],
-                media_type=row["media_type"],
-                source_evidence_ids=tuple(row["evidence_ids"]),
-                card_type=row["card_type"],
-                show_type=row["show_type"],
-                series_group=row["series_group"],
-                relation_type=row["relation_type"],
-            )
-            for key, row in work_rows.items()
+        works, work_rows = _build_work_groups(work_groups)
+        episodes, work_assets, member_issues = _build_members(
+            admitted,
+            entry_work_keys=entry_work_keys,
+            source_file_ids=source_file_ids,
+            allocated_local_specials=allocated_local_specials,
+            allocated_unnumbered_specials=allocated_unnumbered_specials,
         )
-        relations: list[ResolvedWorkRelation] = []
-        for key, row in work_rows.items():
-            parent_key = _relation_work_key_from_row(row)
-            if not parent_key or parent_key == key:
-                continue
-            # 父 Work 可能只存在于已确认数据库；关系始终保留，由持久化层解析。
-            relation_type = row["relation_type"] or "related"
-            relations.append(
-                ResolvedWorkRelation(
-                    parent_work_key=parent_key,
-                    child_work_key=key,
-                    relation_type=relation_type,
-                )
-            )
-        episodes = tuple(
-            ResolvedEpisode(
-                episode_key=row["episode_key"],
-                work_key=row["work_key"],
-                local_season_number=row["local_season_number"],
-                local_episode_number=row["local_episode_number"],
-                absolute_episode_number=row["absolute_episode_number"],
-                season_kind=row["season_kind"],
-                episode_kind=row["episode_kind"],
-                special_number=row["special_number"],
-                display_title=row["display_title"],
-                edition_key=row["edition_key"],
-                asset_evidence_ids=tuple(row["asset_ids"]),
-            )
-            for row in episode_rows.values()
-        )
-        work_assets = tuple(
-            ResolvedWorkAsset(
-                work_key=work_key,
-                edition_key=edition_key,
-                asset_evidence_ids=tuple(asset_ids),
-            )
-            for (work_key, edition_key), asset_ids in work_asset_rows.items()
-        )
+        issues.extend(member_issues)
+        _assert_member_outcome(admitted, episodes, work_assets)
+        relations = _build_relations(work_rows)
         return ResolvedMediaGraph(
             works=works,
             episodes=episodes,

@@ -61,6 +61,11 @@ def test_cancelling_after_an_existing_target_is_seen_never_deletes_that_target(t
     initial = materializer.process(job_id, mirror_root)
     existing_target = initial.artifact_paths[0]
     with database.connect() as conn:
+        # C-006：mirror 现在同时写 artifact_references（FK ON DELETE RESTRICT），
+        # 重置夹具必须先解除引用再删除产物行；断言未变。
+        conn.execute(
+            "DELETE FROM artifact_references WHERE revision_id = ?", ("rev-mirror-cancel",)
+        )
         conn.execute("DELETE FROM artifacts WHERE revision_id = ?", ("rev-mirror-cancel",))
         conn.execute(
             "UPDATE jobs SET status = 'queued', cancel_requested = 0, finished_at = '' WHERE job_id = ?",

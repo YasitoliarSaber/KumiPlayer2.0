@@ -77,7 +77,8 @@ def test_materialize_skips_artwork_that_is_already_published(tmp_path, monkeypat
 
     first: list = []
     module._materialize_local_artwork(
-        config=_artwork_config(), work_dir=work_dir, target=target, metadata=dict(metadata),
+        config=_artwork_config(), work_id="work", mirror_root=work_dir.parent,
+        work_dir=work_dir, target=target, metadata=dict(metadata),
         episode_metadata={key: dict(value) for key, value in episode_metadata.items()},
         artifacts=first,
     )
@@ -89,7 +90,8 @@ def test_materialize_skips_artwork_that_is_already_published(tmp_path, monkeypat
     published = {(artifact_type, str(path)): digest for artifact_type, path, digest in first}
     second: list = []
     module._materialize_local_artwork(
-        config=_artwork_config(), work_dir=work_dir, target=target, metadata=dict(metadata),
+        config=_artwork_config(), work_id="work", mirror_root=work_dir.parent,
+        work_dir=work_dir, target=target, metadata=dict(metadata),
         episode_metadata={key: dict(value) for key, value in episode_metadata.items()},
         artifacts=second,
         published=published,
@@ -112,7 +114,8 @@ def test_materialize_redownloads_only_the_artifact_whose_file_is_gone(tmp_path, 
 
     first: list = []
     module._materialize_local_artwork(
-        config=_artwork_config(), work_dir=work_dir, target=target, metadata=dict(metadata),
+        config=_artwork_config(), work_id="work", mirror_root=work_dir.parent,
+        work_dir=work_dir, target=target, metadata=dict(metadata),
         episode_metadata={}, artifacts=first,
     )
     assert len(calls) == 2
@@ -123,7 +126,8 @@ def test_materialize_redownloads_only_the_artifact_whose_file_is_gone(tmp_path, 
     published = {(artifact_type, str(path)): digest for artifact_type, path, digest in first}
     second: list = []
     module._materialize_local_artwork(
-        config=_artwork_config(), work_dir=work_dir, target=target, metadata=dict(metadata),
+        config=_artwork_config(), work_id="work", mirror_root=work_dir.parent,
+        work_dir=work_dir, target=target, metadata=dict(metadata),
         episode_metadata={}, artifacts=second, published=published,
     )
 

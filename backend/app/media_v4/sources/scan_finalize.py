@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from app.media_v4.domain.models import ParsedFacts, SourceEvidence
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.sources.scanner import SourceScanCancelled
 
@@ -55,7 +56,7 @@ def draft_finalizer(
         # 大型目录树分批解析并持续上报进度，但编号归一化必须在完整来源批次
         # 上执行：128 条只是数据库写入边界，不能把同一季度切成两个语义批次。
         # 解析完成后再统一归一化并分批落盘；取消仍在每个解析/写入批次检查。
-        raw_parsed = []
+        raw_parsed: list[tuple[SourceEvidence, ParsedFacts]] = []
         total = len(evidence)
         if on_progress is not None:
             on_progress(stage="parsing", processed_count=0, total_count=total)

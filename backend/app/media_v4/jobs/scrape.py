@@ -7,10 +7,23 @@ import logging
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
+from app.media_v4.domain.identity import NON_IMPORTABLE_CONTENT_CLASSES
 from app.media_v4.domain.models import ResolvedWork
 from app.media_v4.jobs.completeness import assess_metadata_completeness
 from app.media_v4.jobs.control import cancel_requested, claim_running, heartbeat, mark_cancelled
+from app.media_v4.jobs.metadata import (
+    ARTIFACT_STATUS_COMPLETE,
+    ARTIFACT_STATUS_NOT_REQUIRED,
+    ARTIFACT_STATUS_PARTIAL,
+    ARTIFACT_STATUS_UNAVAILABLE,
+    EPISODE_MAPPING_COMPLETE,
+    EPISODE_MAPPING_NOT_APPLICABLE,
+    METADATA_SOURCE_LOCAL,
+    REFRESH_STATUS_NOT_REQUESTED,
+    finalize_metadata_statuses,
+)
 from app.media_v4.jobs.metadata_artifacts import publish_metadata_artifacts
 from app.media_v4.parsing.parser import show_type_from_import_family
 from app.media_v4.persistence.database import V4Database
@@ -18,6 +31,13 @@ from app.media_v4.persistence.repositories import V4Repository
 from app.media_v4.resolution.candidates import work_identity_title_inputs
 
 logger = logging.getLogger(__name__)
+
+
+#: 镜像层同样不物化的类别：这些条目不得进入刮削 target（"排除视频不在 target"）。
+def _is_excluded_episode(episode: dict) -> bool:
+    if str(episode.get("content_class") or "") in NON_IMPORTABLE_CONTENT_CLASSES:
+        return True
+    return episode.get("is_importable") is False
 
 
 def _claim_provider_binding(
@@ -38,13 +58,13 @@ def _claim_provider_binding(
     conn.execute(
         """
         INSERT INTO provider_bindings(work_id, provider, media_type, provider_id)
-        SELECT ?, ?, CASE WHEN work_type = 'series' THEN 'tv' ELSE 'movie' END, ?
+        SELECT ?, ?, ?, ?
         FROM works WHERE work_id = ?
         ON CONFLICT(work_id, provider, media_type) DO UPDATE SET
             provider_id = excluded.provider_id
         WHERE provider_bindings.provider_id = excluded.provider_id
         """,
-        (work_id, provider, provider_id, work_id),
+        (work_id, provider, media_type, provider_id, work_id),
     )
     row = conn.execute(
         "SELECT provider_id FROM provider_bindings "
@@ -56,6 +76,182 @@ def _claim_provider_binding(
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _episode_provenance(conn, revision_id: str, work_id: str) -> dict[str, dict]:
+    """从 confirmed 成员的 ParsedFacts 读回 C-004 编号/分类出处（只读，不重解析）。
+
+    同一 Episode 的多个证据必须一致才写入；不一致时留空，由上层按"未确认"处理，
+    而不是任取一个来源。
+    """
+
+    rows = conn.execute(
+        """
+        SELECT rb.episode_id AS episode_id, pf.content_class AS content_class,
+               pf.is_importable AS is_importable, pf.numbering_json AS numbering_json
+        FROM revision_bindings rb
+        JOIN revision_evidence re
+          ON re.revision_id = rb.revision_id AND re.evidence_id = rb.evidence_id
+        JOIN parsed_facts pf ON pf.parsed_fact_id = re.parsed_fact_id
+        WHERE rb.revision_id = ? AND rb.work_id = ? AND rb.episode_id IS NOT NULL
+        """,
+        (revision_id, work_id),
+    ).fetchall()
+    classes: dict[str, set[str]] = {}
+    importable: dict[str, set[bool]] = {}
+    origins: dict[str, set[str]] = {}
+    for row in rows:
+        episode_id = str(row["episode_id"] or "")
+        if not episode_id:
+            continue
+        classes.setdefault(episode_id, set()).add(str(row["content_class"] or "").strip())
+        importable.setdefault(episode_id, set()).add(bool(row["is_importable"]))
+        origin = ""
+        try:
+            payload = json.loads(str(row["numbering_json"] or "{}"))
+        except (TypeError, ValueError):
+            payload = {}
+        if isinstance(payload, dict):
+            origin = str(payload.get("absolute_origin") or "").strip()
+        if origin:
+            origins.setdefault(episode_id, set()).add(origin)
+    provenance: dict[str, dict] = {}
+    for episode_id in set(classes) | set(importable) | set(origins):
+        info: dict[str, Any] = {}
+        declared = classes.get(episode_id) or set()
+        if len(declared) == 1 and next(iter(declared)):
+            info["content_class"] = next(iter(declared))
+        flags = importable.get(episode_id) or set()
+        if len(flags) == 1:
+            info["is_importable"] = next(iter(flags))
+        declared_origins = origins.get(episode_id) or set()
+        if declared_origins:
+            if "explicit_absolute" in declared_origins:
+                info["absolute_origin"] = "explicit_absolute"
+            elif len(declared_origins) == 1:
+                info["absolute_origin"] = next(iter(declared_origins))
+        if info:
+            provenance[episode_id] = info
+    return provenance
+
+
+def _verified_season_offsets(conn, revision_id: str, work_id: str) -> dict:
+    """读回 confirmed resolved_json 里携带的已核验偏移规则（C-004）。
+
+    只有各成员一致携带同一份规则时才使用；任何缺失或冲突都返回空表，让映射层
+    退回"证据不足即 unmapped"。旧行没有这个字段是正常情况。
+    """
+
+    rows = conn.execute(
+        """
+        SELECT resolved_json FROM revision_bindings
+        WHERE revision_id = ? AND work_id = ? AND resolved_json NOT IN ('', '{}')
+        """,
+        (revision_id, work_id),
+    ).fetchall()
+    found: list[dict] = []
+    for row in rows:
+        try:
+            payload = json.loads(str(row["resolved_json"] or "{}"))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        offsets = payload.get("verified_season_offsets")
+        if isinstance(offsets, dict) and offsets:
+            found.append({str(key): value for key, value in offsets.items()})
+    if not found or any(item != found[0] for item in found[1:]):
+        return {}
+    return found[0]
+
+
+def _artifact_status(result: dict, *, has_provider_identity: bool) -> str:
+    """把产物执行结果归一化为 C-005 的 artifact_status。"""
+
+    state = str(result.get("artifact_state") or "").strip().casefold()
+    if state == "ready":
+        return ARTIFACT_STATUS_COMPLETE
+    if state == "degraded":
+        return ARTIFACT_STATUS_PARTIAL
+    if state == "incomplete":
+        return ARTIFACT_STATUS_UNAVAILABLE
+    return ARTIFACT_STATUS_UNAVAILABLE if has_provider_identity else ARTIFACT_STATUS_NOT_REQUIRED
+
+
+def _job_outcome(ready: bool, result: dict) -> str:
+    """一次业务尝试的结果；正常处理了远端不可用也可以 succeeded/unavailable。"""
+
+    if ready:
+        return (
+            "published"
+            if str(result.get("episode_mapping_status") or "") in {
+                EPISODE_MAPPING_COMPLETE,
+                EPISODE_MAPPING_NOT_APPLICABLE,
+            }
+            else "partial"
+        )
+    state = str(result.get("metadata_state") or "")
+    if state in {"source_unavailable", "failed"}:
+        return "unavailable"
+    return "skipped"
+
+
+def _reason_codes(result: dict) -> list[str]:
+    codes: list[str] = []
+    for value in (
+        result.get("reason_code"),
+        result.get("refresh_reason_code"),
+        *(
+            str(item.get("reason_code") or "")
+            for item in result.get("season_results") or []
+            if isinstance(item, dict)
+        ),
+        *(result.get("unmapped_reason_codes") or []),
+    ):
+        code = str(value or "").strip()
+        if code and code not in codes:
+            codes.append(code)
+    return codes
+
+
+def _job_result_payload(
+    result: dict,
+    *,
+    ready: bool,
+    produced_artifact_ids: list[str],
+    has_provider_identity: bool,
+) -> dict:
+    """写入 jobs.result_json 的诚实状态集合（C-005）。"""
+
+    metadata_source = str(result.get("metadata_source") or "").strip()
+    if not metadata_source:
+        metadata_source = METADATA_SOURCE_LOCAL
+    refresh_status = str(result.get("refresh_status") or "").strip()
+    if not refresh_status:
+        refresh_status = REFRESH_STATUS_NOT_REQUESTED
+    return {
+        "outcome": _job_outcome(ready, result),
+        "identity_status": str(result.get("identity_status") or ""),
+        "work_metadata_status": str(result.get("work_metadata_status") or ""),
+        "episode_mapping_status": str(result.get("episode_mapping_status") or ""),
+        "mapped_count": int(result.get("mapped_count") or 0),
+        "total_count": int(result.get("total_count") or 0),
+        "unmapped_episode_ids": [str(item) for item in result.get("unmapped_episode_ids") or []],
+        "unmapped_reasons": [
+            dict(item) for item in result.get("unmapped_reasons") or [] if isinstance(item, dict)
+        ],
+        "artifact_status": _artifact_status(result, has_provider_identity=has_provider_identity),
+        "refresh_status": refresh_status,
+        "refresh_reason_code": str(result.get("refresh_reason_code") or ""),
+        "retryable": bool(result.get("retryable")),
+        "metadata_source": metadata_source,
+        "metadata_snapshot_id": str(result.get("metadata_snapshot_id") or ""),
+        "metadata_refresh_error": str(result.get("metadata_refresh_error") or ""),
+        "snapshot_id": str(result.get("metadata_snapshot_id") or ""),
+        "retained_snapshot_id": str(result.get("retained_snapshot_id") or ""),
+        "produced_artifact_ids": list(produced_artifact_ids),
+        "reason_codes": _reason_codes(result),
+    }
 
 
 def _retain_successful_details(previous: dict, current: dict, target: dict) -> dict:
@@ -177,13 +373,15 @@ class V4ScrapeService:
                 """
                 UPDATE jobs
                 SET status = 'queued', cancel_requested = 0, last_error = '',
-                    heartbeat_at = '', started_at = '', finished_at = '', updated_at = ?
+                    heartbeat_at = '', started_at = '', finished_at = '', updated_at = ?,
+                    result_json = '{"explicit_refresh":true}'
                 WHERE job_id = ? AND status != 'running'
                 """,
                 (now, job["job_id"]),
             )
             if updated.rowcount != 1:
                 raise RuntimeError("该作品正在获取媒体信息")
+            conn.execute("INSERT OR REPLACE INTO v4_meta(key,value) VALUES ('library_projection_dirty',?)", (now,))
             refreshed = conn.execute(
                 "SELECT * FROM jobs WHERE job_id = ?", (job["job_id"],)
             ).fetchone()
@@ -246,6 +444,23 @@ class V4ScrapeService:
             "artifact_reasons": [str(item) for item in (metadata.get("artifact_reasons") or [])],
         }
 
+    def _cancel(self, job_id: str, reason: str) -> None:
+        """记录取消原因并落 cancelled 终态。
+
+        C-005：取消是执行终态，迟到的 Provider 结果不得覆盖它；这里只做状态转换，
+        不删除任何产物（产物清理必须走受控维护流程）。
+        """
+
+        from app.media_v4.jobs.control import now
+
+        mark_cancelled(self.database, job_id)
+        with self.database.connect() as conn:
+            conn.execute(
+                "UPDATE jobs SET last_error = ?, updated_at = ? "
+                "WHERE job_id = ? AND status = 'cancelled'",
+                (f"cancelled:{reason}", now(), job_id),
+            )
+
     def process(
         self,
         job_id: str,
@@ -262,14 +477,14 @@ class V4ScrapeService:
             if job["status"] == "cancelled" or bool(job["cancel_requested"]):
                 # 同来源的新 revision 已确认后，旧任务可能刚好迟到。它已经失去活动
                 # 身份，按取消幂等收口即可，不能再触发 Provider 冲突或覆盖当前资料。
-                mark_cancelled(self.database, job_id)
+                self._cancel(job_id, "cancel_before_start")
                 return
             revision = conn.execute(
                 "SELECT status FROM import_revisions WHERE revision_id = ?",
                 (job["revision_id"],),
             ).fetchone()
             if revision is not None and revision["status"] == "superseded":
-                mark_cancelled(self.database, job_id)
+                self._cancel(job_id, "revision_superseded")
                 return
             if revision is None or revision["status"] != "confirmed":
                 raise RuntimeError("只有 confirmed revision 才能执行刮削")
@@ -283,7 +498,7 @@ class V4ScrapeService:
                 return
         if not claim_running(self.database, job_id):
             if cancel_requested(self.database, job_id):
-                mark_cancelled(self.database, job_id)
+                self._cancel(job_id, "cancel_requested")
                 return
             raise RuntimeError("刮削任务已由其他执行器领取")
         with self.database.connect() as conn:
@@ -301,10 +516,20 @@ class V4ScrapeService:
                     work_key=str(job["work_id"]),
                     preferred_title=str(target.get("preferred_title") or ""),
                     year=target.get("year"),
-                    media_type="movie" if target.get("work_type") == "movie" else "tv",
+                    # 未确认类型的作品不得当成 tv/movie 参与标题证据；这里只传递
+                    # 已确认类型，未知一律不对应在线身份。
+                    media_type={
+                        "movie": "movie",
+                        "series": "tv",
+                    }.get(str(target.get("work_type") or ""), "unknown"),
                 ),
                 facts,
             )[:8]
+            # C-004：文件名提示与结构化提示矛盾时暂停自动 Provider 绑定（fetch 层不再搜索）。
+            target["provider_hint_conflict"] = any(
+                "provider_hint_conflict" in tuple(getattr(fact, "reasons", ()) or ())
+                for fact in facts
+            )
             if not str(target.get("show_type") or "").strip():
                 import_families = {
                     str(row["import_family"] or "").strip().casefold()
@@ -332,7 +557,7 @@ class V4ScrapeService:
                     (job["work_id"],),
                 ).fetchall()
             ]
-            target["episodes"] = [
+            episode_rows = [
                 dict(row)
                 for row in conn.execute(
                     """
@@ -355,16 +580,78 @@ class V4ScrapeService:
                     (job["work_id"], job["revision_id"]),
                 ).fetchall()
             ]
+            provenance = _episode_provenance(conn, str(job["revision_id"]), str(job["work_id"]))
+            target["episodes"] = [
+                {**episode, **provenance.get(str(episode.get("episode_id") or ""), {})}
+                for episode in episode_rows
+                # “排除视频不在 target”：附属/辅助内容不参与编号映射，
+                # 也不生成任何在线资料请求。
+                if not _is_excluded_episode(
+                    {**episode, **provenance.get(str(episode.get("episode_id") or ""), {})}
+                )
+            ]
+            # 已核验偏移规则只从 confirmed resolved_json 读回；旧行没有这个字段时
+            # 映射层退回“证据不足即 unmapped”，不自行推断。
+            verified_offsets = _verified_season_offsets(
+                conn, str(job["revision_id"]), str(job["work_id"]),
+            )
+            if verified_offsets:
+                target["verified_season_offsets"] = verified_offsets
 
+        from app.media_v4.persistence.metadata_lifecycle import (
+            attach_snapshot_refs,
+            identity_signature,
+            publish_snapshot,
+            select_applicable_snapshot,
+        )
+        with self.database.connect() as conn:
+            retained = select_applicable_snapshot(conn, str(job['revision_id']), str(job['work_id']))
+            expected_identity = identity_signature(conn, str(job['work_id']))
+        explicit_refresh = bool(json.loads(job['result_json'] or '{}').get('explicit_refresh'))
+        if retained and retained['covers_members'] and not explicit_refresh:
+            with self.database.connect() as conn:
+                conn.execute('BEGIN IMMEDIATE')
+                live = conn.execute(
+                    "SELECT j.attempts FROM jobs j JOIN import_revisions ir ON ir.revision_id=j.revision_id "
+                    "WHERE j.job_id=? AND j.status='running' AND j.cancel_requested=0 AND ir.status='confirmed'",
+                    (job_id,),
+                ).fetchone()
+                if live is None or live['attempts'] != job['attempts']:
+                    return
+                attach_snapshot_refs(conn, job['revision_id'], job['work_id'], retained)
+                payload = {**retained['metadata'], 'outcome': 'reused', 'refresh_status': 'not_requested',
+                           'snapshot_id': retained['snapshot_id'], 'metadata_source': 'retained'}
+                conn.execute("UPDATE jobs SET status='succeeded',result_json=?,finished_at=?,updated_at=? WHERE job_id=?",
+                             (json.dumps(payload, ensure_ascii=False), _now(), _now(), job_id))
+                conn.execute("INSERT OR REPLACE INTO v4_meta(key,value) VALUES ('library_projection_dirty',?)", (_now(),))
+            return
+        candidate_snapshot_id = str(uuid.uuid4())
         try:
             if cancel_requested(self.database, job_id):
-                mark_cancelled(self.database, job_id)
+                self._cancel(job_id, "cancel_requested")
                 return
-            result = provider(target)
+            request_target = target
+            if retained and not explicit_refresh:
+                covered = {str(m['episode_id']) for m in retained['metadata'].get('episode_mappings', [])}
+                request_target = {**target, 'episodes': [e for e in target['episodes'] if str(e['episode_id']) not in covered],
+                                  'retained_work_metadata': retained['metadata']}
+            result = provider(request_target)
+            if retained and not explicit_refresh and result.get('metadata_state') == 'ready':
+                old = retained['metadata']
+                if (result.get('provider'), str(result.get('provider_id'))) == (old.get('provider'), str(old.get('provider_id'))):
+                    new_mappings = {str(m['episode_id']): m for m in result.get('episode_mappings', [])}
+                    mappings = {str(m['episode_id']): m for m in old.get('episode_mappings', [])}
+                    mappings.update(new_mappings)
+                    result = {**old, **result, 'episode_mappings': list(mappings.values()),
+                              'composed_from_snapshot_id': retained['snapshot_id']}
+            produced_artifact_ids: list[str] = []
             heartbeat(self.database, job_id)
             if cancel_requested(self.database, job_id):
-                mark_cancelled(self.database, job_id)
+                self._cancel(job_id, "cancel_requested")
                 return
+            # 统一补齐 C-005 诚实状态：Provider stub / 旧实现未给出的字段在这里归一，
+            # 映射计数按当前成员重算，缺项不会被折算成服务故障。
+            result = finalize_metadata_statuses(target, result)
             provider_name = str(result.get("provider") or "").strip()
             provider_id = str(result.get("provider_id") or "").strip()
             metadata_state = str(result.get("metadata_state") or "").strip()
@@ -428,16 +715,14 @@ class V4ScrapeService:
             identity_ready = has_provider_identity
             if identity_ready:
                 binding_media_type = (
-                    "tv" if str(target.get("work_type") or "") == "series" else "movie"
+                    {'series': 'tv', 'movie': 'movie'}.get(str(target.get('work_type') or ''), 'unknown')
                 )
                 with self.database.connect() as conn:
-                    identity_ready = _claim_provider_binding(
-                        conn,
-                        work_id=str(job["work_id"]),
-                        provider=provider_name,
-                        media_type=binding_media_type,
-                        provider_id=provider_id,
-                    )
+                    existing = conn.execute(
+                        'SELECT provider_id FROM provider_bindings WHERE work_id=? AND provider=? AND media_type=?',
+                        (job['work_id'], provider_name, binding_media_type),
+                    ).fetchone()
+                    identity_ready = binding_media_type != 'unknown' and (existing is None or str(existing['provider_id']) == provider_id)
                 if not identity_ready:
                     ready = False
                     result = {
@@ -447,16 +732,21 @@ class V4ScrapeService:
                         "reason_code": "local_identity_mismatch",
                     }
             if mirror_root and job["work_id"] and ready:
-                publish_metadata_artifacts(
-                    self.database,
-                    revision_id=job["revision_id"],
-                    work_id=job["work_id"],
-                    target=target,
-                    metadata=result,
-                    mirror_root=mirror_root,
-                    # 图片下载可能持续数分钟：必须持续心跳，否则会被失联回收判为
-                    # failed（随后又被本函数的终态写入覆盖成 succeeded，状态自相矛盾）。
-                    on_progress=lambda: heartbeat(self.database, job_id),
+                result = {**result, 'metadata_snapshot_id': candidate_snapshot_id}
+                produced_artifact_ids = list(
+                    publish_metadata_artifacts(
+                        self.database,
+                        revision_id=job["revision_id"],
+                        work_id=job["work_id"],
+                        target=target,
+                        metadata=result,
+                        mirror_root=mirror_root,
+                        snapshot_id=candidate_snapshot_id,
+                        # 图片下载可能持续数分钟：必须持续心跳，否则会被失联回收判为
+                        # failed（随后又被本函数的终态写入覆盖成 succeeded，状态自相矛盾）。
+                        on_progress=lambda: heartbeat(self.database, job_id),
+                    )
+                    or ()
                 )
                 # P-001 7.7 R3：完整性是 ready 的硬门控。
                 complete, reasons = assess_metadata_completeness(
@@ -516,6 +806,29 @@ class V4ScrapeService:
                 mark_cancelled(self.database, job_id)
                 return
             with self.database.connect() as conn:
+                conn.execute('BEGIN IMMEDIATE')
+                live = conn.execute(
+                    "SELECT j.attempts FROM jobs j JOIN import_revisions ir ON ir.revision_id=j.revision_id "
+                    "WHERE j.job_id=? AND j.status='running' AND j.cancel_requested=0 AND ir.status='confirmed'",
+                    (job_id,),
+                ).fetchone()
+                if live is None or live['attempts'] != job['attempts']:
+                    return
+                if identity_signature(conn, job['work_id']) != expected_identity:
+                    raise ValueError('metadata identity changed before publication')
+                if identity_ready and not _claim_provider_binding(
+                    conn, work_id=job['work_id'], provider=provider_name,
+                    media_type=binding_media_type, provider_id=provider_id,
+                ):
+                    raise ValueError('provider identity changed before publication')
+                if ready and result.get('artifact_state') == 'ready':
+                    publish_snapshot(conn, revision_id=job['revision_id'], work_id=job['work_id'],
+                                     snapshot_id=candidate_snapshot_id, metadata=result,
+                                     artifact_ids=produced_artifact_ids)
+                    result = {**result, 'metadata_snapshot_id': candidate_snapshot_id, 'metadata_source': 'current'}
+                elif retained:
+                    result = {**result, 'retained_snapshot_id': retained['snapshot_id'],
+                              'metadata_source': 'retained', 'refresh_status': 'failed'}
                 conn.execute(
                     """
                     INSERT INTO scrape_bindings(
@@ -587,9 +900,27 @@ class V4ScrapeService:
                             ),
                         )
                 updated = conn.execute(
-                    "UPDATE jobs SET status = 'succeeded', updated_at = ?, heartbeat_at = ?, finished_at = ?, last_error = '' "
-                    "WHERE job_id = ? AND status = 'running'",
-                    (now, now, now, job_id),
+                    """
+                    UPDATE jobs
+                    SET status = 'succeeded', updated_at = ?, heartbeat_at = ?, finished_at = ?,
+                        last_error = '', result_json = ?
+                    WHERE job_id = ? AND status = 'running'
+                    """,
+                    (
+                        now,
+                        now,
+                        now,
+                        json.dumps(
+                            _job_result_payload(
+                                result,
+                                ready=ready,
+                                produced_artifact_ids=produced_artifact_ids,
+                                has_provider_identity=has_provider_identity,
+                            ),
+                            ensure_ascii=False,
+                        ),
+                        job_id,
+                    ),
                 )
                 if updated.rowcount != 1:
                     # 守卫必需：图片下载可能长达数分钟，期间任务会被"失联回收"判为
@@ -614,6 +945,7 @@ class V4ScrapeService:
                     "WHERE job_id = ? AND status = 'running'",
                     (str(exc), _now(), _now(), _now(), job_id),
                 )
+                conn.execute("INSERT OR REPLACE INTO v4_meta(key,value) VALUES ('library_projection_dirty',?)", (_now(),))
             raise
 
     def list_bindings(self, revision_id: str) -> list[dict]:

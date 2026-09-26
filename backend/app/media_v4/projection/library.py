@@ -130,9 +130,9 @@ class V4LibraryProjection:
                         w.year,
                         w.show_type,
                         w.card_type,
-                        CASE WHEN w.work_type = 'series' THEN 'tv' ELSE 'movie' END AS media_type,
+                        CASE WHEN w.work_type = 'series' THEN 'tv' WHEN w.work_type = 'movie' THEN 'movie' ELSE 'unknown' END AS media_type,
                         latest_scrapes.revision_id AS revision_id,
-                        CASE WHEN w.work_type = 'series' THEN (
+                        CASE WHEN w.work_type != 'movie' THEN (
                             SELECT COUNT(DISTINCT rb.episode_id)
                             FROM revision_bindings rb
                             JOIN import_revisions ir ON ir.revision_id = rb.revision_id
@@ -165,7 +165,7 @@ class V4LibraryProjection:
                                 JOIN import_revisions ir ON ir.revision_id = rb.revision_id
                             JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = ''
                                 JOIN assets a ON a.asset_id = rb.asset_id
-                                JOIN source_evidence se ON se.evidence_id = a.evidence_id
+                                JOIN source_evidence se ON se.evidence_id = rb.evidence_id
                                 WHERE rb.work_id = w.work_id AND ir.status = 'confirmed'
                             )
                         ), '') AS source_providers,
@@ -279,6 +279,11 @@ class V4LibraryProjection:
                     else:
                         state = "waiting_metadata"
                     metadata["metadata_state"] = state
+                    from app.media_v4.persistence.metadata_lifecycle import referenced_metadata
+
+                    retained_metadata = referenced_metadata(conn, str(row['work_id']))
+                    if retained_metadata is not None:
+                        metadata = {**metadata, **retained_metadata}
                     show_type = str(row["show_type"] or "")
                     card_type = str(row["card_type"] or "")
                     metadata["show_type"] = show_type

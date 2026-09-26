@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 22
+V4_SCHEMA_VERSION = 23
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -802,6 +802,18 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
     create_v21_structures(conn)
     create_v22_structures(conn)
 
+    migrate_schema_v22_to_v23(conn)
+
+
+def migrate_schema_v22_to_v23(conn: sqlite3.Connection) -> None:
+    """新合同使用显式身份键；旧坐标唯一索引仅保护 legacy 行，不合并未知集。"""
+    conn.execute("DROP INDEX IF EXISTS uq_v4_episode_local_identity")
+    conn.execute(
+        "CREATE UNIQUE INDEX uq_v4_episode_local_identity ON episodes("
+        "work_id, season_id, COALESCE(local_episode_number, -1), "
+        "COALESCE(special_number, -1), episode_kind) WHERE identity_key = ''"
+    )
+
 
 def create_tree_scan_validation(conn: sqlite3.Connection) -> None:
     """创建目录树扫描验证表（v5 新增），供 v4→v5 迁移复用。"""
@@ -1593,17 +1605,18 @@ def create_v22_structures(conn: sqlite3.Connection) -> None:
         """
     )
     # 只对 identity_key 非空的新季校验：旧 regular/0 行保持原样可读，
-    # 新正片不得再生成 0 季，未分季必须真的是 NULL。
+    # 新正片不得再生成 0 季，未分季必须真的是 NULL；special 等其他类别不在此约束。
+    conn.execute("DROP TRIGGER IF EXISTS v4_season_identity_kind_guard_insert")
+    conn.execute("DROP TRIGGER IF EXISTS v4_season_identity_kind_guard_update")
     conn.execute(
         """
         CREATE TRIGGER IF NOT EXISTS v4_season_identity_kind_guard_insert
         BEFORE INSERT ON seasons
-        WHEN NEW.identity_key != '' AND NOT (
-            (NEW.season_kind = 'unassigned' AND NEW.local_season_number IS NULL)
+        WHEN NEW.identity_key != '' AND (
+            (NEW.season_kind = 'unassigned' AND NEW.local_season_number IS NOT NULL)
             OR (
                 NEW.season_kind = 'regular'
-                AND NEW.local_season_number IS NOT NULL
-                AND NEW.local_season_number > 0
+                AND (NEW.local_season_number IS NULL OR NEW.local_season_number <= 0)
             )
         )
         BEGIN
@@ -1615,12 +1628,11 @@ def create_v22_structures(conn: sqlite3.Connection) -> None:
         """
         CREATE TRIGGER IF NOT EXISTS v4_season_identity_kind_guard_update
         BEFORE UPDATE ON seasons
-        WHEN NEW.identity_key != '' AND NOT (
-            (NEW.season_kind = 'unassigned' AND NEW.local_season_number IS NULL)
+        WHEN NEW.identity_key != '' AND (
+            (NEW.season_kind = 'unassigned' AND NEW.local_season_number IS NOT NULL)
             OR (
                 NEW.season_kind = 'regular'
-                AND NEW.local_season_number IS NOT NULL
-                AND NEW.local_season_number > 0
+                AND (NEW.local_season_number IS NULL OR NEW.local_season_number <= 0)
             )
         )
         BEGIN

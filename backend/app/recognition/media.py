@@ -1387,8 +1387,11 @@ def _check_sps(filename: str, parent_dirs: list[str]) -> MediaGuess | None:
             reasons=["文件名包含 β 特殊集标记，识别为 Special"],
         )
 
-    # 检查半集（11.5, 14.5 等）
-    m = re.search(r"(\d+)\.5", filename)
+    # 检查半集（11.5, 14.5 等）。
+    # 半集只认**完整编号位置**的 token：`[11.5]`、`E11.5`、`第11.5集`、` - 11.5`。
+    # 旧实现用裸 ``(\d+)\.5``，把发布参数 `H264.50fps` 里的 `264.5` 当成半集，
+    # 整集正片被错误排除（F-007）。
+    m = re.search(r"(?:^|[^A-Za-z0-9]|[EePp])(\d{1,3})\.5(?![0-9])", filename)
     if m:
         half_ep = float(m.group(1) + ".5")
         guess = MediaGuess(

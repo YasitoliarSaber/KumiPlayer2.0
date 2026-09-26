@@ -59,7 +59,7 @@ type WorkDetailState =
 
 function seasonLabel(season: V4WorkExecutionDetail['seasons'][number]): string {
   if (season.season_kind === 'special') return '特别篇'
-  return season.season_number > 0 ? `第 ${season.season_number} 季` : (season.title || '未分季')
+  return season.season_number != null && season.season_number > 0 ? `第 ${season.season_number} 季` : (season.title || '未分季')
 }
 
 type SeasonResult = NonNullable<NonNullable<V4WorkExecutionDetail['scrape']>['season_results']>[number]
@@ -169,10 +169,11 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
     || scrapeHasContent
   ))
   const orderedSeasons = [...detailSeasons].sort((left, right) => {
+      if ((left.season_number == null) !== (right.season_number == null)) return left.season_number == null ? 1 : -1
       const leftSpecial = left.season_kind === 'special'
       const rightSpecial = right.season_kind === 'special'
       if (leftSpecial !== rightSpecial) return leftSpecial ? 1 : -1
-      return left.season_number - right.season_number
+      return (left.season_number ?? 0) - (right.season_number ?? 0)
     })
   const detailPanelId = `media-v4-work-detail-${unit.work_id.replace(/[^a-zA-Z0-9_-]/g, '-')}`
   return (

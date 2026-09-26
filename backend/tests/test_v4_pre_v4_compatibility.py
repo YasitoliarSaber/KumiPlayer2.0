@@ -47,9 +47,10 @@ def _evidence(index: int, relative_path: str, *, provider: str = "pan115") -> So
             1,
         ),
         (
+            # C-004：文件级显式季号优先于目录；冲突记录在 numbering.basis。
             "刮削好的动画/奇巧计程车/Season 1/"
             "奇巧出租车 - S02E01 - 奇怪的司机.mkv",
-            1,
+            2,
             1,
         ),
     ),
@@ -136,8 +137,9 @@ def test_pre_v4_continuous_absolute_numbers_are_rebased_inside_explicit_later_se
 
     normalized = normalize_batch_parsed_facts(entries)
 
+    # C-004：取消"最小编号 - 1"的减偏移推断，S02E13/E14/E15 保持 13/14/15。
     assert [facts.season_candidate for _item, facts in normalized] == [2, 2, 2]
-    assert [facts.episode_candidate for _item, facts in normalized] == [1, 2, 3]
+    assert [facts.episode_candidate for _item, facts in normalized] == [13, 14, 15]
 
 
 def test_pre_v4_single_file_anime_movie_is_not_forced_into_a_tv_season():

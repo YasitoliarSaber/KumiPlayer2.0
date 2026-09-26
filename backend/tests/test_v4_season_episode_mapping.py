@@ -65,6 +65,13 @@ def test_special_episode_is_not_simulated_by_clearing_all_episode_identity():
 
 
 def test_conflicting_absolute_numbers_do_not_split_a_local_episode():
+    """C-003/CHECK-004C：同一 Local 出现互斥绝对号时拆为独立 provisional 条目。
+
+    旧期望是合并成一个 Episode 再任取一个绝对号；用户目标明确禁止“合并后任取”
+    （C-003：拆为各 SourceFile 的 provisional Episode 并提示冲突，本地编号不再被
+    绝对号替换）。因此两个文件各自保留证据与未定位位子，冲突如实上报。
+    """
+
     from app.media_v4.resolution.resolver import MediaResolver
 
     graph = MediaResolver().resolve(
@@ -74,8 +81,15 @@ def test_conflicting_absolute_numbers_do_not_split_a_local_episode():
         ]
     )
 
-    assert len(graph.episodes) == 1
-    assert graph.episodes[0].asset_evidence_ids == ("ev-abs-a", "ev-abs-b")
+    assert len(graph.episodes) == 2
+    assert {episode.asset_evidence_ids for episode in graph.episodes} == {
+        ("ev-abs-a",),
+        ("ev-abs-b",),
+    }
+    # 互斥绝对号不能成为身份：两个条目都退回未定位锚点，而不是任取 13 或 14。
+    assert all(episode.season_kind == "unassigned" for episode in graph.episodes)
+    assert all(episode.local_season_number is None for episode in graph.episodes)
+    assert all(episode.absolute_episode_number is None for episode in graph.episodes)
     assert any(issue.code == "absolute_episode_conflict" for issue in graph.issues)
 
 
