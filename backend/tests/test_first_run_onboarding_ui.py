@@ -13,10 +13,12 @@ def test_first_run_page_contains_required_zero_start_steps():
     page = (ROOT / "src" / "pages" / "FirstRunSetup.tsx").read_text(encoding="utf-8")
     for text in ["内置播放器", "镜像目录", "媒体来源", "验证并完成", "不会移动或改名你的原始文件"]:
         assert text in page
-    # 首次引导不再要求用户选择外部 MPV 路径，改为自动检测内置播放器
+    # 不要求重新填写播放器路径；重新引导可以读取现有外部播放器配置。
     assert "pickFolder" in page
     assert "getMpvRuntime" in page
-    assert "mpv_path" not in page
+    assert "update('mpv_path'" not in page
+    assert "update('external_mpv_path'" not in page
+    assert 'label="MPV 路径"' not in page
 
 
 def test_first_run_no_longer_asks_user_to_pick_external_mpv():
@@ -43,7 +45,8 @@ def test_first_run_reflects_v4_source_flow_without_runtime_metadata():
     page = (ROOT / "src" / "pages" / "FirstRunSetup.tsx").read_text(encoding="utf-8")
 
     assert "OpenList 可在完成后添加" in page
-    assert "并不替代首次配置的可访问媒体根目录" in page
+    assert ("并不替代首次配置的可访问媒体根目录" in page
+            or "首次设置仍需一个本地或已挂载的媒体目录" in page)
     assert "mpvStatus.version" not in page
     assert "mpvStatus.architecture" not in page
     assert "distribution_status" not in page

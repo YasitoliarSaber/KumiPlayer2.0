@@ -45,12 +45,18 @@ def test_responsive_css_does_not_override_virtual_poster_grid_columns():
 
 def test_first_run_setup_explains_current_runtime_requirements():
     page = (ROOT / "src/pages/FirstRunSetup.tsx").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert "Windows 10 / 11" in page
-    assert "WebView2" in page
-    assert "后端、内置播放器和功能插件随软件安装" in page
-    assert "内置干净 MPV" in page
-    assert "安装器会联网补齐" in page
+    # 系统/分发要求保留在说明文档；引导页用实际检测决定能否继续，
+    # 不强制恢复已经简化掉的安装实现说明。
+    assert "Windows 10 / 11" in readme
+    assert "WebView2" in readme
+    assert "getMpvRuntime" in page
+    assert "mpvStatus?.available" in page
+    assert "mpvStatus.manifest_valid" in page
+    assert "mpvStatus.files_valid" in page
+    assert "mpvStatus.configuration_available" in page
+    assert "mpvReady" in page
     assert "Python 3.12" not in page
 
 
