@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import posixpath
+import re
 from dataclasses import dataclass
 
 from app.media_v4.domain.models import SourceEvidence
+from app.media_v4.sources.file_identity import LocatorError, canonical_source_locator
+
+_DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
 
 
 def provider_to_source(provider_id: str) -> str:
@@ -43,8 +46,19 @@ class SourceEntry:
 
 
 def _normalize_relative_path(value: str) -> str:
-    normalized = (value or "").replace("\\", "/")
-    return posixpath.normpath(normalized).lstrip("/") if normalized else ""
+    """词法规范化相对路径：保留合法相邻同名段，不触盘。
+
+    ``.`` 段消去；`..` 逃出所选根时拒绝（不再用 ``normpath().lstrip('/')``
+    掩掉越界）；盘符/UNC 开头的绝对路径属于来源根不匹配，直接拒绝。
+    """
+
+    text = (value or "").strip()
+    if not text:
+        return ""
+    normalized = text.replace("\\", "/")
+    if _DRIVE_PREFIX.match(normalized) or normalized.startswith("//"):
+        raise LocatorError("absolute_relative", f"相对路径字段收到绝对定位符: {value}")
+    return canonical_source_locator(normalized.lstrip("/"))
 
 
 def to_source_evidence(entry: SourceEntry) -> SourceEvidence:

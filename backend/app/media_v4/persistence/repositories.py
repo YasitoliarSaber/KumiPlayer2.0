@@ -6,6 +6,11 @@ import json
 from contextlib import nullcontext
 from dataclasses import replace
 
+from app.media_v4.domain.identity import (
+    NumberingEvidence,
+    decision_trace_json,
+    load_decision_traces,
+)
 from app.media_v4.domain.models import ParsedFacts, SourceEvidence
 from app.media_v4.persistence.database import V4Database
 
@@ -289,6 +294,10 @@ class V4Repository:
             int(facts.is_auxiliary),
             json.dumps(facts.reasons, ensure_ascii=False),
             json.dumps(facts.warnings, ensure_ascii=False),
+            facts.content_class,
+            facts.classification_state,
+            decision_trace_json(facts.decision_trace),
+            facts.numbering.to_json(),
         )
 
     def save_parsed_facts_bulk(self, facts: list[ParsedFacts]) -> None:
@@ -323,10 +332,12 @@ class V4Repository:
                     episode_candidate, absolute_episode_candidate, special_candidate,
                     episode_range_json, special_number, tmdb_hint_id, tmdb_hint_type,
                     release_group, edition_tags_json, quality_tags_json, confidence,
-                    needs_review, is_importable, is_auxiliary, reasons_json, warnings_json
+                    needs_review, is_importable, is_auxiliary, reasons_json, warnings_json,
+                    content_class, classification_state, decision_trace_json, numbering_json
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?
                 )
                 """,
                 [self._parsed_facts_values(item) for item in facts],
@@ -385,6 +396,10 @@ class V4Repository:
             is_auxiliary=bool(row["is_auxiliary"]),
             reasons=tuple(json.loads(row["reasons_json"])),
             warnings=tuple(json.loads(row["warnings_json"])),
+            content_class=row["content_class"],
+            classification_state=row["classification_state"],
+            decision_trace=load_decision_traces(row["decision_trace_json"]),
+            numbering=NumberingEvidence.from_json(row["numbering_json"]),
         )
 
     def get_parsed_facts(self, parsed_fact_id: str, conn=None) -> ParsedFacts:

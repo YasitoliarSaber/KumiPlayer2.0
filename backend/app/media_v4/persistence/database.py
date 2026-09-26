@@ -11,18 +11,6 @@ from pathlib import Path
 from app.media_v4.persistence.schema_v4 import (
     V4_SCHEMA_VERSION,
     create_schema_v4,
-    create_v6_structures,
-    create_v8_structures,
-    create_v9_structures,
-    create_v10_structures,
-    create_v13_structures,
-    create_v15_structures,
-    create_v16_structures,
-    create_v17_structures,
-    create_v18_structures,
-    create_v19_structures,
-    create_v20_structures,
-    create_v21_structures,
     migrate_schema_v4_to_v5,
     migrate_schema_v5_to_v6,
     migrate_schema_v6_to_v7,
@@ -40,6 +28,7 @@ from app.media_v4.persistence.schema_v4 import (
     migrate_schema_v18_to_v19,
     migrate_schema_v19_to_v20,
     migrate_schema_v20_to_v21,
+    migrate_schema_v21_to_v22,
 )
 
 
@@ -107,6 +96,11 @@ class V4Database:
             "playback_history",
             "bangumi_matches",
             "bangumi_episode_sync",
+            "source_files",
+            "source_file_observations",
+            "metadata_snapshots",
+            "revision_metadata_refs",
+            "artifact_references",
         }
     )
     REQUIRED_TRIGGERS = frozenset(
@@ -124,6 +118,10 @@ class V4Database:
             "v4_confirmed_override_delete_guard",
             "v4_confirmed_revision_snapshot_guard",
             "v4_confirmed_revision_delete_guard",
+            "v4_source_file_observations_update_guard",
+            "v4_metadata_snapshot_update_guard",
+            "v4_season_identity_kind_guard_insert",
+            "v4_season_identity_kind_guard_update",
         }
     )
 
@@ -154,7 +152,7 @@ class V4Database:
         使用字面量；写回后立即读回校验，版本升级时若字面量未同步会立即失败。
         """
 
-        conn.execute("PRAGMA user_version = 21")
+        conn.execute("PRAGMA user_version = 22")
         written = int(conn.execute("PRAGMA user_version").fetchone()[0])
         if written != V4_SCHEMA_VERSION:
             raise RuntimeError(
@@ -272,6 +270,32 @@ class V4Database:
                 except Exception:
                     conn.rollback()
                     raise
+                version = self.CURRENT_SCHEMA_VERSION
+            if version == 21 and self._has_user_tables(conn):
+                # v21 → v22：新增来源文件身份、未知值合同、成功资料代次与
+                # 产物引用；只有 seasons 是等值重建，其余均为加法。
+                # 外键校验与物理结构校验都在同一事务内，失败回滚到旧版本。
+                conn.execute("PRAGMA foreign_keys = OFF")
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    migrate_schema_v21_to_v22(conn)
+                    if conn.execute("PRAGMA foreign_key_check").fetchall():
+                        raise V4ResetRequiredError(
+                            "数据库声明为 V4 但导入合同结构迁移后存在外键违约，需要一次性重置"
+                        )
+                    self._validate_physical_schema(conn)
+                    self._set_user_version(conn)
+                    conn.commit()
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    raise V4ResetRequiredError(
+                        "数据库声明为 V4 但导入合同结构不完整，需要一次性重置；" + str(exc)
+                    ) from exc
+                except Exception:
+                    conn.rollback()
+                    raise
+                finally:
+                    conn.execute("PRAGMA foreign_keys = ON")
                 version = self.CURRENT_SCHEMA_VERSION
             if version == 18 and self._has_user_tables(conn):
                 # v18 → v19：新增扫描目录 frontier（断点续扫状态）；加法迁移，
@@ -536,6 +560,7 @@ class V4Database:
                     migrate_schema_v18_to_v19(conn)
                     migrate_schema_v19_to_v20(conn)
                     migrate_schema_v20_to_v21(conn)
+                    migrate_schema_v21_to_v22(conn)
                     conn.commit()
                 except sqlite3.OperationalError as exc:
                     conn.rollback()
@@ -552,12 +577,9 @@ class V4Database:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 create_schema_v4(conn)
-                # 空库创建路径必须补齐"未被 create_schema_v4 收编"的新结构，
-                # 否则新装的库会缺表/缺索引，而版本号已经是当前值（B5-2a 与 v20
-                # 的索引都踩过这个坑）。
-                create_v19_structures(conn)
-                create_v20_structures(conn)
-                create_v21_structures(conn)
+                # 空库创建路径与结构校验使用同一个完整建库函数：
+                # 新结构必须收编进 create_schema_v4，而不是在这里或
+                # _validate_physical_schema 里另调一批 helper。
                 self._set_user_version(conn)
                 conn.commit()
             except Exception:
@@ -629,19 +651,9 @@ class V4Database:
         expected = sqlite3.connect(":memory:")
         expected.row_factory = sqlite3.Row
         try:
+            # 唯一完整建库入口：空库、迁移结果与 expected 三者使用同一函数，
+            # 不在 expected 路径多调 helper 掩盖空库遗漏。
             create_schema_v4(expected)
-            create_v6_structures(expected)
-            create_v8_structures(expected)
-            create_v9_structures(expected)
-            create_v10_structures(expected)
-            create_v13_structures(expected)
-            create_v15_structures(expected)
-            create_v16_structures(expected)
-            create_v17_structures(expected)
-            create_v18_structures(expected)
-            create_v19_structures(expected)
-            create_v20_structures(expected)
-            create_v21_structures(expected)
             for table in sorted(self.REQUIRED_TABLES):
                 actual_cols = self._table_contract(conn, table)
                 expected_cols = self._table_contract(expected, table)

@@ -172,11 +172,17 @@ def test_directory_tree_builder_emits_batches_while_reconstructing_text():
 
 
 def test_115_ascii_tree_adapter_reconstructs_parent_directories(tmp_path):
+    """115 导出的合成根（``根目录``）裁掉一层；真实子目录名一律保留。
+
+    provider 只影响文本格式适配，不得改变语义相对路径：以前"只要 provider=pan115
+    就无条件裁掉顶层"的规则会把真实目录（如顶层就叫 ``动画``）也当成外壳。
+    """
+
     from app.media_v4.sources.scanner import parse_directory_tree_file
 
     tree = tmp_path / "115.txt"
     tree.write_text(
-        "|——动画\n"
+        "|——根目录\n"
         "| |-Show\n"
         "| | |-Season 1\n"
         "| | | |-Show.S01E01.mkv\n",
@@ -192,6 +198,24 @@ def test_115_ascii_tree_adapter_reconstructs_parent_directories(tmp_path):
     assert [item.relative_path for item in evidence] == ["Show/Season 1/Show.S01E01.mkv"]
     assert evidence[0].source_locator == "Show/Season 1/Show.S01E01.mkv"
     assert evidence[0].playback_locator == "Show/Season 1/Show.S01E01.mkv"
+
+
+@pytest.mark.parametrize("provider", ["pan115", "baidu", "local", "openlist"])
+def test_real_top_level_folder_is_never_treated_as_export_shell(tmp_path, provider):
+    """顶层是真实目录名时必须保留，且四个来源得到同一语义相对路径。"""
+
+    from app.media_v4.sources.scanner import build_directory_tree_evidence
+
+    if provider == "pan115":
+        text = "|——动画\n| |-Show\n| | |-Show.S01E01.mkv\n"
+    else:
+        text = "├── 动画\n│   ├── Show\n│   │   ├── Show.S01E01.mkv\n"
+
+    _scan_id, evidence = build_directory_tree_evidence(
+        text, root_id="root-top", provider=provider, scan_id=f"scan-{provider}"
+    )
+
+    assert [item.relative_path for item in evidence] == ["动画/Show/Show.S01E01.mkv"]
 
 
 def test_openlist_scan_recursively_emits_the_same_source_evidence_contract(tmp_path):

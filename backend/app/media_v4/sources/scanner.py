@@ -25,6 +25,11 @@ from app.integrations.openlist.providers import (
     provider_for_remote,
 )
 from app.media_v4.sources.adapters import SourceEntry, to_source_evidence
+from app.media_v4.sources.file_identity import (
+    LocatorError,
+    canonical_source_locator,
+    is_absolute_locator,
+)
 
 
 class SourceScanCancelled(Exception):
@@ -385,7 +390,12 @@ def _tree_relative_paths(text: str, *, provider: str = "") -> list[tuple[str, st
 
     results: list[tuple[str, str]] = []
     stack: list[str] = []
-    skip_tree_root = _skip_shell_root(provider, detect_tree_provider(text))
+    # 外壳根裁剪必须同时满足：来源标签允许，且顶层节点确实是合成占位名。
+    # 真实目录（哪怕与某个分类同名）不能被裁。
+    header_name, header_kind = _top_node_provenance(text)
+    skip_tree_root = header_kind == "export_header" and _skip_shell_root(
+        provider, detect_tree_provider(text)
+    )
     for line in text.splitlines():
         node = _tree_node(line)
         if node is not None:
@@ -416,56 +426,85 @@ def _tree_relative_paths(text: str, *, provider: str = "") -> list[tuple[str, st
     return results
 
 
-def collapse_adjacent_duplicate_segments(path: str) -> str:
-    """折叠路径中**相邻且同名**的重复段：`…\\115网盘\\动画\\动画\\作品` → `…\\115网盘\\动画\\作品`。
+def _top_node_provenance(text: str) -> tuple[str, str]:
+    """返回目录树顶层节点的 (名称, 类型)；类型为 export_header/absolute_root/child。
 
-    用户实测（**第二次**出现，且重导后仍在）：配置里保存的来源根本身就是
-    `K:\\115网盘\\动画\\动画`（历史 bug 把错误值持久化了），于是 `root + relative`
-    继续产出重复层。这里做成**幂等规则**：无论重复来自配置、拼接还是相对路径，
-    相邻同名段一律折叠为一段（大小写不敏感、Windows 与 POSIX 分隔符都支持）。
-    路径不含相邻重复段时**完全不变**。
+    只读取第一条 depth=0 的结构行，作为**可证明的导出根边界**：
+    合成占位名（根目录/根文件夹/root）或绝对路径；真实子目录一律算 child。
     """
 
-    text = path or ""
-    if not text:
-        return text
-    separator = "\\" if "\\" in text else "/"
-    parts = [part for part in text.replace("\\", "/").split("/") if part]
-    collapsed: list[str] = []
-    for part in parts:
-        if collapsed and collapsed[-1].casefold() == part.casefold():
+    for line in text.splitlines():
+        node = _tree_node(line.rstrip("\r\n"))
+        if node is None:
             continue
-        collapsed.append(part)
-    if not collapsed:
-        return text
-    # 保留 Windows 盘符写法（`K:\…`）与 POSIX 根（`/…`）。
-    prefix = ""
-    if text[:1] in {"\\", "/"}:
-        prefix = separator
-    return prefix + separator.join(collapsed)
+        depth, name, _skips_root = node
+        if depth != 0 or not name:
+            continue
+        return name, export_root_header_kind(name)
+    return "", "none"
 
 
-def _strip_selected_root_prefix(relative: str, source_root: str) -> str:
-    """相对路径若以"导入时选中的根目录名"开头，就剥掉它。
+#: 目录树导出工具写的合成根节点名；只允许裁掉**一层**。
+_EXPORT_ROOT_HEADERS = frozenset({"根目录", "根文件夹", "root"})
 
-    用户实测（重复出现两次）：树文件从 `根目录/动画/…` 开始，而导入时选中的根就是
-    `K:\\115网盘\\动画`，于是 `source_root + relative` 拼成
-    `K:\\115网盘\\动画\\动画\\…`（多出一层），strm 内容因此指向不存在的路径。
-    正确语义（用户明确说明）：**根目录由"选中的那个路径"决定**，树文件里与选中根同名的
-    那一层属于根本身，必须剥掉；这是通用规则，与具体分类名（动画/番剧/…）无关。
+
+def export_root_header_kind(name: str) -> str:
+    """顶层节点类型；不按 basename 猜根，也不把真实目录当外壳。"""
+
+    stripped = (name or "").strip()
+    if not stripped:
+        return "none"
+    if is_absolute_locator(stripped):
+        return "absolute_root"
+    if stripped.casefold() in _EXPORT_ROOT_HEADERS:
+        return "export_header"
+    return "child"
+
+
+def _segments_prefix_equal(candidate: str, other: str) -> bool:
+    """candidate 是否为 other 的逐段相等前缀（忽略大小写，纯词法）。"""
+
+    candidate_parts = [part for part in candidate.replace("\\", "/").strip("/").split("/") if part]
+    other_parts = [part for part in other.replace("\\", "/").strip("/").split("/") if part]
+    if not candidate_parts:
+        return False
+    return [part.casefold() for part in candidate_parts] == [
+        part.casefold() for part in other_parts[: len(candidate_parts)]
+    ]
+
+
+def trim_export_root_header(
+    relative: str,
+    header_name: str,
+    header_kind: str,
+    source_root: str = "",
+) -> str:
+    """只裁掉**已证明**的一层导出根外壳；不循环、不按 basename 匹配。
+
+    - ``export_header``：合成占位名与条目首段同名时裁一层；
+    - ``absolute_root``：导出根是所选根的逐段相等前缀时裁一层，否则扫描失败；
+    - ``child``：真实子目录（含用户真的叫 根目录 的目录）一律不动。
     """
 
-    cleaned_root = (source_root or "").replace("\\", "/").rstrip("/")
-    root_name = PurePosixPath(cleaned_root).name if cleaned_root else ""
-    parts = [part for part in PurePosixPath(relative).parts if part]
+    raw = (relative or "")
+    if not raw or header_kind in {"child", "none"}:
+        return relative
+    parts = [part for part in raw.split("/") if part and part != "."]
     if not parts:
         return relative
-    # 树文件可能多包一层"根目录/root"之类的占位外壳。
-    while parts and parts[0].casefold() in {"根目录", "根文件夹", "root"}:
-        parts.pop(0)
-    if root_name and parts and parts[0].casefold() == root_name.casefold():
-        parts.pop(0)
-    return str(PurePosixPath(*parts)) if parts else relative
+    first = parts[0]
+    if header_kind == "export_header":
+        if first.strip().casefold() != header_name.strip().casefold():
+            return relative
+    elif header_kind == "absolute_root":
+        if not _segments_prefix_equal(first, source_root):
+            raise DirectoryTreeReadError(
+                "source_root_mismatch",
+                f"目录树的绝对导出根 {first} 不在所选根 {source_root} 之下，请重新选择来源根",
+            )
+    else:  # pragma: no cover - 防御性分支
+        return relative
+    return "/".join(parts[1:])
 
 
 def build_directory_tree_evidence(
@@ -487,25 +526,24 @@ def build_directory_tree_evidence(
     evidence = []
     pending: list = []
     entries = _tree_relative_paths(text, provider=provider)
-    # 按"选中的根目录"对齐相对路径：剥掉与根同名的第一层，避免 source_root 拼接后
-    # 出现 `动画\动画`（用户实测重复两层；同时避免作品身份被这一层占位目录污染）。
+    # 只裁掉已证明的一层导出根外壳（合成占位名或与所选根逐段相等前缀的绝对根）。
+    # 绝不按 basename 猜测，也绝不折叠合法相邻同名目录（C-001 / F-012）。
+    header_name, header_kind = _top_node_provenance(text)
     entries = [
-        (_strip_selected_root_prefix(relative, source_root), kind)
+        (trim_export_root_header(relative, header_name, header_kind, source_root), kind)
         for relative, kind in entries
     ]
     effective_batch_size = max(1, int(batch_size))
     for index, (relative, kind) in enumerate(entries, start=1):
         if should_cancel is not None and should_cancel():
             raise SourceScanCancelled()
-        locator = relative
-        if source_root:
-            locator_path = Path(source_root).expanduser()
-            for part in PurePosixPath(relative).parts:
-                locator_path /= part
-            locator = str(locator_path)
-        # 幂等护栏：无论重复来自配置的来源根、拼接还是相对路径，最终路径都不得含
-        # 相邻同名段（用户实测 `K:\115网盘\动画\动画\…`，第二次出现仍未消失）。
-        locator = collapse_adjacent_duplicate_segments(locator)
+        # 来源定位符按协议词法规范化：保留 UNC 与合法相邻同名段，不触盘。
+        try:
+            locator = canonical_source_locator(_join_locator(source_root, relative))
+        except LocatorError as exc:
+            raise DirectoryTreeReadError(
+                "source_locator_invalid", f"目录树条目定位符非法（{exc.code}）：{relative}"
+            ) from exc
         item = to_source_evidence(
             SourceEntry(
                 root_id=root_id,
@@ -540,17 +578,63 @@ def build_directory_tree_evidence(
     return actual_scan_id, evidence
 
 
+def export_root_scope(text: str) -> str | None:
+    """从目录树正文证明导出范围，供来源根身份使用。
+
+    - 合成占位根（根目录/根文件夹/root）：导出范围就是所选根本身 → ``""``；
+    - 绝对导出根：返回规范化后的绝对路径；
+    - 真实子目录或无法证明：``None``，由调用方回退到低置信的词干提示。
+    """
+
+    name, kind = _top_node_provenance(text)
+    if kind == "export_header":
+        return ""
+    if kind == "absolute_root":
+        try:
+            return canonical_source_locator(name)
+        except LocatorError:
+            return name
+    return None
+
+
+def _join_locator(source_root: str, relative: str) -> str:
+    """把所选根与相对路径按字符串协议拼接；不做文件系统访问。"""
+
+    if not source_root:
+        return relative or ""
+    if not relative:
+        return str(source_root)
+    root_text = str(source_root).strip()
+    separator = "\\" if "\\" in root_text else "/"
+    return root_text.rstrip("/\\") + separator + relative.replace("\\", "/").replace("/", separator)
+
+
 def _root_id(path: Path) -> str:
     return "root_" + hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:24]
 
 
-def tree_root_id(provider: str, source_root: str, tree_file: str | Path) -> str:
-    """目录树更新文件名可变，但同一逻辑来源根必须得到稳定 root_id。"""
+def tree_root_id(
+    provider: str,
+    source_root: str,
+    tree_file: str | Path,
+    *,
+    export_scope: str | None = None,
+) -> str:
+    """同一逻辑来源根必须得到稳定 root_id。
+
+    身份 = 来源命名空间（provider）+ 所选根边界 + 导出范围。导出范围优先取
+    调用方从目录树正文证明的 ``export_scope``；拿不到时才回退到去掉时间戳的
+    TXT 词干作为**低置信**根定位提示（文件名不是永久身份）。
+    """
 
     stem = Path(tree_file).stem
     scope = re.sub(r"[_\s-]*(?:文件目录|目录树)(?:[_\s-]*\d{6,})?$", "", stem).strip()
-    mapping_identity = source_root.replace("\\", "/").strip().casefold()
-    scope_identity = (scope or stem).replace("\\", "/").strip().casefold()
+    if export_scope is None:
+        resolved_scope = scope or stem
+    else:
+        resolved_scope = export_scope.strip()
+    mapping_identity = source_root.replace("\\", "/").strip().rstrip("/").casefold()
+    scope_identity = resolved_scope.replace("\\", "/").strip().casefold()
     identity = "\x1f".join((mapping_identity, scope_identity))
     digest = hashlib.sha256(f"{provider.casefold()}\x1f{identity}".encode()).hexdigest()[:24]
     return "root_" + digest

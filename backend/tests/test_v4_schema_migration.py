@@ -310,6 +310,11 @@ def _build_v18_database(path) -> None:
         create_v16_structures(conn)
         create_v17_structures(conn)
         create_v18_structures(conn)
+        # create_schema_v4 现在已经是“完整当前结构”，因此要显式退回到物理 v18：
+        # 去掉 v19 的扫描目录 frontier 与 v20 的三个查询索引。
+        conn.execute("DROP TABLE IF EXISTS source_scan_directories")
+        for name in ("idx_v4_bindings_work", "idx_v4_artifacts_work", "idx_v4_jobs_revision"):
+            conn.execute(f"DROP INDEX IF EXISTS {name}")
         conn.execute("PRAGMA user_version = 18")
         conn.commit()
     finally:
@@ -349,7 +354,7 @@ def test_v18_database_is_migrated_to_v19_without_touching_media_facts(tmp_path):
             "SELECT status FROM source_scans WHERE scan_id = 'scan-keep'"
         ).fetchone()
 
-    assert version == V4_SCHEMA_VERSION == 21
+    assert version == V4_SCHEMA_VERSION == 22
     assert "source_scan_directories" in tables
     assert V4Database.REQUIRED_TABLES >= {"source_scan_directories"}
     # 既有媒体事实与来源记录不能被迁移改写。
@@ -441,6 +446,10 @@ def test_v19_database_gains_query_indices_without_touching_media_facts(tmp_path)
         create_v17_structures(conn)
         create_v18_structures(conn)
         create_v19_structures(conn)
+        # 退回物理 v19：v19 上还不存在 v20 的三个查询索引，否则本用例无法
+        # 证明迁移确实新增了它们。
+        for name in ("idx_v4_bindings_work", "idx_v4_artifacts_work", "idx_v4_jobs_revision"):
+            conn.execute(f"DROP INDEX IF EXISTS {name}")
         conn.execute("PRAGMA user_version = 19")
         conn.execute(
             "INSERT INTO source_roots(root_id, provider, ingest_method, source_locator, "
@@ -473,7 +482,7 @@ def test_v19_database_gains_query_indices_without_touching_media_facts(tmp_path)
             "SELECT display_name FROM source_roots WHERE root_id = 'root-keep'"
         ).fetchone()
 
-    assert version == V4_SCHEMA_VERSION == 21
+    assert version == V4_SCHEMA_VERSION == 22
     assert {"idx_v4_bindings_work", "idx_v4_artifacts_work", "idx_v4_jobs_revision"} <= indices
     assert str(root["display_name"]) == "01动画"
 

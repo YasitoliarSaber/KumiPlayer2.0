@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 21
+V4_SCHEMA_VERSION = 22
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -155,7 +155,11 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             is_importable INTEGER NOT NULL DEFAULT 1,
             is_auxiliary INTEGER NOT NULL DEFAULT 0,
             reasons_json TEXT NOT NULL DEFAULT '[]',
-            warnings_json TEXT NOT NULL DEFAULT '[]'
+            warnings_json TEXT NOT NULL DEFAULT '[]',
+            content_class TEXT NOT NULL DEFAULT 'unknown',
+            classification_state TEXT NOT NULL DEFAULT 'unknown',
+            decision_trace_json TEXT NOT NULL DEFAULT '[]',
+            numbering_json TEXT NOT NULL DEFAULT '{}'
         )
         """
     )
@@ -227,9 +231,10 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
         CREATE TABLE seasons (
             season_id TEXT PRIMARY KEY,
             work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE CASCADE,
-            local_season_number INTEGER NOT NULL,
+            local_season_number INTEGER,
             season_kind TEXT NOT NULL DEFAULT 'regular',
             title TEXT NOT NULL DEFAULT '',
+            identity_key TEXT NOT NULL DEFAULT '',
             UNIQUE(work_id, local_season_number, season_kind)
         )
         """
@@ -255,7 +260,8 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             absolute_episode_number INTEGER,
             special_number INTEGER,
             episode_kind TEXT NOT NULL DEFAULT 'regular',
-            display_title TEXT NOT NULL DEFAULT ''
+            display_title TEXT NOT NULL DEFAULT '',
+            identity_key TEXT NOT NULL DEFAULT ''
         )
         """
     )
@@ -304,6 +310,8 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             release_group TEXT NOT NULL DEFAULT '',
             version_tags_json TEXT NOT NULL DEFAULT '[]',
             availability_state TEXT NOT NULL DEFAULT 'available',
+            source_file_id TEXT REFERENCES source_files(source_file_id) ON DELETE RESTRICT,
+            content_version_key TEXT NOT NULL DEFAULT '',
             UNIQUE(evidence_id)
         )
         """
@@ -372,6 +380,7 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             decision_source TEXT NOT NULL DEFAULT 'resolver',
             reasons_json TEXT NOT NULL DEFAULT '[]',
             override_json TEXT NOT NULL DEFAULT '{}',
+            resolved_json TEXT NOT NULL DEFAULT '{}',
             UNIQUE(revision_id, evidence_id, episode_id, edition_id, asset_id)
         )
         """
@@ -433,7 +442,8 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
             started_at TEXT NOT NULL DEFAULT '',
             finished_at TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            result_json TEXT NOT NULL DEFAULT '{}'
         )
         """
     )
@@ -785,6 +795,12 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
     create_v16_structures(conn)
     create_v17_structures(conn)
     create_v18_structures(conn)
+    # v19 起的结构必须同时出现在空库创建路径；历史上正是因为「只改 user_version
+    # 常量、忘了收编建表函数」，新库缺表/缺索引而版本号已是当前值。
+    create_v19_structures(conn)
+    create_v20_structures(conn)
+    create_v21_structures(conn)
+    create_v22_structures(conn)
 
 
 def create_tree_scan_validation(conn: sqlite3.Connection) -> None:
@@ -918,6 +934,27 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str) ->
         conn.execute("ALTER TABLE revision_work_candidates ADD COLUMN popularity REAL")
     elif (table, column) == ("revision_work_candidates", "recommended"):
         conn.execute("ALTER TABLE revision_work_candidates ADD COLUMN recommended INTEGER NOT NULL DEFAULT 0")
+    elif (table, column) == ("parsed_facts", "content_class"):
+        conn.execute("ALTER TABLE parsed_facts ADD COLUMN content_class TEXT NOT NULL DEFAULT 'unknown'")
+    elif (table, column) == ("parsed_facts", "classification_state"):
+        conn.execute("ALTER TABLE parsed_facts ADD COLUMN classification_state TEXT NOT NULL DEFAULT 'unknown'")
+    elif (table, column) == ("parsed_facts", "decision_trace_json"):
+        conn.execute("ALTER TABLE parsed_facts ADD COLUMN decision_trace_json TEXT NOT NULL DEFAULT '[]'")
+    elif (table, column) == ("parsed_facts", "numbering_json"):
+        conn.execute("ALTER TABLE parsed_facts ADD COLUMN numbering_json TEXT NOT NULL DEFAULT '{}'")
+    elif (table, column) == ("episodes", "identity_key"):
+        conn.execute("ALTER TABLE episodes ADD COLUMN identity_key TEXT NOT NULL DEFAULT ''")
+    elif (table, column) == ("assets", "source_file_id"):
+        conn.execute(
+            "ALTER TABLE assets ADD COLUMN source_file_id TEXT "
+            "REFERENCES source_files(source_file_id) ON DELETE RESTRICT"
+        )
+    elif (table, column) == ("assets", "content_version_key"):
+        conn.execute("ALTER TABLE assets ADD COLUMN content_version_key TEXT NOT NULL DEFAULT ''")
+    elif (table, column) == ("revision_bindings", "resolved_json"):
+        conn.execute("ALTER TABLE revision_bindings ADD COLUMN resolved_json TEXT NOT NULL DEFAULT '{}'")
+    elif (table, column) == ("jobs", "result_json"):
+        conn.execute("ALTER TABLE jobs ADD COLUMN result_json TEXT NOT NULL DEFAULT '{}'")
     else:
         raise KeyError(f"未登记的增量列: {table}/{column}，请先在 _add_column_if_missing 登记字面量 DDL")
 
@@ -1339,6 +1376,268 @@ def migrate_schema_v20_to_v21(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE provider_bindings")
     conn.execute("ALTER TABLE provider_bindings_v21 RENAME TO provider_bindings")
     create_v21_structures(conn)
+
+
+def table_column_info(conn: sqlite3.Connection, table: str) -> dict[str, tuple]:
+    """按列名返回 pragma_table_info 原始行，供迁移做物理结构判断。"""
+
+    info: dict[str, tuple] = {}
+    for row in conn.execute("SELECT * FROM pragma_table_info(?)", (table,)).fetchall():
+        values = tuple(row)
+        info[str(values[1])] = values
+    return info
+
+
+def seasons_supports_unassigned(conn: sqlite3.Connection) -> bool:
+    """v22 的 seasons 允许 local_season_number 为空并带 identity_key。"""
+
+    info = table_column_info(conn, "seasons")
+    row = info.get("local_season_number")
+    return "identity_key" in info and row is not None and int(row[3]) == 0
+
+
+def _rebuild_seasons_v22(conn: sqlite3.Connection) -> None:
+    """重建 seasons，使未分季可以写成 NULL；逐行保全既有季与 ID。
+
+    先建新表、复制、最后 DROP + RENAME 到原名（不是先把旧表 RENAME 走），
+    否则子表外键会短暂指向临时表名。重命名期间打开 legacy_alter_table，
+    避免 SQLite 重新解析全部 schema 时因临时缺表而报错。
+    """
+
+    info = table_column_info(conn, "seasons")
+    if not info or seasons_supports_unassigned(conn):
+        return
+    key_expression = "COALESCE(identity_key, '')" if "identity_key" in info else "''"
+    previous_legacy = int(conn.execute("PRAGMA legacy_alter_table").fetchone()[0])
+    conn.execute("PRAGMA legacy_alter_table = ON")
+    try:
+        conn.execute(
+            """
+            CREATE TABLE seasons_v22 (
+                season_id TEXT PRIMARY KEY,
+                work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE CASCADE,
+                local_season_number INTEGER,
+                season_kind TEXT NOT NULL DEFAULT 'regular',
+                title TEXT NOT NULL DEFAULT '',
+                identity_key TEXT NOT NULL DEFAULT '',
+                UNIQUE(work_id, local_season_number, season_kind)
+            )
+            """
+        )
+        conn.execute(
+            f"""
+            INSERT INTO seasons_v22(
+                season_id, work_id, local_season_number, season_kind, title, identity_key
+            )
+            SELECT season_id, work_id, local_season_number, season_kind, title, {key_expression}
+            FROM seasons
+            """
+        )
+        conn.execute("DROP TABLE seasons")
+        conn.execute("ALTER TABLE seasons_v22 RENAME TO seasons")
+    finally:
+        conn.execute(f"PRAGMA legacy_alter_table = {previous_legacy}")
+
+
+def create_v22_structures(conn: sqlite3.Connection) -> None:
+    """v22：来源文件身份、未知值合同、成功资料代次与产物引用。
+
+    本函数同时服务空库创建与 v21→v22 迁移，所有语句幂等：新表用
+    ``IF NOT EXISTS``，新增列走 ``_add_column_if_missing``，触发器用
+    ``IF NOT EXISTS``。旧行不回填语义，只拿默认值。
+    """
+
+    # source_files 必须先于 assets.source_file_id 的外键列存在。
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS source_files (
+            source_file_id TEXT PRIMARY KEY,
+            root_id TEXT NOT NULL REFERENCES source_roots(root_id) ON DELETE RESTRICT,
+            origin_evidence_id TEXT NOT NULL REFERENCES source_evidence(evidence_id) ON DELETE RESTRICT,
+            identity_kind TEXT NOT NULL,
+            identity_namespace TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(root_id, origin_evidence_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS source_file_observations (
+            evidence_id TEXT PRIMARY KEY REFERENCES source_evidence(evidence_id) ON DELETE RESTRICT,
+            source_file_id TEXT NOT NULL REFERENCES source_files(source_file_id) ON DELETE RESTRICT,
+            asset_id TEXT REFERENCES assets(asset_id) ON DELETE RESTRICT,
+            decision_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS metadata_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE RESTRICT,
+            provider TEXT NOT NULL,
+            media_type TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            identity_signature TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            episode_signatures_json TEXT NOT NULL DEFAULT '{}',
+            created_by_revision_id TEXT NOT NULL REFERENCES import_revisions(revision_id) ON DELETE RESTRICT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS revision_metadata_refs (
+            revision_id TEXT NOT NULL REFERENCES import_revisions(revision_id) ON DELETE RESTRICT,
+            work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE RESTRICT,
+            snapshot_id TEXT NOT NULL REFERENCES metadata_snapshots(snapshot_id) ON DELETE RESTRICT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(revision_id, work_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS artifact_references (
+            reference_id TEXT PRIMARY KEY,
+            artifact_id TEXT NOT NULL REFERENCES artifacts(artifact_id) ON DELETE RESTRICT,
+            revision_id TEXT NOT NULL REFERENCES import_revisions(revision_id) ON DELETE RESTRICT,
+            work_id TEXT NOT NULL REFERENCES works(work_id) ON DELETE RESTRICT,
+            snapshot_id TEXT REFERENCES metadata_snapshots(snapshot_id) ON DELETE RESTRICT,
+            role TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(artifact_id, revision_id, role, subject_id)
+        )
+        """
+    )
+
+    for table, column in (
+        ("parsed_facts", "content_class"),
+        ("parsed_facts", "classification_state"),
+        ("parsed_facts", "decision_trace_json"),
+        ("parsed_facts", "numbering_json"),
+        ("episodes", "identity_key"),
+        ("assets", "source_file_id"),
+        ("assets", "content_version_key"),
+        ("revision_bindings", "resolved_json"),
+        ("jobs", "result_json"),
+    ):
+        _add_column_if_missing(conn, table, column)
+
+    _rebuild_seasons_v22(conn)
+
+    # 重建 seasons 会连带丢掉原表上的索引，这里补齐（新库路径为 no-op）。
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_v4_seasons_work ON seasons(work_id)")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_v4_seasons_identity "
+        "ON seasons(work_id, identity_key) WHERE identity_key != ''"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_v4_episodes_identity "
+        "ON episodes(work_id, identity_key) WHERE identity_key != ''"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_v4_assets_source_version "
+        "ON assets(source_file_id, content_version_key) "
+        "WHERE source_file_id IS NOT NULL AND content_version_key != ''"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_v4_source_file_observations_file "
+        "ON source_file_observations(source_file_id, evidence_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_v4_source_file_observations_asset "
+        "ON source_file_observations(asset_id, evidence_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_v4_metadata_snapshots_identity "
+        "ON metadata_snapshots(work_id, identity_signature, created_at, snapshot_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_v4_revision_metadata_refs_snapshot "
+        "ON revision_metadata_refs(snapshot_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_v4_artifact_references_artifact "
+        "ON artifact_references(artifact_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_v4_artifact_references_revision_work "
+        "ON artifact_references(revision_id, work_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_v4_artifact_references_snapshot "
+        "ON artifact_references(snapshot_id)"
+    )
+
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS v4_source_file_observations_update_guard
+        BEFORE UPDATE ON source_file_observations
+        BEGIN
+            SELECT RAISE(ABORT, 'source_file_observations are immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS v4_metadata_snapshot_update_guard
+        BEFORE UPDATE ON metadata_snapshots
+        BEGIN
+            SELECT RAISE(ABORT, 'metadata_snapshots are immutable');
+        END
+        """
+    )
+    # 只对 identity_key 非空的新季校验：旧 regular/0 行保持原样可读，
+    # 新正片不得再生成 0 季，未分季必须真的是 NULL。
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS v4_season_identity_kind_guard_insert
+        BEFORE INSERT ON seasons
+        WHEN NEW.identity_key != '' AND NOT (
+            (NEW.season_kind = 'unassigned' AND NEW.local_season_number IS NULL)
+            OR (
+                NEW.season_kind = 'regular'
+                AND NEW.local_season_number IS NOT NULL
+                AND NEW.local_season_number > 0
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'season identity key requires matching local season number');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS v4_season_identity_kind_guard_update
+        BEFORE UPDATE ON seasons
+        WHEN NEW.identity_key != '' AND NOT (
+            (NEW.season_kind = 'unassigned' AND NEW.local_season_number IS NULL)
+            OR (
+                NEW.season_kind = 'regular'
+                AND NEW.local_season_number IS NOT NULL
+                AND NEW.local_season_number > 0
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'season identity key requires matching local season number');
+        END
+        """
+    )
+
+
+def migrate_schema_v21_to_v22(conn: sqlite3.Connection) -> None:
+    """v21 → v22：新增来源身份/未知值/资料引用结构，逐行保全既有事实。
+
+    只做加法与 seasons 的等值重建；不回填 identity_key、不解释旧 regular/0，
+    也不更新任何 confirmed 事实。调用方负责事务与失败回滚。
+    """
+
+    create_v22_structures(conn)
 
 
 def migrate_schema_v15_to_v16(conn: sqlite3.Connection) -> None:

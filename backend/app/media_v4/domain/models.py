@@ -4,6 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from app.media_v4.domain.identity import (
+    CLASSIFICATION_UNKNOWN,
+    CONTENT_CLASS_UNKNOWN,
+    DecisionTrace,
+    NumberingEvidence,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class SourceEvidence:
@@ -70,6 +77,11 @@ class ParsedFacts:
     is_auxiliary: bool = False
     reasons: tuple[str, ...] = field(default_factory=tuple)
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    # C-002 / C-004：单文件可见词法事实与决定，不承载批量推断。
+    content_class: str = CONTENT_CLASS_UNKNOWN
+    classification_state: str = CLASSIFICATION_UNKNOWN
+    decision_trace: tuple[DecisionTrace, ...] = field(default_factory=tuple)
+    numbering: NumberingEvidence = field(default_factory=NumberingEvidence)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +142,8 @@ class ResolutionIssue:
     code: str
     evidence_id: str
     message: str
+    # 普通歧义只作展示，不阻断整批导入；安全/结构错误仍走服务端错误路径。
+    severity: str = "warning"
 
 
 @dataclass(frozen=True, slots=True)

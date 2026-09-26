@@ -293,17 +293,16 @@ def _configured_cloud_roots(config) -> list[str]:
 
 
 def _collapse_repeated_segment(path: str, segment: str) -> str:
-    """折叠路径中**连续重复**的同一段（保留此前的定点修复，供路由根拼接使用）。
+    """折叠路由根拼接产生的**连续重复**段（定点修复，可证明的配置拼接）。
 
-    用户实测（115 网盘目录树导入，**重复出现两次**）：生成的 strm 路径多出一层"动画"。
-    根因是 `remote_root` 已经以分类目录结尾（如 `/动画`）、路由的 `remote_prefix` 又是
-    `动画`，两次拼接得到 `动画/动画`。这里做幂等折叠：无论重复发生在末尾还是中间都合并，
-    对不含重复的路径完全无影响（不改变既有正确路径）。
-    更一般的情形（配置里保存的来源根自身就含相邻重复段）由
-    `sources.scanner.collapse_adjacent_duplicate_segments` 在构建证据时兜底。
+    用户实测（115 网盘目录树导入）：生成的 strm 路径多出一层"动画"。根因是
+    ``remote_root`` 已以分类目录结尾（如 ``/动画``）、路由的 ``remote_prefix`` 又是
+    ``动画``，两次拼接得到 ``动画/动画``。这里只对**已知的配置段**做定点折叠，对不含重复
+    的路径完全无影响。
+
+    不再回退到"任意相邻同名段折叠"：那会改坏合法路径（``C:\\media\\作品甲\\作品甲\\ep01.mkv``）
+    与 UNC 双斜线，属于 F-012 的根因。
     """
-
-    from app.media_v4.sources.scanner import collapse_adjacent_duplicate_segments
 
     cleaned = (segment or "").strip().strip("/\\")
     if not cleaned or not path:
@@ -314,8 +313,7 @@ def _collapse_repeated_segment(path: str, segment: str) -> str:
     while True:
         collapsed = pattern.sub(lambda match: match.group(1) + cleaned, path)
         if collapsed == path:
-            # 定点替换做完后，再用通用规则兜底（覆盖其它相邻重复段）。
-            return collapse_adjacent_duplicate_segments(path)
+            return path
         path = collapsed
 
 

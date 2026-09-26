@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from app.media_v4.sources.scanner import tree_media_relative_paths, tree_root_id
+from app.media_v4.sources.scanner import export_root_scope, tree_media_relative_paths, tree_root_id
 
 # 导出文件名约定：`01动画_文件目录_时间戳` / `根目录_目录树`。
 _EXPORT_SUFFIX_RE = re.compile(r"[_\s-]*(?:文件目录|目录树)(?:[_\s-]*\d{6,})?$")
@@ -116,6 +116,8 @@ class TreeRootResolution:
     hits: int
     total: int
     candidates: tuple[str, ...]
+    #: 目录树正文可证明的导出范围；None 表示无法证明（回退文件名提示）。
+    export_scope: str | None = None
 
 
 def tree_scan_root_id(
@@ -139,7 +141,9 @@ def tree_scan_root_id(
         identity_root = str(configured_roots[0])
     else:
         identity_root = ""
-    return tree_root_id(provider, identity_root, tree_file)
+    return tree_root_id(
+        provider, identity_root, tree_file, export_scope=resolution.export_scope
+    )
 
 
 class TreePlaybackRootResolver:
@@ -158,17 +162,18 @@ class TreePlaybackRootResolver:
 
     def resolve(self, text: str) -> TreeRootResolution:
         relative_paths = tree_media_relative_paths(text)
+        proof_scope = export_root_scope(text)
         for relative in relative_paths:
             reason = _unsafe_relative_reason(relative)
             if reason:
                 return TreeRootResolution(
                     "", False, f"目录树条目结构校验拒绝：{reason}（{relative}）",
-                    0, 0, (),
+                    0, 0, (), proof_scope,
                 )
         candidates = self._build_candidates(relative_paths)
         if not candidates:
             return TreeRootResolution(
-                "", False, "当前内容来源尚未配置本地挂载路径", 0, 0, (),
+                "", False, "当前内容来源尚未配置本地挂载路径", 0, 0, (), proof_scope,
             )
         # 去重（忽略大小写但保留原文字），再沿祖先链收敛到最深子根。
         unique: dict[str, str] = {}
@@ -179,12 +184,12 @@ class TreePlaybackRootResolver:
         if len(precise) == 1:
             return TreeRootResolution(
                 precise[0], True, "播放路径已根据目录树与来源设置生成",
-                0, 0, tuple(roots),
+                0, 0, tuple(roots), proof_scope,
             )
         return TreeRootResolution(
             "", False,
             "多个来源根都可能覆盖该目录树，请检查设置中的来源范围",
-            0, 0, tuple(roots),
+            0, 0, tuple(roots), proof_scope,
         )
 
     def _build_candidates(self, relative_paths: list[str]) -> list[str]:

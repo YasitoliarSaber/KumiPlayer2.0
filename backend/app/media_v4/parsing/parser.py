@@ -508,7 +508,13 @@ def _parse_sidecar_nfo(evidence: SourceEvidence) -> tuple[int | None, str, str, 
 class V4Parser:
     """从一个 SourceEvidence 生成一个不可变 ParsedFacts。"""
 
-    VERSION = "v4-parser-2"
+    VERSION = "v4-parser-3"
+
+    @classmethod
+    def _parsed_fact_id(cls, evidence: SourceEvidence) -> str:
+        """fact id 包含 parser 版本：新版本事实可与旧版本并存，不原位覆盖。"""
+
+        return f"facts_{evidence.evidence_id}_{cls.VERSION}"
 
     def parse(
         self,
@@ -524,7 +530,7 @@ class V4Parser:
             # 绝不调用 _parse_sidecar_nfo（该函数会对绝对定位符做 is_file/open）。
             if evidence.ingest_method == "directory_tree":
                 return ParsedFacts(
-                    parsed_fact_id="facts_" + evidence.evidence_id,
+                    parsed_fact_id=self._parsed_fact_id(evidence),
                     evidence_id=evidence.evidence_id,
                     parser_version=self.VERSION,
                     resource_type="metadata",
@@ -537,7 +543,7 @@ class V4Parser:
             if parsed is None:
                 # 不可达/不可读的 NFO：只保留标题证据，绝不伪造 provider ID。
                 return ParsedFacts(
-                    parsed_fact_id="facts_" + evidence.evidence_id,
+                    parsed_fact_id=self._parsed_fact_id(evidence),
                     evidence_id=evidence.evidence_id,
                     parser_version=self.VERSION,
                     resource_type="metadata",
@@ -547,7 +553,7 @@ class V4Parser:
                 )
             tmdb_id, title, original_title, tmdb_media_type = parsed
             return ParsedFacts(
-                parsed_fact_id="facts_" + evidence.evidence_id,
+                parsed_fact_id=self._parsed_fact_id(evidence),
                 evidence_id=evidence.evidence_id,
                 parser_version=self.VERSION,
                 resource_type="metadata",
@@ -731,7 +737,7 @@ class V4Parser:
         if not episode_title and cjk_episode is not None:
             episode_title = cjk_episode_title or f"第 {cjk_episode} 集"
         return ParsedFacts(
-            parsed_fact_id="facts_" + evidence.evidence_id,
+            parsed_fact_id=self._parsed_fact_id(evidence),
             evidence_id=evidence.evidence_id,
             parser_version=self.VERSION,
             resource_type=evidence.entry_kind,
