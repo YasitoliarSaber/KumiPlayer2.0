@@ -65,6 +65,30 @@ local QUALITIES = {
 
 local SPEEDS = { "0.25", "0.5", "0.75", "1.0", "1.25", "1.5", "1.75", "2.0" }
 
+-- 命令命名空间与取值白名单（F-013）。同一定义同时驱动菜单项与事件分发，
+-- 避免两边各写一套枚举后又不一致。
+local VALID_MODE_VALUES = {}
+for _, mode in ipairs(MODES) do
+    VALID_MODE_VALUES[mode.value] = true
+end
+local VALID_QUALITY_VALUES = {}
+for _, quality in ipairs(QUALITIES) do
+    VALID_QUALITY_VALUES[quality.value] = true
+end
+local VALID_SPEED_VALUES = {}
+for _, speed in ipairs(SPEEDS) do
+    VALID_SPEED_VALUES[speed] = true
+end
+-- 画面调节属性与步长白名单在 QUALITY_GROUPS 定义之后填充（见下方 fill_quality_whitelist）。
+local QUALITY_PROP = {}
+local DELTA_STEPS = { "-5", "5" }
+local VALID_DELTA_VALUES = {}
+for _, step in ipairs(DELTA_STEPS) do
+    VALID_DELTA_VALUES[step] = true
+end
+-- 画面调节只接受菜单定义的有限步长，不执行自由文本命令；
+-- 属性白名单与“画质调节”子菜单内的既有 MPV 属性一致（对比度/亮度/伽马/饱和度/色相）。
+
 local state = {
     mode = "off",
     quality = "balanced",
@@ -119,6 +143,9 @@ local QUALITY_GROUPS = {
     { label = "饱和度", prop = "saturation" },
     { label = "色相", prop = "hue" },
 }
+for _, group in ipairs(QUALITY_GROUPS) do
+    QUALITY_PROP[group.prop] = group.label
+end
 
 local function build_image_quality_items()
     local items = {}
@@ -129,14 +156,12 @@ local function build_image_quality_items()
             value = "noop",
             muted = true,
         })
-        table.insert(items, {
-            title = "  -5",
-            value = "quality:add:" .. group.prop .. ":-5",
-        })
-        table.insert(items, {
-            title = "  +5",
-            value = "quality:add:" .. group.prop .. ":5",
-        })
+        for _, step in ipairs(DELTA_STEPS) do
+            table.insert(items, {
+                title = "  " .. step,
+                value = "quality:add:" .. group.prop .. ":" .. step,
+            })
+        end
         table.insert(items, { separator = true })
     end
     table.insert(items, {
@@ -237,37 +262,86 @@ end
 
 -- ── 事件处理 ────────────────────────────────────────────────────────
 
+-- 请求 id：区分“已下发”与“已生效”，并让调用方能丢弃过期回执。
+local request_counter = 0
+local pending_request = nil
+
+local function next_request_id()
+    request_counter = request_counter + 1
+    return script_name .. ":" .. tostring(request_counter)
+end
+
+-- 有界提示：只用于当前操作失败，不用来替代状态。（2 秒后自动消失）
+local function notify(message)
+    mp.osd_message(message, 2)
+end
+
+local function request_anime4k(kind, mode, quality)
+    pending_request = { id = next_request_id(), kind = kind }
+    mp.commandv("script-message-to", "kumiplayer_anime4k", kind, mode, quality, pending_request.id)
+end
+
 -- uosc 回调模式事件入口：按 value 前缀分发。
+-- 分发顺序是合同的一部分（F-013）：必须先处理更具体的 `quality:reset` /
+-- `quality:add:<prop>:<delta>`，再处理 `quality:<枚举>`。历史缺陷是把
+-- `quality:` 写成 `value:sub(1, 8)` 先判，于是 `quality:add:brightness:5` 和
+-- `quality:reset` 会被当成质量枚举发给 Anime4K（被拒绝），而画面调节永远不生效，
+-- 菜单本地 state.quality 还会被写成非法值后继续污染后续 mode 切换。
 mp.register_script_message("menu-event", function(event_json)
     local event = utils.parse_json(event_json)
     if type(event) ~= "table" or event.type ~= "activate" then
         return
     end
     local value = tostring(event.value or "")
-    if value:sub(1, 5) == "mode:" then
-        local mode = value:sub(6)
-        mp.commandv("script-message-to", "kumiplayer_anime4k", "set-session", mode, state.quality)
-        state.mode = mode
-    elseif value:sub(1, 8) == "quality:" then
-        local quality = value:sub(9)
-        mp.commandv("script-message-to", "kumiplayer_anime4k", "set-session", state.mode, quality)
-        state.quality = quality
-    elseif value:sub(1, 6) == "speed:" then
-        local speed = value:sub(7)
-        mp.commandv("set", "speed", speed)
-    elseif value:sub(1, 12) == "quality:add:" then
-        -- quality:add:<prop>:<delta>
-        local rest = value:sub(13)
-        local prop, delta = rest:match("^([^:]+):(.+)$")
-        if prop and delta then
-            mp.commandv("add", prop, tonumber(delta) or 0)
-        end
-    elseif value == "quality:reset" then
+    local handled = true
+    if value == "quality:reset" then
+        -- 只重置本菜单管理的画面属性，不动 Anime4K 模式/质量。
         for _, group in ipairs(QUALITY_GROUPS) do
             mp.commandv("set", group.prop, 0)
         end
+    elseif value:sub(1, 12) == "quality:add:" then
+        local rest = value:sub(13)
+        local prop, delta = rest:match("^([^:]+):(.+)$")
+        if not prop or not QUALITY_PROP[prop] or not VALID_DELTA_VALUES[delta] then
+            handled = false
+            notify("无效的画面调节请求")
+        else
+            mp.commandv("add", prop, tonumber(delta))
+            if mp.get_property_number(prop) == nil then
+                notify(string.format("无法调节%s：命令被拒绝", QUALITY_PROP[prop]))
+            end
+        end
+    elseif value:sub(1, 8) == "quality:" then
+        local quality = value:sub(9)
+        if not VALID_QUALITY_VALUES[quality] then
+            handled = false
+            notify("无效的 Anime4K 质量档位")
+        else
+            -- 不乐观写入本地 state：以 kumiplayer_anime4k 的回执为权威。
+            request_anime4k("set-session", state.mode, quality)
+        end
+    elseif value:sub(1, 5) == "mode:" then
+        local mode = value:sub(6)
+        if not VALID_MODE_VALUES[mode] then
+            handled = false
+            notify("无效的 Anime4K 模式")
+        else
+            request_anime4k("set-session", mode, state.quality)
+        end
+    elseif value:sub(1, 6) == "speed:" then
+        local speed = value:sub(7)
+        if not VALID_SPEED_VALUES[speed] then
+            handled = false
+            notify("无效的播放速度")
+        else
+            mp.commandv("set", "speed", speed)
+            if mp.get_property_number("speed") == nil then
+                notify("无法设置播放速度：命令被拒绝")
+            end
+        end
     elseif value:sub(1, 4) == "cmd:" then
-        -- cmd:<mpv 命令>，支持分号分隔的多命令
+        -- cmd:<mpv 命令>，支持分号分隔的多命令。只供固定菜单项使用，
+        -- 不得扩展成任意用户输入的执行入口（菜单 value 全部由本脚本生成）。
         for part in tostring(value:sub(5)):gmatch("[^;]+") do
             local trimmed = part:match("^%s*(.-)%s*$")
             if trimmed and trimmed ~= "" then
@@ -275,6 +349,9 @@ mp.register_script_message("menu-event", function(event_json)
             end
         end
     else
+        handled = false
+    end
+    if not handled then
         return
     end
     -- 与简单模式一致：激活后关闭菜单
@@ -293,9 +370,27 @@ end
 -- 监听 Anime4K 脚本的状态广播。消息名必须与 kumiplayer_anime4k.lua
 -- 的广播名完全一致（kumiplayer_anime4k-state），否则菜单永远等不到
 -- 状态回调、右键无反应。
-mp.register_script_message("kumiplayer_anime4k-state", function(mode, quality)
-    state.mode = mode or "off"
-    state.quality = quality or "balanced"
+-- 本函数是菜单状态的**唯一**写入点：失败/拒绝时保留旧值，绝不乐观写入。
+mp.register_script_message("kumiplayer_anime4k-state", function(mode, quality, session_mode, session_quality, applied, request_id, ok, reason)
+    state.mode = (mode ~= nil and mode ~= "") and mode or "off"
+    state.quality = (quality ~= nil and quality ~= "") and quality or "balanced"
+    local accepted = ok == nil or ok == "true" or ok == true
+    if pending_request ~= nil and request_id ~= nil and request_id ~= "" and request_id == pending_request.id then
+        pending_request = nil
+        if not accepted then
+            local detail = tostring(reason or "")
+            if detail == "invalid_enum" then
+                detail = "参数不被接受"
+            elseif detail == "shader_missing" then
+                detail = "着色器文件缺失"
+            elseif detail == "list_mismatch" then
+                detail = "着色器列表未生效"
+            elseif detail == "" then
+                detail = "请求被拒绝"
+            end
+            notify("未能应用 Anime4K：" .. detail)
+        end
+    end
     if state.waiting_for_state then
         state.waiting_for_state = false
         render_menu()

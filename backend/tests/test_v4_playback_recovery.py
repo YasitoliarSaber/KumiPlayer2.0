@@ -464,3 +464,157 @@ def test_progress_checkpoint_retries_a_transient_sqlite_write_failure(tmp_path, 
         attempts=2,
     )
     assert len(calls) == 2
+
+
+# ── STEP-010：完成阈值只触发一次强制保存（F-010）────────────────────────────
+
+class _MonitorProcess:
+    """_monitor 的最小进程替身：事件耗尽后立即进入终态。"""
+
+    ended = False
+
+    def poll(self):
+        return 0 if self.ended else None
+
+    def wait(self):
+        return 0
+
+
+def _run_monitor(events, *, step=0.0, checkpoint_results=()):
+    """用真实 _monitor 跑一串进度事件；时钟、持久化与同步均为替身。"""
+
+    import threading
+    from unittest.mock import patch
+
+    from app.media_v4.playback import session as playback
+    from app.playback.mpv_ipc import MpvProgressEvent
+
+    process = _MonitorProcess()
+    manager = object.__new__(playback.V4PlaybackManager)
+    manager._lock = threading.Lock()
+    manager._session_bindings = {}
+    manager._process = process
+    manager.database = None
+    state = {
+        "session_id": "probe", "ipc_server": "probe", "episode_id": "ep", "work_id": "work",
+        "playlist": [{"episode_id": "ep", "asset_id": "asset", "preferred_title": "Probe"}],
+        "playlist_position": 0,
+    }
+    manager._session = state
+    writes: list[tuple] = []
+    syncs: list[str] = []
+    results = list(checkpoint_results)
+
+    def checkpoint(session, episode_id, asset_id, position, duration, completed, **kwargs):
+        writes.append((episode_id, asset_id, position, completed))
+        return results.pop(0) if results else True
+
+    manager._checkpoint_progress = checkpoint
+    manager._force_checkpoint = lambda *args, **kwargs: None
+    manager._schedule_completion_sync = lambda session, asset: syncs.append(asset["asset_id"])
+    # 本组用例只关心写入与同步次数，不关心窗口标题。
+    manager._display_title = staticmethod(lambda asset: "Probe")
+    clock = {"t": 100.0}
+
+    def monotonic():
+        return clock["t"]
+
+    def generator(_server):
+        for position, duration in events:
+            yield MpvProgressEvent(position=position, duration=duration, playlist_position=0)
+            clock["t"] += step
+        process.ended = True
+
+    with patch.object(playback, "observe_mpv_progress", generator), \
+            patch.object(playback.time, "monotonic", monotonic):
+        manager._monitor(process, state)
+    return writes, syncs
+
+
+def test_completion_threshold_does_not_amplify_writes_at_same_clock():
+    """90% 之后同一时刻继续采样不得每次都写库（历史写放大）。"""
+
+    below, _ = _run_monitor([(89.0, 100.0)] * 10)
+    assert len(below) == 1, f"89% 十条同刻事件应只写一次，实际 {len(below)}"
+    assert all(not item[3] for item in below)
+
+    above, syncs = _run_monitor([(91.0, 100.0)] * 10)
+    assert len(above) == 1, f"91% 同刻十条事件只应写一次（完成边沿），实际 {len(above)}"
+    assert above[0][3] is True
+    assert syncs == ["asset"], "完成边沿仍必须投递一次完成同步"
+
+
+def test_completion_is_not_retriggered_when_position_falls_below_threshold():
+    """回到 89% 再进 91% 不得重复触发完成写入；只有 5 秒节流采样可以再写。"""
+
+    events = [(91.0, 100.0), (89.0, 100.0)] + [(91.0, 100.0)] * 2
+    writes, syncs = _run_monitor(events, step=2.0)
+    completed_writes = [item for item in writes if item[3]]
+    # 第二条 completed 写入来自 5 秒节流（t=106，距上次保存恰好 5 秒）——
+    # 它只是位置采样，不得再触发完成同步。
+    assert len(completed_writes) == 2, writes
+    assert len(syncs) == 1, f"完成同步只应有 1 次，实际 {len(syncs)}"
+    # 89%（t=102）与第二次 91%（t=104）都不该写：既不是完成边沿，也未到 5 秒。
+    assert [item[2] for item in writes] == [91.0, 91.0], writes
+
+
+def test_completion_failure_is_retried_and_not_marked_saved():
+    """持久化失败不得被当作“已完成”，1 秒后可以重试成功。"""
+
+    events = [(91.0, 100.0)] * 3
+    writes, syncs = _run_monitor(events, step=2.0, checkpoint_results=(False, True))
+    assert len(writes) == 2, f"首次失败后应重试一次，实际 {len(writes)}"
+    assert writes[0][3] is True and writes[1][3] is True
+    assert syncs == ["asset"], "只有持久化成功后才投递完成同步"
+
+
+def test_episode_switch_resets_completion_bookkeeping():
+    """跨集后新集重新开始记账，不受上一集完成状态影响。"""
+
+    import threading
+    from unittest.mock import patch
+
+    from app.media_v4.playback import session as playback
+    from app.playback.mpv_ipc import MpvProgressEvent
+
+    process = _MonitorProcess()
+    manager = object.__new__(playback.V4PlaybackManager)
+    manager._lock = threading.Lock()
+    manager._session_bindings = {}
+    manager._process = process
+    manager.database = None
+    state = {
+        "session_id": "probe", "ipc_server": "probe", "episode_id": "ep1", "work_id": "work",
+        "playlist": [
+            {"episode_id": "ep1", "asset_id": "asset1", "preferred_title": "Probe"},
+            {"episode_id": "ep2", "asset_id": "asset2", "preferred_title": "Probe"},
+        ],
+        "playlist_position": 0,
+    }
+    manager._session = state
+    writes: list[tuple] = []
+    syncs: list[str] = []
+    manager._checkpoint_progress = lambda session, episode_id, asset_id, position, duration, completed, **kwargs: (
+        writes.append((episode_id, asset_id, completed)) or True
+    )
+    manager._force_checkpoint = lambda *args, **kwargs: None
+    manager._schedule_completion_sync = lambda session, asset: syncs.append(asset["asset_id"])
+    manager._display_title = staticmethod(lambda asset: "Probe")
+    clock = {"t": 100.0}
+
+    def generator(_server):
+        yield MpvProgressEvent(position=91.0, duration=100.0, playlist_position=0)
+        clock["t"] += 1.0
+        yield MpvProgressEvent(position=91.0, duration=100.0, playlist_position=1)
+        clock["t"] += 1.0
+        process.ended = True
+
+    with patch.object(playback, "observe_mpv_progress", generator), \
+            patch.object(playback.time, "monotonic", lambda: clock["t"]), \
+            patch.object(playback, "set_mpv_playback_title", lambda *args: None), \
+            patch.object(playback.V4PlaybackStore, "record_activation", lambda *args: None):
+        manager._monitor(process, state)
+
+    completed = [item for item in writes if item[2]]
+    assert [item[0] for item in completed] == ["ep1", "ep2"], writes
+    assert syncs == ["asset1", "asset2"], syncs

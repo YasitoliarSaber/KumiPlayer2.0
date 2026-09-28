@@ -119,3 +119,29 @@ def test_internal_mode_ignores_external_path(monkeypatch, tmp_path):
     _path, external = _resolve_player_executable()
 
     assert external is False
+
+def test_external_mode_never_gets_builtin_window_policy_options():
+    """F-009：初始窗口尺寸策略只属于内置模式，外部整合包 argv 不得出现这些选项。"""
+
+    args = _args(external=True, first_file="D:/a.mkv", ipc_server=r"\.\pipe\kumi")
+    for option in ("--autofit=", "--geometry=", "--auto-window-resize=", "--fullscreen="):
+        assert not any(arg.startswith(option) for arg in args), f"外部模式不应出现 {option}"
+
+
+def test_internal_mode_declares_bounded_initial_window_policy():
+    """F-009：内置模式每次新建进程按工作区限定的中等窗口、居中、非全屏启动。"""
+
+    args = _args(first_file="D:/a.mkv")
+    assert "--autofit=70%x60%" in args, "初始尺寸必须受屏幕尺寸限制"
+    assert "--geometry=50%:50%" in args, "初始窗口必须居中"
+    assert "--auto-window-resize=no" in args, "同一窗口切集不得自动改尺寸"
+    assert "--fullscreen=no" in args, "初始必须是非全屏"
+    # 不记住上次尺寸：不得引入 watch-later 之外的窗口状态持久化
+    assert not any(arg.startswith("--watch-later=") for arg in args)
+
+
+def test_external_mode_never_overrides_the_pack_thumbnail_backend():
+    """F-008：外部整合包自带 thumbfast/缩略图方案，KumiPlayer 不得注入任何 thumbfast 选项。"""
+
+    args = _args(external=True, first_file="D:/a.mkv", ipc_server=r"\.\pipe\kumi")
+    assert not any("thumbfast" in arg for arg in args), args

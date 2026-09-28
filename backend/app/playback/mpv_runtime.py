@@ -472,6 +472,15 @@ def build_mpv_playback_args(
     # 静默忽略。实测：`--script-opt=thumbfast.thumbnail=X` 解析结果仍是配置文件里的
     # 空值，改为 `thumbfast-thumbnail=X` 后 read_options 才拿到 X。
     args.append(f"--script-opt=thumbfast-thumbnail={state_dir / 'thumbfast'}")
+    # 缩略图后端必须用**已校验的内置绝对路径**启动，不依赖 PATH 或前端进程信息（F-008）。
+    # thumbfast 的默认 `mpv_path=mpv` 在 Windows 上会先读 `user-data/frontend/process-path`
+    # （那是前端播放器才提供的属性，KumiPlayer 不提供），拿不到就按 PATH 查 `mpv`；
+    # 一旦解析不到或解析到错误可执行文件，缩略图后端会静默失败并在屏幕上打出
+    # “cannot create mpv subprocess”。这里直接用后端已经校验过的 runtime 路径，
+    # 把“能不能找到播放器”这个变量消除掉。
+    # 选项名来自 thumbfast 自身文档（`mpv_path`，见 mpv/config/portable_config/scripts/thumbfast.lua
+    # 的 options 表与 components-manifest.json 登记），不是从第三方整合包照抄的配置。
+    args.append(f"--script-opt=thumbfast-mpv_path={executable}")
     # Anime4K 着色器是 KumiPlayer 自有层资源（layer_dir/shaders/），必须用绝对路径
     # 注入，不能让脚本用 `~~/shaders/` 自解析：`~~` 指向当前 mpv 的配置目录
     # （内置模式是 portable_config），一旦用户替换 portable_config 整合包，
@@ -507,6 +516,18 @@ def build_mpv_playback_args(
         "--no-terminal",
     ])
     if not fallback:
-        args.extend(["--force-window=immediate", "--focus-on=all", "--window-minimized=no"])
+        args.extend([
+            "--force-window=immediate", "--focus-on=all", "--window-minimized=no",
+            # 初始窗口尺寸合同（F-009，内置模式专用）：每次新建进程都按相对工作区的
+            # 中等尺寸、居中、非全屏启动，不沿用上一次窗口的尺寸/位置。
+            # 依据 MPV 官方手册：--autofit（按屏幕尺寸限制初始大小）、
+            # --geometry=50%:50%（居中）、--auto-window-resize=no（同一窗口切集不自动改尺寸）、
+            # --fullscreen（显式关闭全屏）。
+            # 用户手动 resize/maximize/fullscreen 仍可覆盖本次会话；下一次新进程恢复预设。
+            "--autofit=70%x60%",
+            "--geometry=50%:50%",
+            "--auto-window-resize=no",
+            "--fullscreen=no",
+        ])
     args.extend(playlist_paths or ([first_file] if first_file else []))
     return args

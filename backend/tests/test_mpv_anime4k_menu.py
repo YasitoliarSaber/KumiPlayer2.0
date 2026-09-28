@@ -35,18 +35,70 @@ def test_menu_lua_uses_uosc_callback_mode():
 
 def test_menu_click_flow_forwards_value_to_anime4k_session():
     text = MENU_LUA.read_text(encoding="utf-8")
-    # 回调模式事件契约：activate 事件按 value 前缀转发 set-session
+    # 回调模式事件契约：activate 事件按 value 前缀分发到 Anime4K 会话
     assert 'event.type ~= "activate"' in text
     assert 'value:sub(1, 5) == "mode:"' in text
     assert 'value:sub(1, 8) == "quality:"' in text
-    assert '"set-session", mode, state.quality' in text
-    assert '"set-session", state.mode, quality' in text
+    # 分发通过统一入口发 set-session，并带上请求 id（回执可丢弃过期请求）
+    assert 'request_anime4k("set-session", state.mode, quality)' in text
+    assert 'request_anime4k("set-session", mode, state.quality)' in text
+    assert 'mp.commandv("script-message-to", "kumiplayer_anime4k", kind, mode, quality, pending_request.id)' in text
     # 激活后关闭菜单（主菜单类型为 kumiplayer-context）
     assert '"close-menu", "kumiplayer-context"' in text
     # 新增通用控制前缀
     assert 'value:sub(1, 6) == "speed:"' in text
     assert 'value:sub(1, 12) == "quality:add:"' in text
     assert 'value:sub(1, 4) == "cmd:"' in text
+
+
+def test_menu_command_namespaces_do_not_overlap():
+    """F-013：宽前缀不得抢占更具体的命令命名空间。
+
+    历史缺陷：`quality:` 写成 `value:sub(1, 8)` 先判，于是
+    `quality:add:brightness:5` 与 `quality:reset` 也被当成质量枚举发给 Anime4K，
+    被拒绝；画面调节永远不生效，菜单 state.quality 还会被写成非法值污染后续
+    mode 切换。分发顺序必须是：reset → add → 质量枚举 → mode。
+    """
+
+    text = MENU_LUA.read_text(encoding="utf-8")
+    reset_at = text.index('if value == "quality:reset" then')
+    add_at = text.index('elseif value:sub(1, 12) == "quality:add:" then')
+    enum_at = text.index('elseif value:sub(1, 8) == "quality:" then')
+    mode_at = text.index('elseif value:sub(1, 5) == "mode:" then')
+    assert reset_at < add_at < enum_at < mode_at, "命令命名空间分发顺序被破坏"
+
+
+def test_menu_validates_enums_and_deltas_before_dispatch():
+    text = MENU_LUA.read_text(encoding="utf-8")
+    # 取值白名单同时驱动菜单项与分发，避免两边枚举不一致
+    assert "VALID_MODE_VALUES" in text
+    assert "VALID_QUALITY_VALUES" in text
+    assert "QUALITY_PROP" in text
+    assert "VALID_DELTA_VALUES" in text
+    # 画面调节只接受菜单定义的有限步长，不执行自由文本命令
+    assert 'local DELTA_STEPS = { "-5", "5" }' in text
+    assert 'not QUALITY_PROP[prop] or not VALID_DELTA_VALUES[delta]' in text
+    # 非法值不得静默：至少要有一次用户可见的有界提示
+    assert "mp.osd_message(" in text
+    assert "无效的 Anime4K 质量档位" in text
+    assert "无效的 Anime4K 模式" in text
+
+
+def test_menu_state_comes_from_anime4k_receipt():
+    """状态必须以 Anime4K 回执为权威，不得在请求发出时乐观写入（F-013）。"""
+
+    text = MENU_LUA.read_text(encoding="utf-8")
+    # 请求分支里不能出现 state.mode = / state.quality = 的本地赋值
+    dispatch = text[text.index('if value == "quality:reset" then'):text.index('if not handled then')]
+    assert "state.mode =" not in dispatch
+    assert "state.quality =" not in dispatch
+    # 状态写入只发生在状态广播回调中
+    callback = text[text.index('mp.register_script_message("kumiplayer_anime4k-state"'):]
+    assert "state.mode = " in callback
+    assert "state.quality = " in callback
+    # 回执带请求 id 与成败标记，失败时保留旧状态
+    assert "request_id == pending_request.id" in callback
+    assert "ok == nil or ok == \"true\" or ok == true" in callback
 
 
 def test_menu_contains_only_compact_mode_and_quality_submenus():
@@ -197,3 +249,66 @@ def test_menu_extends_common_controls():
     # 无额外插件依赖：不出现对未接入脚本的 script-binding 调用
     for absent in ("input_plus", "shaders", "vapoursynth", "nvidia"):
         assert absent not in text, f"菜单不应依赖未接入脚本: {absent}"
+
+
+def test_lua_scripts_load_in_isolated_mpv(tmp_path):
+    """两个自有 Lua 脚本必须在真实 mpv Lua 引擎里可加载（隔离、无媒体）。
+
+    静态断言看不出的回归：脚本里出现 `pm.` / 拼错的前缀这类“语法合法、运行时
+    取到 nil”的错误会让整个右键菜单直接加载失败。这里用内置 MPV，把
+    `package.loaded` 里的 mp / mp.utils / mp.options 换成最小替身，再 dofile
+    两个真实脚本；脚本能跑完并打印标记才算通过。
+    """
+
+    import json
+    import shutil
+    import subprocess
+
+    mpv = PROJECT_ROOT / "mpv/runtime/mpv.exe"
+    if not mpv.is_file():
+        import pytest
+
+        pytest.skip("内置 MPV 不可用，跳过 Lua 加载回归")
+
+    harness = """
+local real_mp = require 'mp'
+local real_utils = require 'mp.utils'
+local log = {}
+local function noop() end
+local fake_mp = {
+    msg = { info = noop, warn = noop, error = noop, verbose = noop, fatal = noop },
+    commandv = noop, command = noop, osd_message = noop,
+    get_property_number = function() return 0 end,
+    get_property_bool = function(_, default) return default end,
+    get_property = function() return nil end,
+    get_property_native = function() return {} end,
+    register_script_message = function() end,
+    register_event = function() end,
+    add_timeout = noop, get_time = function() return 0 end,
+}
+package.loaded['mp'] = fake_mp
+package.loaded['mp.utils'] = {
+    format_json = real_utils.format_json, parse_json = real_utils.parse_json,
+    file_info = function() return nil end,
+}
+package.loaded['mp.options'] = { read_options = function(options) return options end }
+dofile(MENU_PATH)
+dofile(ANIME4K_PATH)
+print('AUDIT_LUA_SCRIPTS_LOADED')
+real_mp.commandv('quit')
+"""
+    script = tmp_path / "load-smoke.lua"
+    script.write_text(
+        "MENU_PATH = " + json.dumps(MENU_LUA.as_posix()) + "\n"
+        "ANIME4K_PATH = " + json.dumps(ANIME4K_LUA.as_posix()) + "\n" + harness,
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [str(mpv), "--no-config", "--load-scripts=no", "--idle=yes",
+         "--vo=null", "--ao=null", "--terminal=yes",
+         "--script=" + str(script), "--script-opts="],
+        cwd=PROJECT_ROOT, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=30, creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "AUDIT_LUA_SCRIPTS_LOADED" in (result.stdout + result.stderr), result.stdout + result.stderr

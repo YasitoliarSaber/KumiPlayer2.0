@@ -1008,6 +1008,10 @@ def test_real_mpv_anime4k_menu_click_forwards_set_session(tmp_path):
     （menu-event + activate + value=mode:b），菜单脚本必须按 value 前缀
     转发 set-session 给 Anime4K 脚本，后者日志出现 "applied mode=b"。
     覆盖 uosc 回调模式与 Lua 脚本通讯；辅助脚本只存在于测试临时目录。
+
+    必须像生产后端一样注入 `kumiplayer_anime4k-shaders_dir`：Anime4K 脚本现在会在
+    应用前核对着色器文件确实存在（路径错误时不得报 applied），不注入就解析到
+    `~~/shaders/`（本次跑不存在的配置目录）而按“文件缺失”正确失败。
     """
     import subprocess as _subprocess
 
@@ -1034,6 +1038,7 @@ def test_real_mpv_anime4k_menu_click_forwards_set_session(tmp_path):
             "av://lavfi:sine",
             f"--script={scripts_dir / 'kumiplayer_uosc_menu.lua'}",
             f"--script={scripts_dir / 'kumiplayer_anime4k.lua'}",
+            f"--script-opt=kumiplayer_anime4k-shaders_dir={ROOT / 'mpv/config/kumiplayer/shaders'}",
             f"--script={trigger}",
             f"--log-file={log_path}",
         ],
@@ -1187,3 +1192,24 @@ def test_real_mpv_mounts_anime4k_chain_from_injected_owned_layer(tmp_path):
     assert f"shaders_dir={layer_dir.as_posix()}/shaders/anime4k-v4.0.1/" in log, (
         "脚本没有读到后端注入的 shaders_dir；mpv 日志：" + chr(10) + log[-1500:]
     )
+
+
+def test_internal_mode_injects_thumbfast_backend_as_absolute_path():
+    """F-008：缩略图后端不得依赖 PATH 或前端进程信息。
+
+    thumbfast 默认 `mpv_path=mpv`，在 Windows 上先读 `user-data/frontend/process-path`
+    （KumiPlayer 不提供），拿不到就按 PATH 查 `mpv`；解析失败时它会打通用错误并放弃
+    缩略图。内置模式改用后端已校验的绝对路径，把这个变量消掉。
+    """
+
+    from app.playback.mpv_runtime import build_mpv_playback_args
+
+    args = build_mpv_playback_args(_REAL_MPV_EXE, first_file="episode.mkv")
+    injected = [arg for arg in args if arg.startswith("--script-opt=thumbfast-mpv_path=")]
+    assert len(injected) == 1, injected
+    value = injected[0][len("--script-opt=thumbfast-mpv_path="):]
+    assert Path(value).is_absolute(), value
+    assert Path(value).name.lower() == "mpv.exe", value
+    # 仍然只写 KumiPlayer 状态目录，不写用户/视频目录。
+    thumbnail = [arg for arg in args if arg.startswith("--script-opt=thumbfast-thumbnail=")]
+    assert len(thumbnail) == 1 and "thumbfast" in thumbnail[0]

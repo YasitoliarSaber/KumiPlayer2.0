@@ -619,6 +619,10 @@ class V4PlaybackManager:
         last_checkpoint_at = 0.0
         last_checkpoint_episode = ""
         next_checkpoint_retry_at = 0.0
+        # 已完成边沿按当前 episode_id+asset_id 记账：只表示“这一次完成已经成功
+        # 落盘过”。历史缺陷是把“已经完成”的持续状态当作“刚刚完成”的事件，于是
+        # 达到 90% 后每条进度事件都会绕过 5 秒节流写库（末尾写放大）。
+        completed_assets: dict[tuple[str, str], bool] = {}
         reconnect_delay = 0.25
         try:
             while process.poll() is None:
@@ -643,6 +647,10 @@ class V4PlaybackManager:
                             session["playback_locator"] = active_asset.get("playback_locator") or active_asset.get("source_locator") or ""
                             session["position"] = 0.0
                             session["duration"] = 0.0
+                            # 跨集后重置节流时钟：新集的第一个采样应立即落盘，
+                            # 不能因为上一集刚写过而被 5 秒窗口吃掉。
+                            last_checkpoint_at = 0.0
+                            next_checkpoint_retry_at = 0.0
                             set_mpv_playback_title(
                                 session["ipc_server"], self._display_title(active_asset)
                             )
@@ -652,11 +660,16 @@ class V4PlaybackManager:
                             last_checkpoint_episode = ""
                         completed = event.duration > 0 and event.position / event.duration >= 0.9
                         active_episode_id = str(active_asset.get("episode_id") or session["episode_id"])
+                        asset_key = (active_episode_id, str(active_asset["asset_id"]))
+                        # 完成边沿：只在“本资产还没成功完成过”时算一次事件；
+                        # 之后回到 89% 再进 91% 不再触发完成写入，但普通 5 秒
+                        # 采样照常保存位置。
+                        completion_crossing = completed and not completed_assets.get(asset_key, False)
                         current_time = time.monotonic()
                         if (
                             active_episode_id != last_checkpoint_episode
                             or event.force_checkpoint
-                            or completed
+                            or completion_crossing
                             or current_time - last_checkpoint_at >= 5.0
                         ) and current_time >= next_checkpoint_retry_at:
                             saved = self._checkpoint_progress(
@@ -671,7 +684,11 @@ class V4PlaybackManager:
                                 last_checkpoint_at = current_time
                                 last_checkpoint_episode = active_episode_id
                                 next_checkpoint_retry_at = 0.0
-                                if completed:
+                                if completion_crossing:
+                                    # 只有“刚刚完成”的边沿才记帐并投递同步：
+                                    # 90% 之后的 5 秒普通采样不再重复投递。
+                                    # 持久化失败时不会走到这里，由 1 秒有界重试继续。
+                                    completed_assets[asset_key] = True
                                     self._schedule_completion_sync(session, active_asset)
                             else:
                                 next_checkpoint_retry_at = current_time + 1.0
