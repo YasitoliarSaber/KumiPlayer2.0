@@ -13,13 +13,17 @@ import re
 import unicodedata
 from collections import OrderedDict, defaultdict
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from app.media_v4.domain.identity import (
+    CONTENT_CLASS_UNKNOWN,
     NON_IMPORTABLE_CONTENT_CLASSES,
     ORIGIN_DIRECTORY,
+    ORIGIN_EXPLICIT_ABSOLUTE,
+    ORIGIN_EXPLICIT_DIRECTORY,
+    ORIGIN_EXPLICIT_FILENAME,
     ORIGIN_FILENAME,
     ORIGIN_PARSER_RULE,
     ORIGIN_SIDECAR,
@@ -766,6 +770,167 @@ class _EpisodeClaim:
     has_boundary_identity: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _NumberingPlacement:
+    """同批裁决结果（STEP-004）。仅 Resolver 局部使用，不写回 ParsedFacts。"""
+
+    evidence_id: str
+    effective_media_type: str
+    local_episode_number: int | None
+    local_season_number: int | None
+    origin: str
+    reason: str
+
+
+#: 只有这些来源的集号才能充当“同批正片锚点”。
+_ANCHOR_EPISODE_ORIGINS = frozenset(
+    {ORIGIN_EXPLICIT_FILENAME, ORIGIN_EXPLICIT_ABSOLUTE}
+)
+
+
+def _candidate_group_key(evidence: SourceEvidence, facts: ParsedFacts) -> tuple[str, str]:
+    """候选裁决的作用域：同一次扫描 + 同一个明确作品边界。
+
+    刻意不包含媒体类型：待裁决条目正是“类型未知”的那批，用类型入键会让
+    它们和它们的正片兄弟不在同一组，从而永远拿不到证据。
+    """
+
+    group = _boundary_key_title(facts.series_group)
+    if not group:
+        container = _extract_work_container(
+            evidence.relative_path, provider_to_source(evidence.provider)
+        )
+        if container:
+            group = _normalize_title(_parse_work_title_and_year(container)[0])
+    return (str(evidence.scan_id or ""), group)
+
+
+def _is_tv_anchor(facts: ParsedFacts) -> bool:
+    if _effective_media_type(facts) != "tv":
+        return False
+    if facts.group_type != "season":
+        return False
+    if facts.episode_candidate is None:
+        return False
+    return facts.numbering.episode_origin in _ANCHOR_EPISODE_ORIGINS
+
+
+def _episode_candidates(facts: ParsedFacts) -> list[tuple[int, str, str]]:
+    """从不可变事实的决定轨迹里读回（number, rule_id, title_prefix）候选。
+
+    ParsedFacts 只持久化 NumberingEvidence，不持久化 NumberingFacts；候选按合同
+    存在 decision_trace 中，这是唯一读取入口。
+    """
+
+    out: list[tuple[int, str, str]] = []
+    for trace in facts.decision_trace or ():
+        if str(getattr(trace, "field", "") or "") != "episode_number_candidate":
+            continue
+        value = trace.value if isinstance(trace.value, dict) else {}
+        number = value.get("number")
+        if not isinstance(number, int):
+            continue
+        out.append((number, str(value.get("rule_id") or trace.rule_id or ""), str(value.get("title_prefix") or "")))
+    return out
+
+
+def _adjudicate_numbering_candidates(
+    admitted: list[tuple[SourceEvidence, ParsedFacts]],
+) -> tuple[dict[str, _NumberingPlacement], set[str]]:
+    """用同批正片证据裁决低上下文集号候选（F-004）。
+
+    规则（只提升、不下沉，不补齐缺集，不跨作品边界合并）：
+
+    - 在同一个“扫描 + 明确作品边界”分组里找 TV 正片锚点（显式文件集号）；
+    - 至少 2 个不同集号的锚点 → 强上下文，纯数字 stem 与标题尾数均可提升；
+      标题尾数还要求去掉尾数后的前缀与分组规范标题等价；
+    - 只有 1 个锚点 → 弱上下文，仅当本条目带显式目录季号时提升（只赋本地季号）；
+    - 候选与锚点集号相同、或一个文件有多个相矛盾候选 → 不提升（保留未知）；
+    - 电影/独立外传/OVA/附属内容一律不提升。
+
+    返回（提升表, 处于“序列上下文但仍未定位”的证据集）。后者只用于提示，
+    不参与任何编号写入。
+    """
+
+    anchor_numbers: dict[tuple[str, str], set[int]] = defaultdict(set)
+    group_of: dict[str, tuple[str, str]] = {}
+    for evidence, facts in admitted:
+        group_of[evidence.evidence_id] = _candidate_group_key(evidence, facts)
+        if _is_tv_anchor(facts):
+            anchor_numbers[group_of[evidence.evidence_id]].add(int(facts.episode_candidate))
+
+    placements: dict[str, _NumberingPlacement] = {}
+    unresolved_in_series: set[str] = set()
+    for evidence, facts in admitted:
+        group = group_of[evidence.evidence_id]
+        anchors = anchor_numbers.get(group, set())
+        series_context = len(anchors) >= 1
+        if (
+            _effective_media_type(facts) not in {"unknown", ""}
+            or facts.content_class != CONTENT_CLASS_UNKNOWN
+            or facts.group_type == "movie"
+            or facts.numbering.basis
+        ):
+            continue
+        candidates = _episode_candidates(facts)
+        promoted: _NumberingPlacement | None = None
+        if len(candidates) == 1 and series_context:
+            number, rule_id, title_prefix = candidates[0]
+            season = facts.season_candidate
+            strong = len(anchors) >= 2
+            weak_ok = (
+                len(anchors) == 1
+                and facts.numbering.season_origin == ORIGIN_EXPLICIT_DIRECTORY
+                and season is not None
+            )
+            prefix_ok = rule_id != "title_suffix_number" or (
+                _normalize_title(title_prefix) in _group_titles(admitted, group)
+            )
+            if (strong or weak_ok) and prefix_ok and number not in anchors:
+                promoted = _NumberingPlacement(
+                    evidence_id=evidence.evidence_id,
+                    effective_media_type="tv",
+                    local_episode_number=number,
+                    local_season_number=season,
+                    origin="batch_inferred",
+                    reason=f"series_anchor_{len(anchors)}",
+                )
+        if promoted is not None:
+            placements[evidence.evidence_id] = promoted
+        elif series_context:
+            unresolved_in_series.add(evidence.evidence_id)
+    return placements, unresolved_in_series
+
+
+def _group_titles(
+    admitted: list[tuple[SourceEvidence, ParsedFacts]], group: tuple[str, str]
+) -> frozenset[str]:
+    """分组内已有的规范作品标题（含锚点的 work_title 与 series_group）。"""
+
+    titles: set[str] = set()
+    for evidence, facts in admitted:
+        if _candidate_group_key(evidence, facts) != group:
+            continue
+        for value in (facts.work_title, facts.series_group, *(facts.title_candidates or ())):
+            normalized = _normalize_title(value)
+            if normalized and not is_generic_container_title(value):
+                titles.add(normalized)
+    return frozenset(titles)
+
+
+def _apply_numbering_placement(facts: ParsedFacts, placement: _NumberingPlacement) -> ParsedFacts:
+    """把裁决结果变成 Resolver 局部的派生事实（不写回不可变 ParsedFacts）。"""
+
+    return replace(
+        facts,
+        media_type=placement.effective_media_type,
+        group_type="season",
+        season_candidate=placement.local_season_number,
+        episode_candidate=placement.local_episode_number,
+        reasons=(*facts.reasons, "batch_inferred_episode_number"),
+    )
+
+
 def _entry_issues(
     evidence: SourceEvidence, facts: ParsedFacts, work_key: str
 ) -> list[ResolutionIssue]:
@@ -798,6 +963,24 @@ def _entry_issues(
                     if generic
                     else "缺少足够的作品标题或 Provider 身份，已按清洗后的本地名称入库，"
                     "可稍后补充在线资料"
+                ),
+            )
+        )
+    # F-005：分维度提示。预期是 TV 正片（已判定类型与季度）却没有集号时，
+    # 必须给出具体原因；普通电影没有集号不发提示；“开口未知”的单独文件
+    # （没有序列上下文、没有候选）也不强行报错，避免把合法未知一律当失败。
+    if (
+        _effective_media_type(facts) == "tv"
+        and facts.group_type == "season"
+        and facts.episode_candidate is None
+    ):
+        issues.append(
+            ResolutionIssue(
+                code="episode_number_unresolved",
+                evidence_id=evidence.evidence_id,
+                message=(
+                    "已归入本作品的正片序列，但文件名与目录都没有可用的集号；"
+                    "不会自动补号，请核对文件命名或在预览里手动指定"
                 ),
             )
         )
@@ -1275,10 +1458,23 @@ class MediaResolver:
     ) -> ResolvedMediaGraph:
         # C-002 准入集合：排除条目保留 source/pf 事实与原因，但不参与系列身份、
         # 分组、年份借用、标题频率、季号传播、候选查询与关系建图。
-        admitted = [
+        admitted_raw = [
             (evidence, facts)
             for evidence, facts in entries
             if _is_admitted(facts)
+        ]
+        # STEP-004：用同批正片证据裁决低上下文集号候选。裁决只产生 Resolver 局部
+        # 的派生事实（replace 副本），绝不回写不可变 ParsedFacts；确认后写入的是
+        # resolved_json，而不是改事实。
+        placements, unresolved_in_series = _adjudicate_numbering_candidates(admitted_raw)
+        admitted = [
+            (
+                evidence,
+                _apply_numbering_placement(facts, placements[evidence.evidence_id])
+                if evidence.evidence_id in placements
+                else facts,
+            )
+            for evidence, facts in admitted_raw
         ]
         # 未定位条目以 SourceFile 槽位为稳定锚点：传了上一代 context 就按连续性
         # 复用槽位，没传时由出生观察推导（两者都确定，重复预览结果一致）。
@@ -1430,6 +1626,22 @@ class MediaResolver:
             allocated_unnumbered_specials=allocated_unnumbered_specials,
         )
         issues.extend(member_issues)
+        # 序列上下文里仍无法定位的条目：给出具体原因，而不是静默零问题（F-005）。
+        for evidence, facts in admitted:
+            if evidence.evidence_id not in unresolved_in_series:
+                continue
+            if _effective_media_type(facts) != "unknown":
+                continue
+            issues.append(
+                ResolutionIssue(
+                    code="media_type_unresolved",
+                    evidence_id=evidence.evidence_id,
+                    message=(
+                        "同一序列中的这个文件既没有可用集号，也没有足够的类型与作品边界证据；"
+                        "已保留为未定位条目，不会自动归入某一集"
+                    ),
+                )
+            )
         _assert_member_outcome(admitted, episodes, work_assets)
         relations = _build_relations(work_rows)
         return ResolvedMediaGraph(

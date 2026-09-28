@@ -63,7 +63,13 @@ def test_real_directory_tree_sample_has_complete_non_ambiguous_v4_graph(
     }
 
     assert assigned_ids == importable_ids
-    assert graph.issues == ()
+    # F-005（2026-09-28）：序列中无法定位的正片条目必须显式提示，从前的
+    # “零 issue”断言正是掩盖它们的盲点。这两个码是信息类提示（warning），
+    # 不阻断导入；结构错误与其余提示仍然必须为空。
+    informational = {"episode_number_unresolved", "media_type_unresolved"}
+    unexpected = [issue for issue in graph.issues if issue.code not in informational]
+    assert unexpected == [], unexpected
+    assert all(issue.severity == "warning" for issue in graph.issues), graph.issues
     assert graph.works
     # 只验证解析图会漏掉本次回归：错误绑定是在第二步离线候选阶段产生的。
     _candidates, merge_map, candidate_issues = plan_work_candidates(graph, parsed, lambda *_: [])

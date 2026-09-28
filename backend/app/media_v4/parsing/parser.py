@@ -13,6 +13,7 @@ from app.media_v4.domain.identity import (
     CONTENT_CLASS_ATTACHED_SPECIAL,
     CONTENT_CLASS_MOVIE,
     NON_IMPORTABLE_CONTENT_CLASSES,
+    ORIGIN_LOCAL_UNSCOPED,
     DecisionTrace,
 )
 from app.media_v4.domain.models import ParsedFacts, SourceEvidence
@@ -388,7 +389,7 @@ def _parse_sidecar_nfo(evidence: SourceEvidence) -> tuple[int | None, str, str, 
 class V4Parser:
     """从一个 SourceEvidence 生成一个不可变 ParsedFacts。"""
 
-    VERSION = "v4-parser-3"
+    VERSION = "v4-parser-4"
 
     @classmethod
     def _parsed_fact_id(cls, evidence: SourceEvidence) -> str:
@@ -624,6 +625,22 @@ class V4Parser:
                 scope=numbering.numbering.scope_key or "local",
                 rule_id="numbering_lexical",
                 alternatives=numbering.conflicts,
+            ),
+            # 低上下文集号候选（STEP-003）：写入不可变事实的决定轨迹，供 Resolver
+            # 在同批正片证据下裁决；本层不把它升级为 episode_candidate。
+            *(
+                DecisionTrace(
+                    field="episode_number_candidate",
+                    value={
+                        "number": candidate.number,
+                        "title_prefix": candidate.title_prefix,
+                        "rule_id": candidate.rule_id,
+                    },
+                    origin=ORIGIN_LOCAL_UNSCOPED,
+                    scope="local",
+                    rule_id=candidate.rule_id,
+                )
+                for candidate in numbering.candidates
             ),
         )
         return ParsedFacts(

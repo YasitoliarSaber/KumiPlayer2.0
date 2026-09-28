@@ -152,6 +152,19 @@ _BARE_NUMBER_RES = (
 )
 _RANGE_RE = re.compile(r"(?i)(?<![A-Za-z])E(\d{1,3})\s*[-~]\s*E?(\d{1,3})(?![\w%])")
 
+#: 纯数字文件名（`8.mkv` / `11.mp4`）。
+_PURE_NUMBER_STEM_RE = re.compile(r"^[0-9]{1,3}$")
+
+#: 作品名紧贴尾部数字（`作品名11.mp4`）；前缀必须非空且不含尾部数字。
+_TITLE_SUFFIX_NUMBER_RE = re.compile(r"^(.*?[^0-9\s._-])\s*(\d{1,3})$")
+
+#: 这些数值是年份/分辨率等固有数字，不能当作集号候选。
+_TECHNICAL_NUMBERS = frozenset({720, 1080, 2160, 4320, 480, 576, 1440})
+_TECHNICAL_PREFIX_RE = re.compile(
+    r"(?i)(?:h\.?26[45]|x26[45]|hevc|avc|10bit|8bit|aac|flac|web[-\s]?dl|blu[-\s]?ray|bdrip|"
+    r"\d{3,4}p|fps|repack|proper)"
+)
+
 _MAX_RANGE_LENGTH = 1000
 
 
@@ -176,6 +189,19 @@ class DirectoryToken:
 
 
 @dataclass(frozen=True, slots=True)
+class NumberingCandidate:
+    """低上下文集号候选（F-004 / STEP-003）。
+
+    词法阶段只记录“这里看起来有个集号”，不把它写成强事实：
+    候选是否成立必须有同批、同明确作品边界的正片证据（在 Resolver 裁决）。
+    """
+
+    number: int
+    rule_id: str
+    title_prefix: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class NumberingFacts:
     season: int | None = None
     episode: int | None = None
@@ -184,6 +210,7 @@ class NumberingFacts:
     episode_origin: str = ORIGIN_UNKNOWN
     conflicts: tuple[str, ...] = ()
     numbering: NumberingEvidence = field(default_factory=NumberingEvidence)
+    candidates: tuple[NumberingCandidate, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,6 +413,11 @@ def parse_numbering(
         season_origin = ORIGIN_PARSER_RULE
 
     scope_key = "work" if absolute_origin == ORIGIN_EXPLICIT_ABSOLUTE else "local"
+    candidates: tuple[NumberingCandidate, ...] = ()
+    if episode is None and absolute is None and episode_range is None and not conflicts:
+        # 低上下文集号候选（STEP-003）：只记词法候选与来源，不写成强事实。
+        # 是否成立由 Resolver 用同批、同明确作品边界的正片证据裁决。
+        candidates = _numbering_candidates(stem, tokens)
     evidence = NumberingEvidence(
         season_origin=season_origin,
         episode_origin=episode_origin,
@@ -401,7 +433,51 @@ def parse_numbering(
         episode_origin=episode_origin,
         conflicts=tuple(conflicts),
         numbering=evidence,
+        candidates=candidates,
     )
+
+
+def _numbering_candidates(stem: str, tokens: FilenameTokens) -> tuple[NumberingCandidate, ...]:
+    """提取纯数字 stem 与作品名尾数两类候选（强到弱）。
+
+    年份（1901..2099）、分辨率、编码与帧率类固有数字不得成为集号候选；
+    标题尾数还要求拆出非空且非技术 token 的前缀（在 Resolver 还要与规范作品名等价）。
+    """
+
+    text = (stem or "").strip()
+    if not text:
+        return ()
+    candidates: list[NumberingCandidate] = []
+    if _PURE_NUMBER_STEM_RE.fullmatch(text):
+        number = int(text)
+        if _candidate_number_is_plausible(number):
+            candidates.append(NumberingCandidate(number=number, rule_id="bare_numeric_stem"))
+        return tuple(candidates)
+    suffix = _TITLE_SUFFIX_NUMBER_RE.fullmatch(text)
+    if suffix is not None:
+        prefix = (suffix.group(1) or "").strip(" \t._-~[]【】()")
+        number = int(suffix.group(2))
+        if (
+            prefix
+            and len(prefix) >= 2
+            and not prefix.isdigit()
+            and not _TECHNICAL_PREFIX_RE.search(prefix)
+            and _candidate_number_is_plausible(number)
+        ):
+            candidates.append(
+                NumberingCandidate(number=number, rule_id="title_suffix_number", title_prefix=prefix)
+            )
+    return tuple(candidates)
+
+
+def _candidate_number_is_plausible(number: int) -> bool:
+    if number <= 0 or number > 999:
+        return False
+    if 1901 <= number <= 2099:
+        return False
+    if number in _TECHNICAL_NUMBERS:
+        return False
+    return True
 
 
 def _has_e_token(stem: str) -> bool:
