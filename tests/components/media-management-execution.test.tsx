@@ -618,3 +618,33 @@ test('详情读取失败可在同一展开面板内重新读取，空详情仍�
   fireEvent.click(screen.getByRole('button', { name: '重新读取' }))
   await waitFor(() => expect(fetchWorkDetail).toHaveBeenCalledTimes(2))
 })
+
+test('非阻断提示不阻止确认：按钮可点且恰好发一次 confirm 请求', async () => {
+  render(<MediaManagementPage />)
+  fireEvent.click(await screen.findByRole('button', { name: '导入媒体' }))
+  const input = await screen.findByRole('textbox', { name: '本机媒体文件夹' })
+  fireEvent.change(input, { target: { value: 'D:\Anime' } })
+  api.durableScan.mockResolvedValue({
+    scan_id: 'scan-durable', root_id: 'root', status: 'completed', started_at: '',
+    finished_at: '', error: '', evidence_count: 1, entries: [],
+  })
+  // 后端已采用非阻断合同：issues 非空但 blocking_issue_count=0；
+  // 这是当前后端的真实返回形状（backend/app/api/media_v4.py::_graph_to_dict）。
+  api.preview.mockResolvedValue({
+    revision_id: 'rev-warning',
+    status: 'draft',
+    works: [{ work_key: 'w1', preferred_title: '有提示的作品', year: 2024, media_type: 'tv', source_evidence_ids: ['ev-1'] }],
+    episodes: [],
+    work_assets: [],
+    issues: [{ code: 'episode_number_unresolved', evidence_id: 'ev-1', message: '无法确定集号' }],
+    blocking_issue_count: 0,
+  })
+  fireEvent.click(screen.getByRole('button', { name: '扫描并识别' }))
+
+  const confirmButton = await screen.findByRole('button', { name: '确认并建立媒体库' })
+  expect(confirmButton).toBeEnabled()
+  expect(await screen.findByText(/条不确定信息，不影响建立媒体库/)).toBeVisible()
+  fireEvent.click(confirmButton)
+  await waitFor(() => expect(api.confirm).toHaveBeenCalledTimes(1))
+  expect(api.confirm).toHaveBeenCalledWith(expect.stringMatching(/^rev-/))
+})

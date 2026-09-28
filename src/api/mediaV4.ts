@@ -56,7 +56,11 @@ export interface V4Preview {
   episodes: V4ResolvedEpisode[]
   work_assets: V4ResolvedWorkAsset[]
   issues: V4ReviewIssue[]
-  /** 阻断确认的 issue 数（提示类不计入）；旧后端响应缺失时回退到 issues.length。 */
+  /**
+   * 阻断确认的 issue 数（提示类不计入）。现行后端固定返回 0。
+   * 旧后端响应缺字段时按 0 处理：提示类 issue 不阻断确认，
+   * 不能再用 issues.length 冒充阻断数。
+   */
   blocking_issue_count?: number
 }
 
@@ -130,8 +134,30 @@ export interface V4SourceLibraryCard {
   latest_revision_id: string
   revision_state: string
   evidence_count: number
-  work_count: number
-  asset_count: number
+  /** 数字所属生命周期：scan=仅扫描观察，draft=待确认草稿，confirmed=已确认媒体库。旧后端可能不返回。 */
+  counts_scope?: 'scan' | 'draft' | 'confirmed' | string
+  /**
+   * 该 scope 下的作品数；扫描阶段尚未归属时为 null（未知，不是 0）。
+   */
+  work_count: number | null
+  /** 该 scope 下的物理版本 Asset 数；扫描阶段为 null。 */
+  asset_count: number | null
+  /** 本次 scan 已落库观察到的总条目数（含非视频）。 */
+  observed_entry_count?: number | null
+  /** 本次 scan 已落库观察到的视频条目数。 */
+  observed_video_count?: number | null
+  /** 已准入的物理视频文件数（按 evidence 槽去重）。 */
+  admitted_video_file_count?: number | null
+  /** 该 scope 下的逻辑剧集数。 */
+  episode_count?: number | null
+  /** 有视频证据但按 content_class 明确排除（特别篇/辅助视频）的条数。 */
+  excluded_video_count?: number | null
+  /** confirmed 当前作品中在线资料已就绪的数量；draft/scan 或不可用时为 null。 */
+  metadata_ready_work_count?: number | null
+  /** 其中本次刷新成功就绪的数量。 */
+  metadata_ready_current_count?: number | null
+  /** 其中沿用上一次成功资料快照（retained）的就绪数量。 */
+  metadata_ready_retained_count?: number | null
   progress: {
     state: string
     stage: string
@@ -500,15 +526,24 @@ export const mediaV4Api = {
   sourceLibraryDeletionPreview: (rootId: string) =>
     api.get<{
       root_id: string
+      /** 当前活动媒体库的作品数（不是历史 revision 遗留的 work_id 数）。 */
       works_total: number
+      /** 当前会离开媒体库的作品数。 */
       works_removable: number
+      /** 其中被其他来源共享而保留的数量。 */
       works_shared: number
+      current_works_total?: number
+      current_works_leaving?: number
+      current_works_shared?: number
       artifacts_total: number
       artifact_files: number
       artifact_bytes: number
       files_outside_mirror_count: number
-      removable_samples: string[]
-      shared_samples: string[]
+      /** 已弃用：用户要求删除确认框不再列作品示例，后端固定返回空数组。 */
+      removable_samples?: string[]
+      shared_samples?: string[]
+      /** 仅供诊断：本次检查的历史维护 work_id 数量。 */
+      historical_work_ids_examined?: number
       blockers: string[]
     }>(`/api/v4/sources/libraries/${encodeURIComponent(rootId)}/deletion-preview`),
 

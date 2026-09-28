@@ -13270,17 +13270,26 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
  * 实测浮层规则特异性与之打平（都是两个类），不加 !important 会被 griffel 覆盖，
  * 兜底失效（按钮规则因特异性更高而侥幸生效，浮层则不会）。
  *
- * 浮层规则**不能限定在 .player-tuning-page 内**：实测 Fluent 把 Listbox Portal 到了
- * document.body（祖先链为 Listbox → FluentProvider → BODY → HTML），它不在本页
- * 容器里，任何页面作用域的写法都匹配不到。
+ * 浮层兜底必须**显式选择启用**（`.player-tuning-listbox`）而不是按 `[role='listbox']`
+ * 全局匹配。历史教训（F-007，2026-09-28）：当时为了让兜底命中被 Portal 到
+ * `document.body` 的浮层，把选择器放宽成全局 `[role='listbox']`；结果详情页的
+ * 季选择器（同样 Portal）在更靠后的源码位置被这条规则以同优先级 `!important`
+ * 覆盖了背景色，自己保留的浅色文字落在白底上 → 白底白字。
  *
- * 只覆盖"底色"这一条属性：正常状态下取值与 Fluent 完全相同（token 先命中），
+ * 因此：需要兜底的浮层在自己的 listbox 插槽上加 `player-tuning-listbox` 类；
+ * 详情季选择器保持 `detail-season-listbox` 自有深色底与前景色，不在此规则范围内。
+ * 说明：播放器调节页当前的下拉是 Fluent 原生 `Select`（`<select>` + `Dropdown`
+ * 包装，没有 listbox 节点），此规则目前没有页面内消费者，保留为唯一受支持的
+ * Portal 浮层兜底入口，避免以后又用全局 role 选择器去修同一个问题。
+ *
+ * 只覆盖“底色/前景色”成对属性：正常状态下取值与 Fluent 完全相同（token 先命中），
  * 因此不会带来任何视觉变化（早期版本还加了 border/shadow，实测会把浮层边框从
  * 0px 变成 1px，属于无谓的外观改动，已移除）。
  */
-.fui-Dropdown__listbox,
-[role='listbox'] {
+.fui-Dropdown__listbox.player-tuning-listbox,
+[role='listbox'].player-tuning-listbox {
   background-color: var(--colorNeutralBackground1, var(--surface-raised, #ffffff)) !important;
+  color: var(--colorNeutralForeground1, var(--text)) !important;
 }
 .player-tuning-actions .fui-Button {
   background-color: var(--colorBrandBackground, var(--accent-strong)) !important;
@@ -13649,9 +13658,10 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-source-card-stats span { padding: 4px 8px; border-radius: 5px; color: var(--text-secondary); background: color-mix(in srgb, var(--text) 5%, transparent); font-size: 12px; font-variant-numeric: tabular-nums; }
 .media-v4-source-card-status { display: grid; gap: 5px; padding-block: 4px 8px; }
 .media-v4-source-card-attention { color: var(--danger, #c42b1c); font-size: 13px; line-height: 1.5; }
-/* 来源卡主指标：已正确刮削的作品数 / 总作品数（镜像不是主指标）。 */
+/* 来源卡主指标：在线资料已就绪的作品数 / 总作品数（镜像不是主指标）。 */
 .media-v4-source-card-scrape { display: flex; align-items: baseline; gap: 5px; color: var(--text-secondary); font-size: 13px; font-variant-numeric: tabular-nums; }
 .media-v4-source-card-scrape strong { color: var(--text); font-size: 20px; font-weight: 700; line-height: 1.1; }
+.media-v4-source-card-retained { color: var(--text-secondary); font-size: 12px; }
 .media-v4-source-card-notice { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .media-v4-source-card-progress { display: flex; min-height: 20px; align-items: center; color: var(--text-secondary); font-size: 12px; }
 .media-v4-source-card-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; gap: 8px; margin-top: 1px; }

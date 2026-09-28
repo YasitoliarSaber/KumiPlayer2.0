@@ -126,8 +126,12 @@ def test_plan_keeps_works_shared_with_other_sources(tmp_path):
 
     assert plan["works_removable"] == 1, plan          # work-two 只属于 A
     assert plan["works_shared"] == 1, plan             # work-one 被 B 也绑定
-    assert plan["removable_samples"] == ["作品二"]
-    assert plan["shared_samples"] == ["作品一"]
+    assert plan["current_works_total"] == 2, plan
+    assert plan["current_works_leaving"] == 1, plan
+    assert plan["current_works_shared"] == 1, plan
+    # 用户 2026-09-28 决定：确认框不再列作品示例（后端也不再为 UI 查标题）。
+    assert plan["removable_samples"] == []
+    assert plan["shared_samples"] == []
     # 只统计会真正回收的产物：共享作品（work-one）的产物必须保留，不计入
     assert plan["artifact_files"] == 1
     assert plan["blockers"] == []
@@ -444,3 +448,52 @@ def test_second_deletion_after_succeeded_does_not_hit_unique_key(tmp_path):
             )
         ]
     assert len(keys) == len(set(keys)), f"幂等键必须唯一，实际 {keys}"
+
+
+def test_current_impact_is_separate_from_historical_maintenance_set(tmp_path):
+    """STEP-002 / F-003：卡片作品数与删除提示数是两个集合。
+
+    历史 superseded revision 遗留的 work_id 只属于维护集合（产物回收），不能当成
+    “会离开媒体库的作品数”；反过来也不能为了把数字改小而少回收产物。
+    """
+
+    database = _database(tmp_path)
+    mirror = tmp_path / "mirror"
+    (mirror / "A").mkdir(parents=True, exist_ok=True)
+    with database.connect() as conn:
+        _seed_root(conn, "root-a")
+        _seed_root(conn, "root-b")
+        _seed_revision(conn, "rev-a", "root-a")
+        _seed_revision(conn, "rev-b", "root-b")
+        for index in range(1, 6):
+            _seed_work(conn, f"cur-{index}", f"当前作品{index}")
+            _seed_evidence(conn, f"ev-a{index}", "root-a", "rev-a")
+            _seed_binding(conn, f"bind-a{index}", "rev-a", f"cur-{index}", f"ev-a{index}")
+        # 历史：同一来源的 superseded revision 遗留 20 个不同 work_id。
+        conn.execute(
+            "INSERT INTO source_scans(scan_id, root_id, generation, status, stage, heartbeat_at, started_at) "
+            "VALUES ('scan-rev-a-old', 'root-a', 0, 'completed', 'ready', 'now', 'now')"
+        )
+        conn.execute(
+            "INSERT INTO import_revisions(revision_id, root_id, scan_id, resolver_version, status, created_at) "
+            "VALUES ('rev-a-old', 'root-a', 'scan-rev-a-old', 'fixture', 'superseded', 'now')"
+        )
+        for index in range(1, 21):
+            _seed_work(conn, f"hist-{index}", f"历史作品{index}")
+            _seed_evidence(conn, f"ev-old{index}", "root-a", "rev-a-old")
+            _seed_binding(conn, f"bind-old{index}", "rev-a-old", f"hist-{index}", f"ev-old{index}")
+        # 其他来源当前共享两个当前作品。
+        for index in (1, 2):
+            _seed_evidence(conn, f"ev-b{index}", "root-b", "rev-b")
+            _seed_binding(conn, f"bind-b{index}", "rev-b", f"cur-{index}", f"ev-b{index}")
+
+    plan = plan_source_deletion(database, "root-a", mirror_root=mirror)
+
+    assert plan["current_works_total"] == 5, plan
+    assert plan["current_works_leaving"] == 3, plan
+    assert plan["current_works_shared"] == 2, plan
+    assert plan["works_removable"] == 3, "对外口径必须与 current_works_leaving 一致"
+    assert plan["historical_work_ids_examined"] >= 20, "历史维护集合仍须包含遗留 work_id"
+    # 重复预览无副作用。
+    again = plan_source_deletion(database, "root-a", mirror_root=mirror)
+    assert again == plan

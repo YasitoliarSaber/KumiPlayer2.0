@@ -34,7 +34,11 @@ class SourceDeletionCancelled(Exception):
 
 @dataclass(slots=True)
 class SourceDeletionPlan:
-    """删除影响范围预览（只含计数与少量样本，绝不水合全量对象）。"""
+    """删除影响范围预览（只含计数，绝不水合全量对象，也不列作品示例）。
+
+    ``works_*`` 是**当前活动媒体库的离库影响**；历史 revision 遗留的 work_id 只作为
+    维护集合参与产物回收，不再冒充“被删除的作品数”（见 D2-02）。
+    """
 
     root_id: str
     works_total: int = 0
@@ -44,16 +48,23 @@ class SourceDeletionPlan:
     artifact_files: int = 0
     artifact_bytes: int = 0
     files_outside_mirror: list[str] = field(default_factory=list)
+    # 用户 2026-09-28 决定：删除确认框不再列出被删除/共享的作品示例。
     removable_samples: list[str] = field(default_factory=list)
     shared_samples: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
+    # 只为日志/诊断保留的内部数量：历史维护集合（含已被取代的 revision 遗留 work_id）。
+    historical_work_ids_examined: int = 0
 
     def to_dict(self) -> dict:
         return {
             "root_id": self.root_id,
+            # 当前活动媒体库的离库影响（UI 只应读这三个口径）。
             "works_total": self.works_total,
             "works_removable": self.works_removable,
             "works_shared": self.works_shared,
+            "current_works_total": self.works_total,
+            "current_works_leaving": self.works_removable,
+            "current_works_shared": self.works_shared,
             "artifacts_total": self.artifacts_total,
             "artifact_files": self.artifact_files,
             "artifact_bytes": self.artifact_bytes,
@@ -61,6 +72,7 @@ class SourceDeletionPlan:
             "removable_samples": self.removable_samples,
             "shared_samples": self.shared_samples,
             "blockers": self.blockers,
+            "historical_work_ids_examined": self.historical_work_ids_examined,
         }
 
 
@@ -101,6 +113,64 @@ def _removable_work_ids(conn: sqlite3.Connection, root_id: str) -> tuple[list[st
     removable = [work_id for work_id in own if work_id not in others]
     shared = [work_id for work_id in own if work_id in others]
     return removable, shared
+
+
+def _current_work_impact(conn: sqlite3.Connection, root_id: str) -> tuple[int, int, int]:
+    """(该来源当前作品数, 离库作品数, 被其他来源共享数)。
+
+    与历史维护集合（``_removable_work_ids``）不同：这里只看**当前活动**的
+    confirmed revision 与投影的活动库语义（非退役来源 + confirmed + 参与 EXISTS）。
+    已被取代的 revision 遗留 work_id 不影响用户看到的“多少部作品离开媒体库”。
+    """
+
+    own = {
+        str(row["work_id"])
+        for row in conn.execute(
+            """
+            SELECT DISTINCT rb.work_id FROM revision_bindings rb
+            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            WHERE ir.root_id = ? AND ir.status = 'confirmed' AND rb.work_id != ''
+              AND sr.retired_at = ''
+            """,
+            (root_id,),
+        ).fetchall()
+    }
+    if not own:
+        return (0, 0, 0)
+    others = {
+        str(row["work_id"])
+        for row in conn.execute(
+            """
+            SELECT DISTINCT rb.work_id FROM revision_bindings rb
+            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            WHERE ir.root_id != ? AND ir.status = 'confirmed' AND rb.work_id != ''
+              AND sr.retired_at = ''
+            """,
+            (root_id,),
+        ).fetchall()
+    }
+    candidates = own - others
+    if not candidates:
+        return (len(own), 0, len(own & others))
+    placeholders = ",".join("?" for _ in candidates)
+    # 与 projection/library.py 的活动库 EXISTS 语义一致：仍有非退役来源的
+    # confirmed 绑定才算在媒体墙上，而“当前影响”只能统计真的会离库的作品。
+    visible = {
+        str(row["work_id"])
+        for row in conn.execute(
+            f"""
+            SELECT DISTINCT rb.work_id FROM revision_bindings rb
+            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            WHERE rb.work_id IN ({placeholders}) AND ir.status = 'confirmed'
+              AND sr.retired_at = ''
+            """,
+            tuple(sorted(candidates)),
+        ).fetchall()
+    }
+    return (len(own), len(candidates & visible), len(own & others))
 
 
 def _blockers(conn: sqlite3.Connection, root_id: str, *, ignore_job_id: str = "") -> list[str]:
@@ -151,7 +221,11 @@ def plan_source_deletion(
     mirror_root: str | Path = "",
     sample_limit: int = 8,
 ) -> dict:
-    """只读预览：会删掉哪些作品/文件，哪些作品因为被其他来源共享而保留。"""
+    """只读预览：当前媒体库会失去多少作品、可能回收多少镜像内产物。
+
+    ``sample_limit`` 保留仅为向后兼容；用户已明确去除作品示例，本函数不再查询任何
+    标题样本，避免长标题串和重复标题进入确认框。
+    """
 
     mirror = Path(mirror_root).resolve(strict=False) if mirror_root else None
     plan = SourceDeletionPlan(root_id=root_id)
@@ -162,31 +236,14 @@ def plan_source_deletion(
         if root is None:
             raise KeyError(root_id)
         plan.blockers = _blockers(conn, root_id)
+        # 产物回收仍按**历史维护集合**计算：被取代 revision 遗留的 work_id 产生的
+        # 镜像产物也在本次回收范围内。它不等于用户可见的离库作品数。
         removable, shared = _removable_work_ids(conn, root_id)
-        plan.works_removable = len(removable)
-        plan.works_shared = len(shared)
-        plan.works_total = len(removable) + len(shared)
-
-        if removable:
-            placeholders = ",".join("?" for _ in removable)
-            plan.removable_samples = [
-                str(row["preferred_title"] or row["work_id"])
-                for row in conn.execute(
-                    f"SELECT work_id, preferred_title FROM works WHERE work_id IN ({placeholders}) "
-                    "ORDER BY preferred_title LIMIT ?",
-                    (*removable, sample_limit),
-                )
-            ]
-        if shared:
-            placeholders = ",".join("?" for _ in shared)
-            plan.shared_samples = [
-                str(row["preferred_title"] or row["work_id"])
-                for row in conn.execute(
-                    f"SELECT work_id, preferred_title FROM works WHERE work_id IN ({placeholders}) "
-                    "ORDER BY preferred_title LIMIT ?",
-                    (*shared, sample_limit),
-                )
-            ]
+        plan.historical_work_ids_examined = len(removable) + len(shared)
+        current_total, current_leaving, current_shared = _current_work_impact(conn, root_id)
+        plan.works_total = current_total
+        plan.works_removable = current_leaving
+        plan.works_shared = current_shared
 
         if removable:
             placeholders = ",".join("?" for _ in removable)
@@ -255,7 +312,11 @@ def delete_source_library(
         blockers = _blockers(conn, root_id, ignore_job_id=ignore_job_id)
         if blockers:
             return {"ok": False, "reason": blockers[0], "removed_works": 0, "removed_files": 0}
+        # 产物回收按历史维护集合（含被取代 revision 遗留的 work_id）；
+        # 对外报告则用当前活动媒体库的离库口径（见 D2-02）。
         leaving, shared = _removable_work_ids(conn, root_id)
+        historical_examined = len(leaving) + len(shared)
+        _current_total, current_leaving, current_shared = _current_work_impact(conn, root_id)
 
     def _guard() -> None:
         nonlocal cancelled
@@ -330,11 +391,14 @@ def delete_source_library(
         )
     return {
         "ok": True,
-        "works_leaving_library": len(leaving),
+        # 当前活动媒体库的离库作品数（不是历史维护集合的大小）。
+        "works_leaving_library": current_leaving,
         "removed_artifacts": removed_artifacts,
         "removed_files": removed_files,
         "files_outside_mirror_skipped": skipped_outside,
-        "shared_works_kept": len(shared),
+        "shared_works_kept": current_shared,
+        # 仅为日志/诊断：本次实际检查的历史 work_id 数量。
+        "historical_work_ids_examined": historical_examined,
     }
 
 

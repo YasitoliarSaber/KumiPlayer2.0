@@ -238,6 +238,36 @@ function episodeLabel(episode: V4Preview['episodes'][number]) {
   return `S${season}E${number}`
 }
 
+/**
+ * 来源卡规模摘要（STEP-001）。
+ *
+ * 每个数字只描述一个生命周期：scan=已观察量，draft=待确认量，confirmed=已入库量。
+ * 无法求解时返回空串，由调用方隐藏，避免把“还不知道”渲染成 0。
+ * 旧后端不返回 counts_scope 时保留原有“部作品 / 个文件”摘要。
+ */
+function sourceCardScale(card: V4SourceLibraryCard): { works: string; files: string } {
+  const scope = card.counts_scope
+  if (!scope) {
+    return { works: `${card.work_count ?? 0} 部作品`, files: `${card.asset_count ?? 0} 个文件` }
+  }
+  if (scope === 'scan') {
+    return {
+      works: card.observed_entry_count == null ? '' : `已读取 ${card.observed_entry_count} 个条目`,
+      files: card.observed_video_count == null ? '' : `已发现 ${card.observed_video_count} 个视频`,
+    }
+  }
+  if (scope === 'draft') {
+    return {
+      works: card.work_count == null ? '' : `${card.work_count} 部待确认作品`,
+      files: card.admitted_video_file_count == null ? '' : `${card.admitted_video_file_count} 个待确认视频`,
+    }
+  }
+  return {
+    works: card.work_count == null ? '' : `${card.work_count} 部已入库作品`,
+    files: card.admitted_video_file_count == null ? '' : `${card.admitted_video_file_count} 个已入库文件`,
+  }
+}
+
 export default function MediaManagementPage() {
   const pendingDroppedTreePath = useMediaWorkflowStore((state) => state.pendingDroppedTreePath)
   const consumeDroppedTreePath = useMediaWorkflowStore((state) => state.consumeDroppedTreePath)
@@ -264,8 +294,6 @@ export default function MediaManagementPage() {
     works_shared: number
     artifact_files: number
     artifact_bytes: number
-    removable_samples: string[]
-    shared_samples: string[]
     blockers: string[]
   } | null>(null)
   const [sourceDeletionLoading, setSourceDeletionLoading] = useState(false)
@@ -404,6 +432,10 @@ export default function MediaManagementPage() {
     })
   }, [])
 
+  // 确认准入合同（2026-09-28 T3/STEP-005）：阻断数只认后端显式的
+  // blocking_issue_count；旧后端响应缺字段时按 0 处理，不能再用 issues.length
+  // 当阻断数，否则任何提示都会让确认按钮无效或事件静默 return。
+  const previewBlockingIssueCount = preview?.blocking_issue_count ?? 0
   const hasActiveJobs = jobs.some((job) => !['succeeded', 'failed', 'cancelled'].includes(job.status))
   const executionActive = executeProgress?.overall_status === 'running' || executeProgress?.overall_status === 'queued'
   const executionMirrorTotal = executeProgress?.stage_summary.mirror.total ?? 0
@@ -752,7 +784,8 @@ export default function MediaManagementPage() {
   }
 
   const confirmRevision = async () => {
-    if (!preview || preview.issues.length > 0 || !revisionId) return
+    // 与按钮 disabled 条件保持一致；普通提示（blocking_issue_count=0）不拦截。
+    if (!preview || !revisionId || busy !== '' || preview.status === 'confirmed' || previewBlockingIssueCount > 0) return
     setBusy('confirm')
     setError('')
     try {
@@ -1197,12 +1230,11 @@ export default function MediaManagementPage() {
     try {
       const preview = await mediaV4Api.sourceLibraryDeletionPreview(card.root_id)
       setSourceDeletionPreview({
-        works_removable: preview.works_removable,
-        works_shared: preview.works_shared,
+        // 只取当前活动媒体库的离库口径；历史维护集合不在这里当作品数。
+        works_removable: preview.current_works_leaving ?? preview.works_removable,
+        works_shared: preview.current_works_shared ?? preview.works_shared,
         artifact_files: preview.artifact_files,
         artifact_bytes: preview.artifact_bytes,
-        removable_samples: preview.removable_samples,
-        shared_samples: preview.shared_samples,
         blockers: preview.blockers,
       })
     } catch (cause) {
@@ -1337,21 +1369,27 @@ export default function MediaManagementPage() {
                 {card.last_error && card.overall_status === 'needs_attention' && <span className="media-v4-source-card-error" role="alert">{card.last_error}</span>}
               </div>
               <div className="media-v4-source-card-scale">
-                <div className="media-v4-source-card-stats"><span>{card.work_count} 部作品</span><span>{card.asset_count} 个文件</span></div>
+                <div className="media-v4-source-card-stats">{(() => {
+                  // 阶段化计量（STEP-001）：作品数、视频文件数各自只属于一个生命周期。
+                  // 扫描阶段还没有作品归属，显示已观察量；草稿显示待确认量；已确认显示已入库量。
+                  // 旧后端（无 counts_scope）保持原有“部作品 / 个文件”摘要。
+                  const scale = sourceCardScale(card)
+                  return <>{scale.works && <span>{scale.works}</span>}{scale.files && <span>{scale.files}</span>}</>
+                })()}</div>
                 <div className="media-v4-source-card-status">
                 <div className="media-v4-source-card-progress" role="status"><span>{progressLabel}</span></div>
-                {/* 用户 2026-09-24 要求：来源卡也要以「已正确刮削的作品数」为主指标。
-                    镜像只是搬运、不会失败，完成量不反映质量；需要盯的是「有多少部作品
-                    拿到了正确的在线资料」。work_count - attention_count 就是后端已确认
-                    的作品数（attention_count 覆盖 waiting_review / source_unavailable /
-                    failed 三类需要处理的绑定）。 */}
-                {card.work_count > 0 && (
+                {/* 在线资料就绪量只来自 confirmed 当前作品的 metadata_state；
+                    不能再用 work_count - attention_count 把“没有识别问题”冒充成
+                    “已正确刮削”。draft/scan 或后端不可用时该行为 null，直接隐藏。 */}
+                {typeof card.metadata_ready_work_count === 'number' && (card.work_count ?? 0) > 0 && (
                   <div className="media-v4-source-card-scrape">
-                    <strong>{Math.max(0, card.work_count - card.attention_count)}</strong>
-                    <span>/ {card.work_count} 部已正确刮削</span>
+                    <strong>{card.metadata_ready_work_count}</strong>
+                    <span>/ {card.work_count} 部在线资料已就绪</span>
+                    {(card.metadata_ready_retained_count ?? 0) > 0 && <span className="media-v4-source-card-retained">（其中 {card.metadata_ready_retained_count} 部沿用上次成功资料）</span>}
                   </div>
                 )}
                 {card.attention_count > 0 && <span className="media-v4-source-card-attention">有 {card.attention_count} 个待处理事项</span>}
+                {(card.excluded_video_count ?? 0) > 0 && <span className="media-v4-source-card-notice">{card.excluded_video_count} 个特别篇/辅助视频不计入正片，不入库也不刮削</span>}
                 {(card.relation_pending_count ?? 0) > 0 && <span className="media-v4-source-card-notice">{card.relation_pending_count} 项关联信息待补全，不影响入库和播放</span>}
                 </div>
                 <div className="media-v4-source-card-actions" role="group" aria-label="导入与更新">
@@ -1578,8 +1616,8 @@ export default function MediaManagementPage() {
         {scan.scan_mode === 'tree_baseline' && <MessageBar intent="info"><MessageBarBody>TXT 基线已建立。确认本次导入后，再扫描同一 OpenList 目录时会自动进入风险受控增量核对。</MessageBarBody></MessageBar>}
         {!preview && <div className="media-v4-empty">{scan.evidence_count === 0 ? <Checkbox checked={allowEmpty} onChange={(_, data) => setAllowEmpty(Boolean(data.checked))} label="我确认该来源当前确实为空，并允许移除它先前导入的媒体" /> : '正在生成识别结果…'}</div>}
         {preview && <>
-          {(preview.blocking_issue_count ?? preview.issues.length) > 0 && <MessageBar intent="warning"><MessageBarBody>发现 {preview.blocking_issue_count ?? preview.issues.length} 个需要人工处理的问题；未解决前不能确认。</MessageBarBody></MessageBar>}
-          {(preview.blocking_issue_count ?? preview.issues.length) === 0 && preview.issues.length > 0 && <MessageBar intent="info"><MessageBarBody>有 {preview.issues.length} 条不确定信息，不影响建立媒体库，可稍后核对。</MessageBarBody></MessageBar>}
+          {previewBlockingIssueCount > 0 && <MessageBar intent="warning"><MessageBarBody>发现 {previewBlockingIssueCount} 个需要人工处理的问题；未解决前不能确认。</MessageBarBody></MessageBar>}
+          {previewBlockingIssueCount === 0 && preview.issues.length > 0 && <MessageBar intent="info"><MessageBarBody>有 {preview.issues.length} 条不确定信息，不影响建立媒体库，可稍后核对。</MessageBarBody></MessageBar>}
           <V4RecognitionSummary
             preview={preview}
             issues={preview.issues}
@@ -1590,7 +1628,7 @@ export default function MediaManagementPage() {
             onOverrideChange={(evidenceId, draft) => setOverrideDrafts((current) => ({ ...current, [evidenceId]: draft }))}
             onApplyOverride={(evidenceId) => void applyOverride(evidenceId)}
           />
-          <div className="media-v4-command-row media-v4-confirm-row"><div><strong>{(preview.blocking_issue_count ?? preview.issues.length) > 0 ? '需要先处理识别问题' : '识别结果可以建立媒体库'}</strong><span>确认后将生成镜像、获取媒体信息并更新媒体库。</span></div><Button className="media-primary-command" appearance="primary" icon={<Database24Regular />} disabled={busy !== '' || (preview.blocking_issue_count ?? preview.issues.length) > 0 || preview.status === 'confirmed'} onClick={() => void confirmRevision()}>{busy === 'confirm' ? <><Spinner size="tiny" />正在建立</> : preview.status === 'confirmed' ? '已建立媒体库' : '确认并建立媒体库'}</Button></div>
+          <div className="media-v4-command-row media-v4-confirm-row"><div><strong>{previewBlockingIssueCount > 0 ? '需要先处理识别问题' : '识别结果可以建立媒体库'}</strong><span>确认后将生成镜像、获取媒体信息并更新媒体库。</span></div><Button className="media-primary-command" appearance="primary" icon={<Database24Regular />} disabled={busy !== '' || previewBlockingIssueCount > 0 || preview.status === 'confirmed'} onClick={() => void confirmRevision()}>{busy === 'confirm' ? <><Spinner size="tiny" />正在建立</> : preview.status === 'confirmed' ? '已建立媒体库' : '确认并建立媒体库'}</Button></div>
         </>}
       </section>}
 
@@ -1733,12 +1771,8 @@ export default function MediaManagementPage() {
                           </p>
                           {sourceDeletionPreview.works_shared > 0 && (
                             <p>
-                              其中 <strong>{sourceDeletionPreview.works_shared}</strong> 部作品被其他来源共享，会保留
-                              {sourceDeletionPreview.shared_samples.length > 0 ? `（如：${sourceDeletionPreview.shared_samples.join('、')}）` : ''}。
+                              其中 <strong>{sourceDeletionPreview.works_shared}</strong> 部作品被其他来源共享，会保留。
                             </p>
-                          )}
-                          {sourceDeletionPreview.removable_samples.length > 0 && (
-                            <p>将被删除的作品示例：{sourceDeletionPreview.removable_samples.join('、')}。</p>
                           )}
                           {sourceDeletionPreview.blockers.length > 0 && (
                             <p role="alert">暂时无法删除：{sourceDeletionPreview.blockers.join('；')}</p>

@@ -160,3 +160,29 @@ describe('详情页季度选择器', () => {
     expect(screen.queryByRole('listbox', { name: '可选季度' })).not.toBeInTheDocument();
   });
 });
+
+describe('详情季选择器与 Portal 浮层的样式作用域（F-007）', () => {
+  const css = readFileSync(join(process.cwd(), 'src', 'index.css'), 'utf-8');
+
+  test('不再存在按 [role=listbox] 全局覆盖背景的兜底规则', () => {
+    // 历史回归：全局 [role='listbox'] !important 背景把详情深色浮层改成白底，
+    // 而文字仍是浅色 → 白底白字。兜底必须显式启用，不能按 role 全局匹配。
+    const selectorBlocks = css.match(/[^{}]*\[role='listbox'\][^{}]*\{[^}]*\}/g) ?? [];
+    for (const block of selectorBlocks) {
+      expect(block).toContain('player-tuning-listbox');
+    }
+  });
+
+  test('详情季选择器保留自有深色底与浅色前景', () => {
+    const rule = css.match(/\.detail-season-listbox\s*\{[^}]*\}/s)?.[0] ?? '';
+    expect(rule).toContain('background: var(--detail-command-flyout)');
+    expect(rule).toContain('color: var(--detail-command-fg)');
+    const optionRule = css.match(/\.detail-season-listbox \[role='option'\]\s*\{[^}]*\}/s)?.[0] ?? '';
+    expect(optionRule).toContain('color: var(--detail-command-muted)');
+  });
+
+  test('播放器调校兜底只在显式类下生效', () => {
+    expect(css).toContain(".fui-Dropdown__listbox.player-tuning-listbox,");
+    expect(css).toContain("[role='listbox'].player-tuning-listbox");
+  });
+});

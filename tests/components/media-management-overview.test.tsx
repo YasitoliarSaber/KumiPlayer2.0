@@ -79,9 +79,10 @@ test('按来源删除媒体库：先展示预览，再确认，且预览态不�
   api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
   api.sourceLibraryDeletionPreview.mockResolvedValue({
     root_id: 'root-115', works_total: 3, works_removable: 2, works_shared: 1,
+    current_works_total: 3, current_works_leaving: 2, current_works_shared: 1,
     artifacts_total: 24, artifact_files: 20, artifact_bytes: 3 * 1048576,
-    files_outside_mirror_count: 0,
-    removable_samples: ['摇曳露营', '孤独摇滚'], shared_samples: ['摇曳露营 剧场版'], blockers: [],
+    files_outside_mirror_count: 0, historical_work_ids_examined: 24,
+    removable_samples: [], shared_samples: [], blockers: [],
   })
   api.deleteSourceLibrary.mockResolvedValue({ root_id: 'root-115', job_id: 'job-delete', status: 'queued' })
   render(<MediaManagementPage />)
@@ -94,6 +95,9 @@ test('按来源删除媒体库：先展示预览，再确认，且预览态不�
   expect(await screen.findByText(/2/)).toBeVisible()
   expect(await screen.findByText(/部作品离开媒体库/)).toBeVisible()
   expect(screen.getByText(/被其他来源共享，会保留/)).toBeVisible()
+  // 用户 2026-09-28 决定：删除确认框不再列出被删除/共享的作品示例。
+  expect(screen.queryByText(/将被删除的作品示例/)).toBeNull()
+  expect(screen.queryByText(/摇曳露营 剧场版/)).toBeNull()
   expect(api.sourceLibraryDeletionPreview).toHaveBeenCalledWith('root-115')
   // 预览态下隐藏「移除」，避免用户以为在删除却点到较弱的隐藏操作。
   expect(screen.queryByRole('button', { name: '移除' })).toBeNull()
@@ -108,8 +112,9 @@ test('按来源删除被阻断时给出原因，且不提供确认删除', async
   api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
   api.sourceLibraryDeletionPreview.mockResolvedValue({
     root_id: 'root-115', works_total: 3, works_removable: 2, works_shared: 1,
+    current_works_total: 3, current_works_leaving: 2, current_works_shared: 1,
     artifacts_total: 24, artifact_files: 20, artifact_bytes: 0,
-    files_outside_mirror_count: 0,
+    files_outside_mirror_count: 0, historical_work_ids_examined: 24,
     removable_samples: [], shared_samples: [], blockers: ['该来源仍有进行中的扫描，请先取消或等待结束'],
   })
   render(<MediaManagementPage />)
@@ -457,4 +462,43 @@ test('排队中的扫描任务提供可用的终止按钮', async () => {
   await screen.findByText('115 动画')
   const terminate = screen.getByRole('button', { name: '终止任务' })
   expect(terminate).toBeEnabled()
+})
+
+test('来源卡按阶段显示计量口径，不再用作品数减问题数冒充已刮削', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture({
+    counts_scope: 'confirmed',
+    work_count: 3,
+    admitted_video_file_count: 40,
+    metadata_ready_work_count: 2,
+    metadata_ready_current_count: 1,
+    metadata_ready_retained_count: 1,
+    excluded_video_count: 1,
+  })] })
+  render(<MediaManagementPage />)
+  await screen.findByText('115 动画')
+
+  expect(screen.getByText('3 部已入库作品')).toBeVisible()
+  expect(screen.getByText('40 个已入库文件')).toBeVisible()
+  // 就绪量来自 confirmed 当前作品的 metadata_state，并区分本次刷新与沿用旧快照。
+  expect(screen.getByText(/2/)).toBeVisible()
+  expect(screen.getByText('/ 3 部在线资料已就绪')).toBeVisible()
+  expect(screen.getByText('（其中 1 部沿用上次成功资料）')).toBeVisible()
+  expect(screen.getByText(/1 个特别篇\/辅助视频不计入正片/)).toBeVisible()
+  expect(screen.queryByText(/部已正确刮削/)).not.toBeInTheDocument()
+})
+
+test('草稿来源卡显示待确认量且不显示在线资料就绪', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture({
+    phase: 'review',
+    counts_scope: 'draft',
+    work_count: 2,
+    admitted_video_file_count: 11,
+    metadata_ready_work_count: null,
+  })] })
+  render(<MediaManagementPage />)
+  await screen.findByText('115 动画')
+
+  expect(screen.getByText('2 部待确认作品')).toBeVisible()
+  expect(screen.getByText('11 个待确认视频')).toBeVisible()
+  expect(screen.queryByText(/部在线资料已就绪/)).not.toBeInTheDocument()
 })

@@ -12,6 +12,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from sqlite3 import Row
 
+from app.media_v4.domain.identity import NON_IMPORTABLE_CONTENT_CLASSES
 from app.media_v4.persistence.database import V4Database
 from app.media_v4.revisions.service import V4RevisionService, _lookup_work_by_key
 from app.media_v4.sources.scan_state import scan_is_stale
@@ -84,6 +85,8 @@ def list_source_cards(database: V4Database) -> list[dict]:
         revision_evidence: dict[str, int] = defaultdict(int)
         bound_works = defaultdict(set)
         bound_assets = defaultdict(set)
+        bound_episodes = defaultdict(set)
+        bound_evidence_files = defaultdict(set)
         pending_relations: dict[str, int] = defaultdict(int)
         job_rows = []
         if revision_ids:
@@ -96,12 +99,19 @@ def list_source_cards(database: V4Database) -> list[dict]:
                 ).fetchall()
             })
             for row in conn.execute(
-                f"SELECT revision_id, work_id, asset_id FROM revision_bindings WHERE revision_id IN ({placeholders}) AND work_id != ''",
+                f"SELECT revision_id, work_id, episode_id, asset_id, evidence_id FROM revision_bindings WHERE revision_id IN ({placeholders}) AND work_id != ''",
                 revision_ids,
             ).fetchall():
-                bound_works[str(row["revision_id"])].add(str(row["work_id"]))
+                revision_key = str(row["revision_id"])
+                bound_works[revision_key].add(str(row["work_id"]))
+                if row["episode_id"] is not None:
+                    bound_episodes[revision_key].add(str(row["episode_id"]))
                 if row["asset_id"] is not None:
-                    bound_assets[str(row["revision_id"])].add(str(row["asset_id"]))
+                    bound_assets[revision_key].add(str(row["asset_id"]))
+                # 一个物理视频可以覆盖多集，也可以只有电影直属 Asset；按 evidence 槽
+                # 去重才是「已入库的视频文件数」，不能用 asset_id 或 bindings 行数代替。
+                if row["asset_id"] is not None:
+                    bound_evidence_files[revision_key].add(str(row["evidence_id"]))
             for row in conn.execute(
                 f"SELECT revision_id, evidence_id, message FROM revision_issues WHERE revision_id IN ({placeholders}) "
                 "AND resolved = 0 AND code = 'unresolved_parent_relation'",
@@ -242,8 +252,51 @@ def list_source_cards(database: V4Database) -> list[dict]:
             # 来源卡显示比实际更多的文件（既有测试 test_zombie_scan_is_not_projected_as_active
             # 等正是在断言这一点）。每张卡片一次 COUNT 走索引，代价远小于报错数。
             evidence_count = _scan_evidence_count(database, str(scan["scan_id"]))
-        work_count = len(draft_graph.works) if draft_graph is not None else len(bound_works.get(revision_id, set()))
-        asset_count = len(bound_assets.get(revision_id, set()))
+
+        # 阶段化计量（STEP-001）：同一张卡上的作品数、视频文件数、剧集数各自只属于
+        # 一个生命周期。草稿的作品预览与 confirmed 的绑定集合不能拼成一组无阶段说明的
+        # “规模”，也不能用「作品数 - 问题数」推算“已刮削成功”。
+        if draft_graph is not None:
+            counts_scope = "draft"
+        elif draft is None and confirmed is not None:
+            counts_scope = "confirmed"
+        else:
+            counts_scope = "scan"
+        scan_counts = _scan_scope_counts(database, str(scan["scan_id"])) if scan is not None else None
+        observed_entry_count = scan_counts["observed_entry_count"] if scan_counts else None
+        observed_video_count = scan_counts["observed_video_count"] if scan_counts else None
+        excluded_video_count = scan_counts["excluded_video_count"] if scan_counts else None
+        if counts_scope == "draft" and draft_graph is not None:
+            admitted_ids: set[str] = set()
+            for episode in draft_graph.episodes:
+                admitted_ids.update(str(item) for item in episode.asset_evidence_ids)
+            for asset in draft_graph.work_assets:
+                admitted_ids.update(str(item) for item in asset.asset_evidence_ids)
+            work_count_value: int | None = len(draft_graph.works)
+            admitted_video_file_count: int | None = len(admitted_ids)
+            asset_count = len(admitted_ids)
+            episode_count = len(draft_graph.episodes)
+        elif counts_scope == "confirmed":
+            work_count_value = len(bound_works.get(revision_id, set()))
+            admitted_video_file_count = len(bound_evidence_files.get(revision_id, set()))
+            asset_count = len(bound_assets.get(revision_id, set()))
+            episode_count = len(bound_episodes.get(revision_id, set()))
+        else:
+            # 扫描阶段还没有作品归属，works/assets 是未知而不是 0；
+            # 把“还没算”写成 0 会让用户以为来源里没有内容。
+            work_count_value = None
+            admitted_video_file_count = None
+            asset_count = None
+            episode_count = None
+        work_count = work_count_value
+        if counts_scope == "confirmed":
+            metadata_ready_work_count = _metadata_ready_count(progress)
+            metadata_ready_current_count = _metadata_ready_count(progress, source="current")
+            metadata_ready_retained_count = _metadata_ready_count(progress, source="retained")
+        else:
+            metadata_ready_work_count = None
+            metadata_ready_current_count = None
+            metadata_ready_retained_count = None
         if scan_active:
             message = _scan_message(scan, scan_progress)
             card_progress = {
@@ -296,7 +349,7 @@ def list_source_cards(database: V4Database) -> list[dict]:
                 "current_work_id": "",
                 "current_work_title": "",
                 "completed_work_count": 0,
-                "total_work_count": work_count,
+                "total_work_count": work_count or 0,
                 "percent": None,
                 "message": "识别结果待确认",
             }
@@ -357,6 +410,17 @@ def list_source_cards(database: V4Database) -> list[dict]:
             "asset_count": asset_count,
             "evidence_count": evidence_count,
             "attention_count": attention_count,
+            # 阶段化计量（STEP-001）：每个数字都带 scope 和唯一单位；
+            # 无法求解的项返回 null（未知），不把计算失败转 0。
+            "counts_scope": counts_scope,
+            "observed_entry_count": observed_entry_count,
+            "observed_video_count": observed_video_count,
+            "admitted_video_file_count": admitted_video_file_count,
+            "episode_count": episode_count,
+            "excluded_video_count": excluded_video_count,
+            "metadata_ready_work_count": metadata_ready_work_count,
+            "metadata_ready_current_count": metadata_ready_current_count,
+            "metadata_ready_retained_count": metadata_ready_retained_count,
             "relation_pending_count": pending_relations.get(revision_id, 0) if phase == "execute" else 0,
             "last_error": last_error,
             "scan": scan_payload,
@@ -624,6 +688,65 @@ def _scan_evidence_count(database: V4Database, scan_id: str) -> int:
                 (scan_id,),
             ).fetchone()[0]
         )
+
+
+def _scan_scope_counts(database: V4Database, scan_id: str) -> dict[str, int]:
+    """扫描阶段的已观察量：总条目、视频条目、按 content_class 明确排除的视频。
+
+    只读来源观察与已落库的 ParsedFacts；不把“已观察”当成“已完成”，也不
+    把未解析的条目当成已排除。parsed_facts 尚未生成时排除量为 0。
+    """
+
+    with database.connect() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS observed_entry_count,
+                SUM(CASE WHEN entry_kind = 'video' THEN 1 ELSE 0 END) AS observed_video_count
+            FROM source_evidence WHERE scan_id = ?
+            """,
+            (scan_id,),
+        ).fetchone()
+        excluded_placeholders = ",".join("?" for _ in NON_IMPORTABLE_CONTENT_CLASSES)
+        excluded = conn.execute(
+            f"""
+            SELECT COUNT(*) FROM source_evidence se
+            JOIN parsed_facts pf ON pf.evidence_id = se.evidence_id
+            WHERE se.scan_id = ? AND se.entry_kind = 'video'
+              AND pf.content_class IN ({excluded_placeholders})
+            """,
+            (scan_id, *sorted(NON_IMPORTABLE_CONTENT_CLASSES)),
+        ).fetchone()[0]
+    return {
+        "observed_entry_count": int(row["observed_entry_count"] or 0),
+        "observed_video_count": int(row["observed_video_count"] or 0),
+        "excluded_video_count": int(excluded or 0),
+    }
+
+
+def _metadata_ready_count(progress: dict, source: str | None = None) -> int | None:
+    """当前 confirmed 作品集中在线资料已就绪的数量。
+
+    只对当前 revision 的 work_units 求值：``metadata_state=ready`` 且
+    （可选）指定 ``metadata_source``。``metadata_source=retained`` 表示沿用
+    上一次成功资料快照，也是用户可见的“已就绪”，但必须能与本次刷新成功区分。
+    缺失或不可读时返回 ``None``，由界面显示为暂不可用，不用差值推算。
+    """
+
+    units = progress.get("work_units") if isinstance(progress, dict) else None
+    if not units:
+        return None if not progress else 0
+    count = 0
+    for unit in units:
+        if str(unit.get("metadata_state") or "") != "ready":
+            continue
+        if source is None:
+            count += 1
+            continue
+        observed = str(unit.get("metadata_source") or "current")
+        if observed == source:
+            count += 1
+    return count
 
 
 def _scan_progress(scan) -> int | None:
