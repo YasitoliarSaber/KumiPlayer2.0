@@ -10,7 +10,19 @@ import type { V4Preview, V4ResolvedEpisode, V4ReviewIssue } from '../api/mediaV4
 export interface WorkGroupSummary {
   kind: 'season' | 'special' | 'movie'
   seasonNumber: number | null
+  /**
+   * 季号未知（`local_season_number` 为 `null`）。显示为「季号未定」，
+   * 绝不映射为第 0 季或第 1 季；显式 `0` 仍是第 0 季，两者不合并。
+   */
+  seasonUnknown: boolean
   episodeCount: number
+  /**
+   * 集号未知（`local_episode_number` 为 `null`）的条目数。与已知集号范围分开
+   * 展示，不参与范围端点，也不补齐缺集。
+   */
+  unresolvedEpisodeCount: number
+  /** 本组是否有可用数值集号（电影组为 false：它按文件数展示）。 */
+  hasNumberedItems: boolean
   fileCount: number
   rangeLabel: string
   spanAnomaly: boolean
@@ -20,7 +32,8 @@ export interface WorkSummary {
   work_key: string
   title: string
   year: number | null
-  media_type: 'tv' | 'movie'
+  /** 保留后端事实：`unknown` 是真实状态，不得当成 tv 展示。 */
+  media_type: 'tv' | 'movie' | 'unknown'
   episodeCount: number
   assetCount: number
   groups: WorkGroupSummary[]
@@ -34,11 +47,20 @@ export interface RecognitionSummary {
   totalVideos: number
   totalFiles: number
   totalIssues: number
+  /** 媒体类型仍未确定的作品数（不是 0，也不是 tv）。 */
+  unknownTypeWorks: number
+  /** 集号仍未确定的条目总数（不是缺集，也不是 E00）。 */
+  totalUnresolvedEpisodes: number
   anomalyWorks: WorkSummary[]
   normalWorks: WorkSummary[]
 }
 
 function episodeKey(episode: V4ResolvedEpisode): string {
+  // 逻辑集身份优先：同一集的多个版本共享 `identity_key`，只算一集；
+  // 两个都未编号的不同条目各有自己的 `identity_key`，不会被合并成一个。
+  // 旧后端不返回时回退到「季 + 集 + 类型」组合（与既行为一致）。
+  const identity = episode.identity_key
+  if (identity) return `${episode.work_key}:${identity}`
   return `${episode.work_key}:${episode.local_season_number ?? 's'}:${episode.local_episode_number ?? 'e'}:${episode.season_kind}:${episode.special_number ?? 'x'}`
 }
 
@@ -52,7 +74,8 @@ function spanAnomaly(episodeNumbers: number[]): boolean {
 }
 
 function rangeLabelFor(kind: WorkGroupSummary['kind'], numbers: number[]): string {
-  if (numbers.length === 0) return ''
+  // 没有可用集号就是「集号未定」：不得用 0 当占位，也不得拼出 E00。
+  if (numbers.length === 0) return '集号未定'
   if (kind === 'movie') return `${numbers.length} 个文件`
   const sorted = [...numbers].sort((a, b) => a - b)
   const prefix = kind === 'special' ? 'SP' : 'E'
@@ -90,17 +113,22 @@ export function buildWorkSummaries(preview: V4Preview): RecognitionSummary {
       groups.push({
         kind: 'movie',
         seasonNumber: null,
+        seasonUnknown: false,
         episodeCount,
+        unresolvedEpisodeCount: 0,
+        hasNumberedItems: false,
         fileCount,
         rangeLabel: fileCount > 0 ? `${fileCount} 个文件` : '电影',
         spanAnomaly: false,
       })
     } else {
-      const bySeason = new Map<string, { seasonNumber: number | null; episodes: V4ResolvedEpisode[] }>()
+      const bySeason = new Map<string, { seasonNumber: number | null; seasonUnknown: boolean; episodes: V4ResolvedEpisode[] }>()
       for (const episode of episodes) {
         const isSpecial = episode.season_kind === 'special' || episode.episode_kind === 'special' || episode.special_number != null
-        const key = isSpecial ? 'special' : `season:${episode.local_season_number ?? 0}`
-        const entry = bySeason.get(key) ?? { seasonNumber: isSpecial ? null : episode.local_season_number, episodes: [] }
+        // 季号 null 与显式第 0 季是两个不同的组，不能合并成一个「第 0 季」。
+        const seasonUnknown = episode.local_season_number === null
+        const key = isSpecial ? 'special' : `season:${seasonUnknown ? 'unknown' : episode.local_season_number}`
+        const entry = bySeason.get(key) ?? { seasonNumber: isSpecial || seasonUnknown ? null : episode.local_season_number, seasonUnknown, episodes: [] }
         entry.episodes.push(episode)
         bySeason.set(key, entry)
       }
@@ -110,14 +138,20 @@ export function buildWorkSummaries(preview: V4Preview): RecognitionSummary {
         for (const episode of entry.episodes) {
           unique.set(episodeKey(episode), episode)
         }
-        const numbers = [...unique.values()].map((episode) =>
-          isSpecial ? (episode.special_number ?? 0) : (episode.local_episode_number ?? 0),
+        // 只有有数值的集号参与排序与范围；未知项单独计数。
+        const values = [...unique.values()].map((episode) =>
+          isSpecial ? episode.special_number : episode.local_episode_number,
         )
+        const numbers = values.filter((value): value is number => typeof value === 'number')
+        const unresolvedEpisodeCount = values.length - numbers.length
         const fileCount = entry.episodes.reduce((sum, episode) => sum + episode.asset_evidence_ids.length, 0)
         groups.push({
           kind: isSpecial ? 'special' : 'season',
-          seasonNumber: isSpecial ? null : entry.seasonNumber,
+          seasonNumber: isSpecial || entry.seasonUnknown ? null : entry.seasonNumber,
+          seasonUnknown: isSpecial ? false : entry.seasonUnknown,
           episodeCount: unique.size,
+          unresolvedEpisodeCount,
+          hasNumberedItems: numbers.length > 0,
           fileCount,
           rangeLabel: rangeLabelFor(isSpecial ? 'special' : 'season', numbers),
           spanAnomaly: spanAnomaly(numbers),
@@ -130,11 +164,17 @@ export function buildWorkSummaries(preview: V4Preview): RecognitionSummary {
       + movieAssets.reduce((sum, asset) => sum + asset.asset_evidence_ids.length, 0)
     totalFiles += workFiles
     const hasAnomaly = issues.length > 0 || groups.some((group) => group.spanAnomaly)
+    // 类型与集号都属于真实事实：unknown 保持 unknown，不当作 tv，也不补成第 1 季。
+    const mediaType = work.media_type === 'movie'
+      ? 'movie' as const
+      : work.media_type === 'unknown'
+        ? 'unknown' as const
+        : 'tv' as const
     works.push({
       work_key: work.work_key,
       title: work.preferred_title || '未命名作品',
       year: work.year,
-      media_type: work.media_type === 'movie' ? 'movie' : 'tv',
+      media_type: mediaType,
       episodeCount: episodes.length,
       assetCount: workFiles,
       groups,
@@ -151,6 +191,11 @@ export function buildWorkSummaries(preview: V4Preview): RecognitionSummary {
     totalVideos: works.reduce((sum, work) => sum + work.episodeCount, 0),
     totalFiles,
     totalIssues: preview.issues.length,
+    unknownTypeWorks: works.filter((work) => work.media_type === 'unknown').length,
+    totalUnresolvedEpisodes: works.reduce(
+      (sum, work) => sum + work.groups.reduce((groupSum, group) => groupSum + group.unresolvedEpisodeCount, 0),
+      0,
+    ),
     anomalyWorks,
     normalWorks,
   }

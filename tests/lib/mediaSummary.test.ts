@@ -141,3 +141,102 @@ test('S00 特别篇不作为普通季度', () => {
   expect(kinds).toEqual(['season', 'special'])
   expect(summary.works[0].groups.find((group) => group.kind === 'special')?.seasonNumber).toBeNull()
 })
+
+describe('未知值的显示闭环（STEP-014）', () => {
+  test('unknown 媒体类型保留为 unknown，不冒充 TV 剧集', () => {
+    const preview: V4Preview = {
+      revision_id: 'rev-unknown-type', status: 'draft',
+      works: [{ work_key: 'u1', preferred_title: '未定位作品', year: null, media_type: 'unknown', source_evidence_ids: [] }],
+      episodes: [makeEpisode('u1', 1, { local_season_number: null, local_episode_number: 8 }) as never],
+      work_assets: [], issues: [],
+    }
+    const summary = buildWorkSummaries(preview)
+    expect(summary.works[0].media_type).toBe('unknown')
+    expect(summary.unknownTypeWorks).toBe(1)
+    // 季号未知仍然标出，且不被当成第 0 季。
+    expect(summary.works[0].groups[0].seasonUnknown).toBe(true)
+    expect(summary.works[0].groups[0].seasonNumber).toBeNull()
+    expect(summary.works[0].groups[0].rangeLabel).toBe('E08')
+  })
+
+  test('季号 null 与显式第 0 季分成两组，不互相吞并', () => {
+    const preview: V4Preview = {
+      revision_id: 'rev-season-null-zero', status: 'draft',
+      works: [{ work_key: 's1', preferred_title: '混合季号', year: 2024, media_type: 'tv', source_evidence_ids: [] }],
+      episodes: [
+        makeEpisode('s1', 1, { local_season_number: null, local_episode_number: 1 }),
+        makeEpisode('s1', 1, { local_season_number: 0, season_kind: 'special', special_number: 1 }),
+      ] as never,
+      work_assets: [], issues: [],
+    }
+    const summary = buildWorkSummaries(preview)
+    const groups = summary.works[0].groups
+    expect(groups).toHaveLength(2)
+    const unknownSeason = groups.find((group) => group.seasonUnknown)
+    const seasonZero = groups.find((group) => group.kind === 'special')
+    expect(unknownSeason).toBeDefined()
+    expect(seasonZero).toBeDefined()
+    // 未知季不显示成第 0 季；显式 0 归特别篇，两者不合并成一组。
+    expect(unknownSeason?.seasonNumber).toBeNull()
+    expect(unknownSeason?.seasonUnknown).toBe(true)
+    expect(seasonZero?.seasonNumber).toBeNull()
+    expect(seasonZero?.seasonUnknown).toBe(false)
+  })
+
+  test('集号 null 不生成 E00，也不被算进范围端点', () => {
+    const preview: V4Preview = {
+      revision_id: 'rev-episode-null', status: 'draft',
+      works: [{ work_key: 'e1', preferred_title: '部分未编号', year: 2024, media_type: 'tv', source_evidence_ids: [] }],
+      episodes: [
+        makeEpisode('e1', 1, { identity_key: 'e1|s1|e1' }),
+        // 同一逻辑集的第二个版本：共享 identity_key，只应算一集。
+        makeEpisode('e1', 2, { identity_key: 'e1|s1|e2', edition_key: 'alt' }),
+        makeEpisode('e1', 2, { identity_key: 'e1|s1|e2' }),
+        makeEpisode('e1', 3, { local_episode_number: null, identity_key: 'e1|s1|unassigned-1' }),
+      ] as never,
+      work_assets: [], issues: [],
+    }
+    const summary = buildWorkSummaries(preview)
+    const group = summary.works[0].groups[0]
+    expect(group.rangeLabel).toBe('E01–E02')
+    expect(group.rangeLabel).not.toContain('E00')
+    expect(group.episodeCount).toBe(3)
+    expect(group.unresolvedEpisodeCount).toBe(1)
+    expect(summary.totalUnresolvedEpisodes).toBe(1)
+  })
+
+  test('全部集号未知时只写集号未定，不补缺集也不编造范围', () => {
+    const preview: V4Preview = {
+      revision_id: 'rev-all-null', status: 'draft',
+      works: [{ work_key: 'n1', preferred_title: '全未编号', year: 2024, media_type: 'unknown', source_evidence_ids: [] }],
+      episodes: [
+        makeEpisode('n1', 1, { local_season_number: null, local_episode_number: null, identity_key: 'n1|unassigned-a' }),
+        makeEpisode('n1', 2, { local_season_number: null, local_episode_number: null, identity_key: 'n1|unassigned-b' }),
+      ] as never,
+      work_assets: [], issues: [],
+    }
+    const summary = buildWorkSummaries(preview)
+    const group = summary.works[0].groups[0]
+    expect(group.rangeLabel).toBe('集号未定')
+    expect(group.unresolvedEpisodeCount).toBe(2)
+    expect(JSON.stringify(summary)).not.toContain('E00')
+  })
+
+  test('电影无集号仍按电影展示，不要求集号', () => {
+    const preview: V4Preview = {
+      revision_id: 'rev-movie', status: 'draft',
+      works: [{ work_key: 'm1', preferred_title: '剧场版', year: 2024, media_type: 'movie', source_evidence_ids: [] }],
+      episodes: [],
+      work_assets: [{ work_key: 'm1', edition_key: 'default', asset_evidence_ids: ['asset-m1'] }],
+      issues: [],
+    }
+    const summary = buildWorkSummaries(preview)
+    const work = summary.works[0]
+    expect(work.media_type).toBe('movie')
+    expect(work.groups[0].kind).toBe('movie')
+    expect(work.groups[0].rangeLabel).toBe('1 个文件')
+    expect(work.groups[0].unresolvedEpisodeCount).toBe(0)
+    expect(summary.totalUnresolvedEpisodes).toBe(0)
+    expect(summary.unknownTypeWorks).toBe(0)
+  })
+})

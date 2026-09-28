@@ -426,7 +426,7 @@ test('图片产物缺失时显示非阻断提示与重新下载入口', () => {
   expect(artifacts).toHaveBeenCalledWith('w-degraded')
 })
 
-test('执行详情保留未知季，并将已知季度排在未分季之前', async () => {
+test('执行详情保留未知季，并将已知季度排在季号未定之前', async () => {
   const work = { title: '未知季作品', media_type: 'unknown', metadata_state: 'waiting_review' }
   const { container } = render(<V4ExecutionProgress
     progress={makeProgress([workUnit('w-null', '未知季作品', 'needs_attention', work)])}
@@ -437,9 +437,12 @@ test('执行详情保留未知季，并将已知季度排在未分季之前', as
         { season_id: 'known-season', season_number: 2, season_kind: 'regular', title: '', episode_count: 1 },
       ], episodes: [], episode_total: 2, has_detail: true })}
   />)
-  await screen.findByText('未分季 · 1 集')
-  expect(container.querySelector('.media-v4-work-detail-seasons')?.textContent).toBe('第 2 季 · 1 集未分季 · 1 集')
+  // STEP-014：季号 null 显示「季号未定」，不映射成第 0 季也不补成第 1 季。
+  await screen.findByText('季号未定 · 1 集')
+  expect(container.querySelector('.media-v4-work-detail-seasons')?.textContent).toBe('第 2 季 · 1 集季号未定 · 1 集')
   expect(screen.queryByText('第 0 季 · 1 集')).not.toBeInTheDocument()
+  // unknown 媒体类型不冒充 TV 剧集：单位写成「个条目」。
+  expect(screen.getByText(/类型未定 · 12 个条目/)).toBeVisible()
 })
 
 test.each(['check_settings', 'retry_metadata', 'review_identity'])('恢复入口在详情加载后保持唯一：%s', async (action) => {
@@ -647,4 +650,70 @@ test('非阻断提示不阻止确认：按钮可点且恰好发一次 confirm �
   fireEvent.click(confirmButton)
   await waitFor(() => expect(api.confirm).toHaveBeenCalledTimes(1))
   expect(api.confirm).toHaveBeenCalledWith(expect.stringMatching(/^rev-/))
+})
+
+test('识别摘要显示 unknown 类型与 null 季号/集号，不制造第 0 季或 E00', async () => {
+  render(<MediaManagementPage />)
+  fireEvent.click(await screen.findByRole('button', { name: '导入媒体' }))
+  const input = await screen.findByRole('textbox', { name: '本机媒体文件夹' })
+  fireEvent.change(input, { target: { value: 'D:\Anime' } })
+  api.durableScan.mockResolvedValue({
+    scan_id: 'scan-durable', root_id: 'root', status: 'completed', started_at: '',
+    finished_at: '', error: '', evidence_count: 1, entries: [],
+  })
+  // STEP-014：unknown 类型 + null 季 + null/已知混合集号，都是后端会真实返回的形状。
+  api.preview.mockResolvedValue({
+    revision_id: 'rev-unknown', status: 'draft',
+    works: [
+      { work_key: 'u1', preferred_title: '未定位作品', year: null, media_type: 'unknown', source_evidence_ids: ['ev-u1'] },
+      { work_key: 'u2', preferred_title: '全部集号未知', year: null, media_type: 'unknown', source_evidence_ids: ['ev-u2'] },
+      { work_key: 'z1', preferred_title: '显式第零季', year: 2024, media_type: 'tv', source_evidence_ids: ['ev-z1'] },
+    ],
+    episodes: [
+      { work_key: 'u1', episode_key: 'u1-8', local_season_number: null, local_episode_number: 8,
+        absolute_episode_number: null, season_kind: 'unassigned', episode_kind: 'unknown', special_number: null,
+        edition_key: 'default', asset_evidence_ids: ['ev-u1'], identity_key: 'u1|s?|e8' },
+      { work_key: 'u1', episode_key: 'u1-x', local_season_number: null, local_episode_number: null,
+        absolute_episode_number: null, season_kind: 'unassigned', episode_kind: 'unknown', special_number: null,
+        edition_key: 'default', asset_evidence_ids: ['ev-u1b'], identity_key: 'u1|s?|unassigned' },
+      { work_key: 'u2', episode_key: 'u2-a', local_season_number: null, local_episode_number: null,
+        absolute_episode_number: null, season_kind: 'unassigned', episode_kind: 'unknown', special_number: null,
+        edition_key: 'default', asset_evidence_ids: ['ev-u2a'], identity_key: 'u2|unassigned-a' },
+      { work_key: 'u2', episode_key: 'u2-b', local_season_number: null, local_episode_number: null,
+        absolute_episode_number: null, season_kind: 'unassigned', episode_kind: 'unknown', special_number: null,
+        edition_key: 'default', asset_evidence_ids: ['ev-u2b'], identity_key: 'u2|unassigned-b' },
+      { work_key: 'z1', episode_key: 'z1-0-1', local_season_number: 0, local_episode_number: 1,
+        absolute_episode_number: null, season_kind: 'special', episode_kind: 'special', special_number: 1,
+        edition_key: 'default', asset_evidence_ids: ['ev-z1'], identity_key: 'z1|s0|sp1' },
+    ],
+    work_assets: [],
+    issues: [],
+    blocking_issue_count: 0,
+  })
+  fireEvent.click(screen.getByRole('button', { name: '扫描并识别' }))
+  await screen.findByText('未定位作品')
+
+  // 总数摘要里就要说明类型未定与集号未定，而不是把它们藏起来。
+  expect(screen.getByText(/类型未定的作品 2 部/)).toBeVisible()
+  expect(screen.getByText(/集号未定的条目 3 个/)).toBeVisible()
+  expect(screen.getByText(/不代表缺集/)).toBeVisible()
+
+  // 展开 unknown 作品卡：类型/季号/集号三处都要显式未定。
+  fireEvent.click(screen.getByText('未定位作品'))
+  expect(screen.getAllByText(/类型未定/).length).toBeGreaterThan(0)
+  expect(screen.getByText(/季号未定 · 2 个条目/)).toBeVisible()
+  expect(screen.getByText('另有 1 项集号未定')).toBeVisible()
+  // 未知条目按「个条目」计数，不冒充 TV 集数；已知集号仍照实显示。
+  expect(screen.getByText('E08')).toBeVisible()
+  expect(screen.queryByText(/E00/)).not.toBeInTheDocument()
+
+  // 全部集号未知时范围列写「集号未定」，不补缺集、也不再堆叠“另有”标签。
+  fireEvent.click(screen.getByText('全部集号未知'))
+  expect(screen.getByText('集号未定')).toBeVisible()
+  expect(screen.queryByText(/另有 2 项集号未定/)).not.toBeInTheDocument()
+
+  // 显式第 0 季的特别篇仍按原事实展示，且不与「季号未定」混为一组。
+  fireEvent.click(screen.getByText('显式第零季'))
+  expect(screen.getByText(/特别篇 · 1 集/)).toBeVisible()
+  expect(screen.queryByText(/第 0 季/)).not.toBeInTheDocument()
 })

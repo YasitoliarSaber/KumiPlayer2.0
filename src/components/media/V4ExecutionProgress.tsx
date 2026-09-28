@@ -59,14 +59,34 @@ type WorkDetailState =
 
 function seasonLabel(season: V4WorkExecutionDetail['seasons'][number]): string {
   if (season.season_kind === 'special') return '特别篇'
-  return season.season_number != null && season.season_number > 0 ? `第 ${season.season_number} 季` : (season.title || '未分季')
+  // 季号 null 是真实的未知，不是第 0 季，也不是第 1 季。
+  if (season.season_number == null) return season.title ? `季号未定（${season.title}）` : '季号未定'
+  return `第 ${season.season_number} 季`
+}
+
+/** 集号未知时不得拼出 E00/E? ：直接说“集号未定”。 */
+function episodeCodeLabel(episode: { season_kind: string; season_number: number | null; episode_number: number | null }): string {
+  const episodeNumber = episode.episode_number
+  if (episode.season_kind === 'special') {
+    return episodeNumber == null ? '特别篇（集号未定）' : `SP${String(episodeNumber).padStart(2, '0')}`
+  }
+  if (episode.season_number == null) {
+    // 季号未知不等于第 0/1 季：不补季号，只按已有集号显示。
+    return episodeNumber == null ? '季号未定 · 集号未定' : `季号未定 · 第 ${episodeNumber} 集`
+  }
+  if (episode.season_number === 0) {
+    // 显式第 0 季只按原始事实表示（不写 S00）。
+    return episodeNumber == null ? '第 0 季 · 集号未定' : `第 0 季 · 第 ${episodeNumber} 集`
+  }
+  const season = `S${String(episode.season_number).padStart(2, '0')}`
+  return episodeNumber == null ? `${season} · 集号未定` : `${season}E${String(episodeNumber).padStart(2, '0')}`
 }
 
 type SeasonResult = NonNullable<NonNullable<V4WorkExecutionDetail['scrape']>['season_results']>[number]
 
 function seasonFailureLabel(result: SeasonResult): string {
   if (result.local_season_number === 0) return '特别篇'
-  return result.local_season_number != null ? `第 ${result.local_season_number} 季` : '该季度'
+  return result.local_season_number != null ? `第 ${result.local_season_number} 季` : '季号未定'
 }
 
 function seasonFailureReason(result: SeasonResult): string {
@@ -189,8 +209,8 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
         <span className="media-v4-work-progress-title">{unit.title}</span>
         {/* 主行只保留一句可扫读的数量：文件数与集数一致时不再重复。 */}
         <span className="media-v4-work-progress-meta">
-          {unit.media_type === 'movie' ? '电影' : '剧集'}
-          {unit.episode_count > 0 ? ` · ${unit.episode_count} 集` : ''}
+          {unit.media_type === 'movie' ? '电影' : unit.media_type === 'unknown' ? '类型未定' : '剧集'}
+          {unit.episode_count > 0 ? ` · ${unit.media_type === 'unknown' ? `${unit.episode_count} 个条目` : `${unit.episode_count} 集`}` : ''}
           {unit.asset_count !== unit.episode_count ? ` · ${unit.asset_count} 个文件` : ''}
         </span>
         <span className="media-v4-work-progress-status">{WORK_PROGRESS_LABELS[unit.overall_status] ?? unit.overall_status}</span>
@@ -346,12 +366,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                     {detailEpisodes.map((episode) => (
                       <div className="media-v4-work-detail-episode" key={episode.episode_id}>
                         <span className="media-v4-work-detail-episode-code">
-                          {episode.season_kind === 'special'
-                            ? episode.episode_number == null ? '特别篇（未编号）' : `SP${String(episode.episode_number).padStart(2, '0')}`
-                            : episode.season_number == null || episode.season_number <= 0
-                              // 未分季不等于第 0 季，也不能补成第 1 季：直接按集号显示。
-                              ? episode.episode_number == null ? '未分季（未编号）' : `第 ${episode.episode_number} 集`
-                              : `S${String(episode.season_number).padStart(2, '0')}E${episode.episode_number == null ? '?' : String(episode.episode_number).padStart(2, '0')}`}
+                          {episodeCodeLabel(episode)}
                         </span>
                         <div className="media-v4-work-detail-episode-content">
                           <strong className="media-v4-work-detail-episode-name">{episode.scraped_title || episode.display_title || '未命名'}</strong>

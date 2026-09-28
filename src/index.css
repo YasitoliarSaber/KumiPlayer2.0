@@ -13966,6 +13966,10 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-work-group.attention { border-left: 3px solid var(--warning, #c45b52); }
 .media-v4-work-group code { font-size: 12px; color: var(--text-secondary); }
 .media-v4-anomaly-tag { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 999px; font-size: 11px; color: var(--warning, #c45b52); background: color-mix(in srgb, var(--warning, #c45b52) 12%, transparent); }
+/* 识别未确定（unknown 类型 / null 季号 / null 集号）的提示：中性信息色，
+   与“需要处理”的警告色区分开 —— 它不阻断建立媒体库。 */
+.media-v4-unresolved-tag { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 999px; font-size: 11px; color: var(--text-secondary); background: color-mix(in srgb, var(--text) 7%, transparent); }
+.media-v4-summary-unknown { margin: 10px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.6; }
 .media-v4-issues-block h3 { font-size: 13px; color: var(--warning, #c45b52); margin: 0 0 8px; }
 .media-v4-work-issues-inline { display: grid; gap: 8px; }
 .media-v4-issue-row { display: grid; gap: 5px; padding: 10px; border-left: 3px solid var(--warning, #c45b52); border-radius: 6px; background: color-mix(in srgb, var(--warning, #c45b52) 8%, var(--surface-raised)); }

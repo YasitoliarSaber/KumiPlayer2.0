@@ -35,6 +35,12 @@ export interface V4ResolvedEpisode {
   special_number: number | null
   edition_key: string
   asset_evidence_ids: string[]
+  /**
+   * 后端给出的逻辑集身份（同一集的不同版本共享它）。
+   * 识别摘要用它区分「两个都未编号的不同条目」与「同一集的多个版本」；
+   * 旧后端可能不返回，此时回退到「季 + 集 + 类型」组合。
+   */
+  identity_key?: string
 }
 
 export interface V4ReviewIssue {
@@ -301,7 +307,8 @@ export interface V4OpenlistBaselineStatus {
 export interface V4WorkProgressUnit {
   work_id: string
   title: string
-  media_type: 'tv' | 'movie'
+  /** 后端对未定类型的作品返回 `unknown`；展示层必须保留它而不是归为 tv。 */
+  media_type: 'tv' | 'movie' | 'unknown'
   episode_count: number
   asset_count: number
   overall_status:

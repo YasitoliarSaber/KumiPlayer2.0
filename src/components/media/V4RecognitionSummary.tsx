@@ -61,12 +61,15 @@ function WorkCard({
   const activeEvidence = activeIssue ? evidenceFor(activeIssue.evidence_id) : undefined
   const activeDraft = activeIssue ? overrideDrafts[activeIssue.evidence_id] : undefined
   const identityIssue = activeIssue !== null && identityIssueCodes.has(activeIssue.code)
+  const typeLabel = work.media_type === 'movie' ? '电影' : work.media_type === 'unknown' ? '类型未定' : '剧集'
+  // 未知媒体类型不是 TV 剧集：计数单位写成「个条目」，不冒充集数。
+  const countUnit = work.media_type === 'unknown' ? '个条目' : '集'
   return (
     <article className={`media-v4-work-card ${work.hasAnomaly ? 'attention' : ''}`}>
       <button type="button" className="media-v4-work-card-head" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
         <span className="media-v4-work-card-title">{work.title}</span>
         <span className="media-v4-work-card-meta">
-          {work.year || '年份未知'} · {work.media_type === 'movie' ? '电影' : '剧集'} · 共 {work.assetCount} 个视频
+          {work.year || '年份未知'} · {typeLabel} · 共 {work.assetCount} 个视频
           {work.hasAnomaly && <Warning24Regular aria-label="存在需处理问题" />}
         </span>
         {expanded ? <ChevronDown24Regular aria-hidden="true" /> : <ChevronRight24Regular aria-hidden="true" />}
@@ -75,13 +78,22 @@ function WorkCard({
         <div className="media-v4-work-card-body">
           <div className="media-v4-work-group-list">
             {work.groups.map((group, index) => (
-              <div className={`media-v4-work-group ${group.spanAnomaly ? 'attention' : ''}`} key={`${group.kind}-${group.seasonNumber ?? index}`}>
+              <div className={`media-v4-work-group ${group.spanAnomaly ? 'attention' : ''}`} key={`${group.kind}-${group.seasonNumber ?? (group.seasonUnknown ? 'unknown' : index)}`}>
                 <span>
-                  {group.kind === 'movie' ? '电影' : group.kind === 'special' ? '特别篇' : `第 ${group.seasonNumber} 季`}
+                  {group.kind === 'movie'
+                    ? '电影'
+                    : group.kind === 'special'
+                      ? '特别篇'
+                      : group.seasonUnknown
+                        ? '季号未定'
+                        : `第 ${group.seasonNumber} 季`}
                   {' · '}
-                  {group.episodeCount} 集 · {group.fileCount} 个文件
+                  {group.episodeCount} {countUnit} · {group.fileCount} 个文件
                 </span>
                 {group.rangeLabel && <code>{group.rangeLabel}</code>}
+                {group.unresolvedEpisodeCount > 0 && group.hasNumberedItems && (
+                  <span className="media-v4-unresolved-tag">另有 {group.unresolvedEpisodeCount} 项集号未定</span>
+                )}
                 {group.spanAnomaly && <span className="media-v4-anomaly-tag">集号跨度异常</span>}
               </div>
             ))}
@@ -200,6 +212,14 @@ export function V4RecognitionSummary({ preview, evidenceEntries, overrideDrafts,
         <div><strong>{summary.totalVideos}</strong><span>条剧集记录</span></div>
         <div className={summary.totalIssues > 0 ? 'attention' : ''}><strong>{summary.totalIssues}</strong><span>项需处理问题</span></div>
       </div>
+      {(summary.unknownTypeWorks > 0 || summary.totalUnresolvedEpisodes > 0) && (
+        <p className="media-v4-summary-unknown" role="status">
+          {summary.unknownTypeWorks > 0 && `类型未定的作品 ${summary.unknownTypeWorks} 部`}
+          {summary.unknownTypeWorks > 0 && summary.totalUnresolvedEpisodes > 0 && ' · '}
+          {summary.totalUnresolvedEpisodes > 0 && `集号未定的条目 ${summary.totalUnresolvedEpisodes} 个`}
+          {' —— 这些是识别未确定的信息，不代表缺集，也不影响建立媒体库。'}
+        </p>
+      )}
       {summary.totalIssues > 0 && (
         <div className="media-v4-issues-block">
           <h3>需要处理</h3>
