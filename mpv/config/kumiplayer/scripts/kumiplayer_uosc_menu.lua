@@ -244,7 +244,7 @@ local function build_main_items()
     }
 end
 
-local function render_menu()
+local function render_menu(update)
     if not check_uosc_available() then
         mp.msg.verbose("[kumiplayer_uosc_menu] uosc 未加载，跳过菜单渲染")
         return
@@ -252,12 +252,17 @@ local function render_menu()
     -- 必须使用 uosc 回调模式：JSON 顶层携带 callback 数组后，uosc 把菜单
     -- 事件（activate 等）发回本脚本；否则 uosc 会把菜单项的 value 当作
     -- mpv 命令执行（如 "mode:a"），导致点击无任何反应。
-    mp.commandv("script-message-to", "uosc", "open-menu", utils.format_json({
+    local payload = utils.format_json({
         type = "kumiplayer-context",
         title = "KumiPlayer",
         callback = { script_name, "menu-event" },
         items = build_main_items(),
-    }))
+    })
+    if update then
+        mp.commandv("script-message-to", "uosc", "update-menu", payload)
+    else
+        mp.commandv("script-message-to", "uosc", "open-menu", payload)
+    end
 end
 
 -- ── 事件处理 ────────────────────────────────────────────────────────
@@ -363,6 +368,9 @@ local function request_state_and_open()
         mp.msg.verbose("[kumiplayer_uosc_menu] uosc 未加载，忽略右键菜单请求")
         return
     end
+    -- 先用最近一次广播的状态打开菜单，再异步刷新勾选项。
+    -- 右键首帧不再等待跨脚本消息往返；update-menu 不会重置已打开的子菜单。
+    render_menu()
     state.waiting_for_state = true
     mp.commandv("script-message-to", "kumiplayer_anime4k", "get-state")
 end
@@ -393,7 +401,7 @@ mp.register_script_message("kumiplayer_anime4k-state", function(mode, quality, s
     end
     if state.waiting_for_state then
         state.waiting_for_state = false
-        render_menu()
+        render_menu(true)
     end
 end)
 
