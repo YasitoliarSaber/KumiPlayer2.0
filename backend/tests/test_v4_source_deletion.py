@@ -328,6 +328,126 @@ def test_cancelled_deletion_returns_cancelled_instead_of_raising(tmp_path):
         assert str(root["retired_at"]) == "", "取消后不得退役来源"
 
 
+def test_cancellation_after_cleanup_starts_cannot_leave_visible_work_without_artifact(tmp_path):
+    database, mirror = _two_sources(tmp_path)
+    cancel = False
+
+    def on_progress(_done, _total):
+        nonlocal cancel
+        with database.connect() as conn:
+            retired = conn.execute("SELECT retired_at FROM source_roots WHERE root_id = 'root-a'").fetchone()[0]
+        assert retired, "每批文件清理前必须先让来源退出可见媒体库"
+        cancel = True
+
+    result = delete_source_library(
+        database, "root-a", mirror_root=mirror, batch_size=1,
+        progress=on_progress, should_cancel=lambda: cancel,
+    )
+
+    assert result["ok"] is True
+    with database.connect() as conn:
+        root = conn.execute("SELECT retired_at FROM source_roots WHERE root_id = 'root-a'").fetchone()
+        assert str(root["retired_at"]) != "", "开始清理后来源必须先退役"
+        assert conn.execute("SELECT COUNT(*) FROM artifacts WHERE work_id = 'work-two'").fetchone()[0] == 0
+
+
+def test_deletion_unlink_failure_keeps_artifact_row_for_retry(tmp_path, monkeypatch):
+    database, mirror = _two_sources(tmp_path)
+    target = mirror / "A" / "file2.strm"
+    original_unlink = type(target).unlink
+
+    def fail_one(path, *args, **kwargs):
+        if path == target:
+            raise PermissionError("fixture locked")
+        return original_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(type(target), "unlink", fail_one)
+        result = delete_source_library(database, "root-a", mirror_root=mirror)
+
+    assert result["ok"] is False
+    assert target.exists()
+    with database.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM artifacts WHERE work_id = 'work-two'").fetchone()[0] == 1
+
+
+def test_deletion_job_retries_after_file_failure_then_finishes(tmp_path, monkeypatch):
+    from app.media_v4.jobs.runner import V4JobRunner
+    from app.media_v4.maintenance.source_deletion import enqueue_source_deletion
+
+    database, mirror = _two_sources(tmp_path)
+    monkeypatch.setattr("app.media_v4.jobs.runner.V4LibraryProjection.rebuild", lambda _self: {})
+    job_id = enqueue_source_deletion(database, "root-a")
+    target = mirror / "A" / "file2.strm"
+    original_unlink = type(target).unlink
+    failures = 0
+
+    def fail_once(path, *args, **kwargs):
+        nonlocal failures
+        if path == target and failures == 0:
+            failures += 1
+            raise PermissionError("fixture locked")
+        return original_unlink(path, *args, **kwargs)
+
+    runner = V4JobRunner(database)
+    with monkeypatch.context() as patcher:
+        patcher.setattr(type(target), "unlink", fail_once)
+        first = runner.process_job(job_id, mirror_root=mirror)
+        assert first.status == "queued"
+        assert target.exists()
+        second = runner.process_job(job_id, mirror_root=mirror)
+
+    assert second.status == "succeeded"
+    assert not target.exists()
+    with database.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM artifacts WHERE work_id = 'work-two'").fetchone()[0] == 0
+
+
+def test_stale_deletion_job_resumes_instead_of_staying_running(tmp_path):
+    from app.media_v4.jobs.runner import V4JobRunner
+    from app.media_v4.maintenance.source_deletion import enqueue_source_deletion
+
+    database, _mirror = _two_sources(tmp_path)
+    job_id = enqueue_source_deletion(database, "root-a")
+    with database.connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET status = 'running', attempts = 1, heartbeat_at = '2020-01-01T00:00:00+00:00' "
+            "WHERE job_id = ?", (job_id,),
+        )
+
+    assert V4JobRunner(database).recover_stale_jobs() == 1
+    with database.connect() as conn:
+        row = conn.execute("SELECT status, cancel_requested FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        assert str(row["status"]) == "queued"
+        assert not row["cancel_requested"]
+
+
+def test_source_card_deletion_task_has_no_old_import_percent_or_running_cancel():
+    from app.media_v4.projection.source_libraries import _active_task
+
+    task = _active_task(None, {"job_type": "delete_source_library", "status": "running", "cancel_requested": 0}, "rev-a", {"percent": 80})
+
+    assert task is not None
+    assert task["percent"] is None
+    assert task["can_cancel"] is False
+
+
+def test_failed_deletion_is_visible_on_source_card_for_retry(tmp_path):
+    from app.media_v4.maintenance.source_deletion import enqueue_source_deletion
+    from app.media_v4.projection.source_libraries import list_source_cards
+
+    database, _mirror = _two_sources(tmp_path)
+    job_id = enqueue_source_deletion(database, "root-a")
+    with database.connect() as conn:
+        conn.execute("UPDATE jobs SET status = 'failed', last_error = 'fixture failure' WHERE job_id = ?", (job_id,))
+
+    card = next(item for item in list_source_cards(database) if item["root_id"] == "root-a")
+
+    assert card["deletion_retry_required"] is True
+    assert card["overall_status"] == "needs_attention"
+    assert "清理未完成" in card["last_error"]
+
+
 def test_runner_maps_cancelled_outcome_to_cancelled_job(tmp_path, monkeypatch):
     from app.media_v4.jobs.runner import V4JobRunner
     from app.media_v4.maintenance.source_deletion import enqueue_source_deletion

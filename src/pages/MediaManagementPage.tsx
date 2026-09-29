@@ -34,6 +34,7 @@ import { pickDirectoryTreeFile, pickFolder } from '../platform/folderPicker'
 import { useMediaWorkflowStore } from '../stores/mediaWorkflow'
 import { useUiStore } from '../stores/ui'
 import { getKumiFluentTheme } from '../design/fluentTheme'
+import { summarizeExecutionWorks } from '../lib/mediaSummary'
 
 type ImportKind = 'local' | 'tree' | 'openlist' | 'hybrid'
 type WorkflowStage = 'source' | 'review' | 'execute'
@@ -444,20 +445,7 @@ export default function MediaManagementPage() {
       + executeProgress.stage_summary.mirror.failed
       + executeProgress.stage_summary.mirror.cancelled
     : 0
-  // 进度主指标是「已正确刮削的作品」而不是镜像搬运量（用户 2026-09-24 明确要求）：
-  // 镜像只是按已确认的播放路径搬运文件，不存在“搬错”这种失败，完成量本身不反映质量；
-  // 真正需要盯住的是“多少部作品拿到了正确的在线资料、一个错误都没有”。
-  // 已知会降级的代码（集数未完全匹配 / 部分图片缺失）不计入“正确”。
-  const SCRAPE_DEFECT_CODES = ['episode_mapping_incomplete', 'special_episode_metadata_incomplete', 'artifact_incomplete']
-  const executionWorkTotal = executeProgress?.work_units.length ?? 0
-  const executionWorkScraped = executeProgress
-    ? executeProgress.work_units.filter((unit) => unit.metadata_state === 'ready'
-        && !SCRAPE_DEFECT_CODES.includes(unit.metadata_reason_code ?? '')).length
-    : 0
-  const executionWorkNeedsAttention = executeProgress
-    ? executeProgress.work_units.filter((unit) => unit.overall_status === 'needs_attention'
-        || unit.overall_status === 'failed').length
-    : 0
+  const executionCounts = executeProgress ? summarizeExecutionWorks(executeProgress) : null
   useEffect(() => {
     if (!revisionId || !hasActiveJobs) return
     let cancelled = false
@@ -807,15 +795,18 @@ export default function MediaManagementPage() {
     }
   }
 
-  const applyOverride = async (evidenceId: string) => {
-    if (!revisionId) return
-    const draft = overrideDrafts[evidenceId]
+  const applyOverride = async (evidenceId: string, draft: OverrideDraft): Promise<boolean> => {
+    if (!revisionId) return false
     if (!draft?.title.trim()) {
       setError('人工修正至少需要填写作品标题')
-      return
+      return false
     }
-    const season = Number.parseInt(draft.season || '1', 10)
-    const episode = Number.parseInt(draft.episode || '1', 10)
+    if (!draft.mediaType || (draft.mediaType === 'tv' && (!/^[1-9]\d*$/.test(draft.season) || !/^[1-9]\d*$/.test(draft.episode)))) {
+      setError('请选择类型，并填写有效的季度和集号')
+      return false
+    }
+    const season = Number.parseInt(draft.season, 10)
+    const episode = Number.parseInt(draft.episode, 10)
     setBusy('override')
     setError('')
     try {
@@ -831,8 +822,10 @@ export default function MediaManagementPage() {
         is_auxiliary: false,
       })
       setPreview(result)
+      return true
     } catch (cause) {
       setError(userFacingPageError(cause, '人工修正失败'))
+      return false
     } finally {
       setBusy('')
     }
@@ -1222,9 +1215,9 @@ export default function MediaManagementPage() {
   }
 
   /** 第一步：取删除影响范围预览（只读，后端不水合全量对象）。 */
-  const loadSourceDeletionPreview = async () => {
-    if (!sourceCardPendingDelete || sourceDeletionLoading) return
-    const card = sourceCardPendingDelete
+  const loadSourceDeletionPreview = async (target?: V4SourceLibraryCard) => {
+    const card = target ?? sourceCardPendingDelete
+    if (!card || sourceDeletionLoading) return
     setSourceDeletionLoading(true)
     setError('')
     try {
@@ -1339,15 +1332,18 @@ export default function MediaManagementPage() {
           {sourceCards.map((card) => {
             const activeTask = card.active_task
             const active = Boolean(activeTask)
+            const deletionRetry = card.deletion_retry_required === true && !active
             const executionTerminated = card.overall_status === 'cancelled' && card.phase === 'execute'
             const cancelledLabel = executionTerminated ? '任务已终止' : '扫描已取消'
-            const stateLabel = activeTask?.status === 'cancelling' ? '正在终止…'
+            const stateLabel = deletionRetry ? '清理未完成'
+              : activeTask?.status === 'cancelling' ? '正在终止…'
               : activeTask?.status === 'queued' ? '等待中'
               : activeTask ? '进行中'
                 : card.phase === 'review' && card.attention_count === 0 ? '待确认'
                 : card.overall_status === 'needs_attention' ? '需要处理'
                   : card.overall_status === 'cancelled' ? cancelledLabel : '已完成'
-            const progressLabel = activeTask
+            const progressLabel = deletionRetry ? '来源仍在，需重新核对清理范围'
+              : activeTask
               ? `${activeTask.label}${activeTask.percent == null ? '' : ` · ${activeTask.percent}%`}`
               : card.overall_status === 'cancelled' ? cancelledLabel
                 : card.phase === 'review' ? '识别结果待确认'
@@ -1356,8 +1352,8 @@ export default function MediaManagementPage() {
                     ? card.progress.message
                       : card.overall_status === 'needs_attention' ? '有任务需要处理'
                         : '上次导入已处理完毕'
-            const resumeLabel = activeTask ? '查看进度' : card.scan?.status === 'paused' ? '继续扫描' : card.overall_status === 'cancelled' ? (executionTerminated ? '查看执行结果' : '重新扫描') : card.overall_status === 'needs_attention' && card.phase === 'scan' ? '重新扫描' : card.phase === 'review' ? '查看识别结果' : card.can_resume ? '查看进度' : '查看上次导入'
-            const resumeIcon = activeTask?.kind === 'scan' || card.phase === 'review' ? <DocumentText24Regular /> : <Database24Regular />
+            const resumeLabel = deletionRetry ? '重试清理' : activeTask ? '查看进度' : card.scan?.status === 'paused' ? '继续扫描' : card.overall_status === 'cancelled' ? (executionTerminated ? '查看执行结果' : '重新扫描') : card.overall_status === 'needs_attention' && card.phase === 'scan' ? '重新扫描' : card.phase === 'review' ? '查看识别结果' : card.can_resume ? '查看进度' : '查看上次导入'
+            const resumeIcon = deletionRetry ? <Delete24Regular /> : activeTask?.kind === 'scan' || card.phase === 'review' ? <DocumentText24Regular /> : <Database24Regular />
             return <article className={`media-v4-library-source-card ${active ? 'active' : 'settled'}`} key={card.root_id}>
               <div className="media-v4-source-card-identity">
                 <div className="media-v4-source-card-heading">
@@ -1393,7 +1389,14 @@ export default function MediaManagementPage() {
                 {(card.relation_pending_count ?? 0) > 0 && <span className="media-v4-source-card-notice">{card.relation_pending_count} 项关联信息待补全，不影响入库和播放</span>}
                 </div>
                 <div className="media-v4-source-card-actions" role="group" aria-label="导入与更新">
-                  <Button className={`media-v4-source-card-action ${card.can_resume ? 'primary' : 'secondary'}`} appearance={card.can_resume ? 'primary' : 'secondary'} icon={resumeIcon} onClick={() => void resumeSourceCard(card)}>{resumeLabel}</Button>
+                  <Button className={`media-v4-source-card-action ${card.can_resume || deletionRetry ? 'primary' : 'secondary'}`} appearance={card.can_resume || deletionRetry ? 'primary' : 'secondary'} icon={resumeIcon} onClick={() => {
+                    if (deletionRetry) {
+                      setSourceDeletionPreview(null)
+                      setSourceDeletionQueued(false)
+                      setSourceCardPendingDelete(card)
+                      void loadSourceDeletionPreview(card)
+                    } else void resumeSourceCard(card)
+                  }}>{resumeLabel}</Button>
                   {activeTask?.can_cancel || activeTask?.status === 'cancelling'
                     ? <Button className="media-v4-source-card-action secondary" appearance="secondary" icon={<Dismiss24Regular />} disabled={activeTask?.status === 'cancelling'} onClick={() => void terminateSourceTask(card)}>{activeTask?.status === 'cancelling' ? '正在终止…' : '终止任务'}</Button>
                     : <Button className={`media-v4-source-card-action ${card.can_resume ? 'secondary' : 'primary'}`} appearance={card.can_resume ? 'secondary' : 'primary'} icon={<ArrowSync24Regular />} disabled={active} onClick={() => prepareSourceUpdate(card)}>检查更新</Button>}
@@ -1624,9 +1627,14 @@ export default function MediaManagementPage() {
             evidenceEntries={scan?.entries ?? []}
             overrideDrafts={overrideDrafts}
             onOpenMaintenance={() => goManageView('maintenance')}
+            onReimport={() => {
+              const card = sourceCards.find((item) => item.root_id === scan?.root_id || item.latest_revision_id === preview.revision_id)
+              if (card) prepareSourceUpdate(card)
+              else goManageView('overview')
+            }}
             busy={busy !== ''}
             onOverrideChange={(evidenceId, draft) => setOverrideDrafts((current) => ({ ...current, [evidenceId]: draft }))}
-            onApplyOverride={(evidenceId) => void applyOverride(evidenceId)}
+            onApplyOverride={applyOverride}
           />
           <div className="media-v4-command-row media-v4-confirm-row"><div><strong>{previewBlockingIssueCount > 0 ? '需要先处理识别问题' : '识别结果可以建立媒体库'}</strong><span>确认后将生成镜像、获取媒体信息并更新媒体库。</span></div><Button className="media-primary-command" appearance="primary" icon={<Database24Regular />} disabled={busy !== '' || previewBlockingIssueCount > 0 || preview.status === 'confirmed'} onClick={() => void confirmRevision()}>{busy === 'confirm' ? <><Spinner size="tiny" />正在建立</> : preview.status === 'confirmed' ? '已建立媒体库' : '确认并建立媒体库'}</Button></div>
         </>}
@@ -1637,13 +1645,15 @@ export default function MediaManagementPage() {
           <div className="media-stage-heading"><span className="media-stage-icon" aria-hidden="true"><Database24Regular /></span><div><span className="media-stage-eyebrow">第 3 步</span><h2>建立媒体库</h2><p>可以离开此页面；返回后会继续显示当前导入进度。</p></div></div>
           <div className="media-v4-execute-stage-header-side">
             {executeProgress && <div className="media-v4-execution-header-summary" aria-label="建立媒体库总体进度">
-              <strong>{executionWorkScraped}</strong>
-              <span>/ {executionWorkTotal} 部已正确刮削</span>
-              {executionWorkNeedsAttention > 0 && <>
-                <span aria-hidden="true">·</span>
-                <span className="media-v4-execution-header-attention">{executionWorkNeedsAttention} 部需要处理</span>
-              </>}
-              <span className="media-v4-execution-header-mirror">镜像 {executionMirrorDone}/{executionMirrorTotal}</span>
+              <div className="media-v4-execution-header-primary">
+                <strong>{executionCounts?.completed ?? 0}</strong>
+                <span>/ {executionCounts?.total ?? 0} 部作品已完成</span>
+                {(executionCounts?.needsAttention ?? 0) > 0 && <span className="media-v4-execution-header-attention">{executionCounts?.needsAttention} 部需要处理</span>}
+              </div>
+              <div className="media-v4-execution-header-secondary">
+                <span>{executionCounts?.metadataComplete ?? 0} 部资料完整</span>
+                <span>镜像 {executionMirrorDone}/{executionMirrorTotal}</span>
+              </div>
             </div>}
             {preview && <details className="media-v4-review-details"><summary>查看本次识别摘要</summary><div className="media-v4-review-details-body">
               <V4RecognitionSummary
@@ -1652,9 +1662,14 @@ export default function MediaManagementPage() {
                 evidenceEntries={scan?.entries ?? []}
                 overrideDrafts={overrideDrafts}
                 onOpenMaintenance={() => goManageView('maintenance')}
+                onReimport={() => {
+                  const card = sourceCards.find((item) => item.root_id === scan?.root_id || item.latest_revision_id === preview.revision_id)
+                  if (card) prepareSourceUpdate(card)
+                  else goManageView('overview')
+                }}
                 busy={busy !== ''}
                 onOverrideChange={(evidenceId, draft) => setOverrideDrafts((current) => ({ ...current, [evidenceId]: draft }))}
-                onApplyOverride={(evidenceId) => void applyOverride(evidenceId)}
+                onApplyOverride={applyOverride}
               />
             </div></details>}
           </div>
@@ -1749,7 +1764,7 @@ export default function MediaManagementPage() {
           >
             <FluentProvider theme={getKumiFluentTheme(appearanceMode)} className="media-v4-source-card-delete-dialog-provider">
               <DialogBody className="media-v4-source-card-dialog-body">
-                <DialogTitle className="media-v4-source-card-dialog-title">{sourceDeletionQueued ? '已开始删除' : '移除来源卡？'}</DialogTitle>
+                <DialogTitle className="media-v4-source-card-dialog-title">{sourceDeletionQueued ? '已开始删除' : sourceDeletionPreview || sourceCardPendingDelete.deletion_retry_required ? '清理媒体库' : '移除来源卡？'}</DialogTitle>
                 <DialogContent className="media-v4-source-card-dialog-content">
                   {sourceDeletionQueued ? (
                     <>
@@ -1758,9 +1773,9 @@ export default function MediaManagementPage() {
                     </>
                   ) : (
                     <>
-                      <p>要从“已导入来源”中移除“{sourceCardPendingDelete.display_name}”吗？</p>
+                      <p>{sourceCardPendingDelete.deletion_retry_required ? `重新清理“${sourceCardPendingDelete.display_name}”前，请核对影响范围。` : `要从“已导入来源”中移除“${sourceCardPendingDelete.display_name}”吗？`}</p>
                       {sourceDeletionPreview === null && (
-                        <p>只会隐藏这张来源卡，不会删除媒体库、镜像、资料或观看状态；以后重新扫描同一来源时，卡片会再次出现。</p>
+                        <p>{sourceCardPendingDelete.deletion_retry_required ? '正在读取最新清理范围…' : '只会隐藏这张来源卡，不会删除媒体库、镜像、资料或观看状态；以后重新扫描同一来源时，卡片会再次出现。'}</p>
                       )}
                       {sourceDeletionPreview !== null && (
                         <div className="media-v4-source-card-deletion-preview">
@@ -1801,7 +1816,7 @@ export default function MediaManagementPage() {
                       {sourceDeletionPreview !== null && sourceDeletionPreview.blockers.length === 0 && (
                         <Button className="media-v4-source-card-dialog-confirm media-v4-source-card-dialog-danger" appearance="primary" icon={sourceCardDeleting ? <Spinner size="tiny" /> : <Delete24Regular />} disabled={sourceCardDeleting} onClick={() => void deleteSourceLibrary()}>{sourceCardDeleting ? '正在提交…' : '确认删除媒体库'}</Button>
                       )}
-                      {(sourceDeletionPreview === null || sourceDeletionPreview.blockers.length > 0) && (
+                      {!sourceCardPendingDelete.deletion_retry_required && (sourceDeletionPreview === null || sourceDeletionPreview.blockers.length > 0) && (
                         <Button className="media-v4-source-card-dialog-confirm media-v4-source-card-dialog-danger" appearance="primary" icon={sourceCardDeleting ? <Spinner size="tiny" /> : <Delete24Regular />} disabled={sourceCardDeleting} onClick={() => void hideSourceCard()}>{sourceCardDeleting ? '正在移除…' : '移除'}</Button>
                       )}
                     </>

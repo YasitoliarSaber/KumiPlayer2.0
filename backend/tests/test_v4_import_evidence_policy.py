@@ -133,6 +133,19 @@ def test_bare_episode_takes_title_from_unique_nearest_directory():
     assert facts.episode_candidate == 1
 
 
+def test_baidu_on_air_version_stays_episode_six_in_resolved_graph():
+    entries = [
+        _facts("天元突破/sprcial/[4K_EA] 天元突破 05(On Air Ver) [简体内嵌].mkv", 51, provider="baidu"),
+        _facts("天元突破/sprcial/[4K_EA] 天元突破 06(On Air Ver) [简体内嵌].mkv", 52, provider="baidu"),
+    ]
+
+    graph = MediaResolver().resolve(entries)
+
+    assert len(graph.works) == 1
+    assert sorted(episode.local_episode_number for episode in graph.episodes) == [5, 6]
+    assert all(episode.season_kind != "special" for episode in graph.episodes)
+
+
 def test_distinct_file_titles_are_not_joined_by_a_weak_directory():
     """CHECK-003B: 同一"我的收藏"下两个强文件标题各自成作品。"""
 

@@ -694,9 +694,9 @@ test('识别摘要显示 unknown 类型与 null 季号/集号，不制造第 0 �
   await screen.findByText('未定位作品')
 
   // 总数摘要里就要说明类型未定与集号未定，而不是把它们藏起来。
-  expect(screen.getByText(/类型未定的作品 2 部/)).toBeVisible()
-  expect(screen.getByText(/集号未定的条目 3 个/)).toBeVisible()
-  expect(screen.getByText(/不代表缺集/)).toBeVisible()
+  expect(screen.getByText(/类型未定 2 部/)).toBeVisible()
+  expect(screen.getByText(/集号未定 3 项/)).toBeVisible()
+  expect(screen.getByText(/可先建立媒体库，稍后核对/)).toBeVisible()
 
   // 展开 unknown 作品卡：类型/季号/集号三处都要显式未定。
   fireEvent.click(screen.getByText('未定位作品'))

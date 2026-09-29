@@ -10,7 +10,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Button, ProgressBar, Spinner } from '@fluentui/react-components'
 import { CheckmarkCircle24Filled, ChevronDown24Regular, ChevronRight24Regular, DismissCircle24Regular, ErrorCircle24Regular, SpinnerIosRegular, Warning24Regular } from '@fluentui/react-icons'
 import type { V4ExecutionProgress, V4WorkExecutionDetail, V4WorkProgressUnit } from '../../api/mediaV4'
-import { STAGE_LABELS, WORK_PROGRESS_LABELS, sortWorkUnits } from '../../lib/mediaSummary'
+import { STAGE_LABELS, WORK_PROGRESS_LABELS, sortWorkUnits, summarizeExecutionWorks } from '../../lib/mediaSummary'
 
 export interface V4ExecutionProgressProps {
   progress: V4ExecutionProgress
@@ -40,6 +40,12 @@ function retryMetadataLabel(reasonCode: string | undefined, busy: boolean): stri
   return artworkOnly ? '重新下载媒体图片' : '重新获取媒体信息'
 }
 
+function attentionSummary(unit: V4WorkProgressUnit): string {
+  if (unit.metadata_state === 'waiting_review') return '在线作品待确认；本地播放不受影响。'
+  if (unit.metadata_reason_code === 'artifact_incomplete') return '部分媒体图片尚未就绪。'
+  return unit.metadata_reason || '在线资料待处理。'
+}
+
 function StageSummary({ stageKey, progress }: { stageKey: (typeof STAGE_KEYS)[number]; progress: V4ExecutionProgress }) {
   const summary = progress.stage_summary[stageKey]
   const done = summary.succeeded + summary.failed + summary.cancelled
@@ -47,7 +53,7 @@ function StageSummary({ stageKey, progress }: { stageKey: (typeof STAGE_KEYS)[nu
   return (
     <div className={`media-v4-stage-pill media-v4-stage-${summary.status}`}>
       <strong>{STAGE_LABELS[stageKey]}</strong>
-      <span>{summary.total > 0 ? `${done}/${summary.total}${attention > 0 ? ` · ${attention} 待处理` : ''}` : '未开始'}</span>
+      <span>{summary.total > 0 ? `${done}/${summary.total} 个任务${attention > 0 ? ` · ${attention} 待处理` : ''}` : '未开始'}</span>
     </div>
   )
 }
@@ -226,9 +232,9 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
           )}
           {unit.overall_status === 'needs_attention' && <>
             <div className="media-v4-job-error" role="status">
-              {unit.metadata_reason || '在线资料尚未补齐，可以选择对应作品，也可以稍后处理。'}
+              {attentionSummary(unit)}
             </div>
-            {unit.metadata_recovery_hint && <div className="media-v4-work-progress-hint">{unit.metadata_recovery_hint}</div>}
+            {unit.metadata_recovery_hint && !['review_identity', 'choose_candidate'].includes(unit.metadata_recovery_action ?? '') && <div className="media-v4-work-progress-hint">{unit.metadata_recovery_hint}</div>}
             {['retry_metadata', 'check_settings'].includes(unit.metadata_recovery_action ?? '') && onRetryMetadata && (
               <Button size="small" appearance="secondary" disabled={resolvingWorkId !== ''} onClick={() => onRetryMetadata(unit.work_id)}>
                 {retryMetadataLabel(unit.metadata_reason_code, resolvingWorkId === unit.work_id)}
@@ -481,6 +487,7 @@ export function V4ExecutionProgress({ progress, busyRetryId, onRetry, resolvingW
   const sorted = sortWorkUnits(progress.work_units)
   const active = sorted.filter((unit) => unit.overall_status !== 'completed')
   const completed = sorted.filter((unit) => unit.overall_status === 'completed')
+  const counts = summarizeExecutionWorks(progress)
   const visibleCompleted = completedOpen ? completed : completed.slice(0, COMPLETED_PREVIEW_COUNT)
   const mirrorTotal = progress.stage_summary.mirror.total
   const mirrorDone = progress.stage_summary.mirror.succeeded + progress.stage_summary.mirror.failed + progress.stage_summary.mirror.cancelled
@@ -525,7 +532,7 @@ export function V4ExecutionProgress({ progress, busyRetryId, onRetry, resolvingW
       </div>
       {completed.length > 0 && (
         <div className="media-v4-completed-block">
-          <div className="media-v4-completed-heading"><strong>已完成 {completed.length} 部</strong></div>
+          <div className="media-v4-completed-heading"><strong>已完成 {counts.completed} 部</strong></div>
           <div className="media-v4-work-progress-list">
             {visibleCompleted.map((unit) => renderWorkUnit(unit))}
           </div>

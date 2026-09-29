@@ -121,7 +121,7 @@ def list_source_cards(database: V4Database) -> list[dict]:
                     pending_relations[str(row["revision_id"])] += 1
             job_rows = conn.execute(
                 f"""
-                SELECT revision_id, job_id, work_id, job_type, status, cancel_requested, heartbeat_at
+                SELECT revision_id, job_id, work_id, job_type, status, cancel_requested, heartbeat_at, created_at
                 FROM jobs WHERE revision_id IN ({placeholders})
                 ORDER BY revision_id, CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, job_id
                 """,
@@ -194,6 +194,9 @@ def list_source_cards(database: V4Database) -> list[dict]:
             (row for row in jobs_by_revision.get(revision_id, []) if str(row["status"]) in {"running", "queued"}),
             None,
         )
+        deletion_jobs = [row for row in jobs_by_revision.get(revision_id, []) if str(row["job_type"]) == "delete_source_library"]
+        last_deletion = max(deletion_jobs, key=lambda row: (str(row["created_at"]), str(row["job_id"]))) if deletion_jobs else None
+        deletion_retry_required = last_deletion is not None and str(last_deletion["status"]) in {"failed", "cancelled"}
 
         progress = _safe_progress(progress_service, revision_id) if draft is None and confirmed is not None else {}
         draft_graph = None
@@ -356,6 +359,11 @@ def list_source_cards(database: V4Database) -> list[dict]:
         last_error = _friendly_error(
             str(scan["error"] or "") if (scan_failed or scan_paused) and scan is not None else _first_error(progress)
         )
+        if deletion_retry_required:
+            overall_status = "needs_attention"
+            phase = "execute"
+            last_error = "上次清理未完成，请重新核对范围并重试。"
+            card_progress.update(state=overall_status, message="清理未完成", percent=None)
         started_at = str(scan["started_at"] or "") if scan is not None else ""
         confirmed_at = str(confirmed["confirmed_at"] or "") if confirmed is not None else ""
         draft_created_at = str(draft["created_at"] or "") if draft is not None else ""
@@ -423,6 +431,7 @@ def list_source_cards(database: V4Database) -> list[dict]:
             "metadata_ready_retained_count": metadata_ready_retained_count,
             "relation_pending_count": pending_relations.get(revision_id, 0) if phase == "execute" else 0,
             "last_error": last_error,
+            "deletion_retry_required": deletion_retry_required,
             "scan": scan_payload,
             "progress": card_progress,
             "active_task": active_task,
@@ -613,8 +622,9 @@ def _active_task(scan, job, revision_id: str, progress: dict) -> dict | None:
         "status": status,
         "stage": job_type,
         "label": "正在终止任务" if status == "cancelling" else labels.get(job_type, "正在处理媒体库任务"),
-        "percent": progress.get("percent"),
-        "can_cancel": status in {"queued", "running"},
+        # 删除作业不能使用上一次导入的百分比；退役后已进入不可中断的回收阶段。
+        "percent": None if job_type == "delete_source_library" else progress.get("percent"),
+        "can_cancel": status == "queued" if job_type == "delete_source_library" else status in {"queued", "running"},
         "cancel_requested": status == "cancelling",
     }
 

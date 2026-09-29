@@ -5,7 +5,19 @@
  * review issue 为准；集号跨度只做展示性提示，前端不得自行修改集号。
  */
 
-import type { V4Preview, V4ResolvedEpisode, V4ReviewIssue } from '../api/mediaV4'
+import type { V4ExecutionProgress, V4Preview, V4ResolvedEpisode, V4ReviewIssue } from '../api/mediaV4'
+
+/** 全页面共用的作品口径；阶段 pill 的分子分母另为后台任务数。 */
+export function summarizeExecutionWorks(progress: V4ExecutionProgress) {
+  const units = progress.work_units
+  const defectCodes = new Set(['episode_mapping_incomplete', 'special_episode_metadata_incomplete', 'artifact_incomplete'])
+  return {
+    total: units.length,
+    completed: units.filter((unit) => unit.overall_status === 'completed').length,
+    needsAttention: units.filter((unit) => unit.overall_status === 'needs_attention' || unit.overall_status === 'failed').length,
+    metadataComplete: units.filter((unit) => unit.metadata_state === 'ready' && !defectCodes.has(unit.metadata_reason_code ?? '')).length,
+  }
+}
 
 export interface WorkGroupSummary {
   kind: 'season' | 'special' | 'movie'

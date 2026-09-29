@@ -7,7 +7,8 @@
 - **按来源引用计数**：只删除"不再被任何其他来源 revision 绑定"的作品，
   多来源共享的作品必须保留（否则删一个来源会打穿另一个来源的媒体库）；
 - **路径防护**：只删除镜像根之内的文件，真实来源媒体永不触碰；
-- **批量 + 可取消**：每批独立事务，进度可回报、可中断，投影只在最后刷新一次。
+- **先退役再回收**：物理清理前先让来源退出活动库；清理可重复执行，
+  中途失败不能留下仍可见却缺少镜像的空卡片。只在退役前接受取消。
 
 外键约束决定了执行顺序（已用 PRAGMA 实测）：
 
@@ -21,15 +22,6 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
-
-
-class SourceDeletionCancelled(Exception):
-    """删除被取消（批次之间检查）。
-
-    刻意**不用** ``KeyboardInterrupt``：它是 ``BaseException``，会穿透调用方
-    ``except Exception`` 的保护，把后台 worker 线程直接打死，并让作业永远停在
-    running。用普通异常在删除函数内收口成"已取消"结果，由 runner 标记 cancelled。
-    """
 
 
 @dataclass(slots=True)
@@ -306,7 +298,7 @@ def delete_source_library(
     removed_files = 0
     removed_artifacts = 0
     skipped_outside = 0
-    cancelled = False
+    failed_files = 0
 
     with database.connect() as conn:
         blockers = _blockers(conn, root_id, ignore_job_id=ignore_job_id)
@@ -318,18 +310,21 @@ def delete_source_library(
         historical_examined = len(leaving) + len(shared)
         _current_total, current_leaving, current_shared = _current_work_impact(conn, root_id)
 
-    def _guard() -> None:
-        nonlocal cancelled
-        if should_cancel is not None and should_cancel():
-            cancelled = True
-            raise SourceDeletionCancelled
+    # 取消只在仍可无损退出的阶段有效。此前在批次间取消会留下“来源仍可见、
+    # 部分镜像已删除”的半成品；退役后必须继续完成可重复的物理清理。
+    if should_cancel is not None and should_cancel():
+        return {"ok": False, "cancelled": True, "reason": "已取消", "removed_works": 0, "removed_files": 0}
+
+    now = _now()
+    with database.connect() as conn:
+        conn.execute(
+            "UPDATE source_roots SET retired_at = COALESCE(NULLIF(retired_at, ''), ?), "
+            "enabled = 0, retired_reason = '用户按来源删除媒体库', updated_at = ? WHERE root_id = ?",
+            (now, now, root_id),
+        )
 
     for offset in range(0, len(leaving), max(1, batch_size)):
         batch = leaving[offset : offset + max(1, batch_size)]
-        try:
-            _guard()
-        except SourceDeletionCancelled:
-            break
         placeholders = ",".join("?" for _ in batch)
         with database.connect() as conn:
             rows = conn.execute(
@@ -355,10 +350,13 @@ def delete_source_library(
                     portable_ids.append(artifact_id)
                     continue
                 try:
+                    existed = path.exists()
                     path.unlink(missing_ok=True)
-                    removed_files += 1
+                    if existed:
+                        removed_files += 1
                     removed_artifacts += 1
                 except OSError:
+                    failed_files += 1
                     portable_ids.append(artifact_id)
             if portable_ids:
                 kept_placeholders = ",".join("?" for _ in portable_ids)
@@ -372,25 +370,10 @@ def delete_source_library(
         if progress is not None:
             progress(min(offset + len(batch), len(leaving)), len(leaving))
 
-    if cancelled:
-        return {
-            "ok": False,
-            "cancelled": True,
-            "reason": "已取消",
-            "removed_works": 0,
-            "removed_files": removed_files,
-        }
-
-    now = _now()
-    with database.connect() as conn:
-        # 退役来源：作品、播放与追更查询据此退出活动库（项目既有的按来源清理语义）。
-        conn.execute(
-            "UPDATE source_roots SET retired_at = COALESCE(NULLIF(retired_at, ''), ?), "
-            "enabled = 0, retired_reason = '用户按来源删除媒体库', updated_at = ? WHERE root_id = ?",
-            (now, now, root_id),
-        )
     return {
-        "ok": True,
+        "ok": failed_files == 0,
+        "retired": True,
+        "reason": "部分生成文件暂时无法清理，将自动重试" if failed_files else "",
         # 当前活动媒体库的离库作品数（不是历史维护集合的大小）。
         "works_leaving_library": current_leaving,
         "removed_artifacts": removed_artifacts,

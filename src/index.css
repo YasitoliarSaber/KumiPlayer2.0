@@ -14034,10 +14034,10 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-execute-stage-header { align-items: flex-start; }
 .media-v4-execute-stage-header-side { display: grid; justify-items: end; gap: 10px; min-width: min(100%, 360px); }
 /* 3.5：第三步摘要属于页面标题区，避免和任务列表重复占位。 */
-.media-v4-execution-header-summary { display: flex; align-items: baseline; justify-content: flex-end; justify-self: end; gap: 7px; min-height: 32px; color: var(--text-secondary); font-size: 14px; font-variant-numeric: tabular-nums; }
+.media-v4-execution-header-summary { display: grid; justify-items: end; justify-self: end; gap: 5px; max-width: 100%; min-height: 32px; color: var(--text-secondary); font-size: 14px; font-variant-numeric: tabular-nums; text-align: right; }
+.media-v4-execution-header-primary, .media-v4-execution-header-secondary { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: flex-end; gap: 6px 10px; }
+.media-v4-execution-header-secondary { color: var(--text-muted); font-size: 12px; }
 .media-v4-execution-header-summary strong { color: var(--text); font-size: 28px; font-weight: 700; line-height: 1; }
-/* 次要信息：镜像只是搬运量，不再和主指标同尺寸。 */
-.media-v4-execution-header-mirror { color: var(--text-muted); font-size: 12px; }
 .media-v4-execution-header-attention { color: var(--warning, #c45b52); }
 .media-v4-execution-head { display: flex; align-items: center; min-height: 24px; }
 .media-v4-execution-status { font-size: 16px; }
@@ -14100,7 +14100,7 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
   inset: 50% auto auto 50% !important;
   transform: translate(-50%, -50%) !important;
   box-sizing: border-box;
-  width: min(560px, calc(100vw - 32px));
+  width: min(520px, calc(100vw - 32px));
   max-width: calc(100vw - 32px);
   max-height: calc(100vh - 48px);
   margin: 0;
@@ -14115,7 +14115,11 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-recognition-dialog .fui-FluentProvider { background: transparent; color: inherit; }
 .media-v4-recognition-dialog .fui-DialogBody { display: grid; gap: 16px; }
 .media-v4-recognition-dialog .fui-DialogContent { min-width: 0; overflow-wrap: anywhere; }
-.media-v4-recognition-dialog .media-v4-override-dialog-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.media-v4-recognition-dialog .media-v4-override-dialog-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 12px; }
+.media-v4-recognition-dialog .media-v4-override-dialog-row > :nth-child(-n+2) { grid-column: 1 / -1; }
+.media-v4-recognition-dialog .media-v4-issue-evidence { display: grid; gap: 5px; min-width: 0; margin-bottom: 16px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-soft); font-size: 12px; }
+.media-v4-recognition-dialog .media-v4-issue-evidence code { display: block; overflow: hidden; color: var(--text); font-family: inherit; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.media-v4-recognition-dialog .media-v4-issue-evidence span { color: var(--text-muted); line-height: 1.45; }
 .media-v4-recognition-dialog .fui-DialogActions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 /* 弹窗表单的竖向节奏：Fluent 默认 label/hint 只有 2px 级间距，在 17px 根字号下
    标签会与控件贴在一起（观感像“作品标题作品标题”）。这里统一 label→控件→hint
@@ -14131,6 +14135,10 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   column-gap: 12px;
+}
+@media (max-width: 520px) {
+  .media-v4-recognition-dialog { padding: 18px; }
+  .media-v4-recognition-dialog .media-v4-override-dialog-row { grid-template-columns: minmax(0, 1fr); }
 }
 .media-v4-identity-help { display: grid; gap: 12px; line-height: 1.6; }
 .media-v4-identity-help p { margin: 0; }

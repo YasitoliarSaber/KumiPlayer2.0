@@ -107,24 +107,36 @@ class V4JobRunner:
                 ).fetchone()
             if revision is None:
                 raise ValueError("删除任务的来源 revision 不存在")
-            outcome = delete_source_library(
-                self.database,
-                str(revision["root_id"]),
-                mirror_root=mirror_root or get_mirror_root(),
-                should_cancel=lambda: cancel_requested(self.database, job_id),
-                # 本作业此刻必然是 running，阻断检查要排除它自己。
-                ignore_job_id=job_id,
-            )
+            try:
+                outcome = delete_source_library(
+                    self.database,
+                    str(revision["root_id"]),
+                    mirror_root=mirror_root or get_mirror_root(),
+                    should_cancel=lambda: cancel_requested(self.database, job_id),
+                    progress=lambda _done, _total: heartbeat(self.database, job_id),
+                    # 本作业此刻必然是 running，阻断检查要排除它自己。
+                    ignore_job_id=job_id,
+                )
+            except Exception as exc:
+                self._retry_source_deletion(job_id, str(exc))
+                return JobRunResult(job_id, job["job_type"], self._current_status(job_id))
             if outcome.get("cancelled"):
                 # 取消是可预期终态：标 cancelled，且**不**重建投影制造半成品视图。
                 mark_cancelled(self.database, job_id)
                 return JobRunResult(job_id, job["job_type"], "cancelled")
-            if not outcome.get("ok"):
+            if not outcome.get("ok") and not outcome.get("retired"):
                 self._mark_failed(job_id, str(outcome.get("reason") or "按来源删除未完成"))
                 return JobRunResult(job_id, job["job_type"], "failed")
-            heartbeat(self.database, job_id)
-            # 来源退役后媒体墙必须立即反映：删除作业自己收口一次投影重建。
-            self.projection.rebuild()
+            try:
+                heartbeat(self.database, job_id)
+                # 来源已退役，即使有文件暂时无法回收，也先更新媒体墙避免空卡片。
+                self.projection.rebuild()
+            except Exception as exc:
+                self._retry_source_deletion(job_id, str(exc))
+                return JobRunResult(job_id, job["job_type"], self._current_status(job_id))
+            if not outcome.get("ok"):
+                self._retry_source_deletion(job_id, str(outcome.get("reason") or "按来源删除未完成"))
+                return JobRunResult(job_id, job["job_type"], self._current_status(job_id))
             self._mark_succeeded(job_id)
             return JobRunResult(job_id, job["job_type"], "succeeded")
 
@@ -284,7 +296,8 @@ class V4JobRunner:
 
         with self.database.connect() as conn:
             rows = conn.execute(
-                "SELECT job_id, cancel_requested, heartbeat_at, updated_at FROM jobs WHERE status = 'running'"
+                "SELECT job_id, job_type, attempts, cancel_requested, heartbeat_at, updated_at "
+                "FROM jobs WHERE status = 'running'"
             ).fetchall()
         stale_ids: list[str] = []
         threshold = datetime.now(UTC).timestamp() - max(1, max_age_seconds)
@@ -302,11 +315,26 @@ class V4JobRunner:
         with self.database.connect() as conn:
             for job_id in stale_ids:
                 row = conn.execute(
-                    "SELECT cancel_requested FROM jobs WHERE job_id = ? AND status = 'running'",
+                    "SELECT job_type, attempts, cancel_requested FROM jobs WHERE job_id = ? AND status = 'running'",
                     (job_id,),
                 ).fetchone()
                 if row is None:
                     continue
+                if str(row["job_type"]) == "delete_source_library" and int(row["attempts"]) < 3:
+                    # 崩溃前可能已删掉部分可再生文件；同一删除作业从剩余产物继续。
+                    # 即使收到过终止，退役后的清理仍必须收口，避免隐藏来源残留产物。
+                    retired = conn.execute(
+                        "SELECT sr.retired_at FROM jobs j JOIN import_revisions ir ON ir.revision_id = j.revision_id "
+                        "JOIN source_roots sr ON sr.root_id = ir.root_id WHERE j.job_id = ?",
+                        (job_id,),
+                    ).fetchone()
+                    if not bool(row["cancel_requested"]) or (retired and str(retired["retired_at"])):
+                        conn.execute(
+                            "UPDATE jobs SET status = 'queued', cancel_requested = 0, "
+                            "last_error = '任务异常中断，继续清理', heartbeat_at = ?, updated_at = ? WHERE job_id = ?",
+                            (stamp, stamp, job_id),
+                        )
+                        continue
                 if bool(row["cancel_requested"]):
                     conn.execute(
                         "UPDATE jobs SET status = 'cancelled', finished_at = ?, heartbeat_at = ?, updated_at = ? WHERE job_id = ?",
@@ -323,6 +351,21 @@ class V4JobRunner:
                         (stamp, stamp, stamp, job_id),
                     )
         return len(stale_ids)
+
+    def _retry_source_deletion(self, job_id: str, error: str) -> None:
+        """有界重试可恢复的删除作业；重试沿用同一幂等 job 与剩余产物行。"""
+
+        stamp = now()
+        with self.database.connect() as conn:
+            row = conn.execute("SELECT attempts FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+            if row is not None and int(row["attempts"]) < 3:
+                conn.execute(
+                    "UPDATE jobs SET status = 'queued', cancel_requested = 0, last_error = ?, "
+                    "heartbeat_at = ?, updated_at = ? WHERE job_id = ?",
+                    (error, stamp, stamp, job_id),
+                )
+                return
+        self._mark_failed(job_id, error)
 
     def _mark_running(self, job_id: str) -> bool:
         return claim_running(self.database, job_id)

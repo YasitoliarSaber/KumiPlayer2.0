@@ -127,6 +127,8 @@ export interface V4SourceLibraryCard {
   /** 尚未建立的作品关联，不阻断导入或播放，与当前故障数量分开。 */
   relation_pending_count?: number
   last_error: string
+  /** 最近一次按来源清理未完成；来源仍在，需重新预览后确认。 */
+  deletion_retry_required?: boolean
   source_locator: string
   /** 面向来源卡的紧凑路径摘要；原始 locator 仍用于恢复来源配置。 */
   display_path?: string

@@ -38,3 +38,31 @@ test('普通识别修正保持正常表单，弹窗有独立遮罩和实体居�
   expect(css).toMatch(/\.media-v4-recognition-dialog\s*\{[^}]*position: fixed[^}]*background:/s)
   expect(css).toMatch(/\.media-v4-recognition-dialog\s*\{[^}]*background: var\(--surface-solid\)/s)
 })
+
+test('未知类型和集号保持空白，不把缺失证据预填为第 1 集', () => {
+  const issue = { code: 'episode_number_unresolved', evidence_id: 'ev', message: '集号未定' }
+  const preview: V4Preview = {
+    revision_id: 'rev', status: 'draft',
+    works: [{ work_key: 'work', preferred_title: '天元突破', media_type: 'unknown', year: null, source_evidence_ids: ['ev'] }],
+    episodes: [{ episode_key: 'episode', work_key: 'work', local_season_number: null, local_episode_number: null, absolute_episode_number: null, season_kind: 'unknown', episode_kind: 'unknown', special_number: null, edition_key: '', asset_evidence_ids: ['ev'] }],
+    work_assets: [], issues: [issue],
+  }
+  render(<V4RecognitionSummary preview={preview} issues={preview.issues} evidenceEntries={[]} overrideDrafts={{}} busy={false} onOverrideChange={vi.fn()} onApplyOverride={vi.fn()} />)
+  fireEvent.click(screen.getByRole('button', { name: '修正' }))
+  const dialog = screen.getByRole('dialog')
+  expect(within(dialog).getByRole('combobox', { name: '修正媒体类型' })).toHaveValue('')
+  expect(within(dialog).queryByRole('textbox', { name: '修正集号' })).not.toBeInTheDocument()
+  expect(within(dialog).getByRole('button', { name: '应用修正' })).toBeDisabled()
+})
+
+test('已确认的识别只引导重扫，不能打开会失败的人工改写表单', () => {
+  const issue = { code: 'episode_number_unresolved', evidence_id: 'ev', message: '集号未定' }
+  const preview: V4Preview = { revision_id: 'rev', status: 'confirmed', works: [{ work_key: 'work', preferred_title: '天元突破', media_type: 'unknown', year: null, source_evidence_ids: ['ev'] }], episodes: [], work_assets: [], issues: [issue] }
+  const onReimport = vi.fn()
+  render(<V4RecognitionSummary preview={preview} issues={preview.issues} evidenceEntries={[]} overrideDrafts={{}} busy={false} onOverrideChange={vi.fn()} onApplyOverride={vi.fn()} onReimport={onReimport} />)
+  fireEvent.click(screen.getByRole('button', { name: '查看处理方式' }))
+  const dialog = screen.getByRole('dialog')
+  expect(within(dialog).queryByRole('textbox', { name: '修正集号' })).not.toBeInTheDocument()
+  fireEvent.click(within(dialog).getByRole('button', { name: '重新扫描此来源' }))
+  expect(onReimport).toHaveBeenCalledOnce()
+})

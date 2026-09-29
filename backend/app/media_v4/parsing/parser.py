@@ -74,6 +74,7 @@ _QUALITY_TOKENS = re.compile(
     r"(?i)(?<![a-z0-9])(2160p|1080p|1080i|720p|4k|uhd|hdr10\+?|dolby[ ._-]?vision)(?![a-z0-9])"
 )
 _EDITION_TOKENS = (
+    (re.compile(r"(?i)\(\s*on[ ._-]?air\s*(?:ver(?:sion)?\.?)?\s*\)"), "on-air"),
     (re.compile(r"(?i)(?:director(?:'s)?[ ._-]?cut|导演剪辑版)"), "director-cut"),
     (re.compile(r"(?i)(?:extended(?:[ ._-]?edition)?|加长版)"), "extended"),
     (re.compile(r"(?i)(?:remaster(?:ed)?|重制版)"), "remastered"),
@@ -389,7 +390,7 @@ def _parse_sidecar_nfo(evidence: SourceEvidence) -> tuple[int | None, str, str, 
 class V4Parser:
     """从一个 SourceEvidence 生成一个不可变 ParsedFacts。"""
 
-    VERSION = "v4-parser-4"
+    VERSION = "v4-parser-5"
 
     @classmethod
     def _parsed_fact_id(cls, evidence: SourceEvidence) -> str:

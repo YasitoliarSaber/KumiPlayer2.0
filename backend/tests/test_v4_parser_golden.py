@@ -176,6 +176,29 @@ def test_parser_does_not_mistake_year_or_explicit_local_episode_for_absolute_num
     assert bare.episode_token_raw == "- 13"
 
 
+def test_baidu_broadcast_version_keeps_filename_episode_six():
+    from app.media_v4.parsing.parser import V4Parser
+
+    facts = V4Parser().parse(_evidence(
+        "天元突破/sprcial/[4K_EA] 天元突破 06(On Air Ver) [简体内嵌]【Bilibili_AYWDXNH】.mkv",
+        provider="baidu",
+    ))
+
+    assert facts.media_type == "tv"
+    assert facts.episode_candidate == 6
+    assert facts.special_candidate is False
+    assert facts.is_importable is True
+    assert "on-air" in facts.edition_tags
+
+
+def test_number_before_unrecognized_parenthesis_is_not_promoted_to_episode():
+    from app.media_v4.parsing.parser import V4Parser
+
+    facts = V4Parser().parse(_evidence("Show/Show 06(2024).mkv"))
+
+    assert facts.episode_candidate is None
+
+
 def test_episode_range_end_requires_token_boundary_so_title_numbers_stay_in_title():
     """集标题里的数字不得成为范围终点（真实样本：200万年/100% 安全的水）。"""
 

@@ -128,6 +128,26 @@ test('按来源删除被阻断时给出原因，且不提供确认删除', async
   expect(api.deleteSourceLibrary).not.toHaveBeenCalled()
 })
 
+test('上次清理失败显示重试入口，并重新读取影响范围', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture({
+    overall_status: 'needs_attention', deletion_retry_required: true,
+    last_error: '上次清理未完成，请重新核对范围并重试。',
+  })] })
+  api.sourceLibraryDeletionPreview.mockResolvedValue({
+    root_id: 'root-115', current_works_leaving: 2, current_works_shared: 1,
+    artifact_files: 20, artifact_bytes: 0, blockers: [],
+  })
+  render(<MediaManagementPage />)
+
+  expect(await screen.findByText('清理未完成')).toBeVisible()
+  fireEvent.click(screen.getByRole('button', { name: '重试清理' }))
+  expect(await screen.findByRole('dialog', { name: '清理媒体库' })).toBeVisible()
+  expect(api.sourceLibraryDeletionPreview).toHaveBeenCalledWith('root-115')
+  expect(screen.getByText(/部作品离开媒体库/)).toBeVisible()
+  expect(screen.queryByRole('button', { name: '移除' })).not.toBeInTheDocument()
+  expect(api.deleteSourceLibrary).not.toHaveBeenCalled()
+})
+
 beforeEach(() => {
   localStorage.clear()
   vi.clearAllMocks()
