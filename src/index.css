@@ -13353,6 +13353,44 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
   .player-tuning-actions .fui-Button { width: 100%; }
 }
 
+/* 播放器选择与现有未分层页面规则处于同一层，避免 @layer 页面样式被旧规则覆盖。 */
+.player-tuning-page--compact {
+  width: min(100%, 880px);
+  max-width: 880px;
+  padding: 24px 28px 40px;
+}
+.player-tuning-page--compact .player-tuning-header { align-items: center; gap: 12px; }
+.player-tuning-page--compact .player-tuning-section h3,
+.player-tuning-page--compact .player-tuning-note { margin: 0; }
+.player-tuning-page--compact .fui-RadioGroup[aria-labelledby='player-mode-label'] {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.player-tuning-page--compact .fui-RadioGroup[aria-labelledby='player-mode-label'] .fui-Radio {
+  min-width: 0;
+  min-height: 48px;
+  align-items: center;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-raised);
+}
+.player-tuning-page--compact .fui-RadioGroup[aria-labelledby='player-mode-label'] .fui-Radio:has(input:checked) {
+  border-color: var(--accent-strong);
+  background: color-mix(in srgb, var(--accent-strong) 9%, var(--surface-raised));
+}
+.player-tuning-page--compact .fui-RadioGroup[aria-labelledby='player-mode-label'] .fui-Radio:focus-within {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
+}
+@media (max-width: 640px) {
+  .player-tuning-page--compact { padding: 16px 12px 28px; }
+  .player-tuning-page--compact .fui-RadioGroup[aria-labelledby='player-mode-label'] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* ============ OpenList 目录连接（夸克试点） ============ */
 .media-openlist-browser {
   display: grid;
