@@ -148,6 +148,43 @@ test('上次清理失败显示重试入口，并重新读取影响范围', async
   expect(api.deleteSourceLibrary).not.toHaveBeenCalled()
 })
 
+test('来源已退役但文件回收失败时仅显示维护入口，重试预览不重复计入作品', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture({
+    enabled: 0, counts_scope: 'cleanup', work_count: null, asset_count: null,
+    admitted_video_file_count: null, overall_status: 'needs_attention',
+    deletion_retry_required: true, last_error: '生成文件清理未完成，请重新核对范围并重试。',
+  })] })
+  api.sourceLibraryDeletionPreview.mockResolvedValue({
+    root_id: 'root-115', works_removable: 0, works_shared: 0,
+    artifact_files: 2, artifact_bytes: 0, blockers: [],
+  })
+  render(<MediaManagementPage />)
+
+  expect(await screen.findByText('媒体库已移除，生成文件待清理')).toBeVisible()
+  expect(screen.getByRole('button', { name: '重试清理' })).toBeVisible()
+  expect(screen.queryByRole('button', { name: '检查更新' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '删除来源卡：115 动画' })).not.toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: '重试清理' }))
+  expect(await screen.findByText(/媒体库已移除，仍需回收/)).toHaveTextContent('2 个镜像文件')
+  expect(screen.queryByText(/部作品离开媒体库/)).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '确认继续清理' })).toBeEnabled()
+})
+
+test('来源已退役且文件仍在回收时保留状态卡，不提供无效操作', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture({
+    enabled: 0, counts_scope: 'cleanup', work_count: null, asset_count: null,
+    active_task: { kind: 'execution', revision_id: 'rev-existing', status: 'running', stage: 'delete_source_library', label: '正在清理生成文件', percent: null, can_cancel: false, cancel_requested: false },
+    deletion_retry_required: false,
+  })] })
+  render(<MediaManagementPage />)
+
+  expect(await screen.findByText('正在清理生成文件')).toBeVisible()
+  expect(screen.getByRole('button', { name: '清理中' })).toBeDisabled()
+  expect(screen.queryByRole('button', { name: '检查更新' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '终止任务' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '删除来源卡：115 动画' })).not.toBeInTheDocument()
+})
+
 beforeEach(() => {
   localStorage.clear()
   vi.clearAllMocks()

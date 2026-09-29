@@ -1332,6 +1332,7 @@ export default function MediaManagementPage() {
           {sourceCards.map((card) => {
             const activeTask = card.active_task
             const active = Boolean(activeTask)
+            const retiredCleanup = card.enabled === 0 && card.counts_scope === 'cleanup'
             const deletionRetry = card.deletion_retry_required === true && !active
             const executionTerminated = card.overall_status === 'cancelled' && card.phase === 'execute'
             const cancelledLabel = executionTerminated ? '任务已终止' : '扫描已取消'
@@ -1342,7 +1343,7 @@ export default function MediaManagementPage() {
                 : card.phase === 'review' && card.attention_count === 0 ? '待确认'
                 : card.overall_status === 'needs_attention' ? '需要处理'
                   : card.overall_status === 'cancelled' ? cancelledLabel : '已完成'
-            const progressLabel = deletionRetry ? '来源仍在，需重新核对清理范围'
+            const progressLabel = deletionRetry ? card.enabled === 0 ? '媒体库已移除，生成文件待清理' : '来源仍在，需重新核对清理范围'
               : activeTask
               ? `${activeTask.label}${activeTask.percent == null ? '' : ` · ${activeTask.percent}%`}`
               : card.overall_status === 'cancelled' ? cancelledLabel
@@ -1352,7 +1353,7 @@ export default function MediaManagementPage() {
                     ? card.progress.message
                       : card.overall_status === 'needs_attention' ? '有任务需要处理'
                         : '上次导入已处理完毕'
-            const resumeLabel = deletionRetry ? '重试清理' : activeTask ? '查看进度' : card.scan?.status === 'paused' ? '继续扫描' : card.overall_status === 'cancelled' ? (executionTerminated ? '查看执行结果' : '重新扫描') : card.overall_status === 'needs_attention' && card.phase === 'scan' ? '重新扫描' : card.phase === 'review' ? '查看识别结果' : card.can_resume ? '查看进度' : '查看上次导入'
+            const resumeLabel = deletionRetry ? '重试清理' : retiredCleanup ? '清理中' : activeTask ? '查看进度' : card.scan?.status === 'paused' ? '继续扫描' : card.overall_status === 'cancelled' ? (executionTerminated ? '查看执行结果' : '重新扫描') : card.overall_status === 'needs_attention' && card.phase === 'scan' ? '重新扫描' : card.phase === 'review' ? '查看识别结果' : card.can_resume ? '查看进度' : '查看上次导入'
             const resumeIcon = deletionRetry ? <Delete24Regular /> : activeTask?.kind === 'scan' || card.phase === 'review' ? <DocumentText24Regular /> : <Database24Regular />
             return <article className={`media-v4-library-source-card ${active ? 'active' : 'settled'}`} key={card.root_id}>
               <div className="media-v4-source-card-identity">
@@ -1389,7 +1390,7 @@ export default function MediaManagementPage() {
                 {(card.relation_pending_count ?? 0) > 0 && <span className="media-v4-source-card-notice">{card.relation_pending_count} 项关联信息待补全，不影响入库和播放</span>}
                 </div>
                 <div className="media-v4-source-card-actions" role="group" aria-label="导入与更新">
-                  <Button className={`media-v4-source-card-action ${card.can_resume || deletionRetry ? 'primary' : 'secondary'}`} appearance={card.can_resume || deletionRetry ? 'primary' : 'secondary'} icon={resumeIcon} onClick={() => {
+                  <Button className={`media-v4-source-card-action ${card.can_resume || deletionRetry ? 'primary' : 'secondary'}`} appearance={card.can_resume || deletionRetry ? 'primary' : 'secondary'} icon={resumeIcon} disabled={retiredCleanup && active} onClick={() => {
                     if (deletionRetry) {
                       setSourceDeletionPreview(null)
                       setSourceDeletionQueued(false)
@@ -1397,11 +1398,11 @@ export default function MediaManagementPage() {
                       void loadSourceDeletionPreview(card)
                     } else void resumeSourceCard(card)
                   }}>{resumeLabel}</Button>
-                  {activeTask?.can_cancel || activeTask?.status === 'cancelling'
+                  {!retiredCleanup && !deletionRetry && (activeTask?.can_cancel || activeTask?.status === 'cancelling'
                     ? <Button className="media-v4-source-card-action secondary" appearance="secondary" icon={<Dismiss24Regular />} disabled={activeTask?.status === 'cancelling'} onClick={() => void terminateSourceTask(card)}>{activeTask?.status === 'cancelling' ? '正在终止…' : '终止任务'}</Button>
-                    : <Button className={`media-v4-source-card-action ${card.can_resume ? 'secondary' : 'primary'}`} appearance={card.can_resume ? 'secondary' : 'primary'} icon={<ArrowSync24Regular />} disabled={active} onClick={() => prepareSourceUpdate(card)}>检查更新</Button>}
+                    : <Button className={`media-v4-source-card-action ${card.can_resume ? 'secondary' : 'primary'}`} appearance={card.can_resume ? 'secondary' : 'primary'} icon={<ArrowSync24Regular />} disabled={active} onClick={() => prepareSourceUpdate(card)}>检查更新</Button>)}
                 </div>
-                {!active && <div className="media-v4-source-card-actions media-v4-source-card-management" role="group" aria-label="来源卡管理">
+                {!active && !retiredCleanup && !deletionRetry && <div className="media-v4-source-card-actions media-v4-source-card-management" role="group" aria-label="来源卡管理">
                   {!active && <Button className="media-v4-source-card-action secondary" appearance="secondary" icon={<Edit24Regular />} aria-label={`重命名来源卡：${card.display_name}`} onClick={() => openSourceCardRename(card)}>重命名</Button>}
                   {!active && <Button className="media-v4-source-card-action media-v4-source-card-action-danger" appearance="secondary" icon={<Delete24Regular />} aria-label={`删除来源卡：${card.display_name}`} onClick={() => setSourceCardPendingDelete(card)}>删除来源卡</Button>}
                 </div>}
@@ -1768,8 +1769,8 @@ export default function MediaManagementPage() {
                 <DialogContent className="media-v4-source-card-dialog-content">
                   {sourceDeletionQueued ? (
                     <>
-                      <p>已开始按来源删除“{sourceCardPendingDelete.display_name}”的媒体库。</p>
-                      <p>删除在后台分批进行（不会重跑识别）。完成后该来源卡会消失，媒体墙上属于它的作品也会一并离开；被其他来源共享的作品会保留。</p>
+                      <p>{sourceCardPendingDelete.enabled === 0 ? `已开始继续清理“${sourceCardPendingDelete.display_name}”的生成文件。` : `已开始按来源删除“${sourceCardPendingDelete.display_name}”的媒体库。`}</p>
+                      <p>{sourceCardPendingDelete.enabled === 0 ? '清理在后台分批进行。完成后这张维护卡会消失。' : '删除在后台分批进行（不会重跑识别）。完成后该来源卡会消失，媒体墙上属于它的作品也会一并离开；被其他来源共享的作品会保留。'}</p>
                     </>
                   ) : (
                     <>
@@ -1779,11 +1780,15 @@ export default function MediaManagementPage() {
                       )}
                       {sourceDeletionPreview !== null && (
                         <div className="media-v4-source-card-deletion-preview">
-                          <p>
-                            将删除该来源的媒体库：<strong>{sourceDeletionPreview.works_removable}</strong> 部作品离开媒体库、回收{' '}
-                            <strong>{sourceDeletionPreview.artifact_files}</strong> 个镜像文件
-                            {sourceDeletionPreview.artifact_bytes > 0 ? `（约 ${Math.max(1, Math.round(sourceDeletionPreview.artifact_bytes / 1048576))} MB）` : ''}。
-                          </p>
+                          {sourceCardPendingDelete.enabled === 0 ? (
+                            <p>媒体库已移除，仍需回收 <strong>{sourceDeletionPreview.artifact_files}</strong> 个镜像文件。</p>
+                          ) : (
+                            <p>
+                              将删除该来源的媒体库：<strong>{sourceDeletionPreview.works_removable}</strong> 部作品离开媒体库、回收{' '}
+                              <strong>{sourceDeletionPreview.artifact_files}</strong> 个镜像文件
+                              {sourceDeletionPreview.artifact_bytes > 0 ? `（约 ${Math.max(1, Math.round(sourceDeletionPreview.artifact_bytes / 1048576))} MB）` : ''}。
+                            </p>
+                          )}
                           {sourceDeletionPreview.works_shared > 0 && (
                             <p>
                               其中 <strong>{sourceDeletionPreview.works_shared}</strong> 部作品被其他来源共享，会保留。
@@ -1814,7 +1819,7 @@ export default function MediaManagementPage() {
                         <Button className="media-v4-source-card-dialog-confirm media-v4-source-card-dialog-danger" appearance="secondary" icon={sourceDeletionLoading ? <Spinner size="tiny" /> : <Delete24Regular />} disabled={sourceCardDeleting || sourceDeletionLoading} onClick={() => void loadSourceDeletionPreview()}>{sourceDeletionLoading ? '正在统计…' : '同时删除媒体库…'}</Button>
                       )}
                       {sourceDeletionPreview !== null && sourceDeletionPreview.blockers.length === 0 && (
-                        <Button className="media-v4-source-card-dialog-confirm media-v4-source-card-dialog-danger" appearance="primary" icon={sourceCardDeleting ? <Spinner size="tiny" /> : <Delete24Regular />} disabled={sourceCardDeleting} onClick={() => void deleteSourceLibrary()}>{sourceCardDeleting ? '正在提交…' : '确认删除媒体库'}</Button>
+                        <Button className="media-v4-source-card-dialog-confirm media-v4-source-card-dialog-danger" appearance="primary" icon={sourceCardDeleting ? <Spinner size="tiny" /> : <Delete24Regular />} disabled={sourceCardDeleting} onClick={() => void deleteSourceLibrary()}>{sourceCardDeleting ? '正在提交…' : sourceCardPendingDelete.enabled === 0 ? '确认继续清理' : '确认删除媒体库'}</Button>
                       )}
                       {!sourceCardPendingDelete.deletion_retry_required && (sourceDeletionPreview === null || sourceDeletionPreview.blockers.length > 0) && (
                         <Button className="media-v4-source-card-dialog-confirm media-v4-source-card-dialog-danger" appearance="primary" icon={sourceCardDeleting ? <Spinner size="tiny" /> : <Delete24Regular />} disabled={sourceCardDeleting} onClick={() => void hideSourceCard()}>{sourceCardDeleting ? '正在移除…' : '移除'}</Button>

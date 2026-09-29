@@ -45,6 +45,21 @@ def list_source_cards(database: V4Database) -> list[dict]:
             ORDER BY updated_at DESC, root_id
             """
         ).fetchall()
+        retired_cleanup_rows = conn.execute(
+            """
+            SELECT * FROM (
+                SELECT sr.*, ir.revision_id AS cleanup_revision_id,
+                       j.status AS cleanup_status,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY sr.root_id ORDER BY j.created_at DESC, j.job_id DESC
+                       ) AS cleanup_rank
+                FROM source_roots sr
+                JOIN import_revisions ir ON ir.root_id = sr.root_id
+                JOIN jobs j ON j.revision_id = ir.revision_id
+                WHERE sr.retired_at != '' AND j.job_type = 'delete_source_library'
+            ) WHERE cleanup_rank = 1 AND cleanup_status IN ('queued', 'running', 'failed', 'cancelled')
+            """
+        ).fetchall()
         revisions = conn.execute(
             """
             SELECT ir.* FROM import_revisions ir
@@ -438,6 +453,59 @@ def list_source_cards(database: V4Database) -> list[dict]:
             "available_actions": ["inspect", "resume"] if can_resume else ["inspect", "update"],
             "can_resume": can_resume,
             "job_summary": job_summary,
+        })
+    # 退役来源不再贡献媒体墙作品，但最后一次文件回收失败时仍须留下一个明确的
+    # 维护入口；否则用户看不到残留产物，也无从重试。此卡不报告旧作品数。
+    active_root_ids = {str(row["root_id"]) for row in roots}
+    for root in retired_cleanup_rows:
+        root_id = str(root["root_id"])
+        if root_id in active_root_ids:
+            continue
+        revision_id = str(root["cleanup_revision_id"])
+        cleanup_status = str(root["cleanup_status"])
+        cleanup_active = cleanup_status in {"queued", "running"}
+        cards.append({
+            "root_id": root_id,
+            "provider": str(root["provider"] or ""),
+            "ingest_method": str(root["ingest_method"] or ""),
+            "source_mode": str(root["source_mode"] or ""),
+            "last_scan_mode": str(root["last_scan_mode"] or ""),
+            "has_confirmed_baseline": False,
+            "source_locator": str(root["source_locator"] or ""),
+            "display_path": _display_path(str(root["source_locator"] or ""), str(root["provider"] or "")),
+            "playback_locator": str(root["playback_locator"] or ""),
+            "route_id": str(root["route_id"] or ""),
+            "display_name": _display_name(str(root["display_name"] or ""), str(root["source_locator"] or ""), str(root["provider"] or "")),
+            "enabled": 0,
+            "added_at": str(root["created_at"] or ""),
+            "updated_at": str(root["updated_at"] or ""),
+            "revision_id": revision_id,
+            "latest_revision_id": revision_id,
+            "revision_state": "retired",
+            "phase": "cleanup",
+            "overall_status": "running" if cleanup_active else "needs_attention",
+            "work_count": None,
+            "asset_count": None,
+            "evidence_count": 0,
+            "attention_count": 0,
+            "counts_scope": "cleanup",
+            "observed_entry_count": None,
+            "observed_video_count": None,
+            "admitted_video_file_count": None,
+            "episode_count": None,
+            "excluded_video_count": None,
+            "metadata_ready_work_count": None,
+            "metadata_ready_current_count": None,
+            "metadata_ready_retained_count": None,
+            "relation_pending_count": 0,
+            "last_error": "" if cleanup_active else "生成文件清理未完成，请重新核对范围并重试。",
+            "deletion_retry_required": not cleanup_active,
+            "scan": None,
+            "progress": {"state": "running" if cleanup_active else "needs_attention", "stage": "cleanup", "current_work_id": "", "current_work_title": "", "completed_work_count": 0, "total_work_count": 0, "percent": None, "message": "正在清理生成文件" if cleanup_active else "清理未完成"},
+            "active_task": {"kind": "execution", "revision_id": revision_id, "status": cleanup_status, "stage": "delete_source_library", "label": "正在清理生成文件", "percent": None, "can_cancel": False, "cancel_requested": False} if cleanup_active else None,
+            "available_actions": [] if cleanup_active else ["retry_deletion"],
+            "can_resume": False,
+            "job_summary": {"total": 1, "queued": int(cleanup_status == "queued"), "running": int(cleanup_status == "running"), "succeeded": 0, "failed": int(cleanup_status == "failed"), "cancelled": int(cleanup_status == "cancelled")},
         })
     return cards
 

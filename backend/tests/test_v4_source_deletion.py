@@ -403,6 +403,45 @@ def test_deletion_job_retries_after_file_failure_then_finishes(tmp_path, monkeyp
         assert conn.execute("SELECT COUNT(*) FROM artifacts WHERE work_id = 'work-two'").fetchone()[0] == 0
 
 
+def test_exhausted_cleanup_remains_visible_and_can_be_retried(tmp_path, monkeypatch):
+    from app.media_v4.jobs.runner import V4JobRunner
+    from app.media_v4.maintenance.source_deletion import enqueue_source_deletion
+    from app.media_v4.projection.source_libraries import list_source_cards
+
+    database, mirror = _two_sources(tmp_path)
+    monkeypatch.setattr("app.media_v4.jobs.runner.V4LibraryProjection.rebuild", lambda _self: {})
+    target = mirror / "A" / "file2.strm"
+    original_unlink = type(target).unlink
+
+    def fail_locked(path, *args, **kwargs):
+        if path == target:
+            raise PermissionError("fixture locked")
+        return original_unlink(path, *args, **kwargs)
+
+    runner = V4JobRunner(database)
+    job_id = enqueue_source_deletion(database, "root-a")
+    with monkeypatch.context() as patcher:
+        patcher.setattr(type(target), "unlink", fail_locked)
+        assert [runner.process_job(job_id, mirror_root=mirror).status for _ in range(3)] == [
+            "queued", "queued", "failed"
+        ]
+
+    assert target.exists()
+    card = next(item for item in list_source_cards(database) if item["root_id"] == "root-a")
+    assert card["deletion_retry_required"] is True
+    assert card["counts_scope"] == "cleanup"
+    assert card["work_count"] is None
+    assert plan_source_deletion(database, "root-a", mirror_root=mirror)["artifact_files"] == 1
+
+    retry_id = enqueue_source_deletion(database, "root-a")
+    assert retry_id != job_id
+    queued_card = next(item for item in list_source_cards(database) if item["root_id"] == "root-a")
+    assert queued_card["active_task"]["status"] == "queued"
+    assert runner.process_job(retry_id, mirror_root=mirror).status == "succeeded"
+    assert not target.exists()
+    assert not any(item["root_id"] == "root-a" for item in list_source_cards(database))
+
+
 def test_stale_deletion_job_resumes_instead_of_staying_running(tmp_path):
     from app.media_v4.jobs.runner import V4JobRunner
     from app.media_v4.maintenance.source_deletion import enqueue_source_deletion
@@ -446,6 +485,43 @@ def test_failed_deletion_is_visible_on_source_card_for_retry(tmp_path):
     assert card["deletion_retry_required"] is True
     assert card["overall_status"] == "needs_attention"
     assert "清理未完成" in card["last_error"]
+
+
+def test_retired_source_with_failed_cleanup_has_retry_card_without_restoring_works(tmp_path):
+    from app.media_v4.maintenance.source_deletion import enqueue_source_deletion
+    from app.media_v4.projection.source_libraries import list_source_cards
+
+    database, _mirror = _two_sources(tmp_path)
+    job_id = enqueue_source_deletion(database, "root-a")
+    with database.connect() as conn:
+        conn.execute("UPDATE source_roots SET retired_at = '2026-09-29T00:00:00+00:00', enabled = 0 WHERE root_id = 'root-a'")
+        conn.execute("UPDATE jobs SET status = 'failed' WHERE job_id = ?", (job_id,))
+
+    card = next(item for item in list_source_cards(database) if item["root_id"] == "root-a")
+
+    assert card["deletion_retry_required"] is True
+    assert card["work_count"] is None
+    assert card["counts_scope"] == "cleanup"
+
+
+def test_retired_source_cleanup_card_stays_visible_while_queued_and_running(tmp_path):
+    from app.media_v4.maintenance.source_deletion import enqueue_source_deletion
+    from app.media_v4.projection.source_libraries import list_source_cards
+
+    database, _mirror = _two_sources(tmp_path)
+    job_id = enqueue_source_deletion(database, "root-a")
+    with database.connect() as conn:
+        conn.execute("UPDATE source_roots SET retired_at = '2026-09-29T00:00:00+00:00', enabled = 0 WHERE root_id = 'root-a'")
+
+    for status in ("queued", "running"):
+        with database.connect() as conn:
+            conn.execute("UPDATE jobs SET status = ? WHERE job_id = ?", (status, job_id))
+        card = next(item for item in list_source_cards(database) if item["root_id"] == "root-a")
+        assert card["counts_scope"] == "cleanup"
+        assert card["work_count"] is None
+        assert card["active_task"]["status"] == status
+        assert card["active_task"]["can_cancel"] is False
+        assert card["deletion_retry_required"] is False
 
 
 def test_runner_maps_cancelled_outcome_to_cancelled_job(tmp_path, monkeypatch):
