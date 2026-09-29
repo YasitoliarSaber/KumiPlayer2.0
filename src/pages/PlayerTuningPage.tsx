@@ -232,9 +232,12 @@ export default function PlayerTuningPage() {
       <section className="player-tuning-section">
         <h3>如何选择</h3>
         <ul className="player-tuning-help">
-          <li>不确定时按 <strong>Mode A → Mode B → Mode C</strong> 依次试听，保留观感最好的一个。</li>
-          <li>增强模式（A+A / B+B / C+A）建议在显示放大至少 2× 时使用，否则可能过锐或劣化。</li>
-          <li>播放掉帧时，优先把质量降为“均衡”或“轻量”，而不是关闭整个功能。</li>
+          <li>“模式”选择的是<strong>算法族</strong>（Restore / Upscale_Denoise / 二次增强），不是性能档位。Mode C 使用 Upscale_Denoise 链，并不是最轻量的选项。</li>
+          <li>“质量”是<strong>成本档位</strong>：它决定链中 CNN 模型的大小（轻量 M/S、均衡 L/M、高质量 VL/M）。降低质量能减轻 GPU 负担，但 4K 源片仍可能超出帧预算。</li>
+          <li>当前默认是“关闭”，需要时再手动开启；播放中右键菜单可临时切换，只影响当前视频，不改这里的默认值。</li>
+          <li>不确定时从 Mode A + 均衡质量开始，播放中比较 Mode B、Mode C，保留观感最好的一个。</li>
+          <li>增强模式（A+A / B+B / C+A）的链更长、渲染开销更高，建议在显示放大至少 2× 时使用，否则可能过锐或劣化。</li>
+          <li>播放 4K 视频出现掉帧时，先关闭 Anime4K 确认是否恢复流畅；仅降到“轻量”也可能不足。较低分辨率视频可再试轻量档或更短模式。“已应用”只代表着色器链已下发并被 MPV 接受，不代表当前 GPU 帧预算已经足够。</li>
         </ul>
       </section>
 
