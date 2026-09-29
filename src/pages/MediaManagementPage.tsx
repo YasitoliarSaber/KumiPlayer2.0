@@ -293,6 +293,7 @@ export default function MediaManagementPage() {
   const [sourceDeletionPreview, setSourceDeletionPreview] = useState<{
     works_removable: number
     works_shared: number
+    artifacts_total: number
     artifact_files: number
     artifact_bytes: number
     blockers: string[]
@@ -1226,6 +1227,7 @@ export default function MediaManagementPage() {
         // 只取当前活动媒体库的离库口径；历史维护集合不在这里当作品数。
         works_removable: preview.current_works_leaving ?? preview.works_removable,
         works_shared: preview.current_works_shared ?? preview.works_shared,
+        artifacts_total: preview.artifacts_total,
         artifact_files: preview.artifact_files,
         artifact_bytes: preview.artifact_bytes,
         blockers: preview.blockers,
@@ -1781,7 +1783,7 @@ export default function MediaManagementPage() {
                       {sourceDeletionPreview !== null && (
                         <div className="media-v4-source-card-deletion-preview">
                           {sourceCardPendingDelete.enabled === 0 ? (
-                            <p>媒体库已移除，仍需回收 <strong>{sourceDeletionPreview.artifact_files}</strong> 个镜像文件。</p>
+                            <p>媒体库已移除；尚有 <strong>{sourceDeletionPreview.artifact_files}</strong> 个镜像文件和 <strong>{sourceDeletionPreview.artifacts_total}</strong> 条产物记录待核对。</p>
                           ) : (
                             <p>
                               将删除该来源的媒体库：<strong>{sourceDeletionPreview.works_removable}</strong> 部作品离开媒体库、回收{' '}

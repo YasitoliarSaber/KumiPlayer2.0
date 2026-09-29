@@ -250,9 +250,10 @@ def test_stale_zombie_scan_does_not_block_deletion(tmp_path):
 
 
 def test_api_preview_and_delete_requires_explicit_confirmation(tmp_path, monkeypatch):
-    from app.api import media_v4
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
+
+    from app.api import media_v4
 
     database, mirror = _two_sources(tmp_path)
     monkeypatch.setattr(media_v4, "_database", database)
@@ -371,6 +372,49 @@ def test_deletion_unlink_failure_keeps_artifact_row_for_retry(tmp_path, monkeypa
         assert conn.execute("SELECT COUNT(*) FROM artifacts WHERE work_id = 'work-two'").fetchone()[0] == 1
 
 
+def test_deletion_retires_referenced_artifact_without_breaking_history(tmp_path):
+    database, mirror = _two_sources(tmp_path)
+    target = mirror / "A" / "file2.strm"
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO artifact_references(reference_id,artifact_id,revision_id,work_id,"
+            "snapshot_id,role,subject_id,created_at) "
+            "VALUES ('reference-a2','art-a2','rev-a','work-two',NULL,'mirror','asset-a2','now')"
+        )
+
+    result = delete_source_library(database, "root-a", mirror_root=mirror)
+
+    assert result["ok"] is True
+    assert not target.exists()
+    with database.connect() as conn:
+        assert conn.execute("SELECT status FROM artifacts WHERE artifact_id = 'art-a2'").fetchone()[0] == "removed"
+        assert conn.execute("SELECT COUNT(*) FROM artifact_references WHERE artifact_id = 'art-a2'").fetchone()[0] == 1
+    assert plan_source_deletion(database, "root-a", mirror_root=mirror)["artifact_files"] == 0
+
+
+def test_deletion_closes_published_record_when_file_is_already_missing(tmp_path):
+    database, mirror = _two_sources(tmp_path)
+    target = mirror / "A" / "file2.strm"
+    target.unlink()
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO artifact_references(reference_id,artifact_id,revision_id,work_id,"
+            "snapshot_id,role,subject_id,created_at) "
+            "VALUES ('reference-a2','art-a2','rev-a','work-two',NULL,'mirror','asset-a2','now')"
+        )
+
+    preview = plan_source_deletion(database, "root-a", mirror_root=mirror)
+    assert preview["artifacts_total"] == 1
+    assert preview["artifact_files"] == 0
+
+    result = delete_source_library(database, "root-a", mirror_root=mirror)
+
+    assert result["ok"] is True
+    assert result["removed_files"] == 0
+    with database.connect() as conn:
+        assert conn.execute("SELECT status FROM artifacts WHERE artifact_id = 'art-a2'").fetchone()[0] == "removed"
+
+
 def test_deletion_job_retries_after_file_failure_then_finishes(tmp_path, monkeypatch):
     from app.media_v4.jobs.runner import V4JobRunner
     from app.media_v4.maintenance.source_deletion import enqueue_source_deletion
@@ -411,6 +455,12 @@ def test_exhausted_cleanup_remains_visible_and_can_be_retried(tmp_path, monkeypa
     database, mirror = _two_sources(tmp_path)
     monkeypatch.setattr("app.media_v4.jobs.runner.V4LibraryProjection.rebuild", lambda _self: {})
     target = mirror / "A" / "file2.strm"
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO artifact_references(reference_id,artifact_id,revision_id,work_id,"
+            "snapshot_id,role,subject_id,created_at) "
+            "VALUES ('reference-a2','art-a2','rev-a','work-two',NULL,'mirror','asset-a2','now')"
+        )
     original_unlink = type(target).unlink
 
     def fail_locked(path, *args, **kwargs):
@@ -439,6 +489,9 @@ def test_exhausted_cleanup_remains_visible_and_can_be_retried(tmp_path, monkeypa
     assert queued_card["active_task"]["status"] == "queued"
     assert runner.process_job(retry_id, mirror_root=mirror).status == "succeeded"
     assert not target.exists()
+    with database.connect() as conn:
+        assert conn.execute("SELECT status FROM artifacts WHERE artifact_id = 'art-a2'").fetchone()[0] == "removed"
+        assert conn.execute("SELECT COUNT(*) FROM artifact_references WHERE artifact_id = 'art-a2'").fetchone()[0] == 1
     assert not any(item["root_id"] == "root-a" for item in list_source_cards(database))
 
 

@@ -156,7 +156,7 @@ test('来源已退役但文件回收失败时仅显示维护入口，重试预�
   })] })
   api.sourceLibraryDeletionPreview.mockResolvedValue({
     root_id: 'root-115', works_removable: 0, works_shared: 0,
-    artifact_files: 2, artifact_bytes: 0, blockers: [],
+    artifacts_total: 5, artifact_files: 2, artifact_bytes: 0, blockers: [],
   })
   render(<MediaManagementPage />)
 
@@ -165,7 +165,7 @@ test('来源已退役但文件回收失败时仅显示维护入口，重试预�
   expect(screen.queryByRole('button', { name: '检查更新' })).not.toBeInTheDocument()
   expect(screen.queryByRole('button', { name: '删除来源卡：115 动画' })).not.toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: '重试清理' }))
-  expect(await screen.findByText(/媒体库已移除，仍需回收/)).toHaveTextContent('2 个镜像文件')
+  expect(await screen.findByText(/媒体库已移除；尚有/)).toHaveTextContent('2 个镜像文件和 5 条产物记录待核对')
   expect(screen.queryByText(/部作品离开媒体库/)).not.toBeInTheDocument()
   expect(screen.getByRole('button', { name: '确认继续清理' })).toBeEnabled()
 })

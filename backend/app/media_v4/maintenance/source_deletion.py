@@ -240,7 +240,8 @@ def plan_source_deletion(
         if removable:
             placeholders = ",".join("?" for _ in removable)
             for row in conn.execute(
-                f"SELECT target_path FROM artifacts WHERE work_id IN ({placeholders})",
+                f"SELECT target_path FROM artifacts "
+                f"WHERE work_id IN ({placeholders}) AND status != 'removed'",
                 removable,
             ):
                 target = str(row["target_path"] or "")
@@ -257,9 +258,10 @@ def plan_source_deletion(
                         # 镜像根之外的文件（例如来源真实媒体）绝不删除，只如实报告。
                         plan.files_outside_mirror.append(str(resolved))
                         continue
-                plan.artifact_files += 1
                 try:
-                    plan.artifact_bytes += path.stat().st_size
+                    if path.is_file():
+                        plan.artifact_files += 1
+                        plan.artifact_bytes += path.stat().st_size
                 except OSError:
                     pass
     return plan.to_dict()
@@ -285,8 +287,8 @@ def delete_source_library(
     - 强行绕开就等于改写已确认事实，违反"confirmed revision 不可反向改写"。
 
     因此本实现走项目既有的 ``retired_at`` 语义（来源退役即让作品、播放与追更查询
-    退出活动库），并**物理删除可再生的镜像产物**（artifacts 行 + 镜像根之内的文件）
-    来真正回收磁盘：
+    退出活动库），并物理删除可再生的镜像文件来回收磁盘。被历史 revision 引用的
+    artifacts 行保留并标记 removed，不能删除后触发 RESTRICT 外键回滚：
 
     - 只处理**不与其它来源共享**的作品：仍被别的来源绑定的作品必须保留其产物，
       否则会出现"作品还在媒体墙上、文件却被删掉"的悬挂状态；
@@ -328,45 +330,51 @@ def delete_source_library(
         placeholders = ",".join("?" for _ in batch)
         with database.connect() as conn:
             rows = conn.execute(
-                f"SELECT artifact_id, target_path FROM artifacts WHERE work_id IN ({placeholders})",
+                f"SELECT artifact_id, target_path FROM artifacts "
+                f"WHERE work_id IN ({placeholders}) AND status != 'removed'",
                 batch,
             ).fetchall()
-            portable_ids: list[str] = []
+            cleaned_ids: list[str] = []
             for row in rows:
                 target = str(row["target_path"] or "")
                 artifact_id = str(row["artifact_id"])
                 if not target:
-                    portable_ids.append(artifact_id)
                     continue
                 path = Path(target)
                 try:
                     resolved = path.resolve(strict=False)
                 except OSError:
-                    portable_ids.append(artifact_id)
                     continue
                 if mirror != resolved and mirror not in resolved.parents:
                     # 镜像根之外：绝不删除，保留产物行以便用户看见这条异常。
                     skipped_outside += 1
-                    portable_ids.append(artifact_id)
                     continue
                 try:
                     existed = path.exists()
                     path.unlink(missing_ok=True)
                     if existed:
                         removed_files += 1
-                    removed_artifacts += 1
+                    cleaned_ids.append(artifact_id)
                 except OSError:
                     failed_files += 1
-                    portable_ids.append(artifact_id)
-            if portable_ids:
-                kept_placeholders = ",".join("?" for _ in portable_ids)
+            if cleaned_ids:
+                cleaned_placeholders = ",".join("?" for _ in cleaned_ids)
+                # artifact_references 对产物行有 RESTRICT 外键；成功资料和
+                # confirmed revision 的历史引用必须保留，状态与物理文件分离。
                 conn.execute(
-                    f"DELETE FROM artifacts WHERE work_id IN ({placeholders}) "
-                    f"AND artifact_id NOT IN ({kept_placeholders})",
-                    (*batch, *portable_ids),
+                    f"UPDATE artifacts SET status = 'removed', updated_at = ? "
+                    f"WHERE artifact_id IN ({cleaned_placeholders}) "
+                    "AND EXISTS (SELECT 1 FROM artifact_references ar "
+                    "WHERE ar.artifact_id = artifacts.artifact_id)",
+                    (now, *cleaned_ids),
                 )
-            else:
-                conn.execute(f"DELETE FROM artifacts WHERE work_id IN ({placeholders})", batch)
+                conn.execute(
+                    f"DELETE FROM artifacts WHERE artifact_id IN ({cleaned_placeholders}) "
+                    "AND NOT EXISTS (SELECT 1 FROM artifact_references ar "
+                    "WHERE ar.artifact_id = artifacts.artifact_id)",
+                    cleaned_ids,
+                )
+                removed_artifacts += len(cleaned_ids)
         if progress is not None:
             progress(min(offset + len(batch), len(leaving)), len(leaving))
 
