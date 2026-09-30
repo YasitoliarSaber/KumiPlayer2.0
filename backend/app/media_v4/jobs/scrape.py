@@ -242,6 +242,8 @@ def _job_result_payload(
         ],
         "artifact_status": _artifact_status(result, has_provider_identity=has_provider_identity),
         "refresh_status": refresh_status,
+        "scope": str(result.get("scope") or ""),
+        "refresh_season_number": result.get("refresh_season_number"),
         "refresh_reason_code": str(result.get("refresh_reason_code") or ""),
         "retryable": bool(result.get("retryable")),
         "metadata_source": metadata_source,
@@ -336,7 +338,7 @@ class V4ScrapeService:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def requeue_work(self, revision_id: str, work_id: str) -> dict:
+    def requeue_work(self, revision_id: str, work_id: str, *, season_number: int | None = None) -> dict:
         """仅重置一个已确认作品的刮削任务，供人工确认候选后继续执行。"""
 
         with self.database.connect() as conn:
@@ -357,6 +359,17 @@ class V4ScrapeService:
             ).fetchone()
             if bound is None:
                 raise KeyError((revision_id, work_id))
+            if season_number is not None:
+                if isinstance(season_number, bool) or season_number < 1:
+                    raise ValueError("只能刷新已确认的正片季度")
+                season = conn.execute(
+                    "SELECT 1 FROM seasons s JOIN revision_bindings rb ON rb.season_id = s.season_id "
+                    "WHERE rb.revision_id = ? AND rb.work_id = ? AND s.local_season_number = ? "
+                    "AND s.season_kind = 'regular' LIMIT 1",
+                    (revision_id, work_id, season_number),
+                ).fetchone()
+                if season is None:
+                    raise ValueError("当前作品没有该季度的已确认剧集")
             job = conn.execute(
                 "SELECT * FROM jobs WHERE revision_id = ? AND work_id = ? AND job_type = 'scrape_work'",
                 (revision_id, work_id),
@@ -374,10 +387,11 @@ class V4ScrapeService:
                 UPDATE jobs
                 SET status = 'queued', cancel_requested = 0, last_error = '',
                     heartbeat_at = '', started_at = '', finished_at = '', updated_at = ?,
-                    result_json = '{"explicit_refresh":true}'
+                    result_json = ?
                 WHERE job_id = ? AND status != 'running'
                 """,
-                (now, job["job_id"]),
+                (now, json.dumps({"explicit_refresh": True, "scope": "season" if season_number is not None else "work",
+                                  "season_number": season_number}, ensure_ascii=False), job["job_id"]),
             )
             if updated.rowcount != 1:
                 raise RuntimeError("该作品正在获取媒体信息")
@@ -607,7 +621,9 @@ class V4ScrapeService:
         with self.database.connect() as conn:
             retained = select_applicable_snapshot(conn, str(job['revision_id']), str(job['work_id']))
             expected_identity = identity_signature(conn, str(job['work_id']))
-        explicit_refresh = bool(json.loads(job['result_json'] or '{}').get('explicit_refresh'))
+        refresh_request = json.loads(job['result_json'] or '{}')
+        explicit_refresh = bool(refresh_request.get('explicit_refresh'))
+        refresh_season = refresh_request.get('season_number') if refresh_request.get('scope') == 'season' else None
         if retained and retained['covers_members'] and not explicit_refresh:
             with self.database.connect() as conn:
                 conn.execute('BEGIN IMMEDIATE')
@@ -631,11 +647,29 @@ class V4ScrapeService:
                 self._cancel(job_id, "cancel_requested")
                 return
             request_target = target
-            if retained and not explicit_refresh:
+            if refresh_season is not None:
+                selected = [episode for episode in target['episodes']
+                            if episode.get('local_season_number') == refresh_season
+                            and episode.get('season_kind') == 'regular']
+                if not selected:
+                    raise ValueError('当前季度没有可刮削的已确认剧集')
+                request_target = {**target, 'episodes': selected}
+            elif retained and not explicit_refresh:
                 covered = {str(m['episode_id']) for m in retained['metadata'].get('episode_mappings', [])}
                 request_target = {**target, 'episodes': [e for e in target['episodes'] if str(e['episode_id']) not in covered],
                                   'retained_work_metadata': retained['metadata']}
             result = provider(request_target)
+            if refresh_season is not None and retained and result.get('metadata_state') == 'ready':
+                old = retained['metadata']
+                if (result.get('provider'), str(result.get('provider_id'))) != (old.get('provider'), str(old.get('provider_id'))):
+                    raise ValueError('季度刷新不能更换在线作品，请改用整部作品刮削')
+                mappings = {str(item['episode_id']): item for item in old.get('episode_mappings', [])}
+                mappings.update({str(item['episode_id']): item for item in result.get('episode_mappings', [])})
+                result = {**old, **result, 'episode_mappings': list(mappings.values()),
+                          'composed_from_snapshot_id': retained['snapshot_id']}
+            if explicit_refresh:
+                result = {**result, 'scope': 'season' if refresh_season is not None else 'work',
+                          'refresh_season_number': refresh_season}
             if retained and not explicit_refresh and result.get('metadata_state') == 'ready':
                 old = retained['metadata']
                 if (result.get('provider'), str(result.get('provider_id'))) == (old.get('provider'), str(old.get('provider_id'))):

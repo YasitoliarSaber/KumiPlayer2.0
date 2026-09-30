@@ -88,11 +88,12 @@ export const workDetailV4Compatibility = {
       });
       const candidates = (result.candidates || []).map((item) => {
         const tmdbId = Number(item.provider_id);
-        candidateIdByTmdb.set(`${targetId}:${tmdbId}`, item.candidate_id);
+        const candidateType = item.media_type || 'tv';
+        candidateIdByTmdb.set(`${targetId}:${candidateType}:${tmdbId}`, item.candidate_id);
         return {
           scrape_target_id: targetId,
           tmdb_id: tmdbId,
-          tmdb_type: item.media_type || 'tv',
+          tmdb_type: candidateType,
           title: item.title,
           original_title: item.original_title || '',
           year: item.year,
@@ -106,19 +107,26 @@ export const workDetailV4Compatibility = {
     selectCandidate: async (
       targetId: string,
       tmdbId: number,
-      _tmdbType: string,
+      tmdbType: string,
       _selectedBy?: string,
       _searchQuery?: string,
-      _seasonNumber?: number,
+      seasonNumber?: number,
       _includeEpisode?: boolean,
       _workId?: string,
-      _scope?: 'work' | 'season',
+      scope: 'work' | 'season' = 'work',
     ) => {
-      const candidateId = candidateIdByTmdb.get(`${targetId}:${tmdbId}`);
+      const candidateId = candidateIdByTmdb.get(`${targetId}:${tmdbType}:${tmdbId}`);
       if (!candidateId) throw new Error('候选已失效，请重新搜索');
-      await mediaV4Api.metadataConfirm({ work_id: targetId, candidate_id: candidateId });
+      if (scope === 'season' && (seasonNumber == null || seasonNumber < 1)) {
+        throw new Error('请先选择一个正片季度');
+      }
+      const result = await mediaV4Api.metadataConfirm({
+        work_id: targetId, candidate_id: candidateId, scope,
+        ...(scope === 'season' ? { season_number: seasonNumber } : {}),
+      });
+      if (result.status !== 'confirmed') throw new Error('在线资料刷新未完成；已保留上一次成功的资料');
       // metadata/confirm 同步完成刮削并刷新投影；空 task_id 表示无需轮询。
-      return { task_id: '', status: 'succeeded' };
+      return { task_id: '', status: 'succeeded', result };
     },
     rerunWorkScrape: async (workId: string) => {
       const result = await mediaV4Api.enqueueWorkScrape(workId);

@@ -935,6 +935,7 @@ export default function WorkDetailPage() {
   const reloadCurrentWork = async () => {
     const next = await refreshWork(work.work_id);
     setWork(next);
+    return next;
   };
 
   const scanCurrentWork = async () => {
@@ -1206,26 +1207,17 @@ export default function WorkDetailPage() {
         scrapeScope,
       );
       setScrapeCandidates([]);
-      setNotice(scrapeScope === 'work' ? '正在逐季刮削整部作品...' : '正在刮削并刷新当前季度...');
-      const finishedTask = await waitForManagementTask(
-        task.task_id,
-        undefined,
-        scrapeScope === 'work' ? 30 * 60 * 1000 : 10 * 60 * 1000,
-      );
-      await reloadCurrentWork();
+      setNotice(scrapeScope === 'work' ? '正在刷新整部作品资料...' : '正在刷新当前季度资料...');
+      const refreshedWork = await reloadCurrentWork();
       await loadAuxiliary({ preferCache: false });
-      if (scrapeScope === 'work') {
-        const result = (finishedTask.result || {}) as Record<string, unknown>;
-        const manualScraped = result.manual_scraped == null ? 1 : Number(result.manual_scraped || 0);
-        const scraped = manualScraped + Number(result.auto_scraped || 0);
-        const skipped = Number(result.skipped_existing || 0);
-        const pending = Number(result.review_queued || 0);
-        const failed = Number(result.failed || 0);
-        const remaining = Number(result.remaining_targets || 0);
-        setNotice(`整部作品刮削完成：新完成 ${scraped} 季，已有资料 ${skipped} 季${pending ? `，待确认 ${pending} 季` : ''}${failed ? `，失败 ${failed} 季` : ''}${remaining ? `，未处理 ${remaining} 季` : ''}`);
-      } else {
-        setNotice('刮削完成，作品信息已自动刷新');
-      }
+      const result = task.result;
+      const mapped = Number(refreshedWork.mapped_count ?? result.mapped_count ?? 0);
+      const total = Number(refreshedWork.total_count ?? result.total_count ?? 0);
+      const scopeLabel = scrapeScope === 'season' ? '当前季度' : '整部作品';
+      const numberingUnknown = result.reason_codes?.includes('insufficient_numbering_evidence');
+      setNotice(total > 0 && mapped < total
+        ? `${scopeLabel}资料已刷新；分集匹配 ${mapped}/${total}。${numberingUnknown ? '在线集号无法安全对应本地季度' : '未匹配剧集暂时没有缩略图'}`
+        : `${scopeLabel}资料已刷新${total > 0 ? `；分集匹配 ${mapped}/${total}` : ''}`);
     } catch (err) {
       setNotice(`刮削失败：${(err as Error).message}`);
     } finally {
@@ -1354,7 +1346,7 @@ export default function WorkDetailPage() {
           {work.year && <span>{work.year}</span>}
           <span>{categoryLabel(work.show_type)}</span>
           {work.metadata_source === 'retained' && work.refresh_status === 'failed' && <span>资料已保留，刷新失败</span>}
-          {work.episode_mapping_status === 'partial' && <span>剧集资料 {work.mapped_count || 0}/{work.total_count || 0}</span>}
+          {['partial', 'unmapped'].includes(work.episode_mapping_status || '') && <span title="未匹配的剧集没有在线缩略图">分集资料 {work.mapped_count || 0}/{work.total_count || 0}</span>}
           {isSeries && <span>{seasons.length} 季</span>}
           {isSeries && <span>{work.episode_count || work.episodes?.length || 0} 集</span>}
           {work.rating > 0 && <span><Star size={15} fill="currentColor" /> {work.rating.toFixed(1)}</span>}
@@ -1460,7 +1452,7 @@ export default function WorkDetailPage() {
                 setScrapeScope('work');
                 setManualScrapeOpen((open) => !open);
                 setMoreMenuOpen(false);
-              }}><SlidersHorizontal size={16} />手动刮削</button>}
+              }}><SlidersHorizontal size={16} />重新刮削／选择在线作品</button>}
               {workDetailV4Capabilities.workDeletion && <button className="danger" role="menuitem" onClick={openDeleteWork}><Trash2 size={16} />删除该作品</button>}
             </div>}
           </div>
@@ -1478,7 +1470,7 @@ export default function WorkDetailPage() {
             <div className="detail-manual-scrape-panel">
               <div className="detail-manual-scrape-head">
                 <div>
-                  <strong>手动刮削</strong>
+                  <strong>重新刮削</strong>
                   <span>{scrapeScope === 'work'
                     ? `整部作品${isSeries && seasons.length ? ` · ${seasons.length} 个季度` : ''}`
                     : manualScrapeScope}</span>

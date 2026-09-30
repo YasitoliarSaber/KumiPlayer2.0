@@ -626,8 +626,8 @@ export const mediaV4Api = {
   metadataArtifactsRetry: (workId: string) =>
     api.post<{ work_id: string; revision_id: string; binding_status: string; metadata_state: string; artifact_state: string; artifact_reasons: string[] }>('/api/v4/metadata/artifacts/retry', { work_id: workId }),
 
-  metadataConfirm: (request: { work_id: string; candidate_id: string }) =>
-    api.post<{ work_id: string; candidate_id: string; provider: string; provider_id: string; status: string }>('/api/v4/metadata/confirm', request),
+  metadataConfirm: (request: { work_id: string; candidate_id: string; scope?: 'work' | 'season'; season_number?: number }) =>
+    api.post<{ work_id: string; candidate_id: string; provider: string; provider_id: string; status: string; scope: 'work' | 'season'; season_number: number | null; episode_mapping_status: string; mapped_count: number; total_count: number; refresh_status: string; reason_codes: string[] }>('/api/v4/metadata/confirm', request),
 
   deleteWorkPreview: (workId: string) =>
     api.post<{ preview_id: string; work_id: string; artifact_count: number; artifact_paths: string[]; playback_count: number; tracking_count: number; digest: string }>(`/api/v4/works/${encodeURIComponent(workId)}/delete-preview`, {}),

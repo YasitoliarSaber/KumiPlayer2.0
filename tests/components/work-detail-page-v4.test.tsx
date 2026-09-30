@@ -312,6 +312,6 @@ test('更多菜单只显示已经接通 V4 的操作', async () => {
   fireEvent.click(await screen.findByRole('button', { name: '更多操作' }));
 
   expect(screen.getAllByRole('menuitem', { name: /文件夹/ }).length).toBeGreaterThan(0);
-  expect(screen.queryByRole('menuitem', { name: '手动刮削' })).toBeVisible();
+  expect(screen.queryByRole('menuitem', { name: /重新刮削/ })).toBeVisible();
   expect(screen.queryByRole('menuitem', { name: '删除该作品' })).toBeVisible();
 });

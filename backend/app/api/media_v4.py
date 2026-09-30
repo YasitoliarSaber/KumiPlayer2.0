@@ -1836,17 +1836,11 @@ def enqueue_work_scrape(work_id: str):
         ).fetchone()
     if revision is None:
         raise HTTPException(status_code=404, detail="该作品不在任何活动媒体库中")
-    job_id = "job_" + uuid.uuid4().hex
-    now = _now_iso()
-    with get_database().connect() as conn:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO jobs(job_id, job_type, revision_id, work_id, idempotency_key, status, attempts, last_error, created_at, updated_at)
-            VALUES (?, 'scrape_work', ?, ?, ?, 'queued', 0, '', ?, ?)
-            """,
-            (job_id, revision["revision_id"], work_id, f"scrape_work:{revision['revision_id']}:{work_id}", now, now),
-        )
-    return {"work_id": work_id, "job_id": job_id, "status": "queued"}
+    try:
+        job = V4ScrapeService(get_database()).requeue_work(str(revision["revision_id"]), work_id)
+    except (KeyError, RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"work_id": work_id, "job_id": str(job["job_id"]), "status": str(job["status"])}
 
 
 @router.post("/works/{work_id}/delete-preview")
@@ -2079,11 +2073,14 @@ class MetadataSearchRequest(BaseModel):
     work_id: str = Field(min_length=1)
     query: str = ""
     media_type: str = ""
+    year: int | None = Field(default=None, ge=1800, le=2200)
 
 
 class MetadataConfirmRequest(BaseModel):
     work_id: str = Field(min_length=1)
     candidate_id: str = Field(min_length=1)
+    scope: Literal["work", "season"] = "work"
+    season_number: int | None = Field(default=None, ge=1)
 
 
 class MetadataRetryRequest(BaseModel):
@@ -2105,7 +2102,8 @@ def metadata_search(request: MetadataSearchRequest):
 
     media_type = request.media_type or ("tv" if work["work_type"] == "series" else "movie")
     query = request.query or work["preferred_title"]
-    candidates = search_tmdb_candidates(query, media_type, work["year"])
+    search_year = request.year if request.year is not None else work["year"]
+    candidates = search_tmdb_candidates(query, media_type, search_year)
     if candidates is None:
         raise HTTPException(status_code=409, detail="未配置 TMDB API Token，无法搜索在线候选")
     if not candidates:
@@ -2120,7 +2118,7 @@ def metadata_search(request: MetadataSearchRequest):
             "preferred_title": str(work["preferred_title"] or ""),
             "queries": [query],
             "media_type": media_type,
-            "year": work["year"],
+            "year": search_year,
             "show_type": str(work["show_type"] or ""),
         },
         candidates,
@@ -2132,7 +2130,8 @@ def metadata_search(request: MetadataSearchRequest):
             """
             SELECT ir.revision_id FROM import_revisions ir
             JOIN revision_bindings rb ON rb.revision_id = ir.revision_id
-            WHERE rb.work_id = ? AND ir.status = 'confirmed'
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            WHERE rb.work_id = ? AND ir.status = 'confirmed' AND sr.retired_at = ''
             ORDER BY ir.confirmed_at DESC, ir.revision_id DESC LIMIT 1
             """,
             (request.work_id,),
@@ -2372,7 +2371,8 @@ def metadata_confirm(request: MetadataConfirmRequest):
             """
             SELECT ir.revision_id FROM import_revisions ir
             JOIN revision_bindings rb ON rb.revision_id = ir.revision_id
-            WHERE rb.work_id = ? AND ir.status = 'confirmed'
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            WHERE rb.work_id = ? AND ir.status = 'confirmed' AND sr.retired_at = ''
             ORDER BY ir.confirmed_at DESC, ir.revision_id DESC LIMIT 1
             """,
             (request.work_id,),
@@ -2387,19 +2387,7 @@ def metadata_confirm(request: MetadataConfirmRequest):
         raise HTTPException(status_code=409, detail="候选不属于该作品，无法确认")
     if str(candidate["revision_id"]) != str(revision["revision_id"]):
         raise HTTPException(status_code=409, detail="候选不属于当前已确认 revision，请重新搜索")
-    if candidate["status"] == "confirmed":
-        with database.connect() as conn:
-            binding = conn.execute(
-                "SELECT provider, provider_id, status FROM scrape_bindings WHERE work_id = ?",
-                (request.work_id,),
-            ).fetchone()
-        return {
-            "work_id": request.work_id,
-            "candidate_id": request.candidate_id,
-            "status": "already_confirmed",
-            "binding": dict(binding) if binding else None,
-        }
-    if candidate["status"] != "proposed":
+    if candidate["status"] not in {"proposed", "confirmed"}:
         raise HTTPException(status_code=409, detail="候选状态不允许确认")
     from app.media_v4.resolution.candidates import supported_provider
 
@@ -2408,6 +2396,16 @@ def metadata_confirm(request: MetadataConfirmRequest):
         raise HTTPException(status_code=409, detail="候选 Provider 不受支持")
     provider_id = str(candidate["provider_id"])
     media_type = str(candidate["media_type"]) or ("tv" if work["work_type"] == "series" else "movie")
+    if request.scope == "season":
+        if request.season_number is None or media_type != "tv":
+            raise HTTPException(status_code=409, detail="请先选择可刮削的正片季度")
+        with database.connect() as conn:
+            existing_binding = conn.execute(
+                "SELECT provider_id FROM provider_bindings WHERE work_id=? AND provider=? AND media_type=?",
+                (request.work_id, provider, media_type),
+            ).fetchone()
+        if existing_binding is None or str(existing_binding["provider_id"]) != provider_id:
+            raise HTTPException(status_code=409, detail="当前季度只能刷新同一在线作品；更换作品请选整部作品")
     try:
         updated_at = datetime.fromisoformat(str(candidate["updated_at"]))
     except (ValueError, TypeError):
@@ -2415,6 +2413,34 @@ def metadata_confirm(request: MetadataConfirmRequest):
     if updated_at is None or datetime.now(UTC) - updated_at > timedelta(hours=24):
         raise HTTPException(status_code=409, detail="候选已过期，请重新搜索")
 
+    with database.connect() as conn:
+        active_revisions = [str(row["revision_id"]) for row in conn.execute(
+            """
+            SELECT DISTINCT ir.revision_id, ir.confirmed_at
+            FROM import_revisions ir
+            JOIN source_roots sr ON sr.root_id = ir.root_id
+            JOIN revision_bindings rb ON rb.revision_id = ir.revision_id
+            WHERE rb.work_id = ? AND ir.status = 'confirmed' AND sr.retired_at = ''
+              AND (? = 'work' OR EXISTS (
+                SELECT 1 FROM revision_bindings member
+                JOIN seasons s ON s.season_id = member.season_id
+                WHERE member.revision_id = ir.revision_id AND member.work_id = ?
+                  AND s.season_kind = 'regular' AND s.local_season_number = ?
+              ))
+            ORDER BY ir.confirmed_at DESC, ir.revision_id DESC
+            """,
+            (request.work_id, request.scope, request.work_id, request.season_number),
+        ).fetchall()]
+    if not active_revisions:
+        raise HTTPException(status_code=409, detail="所选范围没有活动来源中的已确认剧集")
+    scrape = V4ScrapeService(database)
+    try:
+        jobs = [scrape.requeue_work(
+            current_revision, request.work_id,
+            season_number=request.season_number if request.scope == "season" else None,
+        ) for current_revision in active_revisions]
+    except (KeyError, RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     with database.connect() as conn:
         conn.execute(
             """
@@ -2437,19 +2463,32 @@ def metadata_confirm(request: MetadataConfirmRequest):
         )
     from app.media_v4.jobs.metadata import default_metadata_provider
 
-    scrape = V4ScrapeService(database)
-    try:
-        job = scrape.requeue_work(str(revision["revision_id"]), request.work_id)
-    except KeyError:
-        raise HTTPException(status_code=409, detail="该作品没有可重试的刮削任务") from None
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    scrape.process(job["job_id"], default_metadata_provider)
+    for job in jobs:
+        scrape.process(job["job_id"], default_metadata_provider)
     V4LibraryProjection(database).rebuild()
+    with database.connect() as conn:
+        finished_jobs = [conn.execute(
+            "SELECT status,result_json,last_error FROM jobs WHERE job_id=?", (job["job_id"],)
+        ).fetchone() for job in jobs]
+    if any(row is None or row["status"] != "succeeded" for row in finished_jobs):
+        raise HTTPException(status_code=502, detail="部分来源刮削未完成；已保留原有资料")
+    outcomes = [json.loads(str(row["result_json"] or "{}")) for row in finished_jobs if row is not None]
+    reason_codes = sorted({str(code) for outcome in outcomes for code in outcome.get("reason_codes", [])})
+    available = all(outcome.get("outcome") in {"published", "partial"} for outcome in outcomes)
+    from app.media_v4.persistence.metadata_lifecycle import referenced_metadata
+    with database.connect() as conn:
+        visible_metadata = referenced_metadata(conn, request.work_id) or {}
     return {
         "work_id": request.work_id,
         "candidate_id": request.candidate_id,
         "provider": provider,
         "provider_id": provider_id,
-        "status": "confirmed",
+        "status": "confirmed" if available else "refresh_unavailable",
+        "scope": request.scope,
+        "season_number": request.season_number if request.scope == "season" else None,
+        "episode_mapping_status": visible_metadata.get("episode_mapping_status", ""),
+        "mapped_count": int(visible_metadata.get("mapped_count") or 0),
+        "total_count": int(visible_metadata.get("total_count") or 0),
+        "refresh_status": "failed" if not available else "complete",
+        "reason_codes": reason_codes,
     }
