@@ -123,6 +123,8 @@ test('目录树使用真实网盘提供商、官网入口和设置中的播放�
   expect(screen.queryByRole('combobox', { name: '存储来源' })).not.toBeInTheDocument()
   expect(screen.queryByRole('textbox', { name: '本地挂载根目录（可选）' })).not.toBeInTheDocument()
   expect(screen.getByRole('link', { name: /前往 115 官网/ })).toHaveAttribute('href', 'https://115.com/')
+  expect(screen.getByRole('link', { name: /前往 115 官网/ })).toHaveClass('media-v4-provider-link')
+  expect(screen.queryByText(/支持 115、百度、夸克和 OpenList 导出的清单/)).not.toBeInTheDocument()
   expect(screen.getByText(/播放路径将使用设置中的/)).toBeVisible()
 
   fireEvent.click(screen.getByRole('button', { name: '夸克网盘' }))
@@ -130,6 +132,9 @@ test('目录树使用真实网盘提供商、官网入口和设置中的播放�
   fireEvent.change(screen.getByRole('textbox', { name: '目录树 TXT 文件' }), {
     target: { value: 'K:\\夸克网盘\\动画\\目录树.txt' },
   })
+  expect(screen.getByText('目录树.txt')).toBeVisible()
+  expect(screen.getByText('K:\\夸克网盘\\动画', { selector: '.media-v4-selected-file span' })).toBeVisible()
+  expect(screen.getByRole('button', { name: '选择文件' })).toHaveClass('media-v4-file-picker-button')
   fireEvent.click(screen.getByRole('button', { name: '扫描并识别' }))
 
   await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({

@@ -13688,7 +13688,7 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-library-source-card.active { border-color: color-mix(in srgb, var(--accent-strong) 44%, var(--border)); background: color-mix(in srgb, var(--accent-strong) 5%, var(--surface-raised)); }
 .media-v4-source-card-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
 .media-v4-library-source-card-top { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; color: var(--text-secondary); font-size: 12px; }
-:root[data-theme='cinema'] .media-v4-library-source-card-top .provider-baidu img { filter: invert(1); }
+:root[data-theme='cinema'] .media-v4-library-source-card-top .provider-baidu img { filter: none; }
 .media-v4-source-card-state { padding: 3px 8px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-secondary); font-size: 12px; line-height: 1.4; white-space: nowrap; }
 .media-v4-source-card-state-needs_attention { color: var(--danger, #c42b1c); border-color: color-mix(in srgb, var(--danger, #c42b1c) 40%, var(--border)); }
 .media-v4-source-card-locator { overflow: hidden; color: var(--text-secondary); font-family: inherit; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
@@ -13770,11 +13770,11 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: border-color 140ms ease, background-color 140ms ease, transform 120ms ease;
+  transition: border-color 140ms ease, background-color 140ms ease;
 }
-.media-v4-source-options > button:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--accent-strong) 34%, var(--border)); background: color-mix(in srgb, var(--surface-raised) 94%, transparent); }
+.media-v4-source-options > button:hover { border-color: color-mix(in srgb, var(--accent-strong) 34%, var(--border)); background: color-mix(in srgb, var(--surface-raised) 94%, transparent); }
 .media-v4-source-options > button:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent-strong) 70%, #fff); outline-offset: 2px; }
-.media-v4-source-options > button.selected { border-color: color-mix(in srgb, var(--accent-strong) 55%, var(--border)); background: color-mix(in srgb, var(--accent-strong) 10%, var(--surface-raised)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-strong) 12%, transparent); }
+.media-v4-source-options > button.selected { border-color: color-mix(in srgb, var(--accent-strong) 55%, var(--border)); background: color-mix(in srgb, var(--accent-strong) 10%, var(--surface-raised)); }
 .media-v4-source-options > button > span:nth-child(2) { display: grid; gap: 3px; min-width: 0; }
 .media-v4-source-options strong { font-size: 14px; font-weight: 650; }
 .media-v4-source-icon { display: grid; width: 38px; height: 38px; place-items: center; border-radius: 8px; color: var(--text-secondary); background: color-mix(in srgb, var(--text) 6%, transparent); }
@@ -13847,6 +13847,16 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-path-row-wide { width: 100%; }
 .media-v4-path-row-wide .fui-Input { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 38px; background: var(--control-bg); }
 .media-v4-path-row-wide .fui-Button { min-width: 112px; }
+.media-v4-path-row-wide .media-v4-file-picker-button.fui-Button {
+  min-height: 38px;
+  border: 1px solid var(--border);
+  background: var(--control-bg);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 8%, transparent);
+}
+.media-v4-path-row-wide .media-v4-file-picker-button.fui-Button:hover:not(:disabled) { border-color: var(--accent-strong); background: var(--control-hover); }
+.media-v4-selected-file { display: grid; gap: 2px; min-width: 0; padding: 9px 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-raised); }
+.media-v4-selected-file strong { font-size: 12px; font-weight: 650; overflow-wrap: anywhere; }
+.media-v4-selected-file span { font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
 
 .media-v4-provider-picker { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
 .media-v4-provider-picker > button {
@@ -13876,11 +13886,10 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-provider-brand-image { display: block; max-width: none; }
 .media-provider-brand.provider-pan115 .media-provider-brand-image { border-radius: 5px; }
 .media-v4-provider-mark { display: grid; width: 36px; height: 36px; place-items: center; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-soft); }
-.media-v4-provider-mark .media-provider-brand.provider-quark { width: 27px !important; height: 27px !important; }
-.media-v4-provider-mark .media-provider-brand.provider-quark .media-provider-brand-image { transform: translateX(-1px); }
-.media-v4-provider-mark .media-provider-brand.provider-baidu .media-provider-brand-image { width: 25px !important; height: 25px !important; }
-.media-v4-provider-link { display: inline-flex; align-items: center; gap: 5px; width: fit-content; color: var(--accent-strong); font-size: 12px; text-decoration: none; }
-.media-v4-provider-link:hover { text-decoration: underline; }
+.media-v4-provider-mark .media-provider-brand { width: 26px !important; height: 26px !important; }
+.media-v4-provider-link { display: inline-flex; align-items: center; gap: 6px; width: fit-content; min-height: 32px; padding: 5px 11px; border: 1px solid var(--border); border-radius: 6px; background: var(--control-bg); color: var(--text); font-size: 12px; font-weight: 600; text-decoration: none; }
+.media-v4-provider-link:hover { border-color: var(--accent-strong); background: var(--control-hover); text-decoration: none; }
+.media-v4-provider-link:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
 
 .media-v4-mapping-note {
   display: grid;

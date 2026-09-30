@@ -208,6 +208,12 @@ function finalPathSegment(path: string) {
   return parts.at(-1) || ''
 }
 
+function parentPath(path: string) {
+  const separator = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'))
+  if (separator < 0) return ''
+  return path.slice(0, separator === 2 && path[1] === ':' ? separator + 1 : separator)
+}
+
 function ProviderPicker({ value, onChange }: {
   value: Exclude<ProviderId, 'local' | 'other'>
   onChange: (provider: Exclude<ProviderId, 'local' | 'other'>) => void
@@ -1511,14 +1517,18 @@ export default function MediaManagementPage() {
               <div className="media-v4-field-block">
                 <div className="media-v4-field-copy"><strong>内容来源</strong></div>
                 <ProviderPicker value={provider} onChange={setProvider} />
-                <a className="media-v4-provider-link" href={providerOption.website} target="_blank" rel="noreferrer">{providerOption.websiteLabel}<span aria-hidden="true">↗</span></a>
+                <a className="media-v4-provider-link" href={providerOption.website} target="_blank" rel="noopener noreferrer">{providerOption.websiteLabel}<span aria-hidden="true">↗</span></a>
               </div>
               <div className="media-v4-field-block">
-                <div className="media-v4-field-copy"><strong>目录树 TXT 文件</strong><span>支持 115、百度、夸克和 OpenList 导出的清单。</span></div>
+                <div className="media-v4-field-copy"><strong>目录树 TXT 文件</strong></div>
                 <div className="media-v4-path-row media-v4-path-row-wide">
-                  <Input aria-label="目录树 TXT 文件" name="tree_file" autoComplete="off" spellCheck={false} value={path} onChange={(_, data) => setPath(data.value)} placeholder="例如 K:\\媒体清单\\动画目录树.txt" />
-                  <Button appearance="secondary" icon={<DocumentText24Regular />} onClick={() => void choosePath()}>选择文件</Button>
+                  <Input aria-label="目录树 TXT 文件" name="tree_file" autoComplete="off" spellCheck={false} title={path || undefined} value={path} onChange={(_, data) => setPath(data.value)} placeholder="例如 K:\\媒体清单\\动画目录树.txt" />
+                  <Button className="media-v4-file-picker-button" appearance="secondary" icon={<DocumentText24Regular />} onClick={() => void choosePath()}>选择文件</Button>
                 </div>
+                {path.trim() && <div className="media-v4-selected-file" title={path}>
+                  <strong>{finalPathSegment(path)}</strong>
+                  {parentPath(path) && <span>{parentPath(path)}</span>}
+                </div>}
               </div>
               <div className="media-v4-mapping-note">
                 <Database24Regular aria-hidden="true" />
@@ -1570,9 +1580,13 @@ export default function MediaManagementPage() {
                 <div className="media-v4-field-block">
                   <div className="media-v4-field-copy"><span className="media-v4-action-index">首次</span><strong>选择 TXT 基线</strong><span>目录树负责快速建立大库的完整基线。</span></div>
                   <div className="media-v4-path-row media-v4-path-row-wide">
-                    <Input aria-label="首次目录树 TXT 文件" name="hybrid_tree_file" autoComplete="off" spellCheck={false} value={path} onChange={(_, data) => setPath(data.value)} placeholder="例如 K:\\媒体清单\\动画目录树.txt" />
-                    <Button appearance="secondary" icon={<DocumentText24Regular />} onClick={() => void choosePath()}>选择文件</Button>
+                    <Input aria-label="首次目录树 TXT 文件" name="hybrid_tree_file" autoComplete="off" spellCheck={false} title={path || undefined} value={path} onChange={(_, data) => setPath(data.value)} placeholder="例如 K:\\媒体清单\\动画目录树.txt" />
+                    <Button className="media-v4-file-picker-button" appearance="secondary" icon={<DocumentText24Regular />} onClick={() => void choosePath()}>选择文件</Button>
                   </div>
+                  {path.trim() && <div className="media-v4-selected-file" title={path}>
+                    <strong>{finalPathSegment(path)}</strong>
+                    {parentPath(path) && <span>{parentPath(path)}</span>}
+                  </div>}
                 </div>
                 <div className="media-v4-field-block">
                   <div className="media-v4-field-copy"><span className="media-v4-action-index">后续</span><strong>选择同一 OpenList 目录</strong><span>确认 TXT 基线后，增量只核对新增和变化目录。</span></div>
