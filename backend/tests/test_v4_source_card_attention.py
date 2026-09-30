@@ -55,7 +55,7 @@ def test_completed_source_separates_relation_notices_without_deleting_history(tm
         assert conn.execute('SELECT resolved FROM revision_issues').fetchone()[0] == 0
 
 
-@pytest.mark.parametrize('failure', ['metadata', 'mirror', 'projection', 'cleanup'])
+@pytest.mark.parametrize('failure', ['metadata', 'mirror', 'projection'])
 def test_real_failure_is_counted_even_when_work_is_in_library(tmp_path, failure):
     database, _wid = _completed_source(tmp_path)
     with database.connect() as conn:
@@ -64,12 +64,30 @@ def test_real_failure_is_counted_even_when_work_is_in_library(tmp_path, failure)
         else:
             kind = 'materialize_mirror' if failure == 'mirror' else 'refresh_projection'
             conn.execute("UPDATE jobs SET status='failed' WHERE job_type=?", (kind,))
-            if failure == 'cleanup':
-                conn.execute("UPDATE jobs SET job_type='cleanup_superseded_artifacts' WHERE job_type=?", (kind,))
     card = list_source_cards(database)[0]
     assert card['work_count'] == 1
     assert card['overall_status'] == 'needs_attention'
     assert card['attention_count'] == 1
+
+
+@pytest.mark.parametrize('status', ['failed', 'queued', 'running'])
+def test_cleanup_is_not_an_import_attention_item(tmp_path, status):
+    database, wid = _completed_source(tmp_path)
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO jobs(job_id,job_type,revision_id,work_id,idempotency_key,status,attempts,created_at,updated_at) "
+            "VALUES ('cleanup','cleanup_superseded_artifacts','rev',?, 'cleanup:rev',?,1,'now','now')",
+            (wid, status),
+        )
+    progress = V4RevisionService(database).get_execution_progress('rev')
+    assert progress['overall_status'] == 'completed'
+    assert all(unit['overall_status'] == 'completed' for unit in progress['work_units'])
+    card = list_source_cards(database)[0]
+    assert card['overall_status'] == 'completed'
+    assert card['attention_count'] == 0
+    assert card['can_resume'] is False
+    assert card['active_task'] is None
+    assert card['job_summary'][status] == 1
 
 
 def test_generic_provider_name_uses_source_folder_not_truncated_provider():

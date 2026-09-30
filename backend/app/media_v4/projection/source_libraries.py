@@ -206,7 +206,9 @@ def list_source_cards(database: V4Database) -> list[dict]:
             "total": 0, "queued": 0, "running": 0, "succeeded": 0, "failed": 0, "cancelled": 0,
         }))
         active_job = next(
-            (row for row in jobs_by_revision.get(revision_id, []) if str(row["status"]) in {"running", "queued"}),
+            (row for row in jobs_by_revision.get(revision_id, [])
+             if str(row["status"]) in {"running", "queued"}
+             and str(row["job_type"]) != "cleanup_superseded_artifacts"),
             None,
         )
         deletion_jobs = [row for row in jobs_by_revision.get(revision_id, []) if str(row["job_type"]) == "delete_source_library"]
@@ -389,19 +391,14 @@ def list_source_cards(database: V4Database) -> list[dict]:
             else confirmed_at or draft_created_at or str(root["updated_at"] or "")
         )
         resume_by_scan = scan_active or scan_failed or scan_interrupted or scan_paused
-        can_resume = resume_by_scan or _can_resume(progress) or (
-            job_summary["queued"] > 0
-            or job_summary["running"] > 0
-            or job_summary["failed"] > 0
-            or job_summary["cancelled"] > 0
-        ) or draft is not None
+        can_resume = resume_by_scan or _can_resume(progress) or deletion_retry_required or draft is not None
         active_task = None if scan_interrupted else _active_task(scan, active_job, revision_id, card_progress)
         if phase == "scan":
             attention_count = int(scan_status == "failed" or scan_interrupted or scan_paused)
         elif draft_graph is not None:
             attention_count = len(draft_graph.issues)
         else:
-            attention_count = _execution_attention_count(progress, jobs_by_revision.get(revision_id, []))
+            attention_count = _execution_attention_count(progress)
         if overall_status == "completed" and attention_count:
             overall_status = "needs_attention"
             card_progress.update(state=overall_status, message="有任务需要处理")
@@ -510,21 +507,14 @@ def list_source_cards(database: V4Database) -> list[dict]:
     return cards
 
 
-def _execution_attention_count(progress: dict, jobs: list) -> int:
-    """按作品去重当前故障；非作品任务单独计数，主动取消不当作报错。"""
+def _execution_attention_count(progress: dict) -> int:
+    """只统计执行详情可见的作品故障与投影故障；历史清理任务不算待处理。"""
     affected = {
         str(unit["work_id"]) for unit in progress.get("work_units") or []
         if unit.get("overall_status") in {"failed", "needs_attention"}
     }
-    other_jobs = 0
-    for job in jobs:
-        if job["status"] != "failed":
-            continue
-        if job["work_id"]:
-            affected.add(str(job["work_id"]))
-        else:
-            other_jobs += 1
-    return len(affected) + other_jobs
+    projection = (progress.get("stage_summary") or {}).get("projection") or {}
+    return len(affected) + int(int(projection.get("failed") or 0) > 0)
 
 
 def _relation_parent_is_self(conn, parent_key: str, child_id: str) -> bool:
