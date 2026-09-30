@@ -1,6 +1,6 @@
 /** P-005 媒体管理首页层级与媒体库维护入口测试。 */
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import MediaManagementPage from '../../src/pages/MediaManagementPage'
 import { useUiStore } from '../../src/stores/ui'
@@ -241,6 +241,27 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+})
+
+test('返回同一导入目录时重新读取基线，不沿用删除前的提示', async () => {
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
+  api.openlistStatus.mockResolvedValue({
+    root_id: 'root-115', remote_root: '/115/Anime', has_confirmed_baseline: true,
+    source_mode: 'openlist_full', last_scan_mode: 'incremental',
+  })
+  render(<MediaManagementPage />)
+  fireEvent.click(await screen.findByRole('button', { name: '检查更新' }))
+  expect(await screen.findByText('已有已确认基线，默认增量更新')).toBeVisible()
+  fireEvent.click(screen.getByRole('button', { name: '返回媒体管理' }))
+  api.openlistStatus.mockResolvedValue({
+    root_id: 'root-115', remote_root: '/115/Anime', has_confirmed_baseline: false,
+    source_mode: 'openlist_full', last_scan_mode: 'incremental',
+  })
+  api.openlistStatus.mockClear()
+  act(() => useUiStore.getState().goBack())
+  await waitFor(() => expect(api.openlistStatus).toHaveBeenCalledWith('/115/Anime'))
+  await waitFor(() => expect(screen.queryByText('已有已确认基线，默认增量更新')).not.toBeInTheDocument())
+  expect(screen.getByRole('button', { name: '完整扫描并建立基线' })).toBeVisible()
 })
 
 test('默认进入媒体管理首页，只有来源卡与命令栏，不显示三步导入', async () => {

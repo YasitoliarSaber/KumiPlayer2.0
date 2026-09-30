@@ -291,6 +291,7 @@ export default function MediaManagementPage() {
   const [remoteBrowsing, setRemoteBrowsing] = useState(false)
   const [browserSession, setBrowserSession] = useState(0)
   const [openlistBaseline, setOpenlistBaseline] = useState<V4OpenlistBaselineStatus | null>(null)
+  const openlistBaselineRequest = useRef(0)
   const [sourceCards, setSourceCards] = useState<V4SourceLibraryCard[]>([])
   const [sourceCardsLoading, setSourceCardsLoading] = useState(true)
   const [sourceCardPendingDelete, setSourceCardPendingDelete] = useState<V4SourceLibraryCard | null>(null)
@@ -382,19 +383,27 @@ export default function MediaManagementPage() {
   }, [])
 
   const refreshOpenlistBaseline = useCallback(async (remote: string) => {
+    const requestId = ++openlistBaselineRequest.current
+    setOpenlistBaseline(null)
     try {
       const status = await mediaV4Api.openlistStatus(remote)
-      setOpenlistBaseline(status)
+      if (requestId === openlistBaselineRequest.current) setOpenlistBaseline(status)
     } catch {
       // 凭据/连接未就绪时不阻塞浏览；扫描动作会给出可操作错误。
-      setOpenlistBaseline(null)
+      if (requestId === openlistBaselineRequest.current) setOpenlistBaseline(null)
     }
   }, [])
 
   useEffect(() => {
-    if ((kind !== 'openlist' && kind !== 'hybrid') || !remoteRoot.trim()) return
+    // 删除后返回相同目录也必须重新查询，不能沿用页面驻留期间的基线提示。
+    if (pageMode !== 'import' || (kind !== 'openlist' && kind !== 'hybrid') || !remoteRoot.trim()) {
+      ++openlistBaselineRequest.current
+      setOpenlistBaseline(null)
+      return
+    }
     void refreshOpenlistBaseline(remoteRoot)
-  }, [kind, remoteRoot, refreshOpenlistBaseline])
+    return () => { ++openlistBaselineRequest.current }
+  }, [pageMode, kind, remoteRoot, refreshOpenlistBaseline])
 
   useEffect(() => {
     void refreshSourceCards()

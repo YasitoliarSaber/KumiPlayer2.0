@@ -238,16 +238,21 @@ class V4Repository:
         return found
 
     def list_confirmed_source_evidence(self, root_id: str) -> list[SourceEvidence]:
-        """一次查询读取来源根当前唯一 confirmed revision 的完整证据。"""
+        """读取活动来源的已确认基线；退役来源的历史证据仅供审计。
+
+        隐藏来源卡（enabled=0）不等于删除媒体库，不能据此丢弃有效基线。
+        重新扫描或生成草稿也不恢复旧基线，须等新 revision 确认并解除退役。
+        """
 
         with self.database.connect() as conn:
             rows = conn.execute(
                 """
                 SELECT se.*
                 FROM import_revisions ir
+                JOIN source_roots sr ON sr.root_id = ir.root_id
                 JOIN revision_evidence re ON re.revision_id = ir.revision_id
                 JOIN source_evidence se ON se.evidence_id = re.evidence_id
-                WHERE ir.root_id = ? AND ir.status = 'confirmed'
+                WHERE ir.root_id = ? AND ir.status = 'confirmed' AND sr.retired_at = ''
                 ORDER BY se.relative_path COLLATE NOCASE, se.evidence_id
                 """,
                 (root_id,),
