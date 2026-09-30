@@ -1,0 +1,163 @@
+/* 设置与任务浮层使用相同控件合同；限定作用域，避免影响海报墙和播放器画面。 */
+.app-main { scrollbar-gutter: stable !important; }
+
+/* 层内 important 接管既有 pages 层的布局；普通控件样式保留在层外。 */
+@layer pages {
+.settings-shell.settings-focused {
+  width: 100% !important;
+  max-width: 1180px !important;
+  grid-template-columns: 200px minmax(0, 1fr) !important;
+  gap: 28px !important;
+  padding: 28px 28px 48px !important;
+}
+.settings-focused .settings-outline-popover-wrap { width: 200px !important; }
+.settings-focused .settings-outline-link { width: 100% !important; min-height: 42px !important; }
+.settings-shell.settings-focused .settings-config-row {
+  grid-template-columns: 156px minmax(0, 1fr) auto !important;
+  align-items: center !important;
+  gap: 12px !important;
+}
+.settings-shell.settings-focused .settings-config-row > :is(label, span),
+.settings-shell.settings-focused .settings-toggle-row > span { font-size: 14px !important; line-height: 22px !important; font-weight: 500 !important; }
+.settings-shell.settings-focused .settings-config-row > .fui-Button { width: auto !important; min-width: 68px; grid-column: auto !important; }
+.settings-focused .settings-section-head h3 { font-size: 16px !important; }
+.settings-focused .settings-input { font-size: 14px !important; }
+}
+
+:is(.settings-focused, .player-tuning-page, .fui-DialogSurface, .detail-management-dialog) {
+  font-family: 'Segoe UI Variable Text', 'Microsoft YaHei UI', 'Segoe UI', system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+/* 为 Fluent slot 恢复完整表面，阻止旧的原生 input/select 样式落在内部控件上。 */
+:is(.settings-focused, .player-tuning-page, .fui-DialogSurface) :is(.fui-Input, .fui-Select, .fui-Dropdown) {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-bottom-color: var(--text-muted);
+  border-radius: 6px;
+  background: var(--control-bg, var(--surface));
+  color: var(--text);
+  box-shadow: none;
+}
+:is(.settings-focused, .player-tuning-page, .fui-DialogSurface) .fui-Input > input {
+  flex: 1;
+  width: 100% !important;
+  min-width: 0;
+  min-height: 34px !important;
+  height: auto !important;
+  padding: 6px 10px !important;
+  margin: 0 !important;
+  border: 0 !important;
+  border-radius: inherit;
+  background: transparent !important;
+  color: inherit !important;
+  font: inherit !important;
+  box-shadow: none !important;
+  outline: none;
+}
+:is(.settings-focused, .player-tuning-page, .fui-DialogSurface) .fui-Select > select {
+  appearance: none;
+  width: 100% !important;
+  min-width: 0;
+  min-height: 34px !important;
+  height: auto !important;
+  margin: 0 !important;
+  padding: 6px 36px 6px 10px !important;
+  border: 0 !important;
+  background: transparent !important;
+  color: inherit !important;
+  font: inherit !important;
+  box-shadow: none !important;
+  outline: none;
+}
+:is(.settings-focused, .player-tuning-page, .fui-DialogSurface) .fui-Select__icon {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  display: inline-flex;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--text-muted);
+}
+:is(.settings-focused, .player-tuning-page, .fui-DialogSurface) :is(.fui-Input, .fui-Select):focus-within {
+  border-bottom: 2px solid var(--accent-strong);
+}
+:is(.settings-focused, .player-tuning-page, .fui-DialogSurface) .fui-Field { display: grid; gap: 6px; min-width: 0; }
+:is(.settings-focused, .player-tuning-page, .fui-DialogSurface) .fui-Field__label { font-size: 14px; line-height: 20px; font-weight: 500; }
+:is(.settings-focused, .player-tuning-page, .fui-DialogSurface) .fui-Field__hint { font-size: 12px; line-height: 18px; color: var(--text-muted); }
+
+:is(.settings-focused, .player-tuning-page, .fui-DialogSurface) .fui-Button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 80px;
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--control-bg, var(--surface));
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  box-shadow: none;
+}
+:is(.settings-focused, .player-tuning-page, .fui-DialogSurface) .fui-Button__icon { display: inline-flex; align-items: center; flex-shrink: 0; }
+:is(.settings-focused, .player-tuning-page, .fui-DialogSurface) .fui-Button:hover:not(:disabled) { background: var(--control-hover, var(--surface-soft)); }
+:is(.settings-focused, .player-tuning-page, .fui-DialogSurface) .fui-Button:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+:is(.settings-focused, .player-tuning-page, .fui-DialogSurface) .fui-Button:disabled { opacity: .5; cursor: default; }
+.player-tuning-actions .fui-Button,
+.fui-DialogSurface .fui-DialogActions > .fui-Button:last-child:not(.media-v4-source-card-dialog-danger) {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: #fff;
+}
+.player-tuning-actions .fui-Button:hover:not(:disabled),
+.fui-DialogSurface .fui-DialogActions > .fui-Button:last-child:not(.media-v4-source-card-dialog-danger):hover:not(:disabled) { background: color-mix(in srgb, var(--accent-strong) 88%, #000); }
+.fui-DialogSurface .fui-DialogTitle { font-size: 20px; line-height: 28px; font-weight: 600; }
+.fui-DialogSurface .fui-DialogContent { min-width: 0; font-size: 14px; line-height: 22px; }
+.fui-DialogSurface .fui-DialogActions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+.fui-DialogSurface:is(.media-v4-recognition-dialog, .media-v4-source-card-rename-dialog, .media-v4-source-card-delete-dialog) {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-flyout, 0 16px 48px rgb(0 0 0 / 24%));
+}
+.fui-DialogSurface__backdrop:is(.media-v4-recognition-backdrop, .media-v4-source-card-rename-backdrop, .media-v4-source-card-delete-backdrop) {
+  background: rgb(15 23 42 / 36%);
+}
+.media-v4-source-card-rename-dialog .fui-Input { display: flex; }
+.media-v4-recognition-dialog .fui-DialogTitle { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
+.fui-DialogSurface .fui-DialogTitle .fui-Button,
+.fui-DialogSurface .fui-DialogTitle__action .fui-Button { min-width: 32px; min-height: 32px; padding: 5px; }
+.detail-management-dialog :is(input:not([type='checkbox']):not([type='radio']), select, textarea) {
+  width: 100%; min-width: 0; min-height: 36px; padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); background: var(--control-bg, var(--surface)); font: inherit;
+}
+.detail-management-dialog :is(input, select, textarea):focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+.player-tuning-page .player-tuning-header > .fui-Button { flex-shrink: 0; }
+.player-tuning-page .fui-RadioGroup { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.player-tuning-page .fui-Radio { position: relative; display: flex; align-items: center; min-height: 52px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--control-bg, var(--surface)); }
+.player-tuning-page .fui-Radio:has(input:checked) { border-color: var(--accent-strong); background: color-mix(in srgb, var(--accent-strong) 8%, var(--surface)); }
+.player-tuning-page .fui-Radio__input { position: static; opacity: 1; width: 16px; height: 16px; margin: 0 10px 0 0; flex-shrink: 0; appearance: auto; accent-color: var(--accent-strong); }
+.player-tuning-page .fui-Radio__indicator { display: none; }
+.player-tuning-page .fui-Radio label { padding: 0; font-size: 14px; line-height: 22px; cursor: pointer; }
+.player-tuning-page .fui-Radio:focus-within { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+
+@layer pages {
+@media (max-width: 760px) {
+  .settings-shell.settings-focused { grid-template-columns: minmax(0, 1fr) !important; gap: 16px !important; padding: 16px 14px 36px !important; }
+  .settings-focused .settings-outline-popover-wrap { width: 100% !important; }
+  .settings-focused .settings-outline-link { width: auto !important; }
+  .settings-shell.settings-focused .settings-config-row { grid-template-columns: minmax(0, 1fr) auto !important; gap: 8px !important; }
+  .settings-shell.settings-focused .settings-config-row > :is(label, span) { grid-column: 1 / -1; }
+  .settings-shell.settings-focused .settings-config-row > .settings-input { grid-column: 1; }
+}
+}
+@media (max-width: 640px) { .player-tuning-page .fui-RadioGroup { grid-template-columns: minmax(0, 1fr); } }
