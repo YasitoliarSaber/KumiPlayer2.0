@@ -75,6 +75,26 @@ test('来源卡将关联提示与真实待处理分开，操作按用途分组',
   expect(screen.getByRole('group', { name: '来源卡管理' })).toContainElement(screen.getByRole('button', { name: '重命名来源卡：115 动画' }))
 })
 
+test('来源卡显示选择的 TXT 路径和实际完成时间，操作按钮保持同一背景层级', async () => {
+  const path = 'K:\\百度网盘\\01动画\\01动画.txt'
+  api.sourceLibraries.mockResolvedValue({ cards: [cardFixture({
+    ingest_method: 'directory_tree', tree_file_path: path,
+    display_path: '01动画', source_locator: 'K:\\百度网盘\\01动画',
+    import_completed_at: '2026-09-30T12:34:00', excluded_video_count: 85,
+    metadata_ready_work_count: 3,
+  })] })
+  render(<MediaManagementPage />)
+  expect(await screen.findByText(path)).toHaveAttribute('title', path)
+  expect(screen.getByText(/上次导入完成于.*2026.*09.*30.*12:34/)).toBeVisible()
+  expect(screen.queryByText(/特别篇\/辅助视频/)).not.toBeInTheDocument()
+  expect(screen.getByText('/ 3 部在线资料已就绪')).toBeVisible()
+  const card = screen.getByText(path).closest('article')!
+  for (const button of card.querySelectorAll('.media-v4-source-card-action')) {
+    expect(button).toHaveClass('secondary')
+    expect(button).not.toHaveClass('primary')
+  }
+})
+
 test('按来源删除媒体库：先展示预览，再确认，且预览态不暴露「移除」', async () => {
   api.sourceLibraries.mockResolvedValue({ cards: [cardFixture()] })
   api.sourceLibraryDeletionPreview.mockResolvedValue({
@@ -540,7 +560,7 @@ test('来源卡按阶段显示计量口径，不再用作品数减问题数冒�
   expect(screen.getByText(/2/)).toBeVisible()
   expect(screen.getByText('/ 3 部在线资料已就绪')).toBeVisible()
   expect(screen.getByText('（其中 1 部沿用上次成功资料）')).toBeVisible()
-  expect(screen.getByText(/1 个特别篇\/辅助视频不计入正片/)).toBeVisible()
+  expect(screen.queryByText(/1 个特别篇\/辅助视频不计入正片/)).not.toBeInTheDocument()
   expect(screen.queryByText(/部已正确刮削/)).not.toBeInTheDocument()
 })
 

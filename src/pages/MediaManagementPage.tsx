@@ -1360,7 +1360,9 @@ export default function MediaManagementPage() {
                   : card.overall_status === 'needs_attention' && card.phase === 'scan' && card.progress?.message
                     ? card.progress.message
                       : card.overall_status === 'needs_attention' ? '有任务需要处理'
-                        : '上次导入已处理完毕'
+                        : card.import_completed_at && !Number.isNaN(new Date(card.import_completed_at).getTime())
+                          ? `上次导入完成于 ${new Date(card.import_completed_at).toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })}`
+                          : '上次导入已处理完毕'
             const resumeLabel = deletionRetry ? '重试清理' : retiredCleanup ? '清理中' : activeTask ? '查看进度' : card.scan?.status === 'paused' ? '继续扫描' : card.overall_status === 'cancelled' ? (executionTerminated ? '查看执行结果' : '重新扫描') : card.overall_status === 'needs_attention' && card.phase === 'scan' ? '重新扫描' : card.phase === 'review' ? '查看识别结果' : card.can_resume ? '查看进度' : '查看上次导入'
             const resumeIcon = deletionRetry ? <Delete24Regular /> : activeTask?.kind === 'scan' || card.phase === 'review' ? <DocumentText24Regular /> : <Database24Regular />
             return <article className={`media-v4-library-source-card ${active ? 'active' : 'settled'}`} key={card.root_id}>
@@ -1370,7 +1372,7 @@ export default function MediaManagementPage() {
                 <span className={`media-v4-source-card-state media-v4-source-card-state-${card.overall_status ?? 'completed'}`}>{stateLabel}</span>
                 </div>
                 <strong title={card.display_name}>{card.display_name}</strong>
-                {card.display_path && card.display_path !== card.display_name && <span className="media-v4-source-card-locator" title={card.source_locator}>{card.display_path}</span>}
+                {(card.tree_file_path || card.source_locator || card.display_path) && <span className="media-v4-source-card-locator" title={card.tree_file_path || card.source_locator || card.display_path}>{card.tree_file_path || card.source_locator || card.display_path}</span>}
                 {card.last_error && card.overall_status === 'needs_attention' && <span className="media-v4-source-card-error" role="alert">{card.last_error}</span>}
               </div>
               <div className="media-v4-source-card-scale">
@@ -1394,7 +1396,6 @@ export default function MediaManagementPage() {
                   </div>
                 )}
                 {card.attention_count > 0 && <span className="media-v4-source-card-attention">有 {card.attention_count} 个待处理事项</span>}
-                {(card.excluded_video_count ?? 0) > 0 && <span className="media-v4-source-card-notice">{card.excluded_video_count} 个特别篇/辅助视频不计入正片，不入库也不刮削</span>}
                 {(card.relation_pending_count ?? 0) > 0 && <span className="media-v4-source-card-notice">{card.relation_pending_count} 项关联信息待补全，不影响入库和播放</span>}
                 </div>
                 <div className="media-v4-source-card-actions" role="group" aria-label="导入与更新">
@@ -1408,11 +1409,11 @@ export default function MediaManagementPage() {
                   }}>{resumeLabel}</Button>
                   {!retiredCleanup && !deletionRetry && (activeTask?.can_cancel || activeTask?.status === 'cancelling'
                     ? <Button className="media-v4-source-card-action secondary" appearance="secondary" icon={<Dismiss24Regular />} disabled={activeTask?.status === 'cancelling'} onClick={() => void terminateSourceTask(card)}>{activeTask?.status === 'cancelling' ? '正在终止…' : '终止任务'}</Button>
-                    : <Button className={`media-v4-source-card-action ${card.can_resume ? 'secondary' : 'primary'}`} appearance={card.can_resume ? 'secondary' : 'primary'} icon={<ArrowSync24Regular />} disabled={active} onClick={() => prepareSourceUpdate(card)}>检查更新</Button>)}
+                    : <Button className="media-v4-source-card-action secondary" appearance="secondary" icon={<ArrowSync24Regular />} disabled={active} onClick={() => prepareSourceUpdate(card)}>检查更新</Button>)}
                 </div>
                 {!active && !retiredCleanup && !deletionRetry && <div className="media-v4-source-card-actions media-v4-source-card-management" role="group" aria-label="来源卡管理">
                   {!active && <Button className="media-v4-source-card-action secondary" appearance="secondary" icon={<Edit24Regular />} aria-label={`重命名来源卡：${card.display_name}`} onClick={() => openSourceCardRename(card)}>重命名</Button>}
-                  {!active && <Button className="media-v4-source-card-action media-v4-source-card-action-danger" appearance="secondary" icon={<Delete24Regular />} aria-label={`删除来源卡：${card.display_name}`} onClick={() => setSourceCardPendingDelete(card)}>删除来源卡</Button>}
+                  {!active && <Button className="media-v4-source-card-action secondary media-v4-source-card-action-danger" appearance="secondary" icon={<Delete24Regular />} aria-label={`删除来源卡：${card.display_name}`} onClick={() => setSourceCardPendingDelete(card)}>删除来源卡</Button>}
                 </div>}
               </div>
             </article>

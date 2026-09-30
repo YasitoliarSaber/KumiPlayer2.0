@@ -132,6 +132,10 @@ export interface V4SourceLibraryCard {
   source_locator: string
   /** 面向来源卡的紧凑路径摘要；原始 locator 仍用于恢复来源配置。 */
   display_path?: string
+  /** 用户实际选择的 TXT 路径；旧记录未保存时为空，不使用归档位置代替。 */
+  tree_file_path?: string
+  /** 当前 revision 导入任务全部成功后的实际结束时间，不是来源卡更新时间。 */
+  import_completed_at?: string
   playback_locator: string
   route_id: string
   display_name: string

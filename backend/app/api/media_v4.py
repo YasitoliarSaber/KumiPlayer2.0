@@ -1503,6 +1503,7 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
                 "resolution_ok": resolution.ok,
                 "resolution_reason": resolution.reason,
                 "resolution_candidates": list(resolution.candidates),
+                "tree_file_path": str(Path(request.tree_file).expanduser().resolve()),
                 "remote_root": remote_root,
                 "scan_mode": scan_mode,
             },

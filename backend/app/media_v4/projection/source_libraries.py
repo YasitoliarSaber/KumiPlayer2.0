@@ -7,6 +7,7 @@ revision_bindings，不按标题/路径猜测；退役来源统一过滤。
 
 from __future__ import annotations
 
+import json
 import re
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -82,12 +83,13 @@ def list_source_cards(database: V4Database) -> list[dict]:
             scans = conn.execute(
                 f"""
                 SELECT * FROM (
-                    SELECT ss.*,
+                    SELECT ss.*, ssr.request_json,
                            ROW_NUMBER() OVER (
                                PARTITION BY ss.root_id
                                ORDER BY ss.generation DESC, ss.started_at DESC, ss.scan_id DESC
                            ) AS scan_rank
                     FROM source_scans ss
+                    LEFT JOIN source_scan_requests ssr ON ssr.scan_id = ss.scan_id
                     WHERE ss.root_id IN ({scan_placeholders})
                 ) WHERE scan_rank = 1
                 """,
@@ -136,7 +138,7 @@ def list_source_cards(database: V4Database) -> list[dict]:
                     pending_relations[str(row["revision_id"])] += 1
             job_rows = conn.execute(
                 f"""
-                SELECT revision_id, job_id, work_id, job_type, status, cancel_requested, heartbeat_at, created_at
+                SELECT revision_id, job_id, work_id, job_type, status, cancel_requested, heartbeat_at, created_at, finished_at
                 FROM jobs WHERE revision_id IN ({placeholders})
                 ORDER BY revision_id, CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, job_id
                 """,
@@ -402,6 +404,16 @@ def list_source_cards(database: V4Database) -> list[dict]:
         if overall_status == "completed" and attention_count:
             overall_status = "needs_attention"
             card_progress.update(state=overall_status, message="有任务需要处理")
+        import_jobs = [job for job in jobs_by_revision.get(revision_id, [])
+                       if job["job_type"] in {"materialize_mirror", "scrape_work", "refresh_projection"}]
+        import_completed_at = max((str(job["finished_at"] or "") for job in import_jobs), default="") if (
+            import_jobs and all(job["status"] == "succeeded" and job["finished_at"] for job in import_jobs)
+        ) else ""
+        try:
+            scan_request = json.loads(scan["request_json"] or "{}") if scan is not None else {}
+        except (TypeError, ValueError):
+            scan_request = {}
+        tree_file_path = str(scan_request.get("tree_file_path") or "") if isinstance(scan_request, dict) else ""
         cards.append({
             "root_id": root_id,
             "provider": str(root["provider"] or ""),
@@ -411,6 +423,8 @@ def list_source_cards(database: V4Database) -> list[dict]:
             "has_confirmed_baseline": has_confirmed,
             "source_locator": str(root["source_locator"] or ""),
             "display_path": _display_path(str(root["source_locator"] or ""), str(root["provider"] or "")),
+            "tree_file_path": tree_file_path,
+            "import_completed_at": import_completed_at,
             "playback_locator": str(root["playback_locator"] or ""),
             "route_id": str(root["route_id"] or ""),
             "display_name": _display_name(
