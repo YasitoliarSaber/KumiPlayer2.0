@@ -181,10 +181,12 @@ export interface PlaybackHistoryItem {
   duration: number
   completed: boolean
   updated_at: string
-  // 详情页可选地补充这些展示字段；它们不是播放状态事实。
+  // 历史接口按 Episode 身份补充的读模型；不改写播放事件或媒体事实。
   episode_title?: string
   season_number?: number | null
   episode_number?: number | null
+  thumb_path?: string
+  played_at?: string
   // 播放历史行自带的快照（后端 `/history` 直接返回这些字段）。
   season_snapshot?: string
   episode_snapshot?: string

@@ -26,11 +26,11 @@ function item(overrides: Partial<PlaybackHistoryItem> = {}): PlaybackHistoryItem
 describe('「最近播放」标签（规格 §12）', () => {
   it('同时给出集号、进度与时间，而不是只显示作品', () => {
     const label = recentEpisodeLabel(item(), NOW)
-    expect(label).toContain('第 3 集')
+    expect(label).toContain('S01E03')
     expect(label).toContain('12:34 / 24:00')
     expect(label).toContain('52%')
     expect(label).toContain('今天 21:20')
-    expect(label).not.toBe('最近播放')
+    expect(label).not.toContain('最近播放')
   })
 
   it('缺集号与集标题时仍给出进度与时间（绝不退化成只有"最近播放"）', () => {
@@ -53,7 +53,7 @@ describe('「最近播放」标签（规格 §12）', () => {
       }),
       NOW,
     )
-    expect(label).toContain('第 1 季 · 第 3 集')
+    expect(label).toContain('S01E03')
     expect(label).toContain('12:34 / 24:00')
     expect(label).not.toBe('最近播放')
   })
@@ -61,6 +61,14 @@ describe('「最近播放」标签（规格 §12）', () => {
   it('已看完与无进度分别给出明确文案', () => {
     expect(recentProgressLabel(item({ completed: true }))).toBe('已看完')
     expect(recentProgressLabel(item({ position: 0 }))).toBe('')
+  })
+
+  it('保留未知编号与第零季，不补成第一集', () => {
+    expect(recentEpisodeLabel(item({ season_number: 0, episode_number: 6 }), NOW)).toContain('S00E06')
+    expect(recentEpisodeLabel(item({ season_number: null, episode_number: 6 }), NOW)).toContain('E06')
+    const unknown = recentEpisodeLabel(item({ season_number: null, episode_number: null }), NOW)
+    expect(unknown).not.toContain('S01E01')
+    expect(unknown).toContain('集号待定')
   })
 
   it('时间文案区分今天/昨天/更早', () => {

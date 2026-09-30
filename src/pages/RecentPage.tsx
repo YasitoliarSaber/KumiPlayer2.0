@@ -1,8 +1,9 @@
 import { useLibraryStore } from '../stores/library';
 import { useUiStore } from '../stores/ui';
 import { matchesSourceFilter } from '../utils/sourceFilter';
-import PosterCard from '../components/library/PosterCard';
+import RecentWatchCard from '../components/library/RecentWatchCard';
 import type { PlaybackHistoryItem, WorkIndex } from '../api/types';
+import './RecentPage.css';
 
 export default function RecentPage() {
   const works = useLibraryStore((state) => state.works);
@@ -50,13 +51,15 @@ export default function RecentPage() {
           <button className="empty-state-action" onClick={goHome}>回到首页</button>
         </div>
       ) : (
-        <div className="recent-card-grid">
-          {recentWorks.slice(0, RECENT_SECTION_LIMIT).map((item) => (
-            <PosterCard
+        <div className="recent-watch-grid">
+          {recentWorks.map((item) => (
+            <RecentWatchCard
               key={item.work.work_id}
               work={item.work}
-              showType="recent"
-              recentLabel={recentEpisodeLabel(item.history)}
+              history={item.history}
+              episodeLabel={item.work.media_type === 'movie' ? '电影' : recentEpisodeCode(item.history)}
+              progressLabel={recentProgressLabel(item.history)}
+              timeLabel={recentTimeLabel(item.history.played_at || item.history.updated_at)}
             />
           ))}
         </div>
@@ -65,7 +68,6 @@ export default function RecentPage() {
   );
 }
 
-const RECENT_SECTION_LIMIT = 6;
 export function selectRecentWorks(works: WorkIndex[], history: PlaybackHistoryItem[]) {
   const workById = new Map(works.map((work) => [work.work_id, work]));
   const candidates = new Map<string, { work: WorkIndex; history: PlaybackHistoryItem; firstIndex: number; playCount: number }>();
@@ -132,19 +134,25 @@ export function recentTimeLabel(value: string, now: Date = new Date()) {
  * 只显示作品名不算最近播放；缺集号/集标题时至少给出进度与时间，绝不只留"最近播放"。
  */
 export function recentEpisodeLabel(item: PlaybackHistoryItem, now: Date = new Date()) {
-  const episodeNumber = Number(item.episode_number ?? 0);
-  const seasonNumber = Number(item.season_number ?? 0);
-  // 后端 `/history` 返回的是**快照**字段（`episode_snapshot`/`season_snapshot`）；
-  // 数字集号只有详情页补充时才存在。此前只读数字，导致永远退化成"最近播放"。
-  const episodeSnapshot = (item.episode_snapshot || '').trim();
-  const seasonSnapshot = (item.season_snapshot || '').trim();
-  const snapshotLabel = [seasonSnapshot, episodeSnapshot].filter(Boolean).join(' · ');
-  const base = episodeNumber > 0
-    ? `${seasonNumber > 0 ? `第 ${seasonNumber} 季 · ` : ''}最近播放第 ${episodeNumber} 集`
-    : snapshotLabel
-      ? `最近播放：${snapshotLabel}`
-      : item.episode_title ? `最近播放：${item.episode_title}` : '最近播放';
-  return [base, recentProgressLabel(item), recentTimeLabel(item.updated_at, now)]
+  return [recentEpisodeCode(item), recentProgressLabel(item), recentTimeLabel(item.played_at || item.updated_at, now)]
     .filter((part) => Boolean(part))
     .join(' · ');
+}
+
+/** 未知季号/集号保持未知；旧快照只解析明确编号，不推断成 S01E01。 */
+export function recentEpisodeCode(item: PlaybackHistoryItem) {
+  const season = explicitNumber(item.season_number, item.season_snapshot, /^(?:第\s*(\d+)\s*季|S(\d+))$/i, 0);
+  const episode = explicitNumber(item.episode_number, item.episode_snapshot, /^(?:第\s*(\d+)\s*集|E(\d+))$/i, 1);
+  if (episode !== null) {
+    return `${season === null ? '' : `S${String(season).padStart(2, '0')}`}E${String(episode).padStart(2, '0')}`;
+  }
+  return item.episode_title?.trim() || item.episode_snapshot?.trim() || '集号待定';
+}
+
+function explicitNumber(value: number | null | undefined, snapshot: string | undefined, pattern: RegExp, minimum: number) {
+  if (typeof value === 'number' && Number.isInteger(value) && value >= minimum) return value;
+  const match = (snapshot || '').trim().match(pattern);
+  if (!match) return null;
+  const number = Number(match[1] || match[2]);
+  return Number.isInteger(number) && number >= minimum ? number : null;
 }

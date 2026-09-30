@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -126,45 +128,63 @@ def history(limit: int = 50, work_id: str | None = None):
     params: list = []
     where = ""
     if work_id:
-        where = "WHERE work_id = ?"
+        where = "WHERE h.work_id = ?"
         params.append(work_id)
     with get_database().connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM playback_history " + where + " ORDER BY played_at DESC, event_id LIMIT ?",
+            "SELECT h.*, COALESCE(p.position, 0) AS position, COALESCE(p.duration, 0) AS duration, "
+            "COALESCE(p.completed, 0) AS completed, COALESCE(p.updated_at, h.played_at) AS updated_at, "
+            "s.local_season_number AS season_number, e.local_episode_number AS episode_number, "
+            "COALESCE(e.display_title, '') AS episode_title "
+            "FROM playback_history h "
+            "LEFT JOIN playback_progress p ON p.work_id = h.work_id AND p.episode_id = h.episode_id "
+            "AND p.asset_id = h.asset_id "
+            "LEFT JOIN episodes e ON e.episode_id = h.episode_id AND e.work_id = h.work_id "
+            "LEFT JOIN seasons s ON s.season_id = e.season_id "
+            + where + " ORDER BY h.played_at DESC, h.event_id LIMIT ?",
             (*params, bounded),
         ).fetchall()
-        # 用户反馈："最近播放"只显示四个字，看不到**哪一集、进度、什么时候**。
-        # 播放历史行只存事件与快照（`season_snapshot`/`episode_snapshot`），
-        # 进度在 `playback_progress` 里，因此这里联表补全。取法是防御式的：
-        # 该表结构变化或缺表都不影响历史列表本身。
-        progress_by_key: dict[tuple[str, str, str], dict] = {}
-        try:
-            for row in conn.execute("SELECT * FROM playback_progress").fetchall():
-                progress_row = dict(row)
-                key = (
-                    str(progress_row.get("work_id") or ""),
-                    str(progress_row.get("episode_id") or ""),
-                    str(progress_row.get("asset_id") or ""),
-                )
-                progress_by_key[key] = progress_row
-        except Exception:  # noqa: BLE001 - 历史列表不得因进度表问题整体失败
-            progress_by_key = {}
-    items: list[dict] = []
-    for row in rows:
-        item = dict(row)
-        data = progress_by_key.get(
-            (
-                str(item.get("work_id") or ""),
-                str(item.get("episode_id") or ""),
-                str(item.get("asset_id") or ""),
+        # 与详情页消费同一份最近成功资料；每个 Work 只读取一次，
+        # 按 Episode 身份取图，绝不把作品 fanart 当成分集缩略图。
+        mappings_by_work: dict[str, dict[str, dict]] = {}
+        items: list[dict] = []
+        for row in rows:
+            item = dict(row)
+            key = str(item["work_id"])
+            if key not in mappings_by_work:
+                mappings_by_work[key] = _history_episode_metadata(conn, key)
+            episode = mappings_by_work[key].get(str(item["episode_id"]), {})
+            item["thumb_path"] = str(
+                episode.get("local_thumb_path") or episode.get("still_url") or episode.get("thumb_path") or ""
             )
-        )
-        if data:
-            item["position"] = data.get("position", 0)
-            item["duration"] = data.get("duration", 0)
-            item["completed"] = bool(data.get("completed", 0))
-            item["updated_at"] = str(data.get("updated_at") or item.get("played_at") or "")
-        else:
-            item["updated_at"] = str(item.get("played_at") or "")
-        items.append(item)
+            item["episode_title"] = str(episode.get("title") or item["episode_title"])
+            item["completed"] = bool(item["completed"])
+            items.append(item)
     return {"items": items, "limit": bounded}
+
+
+def _history_episode_metadata(conn, work_id: str) -> dict[str, dict]:
+    from app.media_v4.persistence.metadata_lifecycle import referenced_metadata
+
+    row = conn.execute(
+        "SELECT sb.metadata_json FROM scrape_bindings sb "
+        "JOIN import_revisions ir ON ir.revision_id = sb.revision_id "
+        "JOIN source_roots sr ON sr.root_id = ir.root_id AND sr.retired_at = '' "
+        "WHERE sb.work_id = ? AND ir.status = 'confirmed' "
+        "ORDER BY sb.updated_at DESC, sb.binding_id DESC LIMIT 1",
+        (work_id,),
+    ).fetchone()
+    try:
+        metadata = json.loads(row["metadata_json"] or "{}") if row else {}
+    except (TypeError, ValueError):
+        metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    retained = referenced_metadata(conn, work_id)
+    if retained is not None:
+        metadata = {**metadata, **retained}
+    mappings = metadata.get("episode_mappings")
+    return {
+        str(item["episode_id"]): item for item in mappings
+        if isinstance(item, dict) and item.get("episode_id")
+    } if isinstance(mappings, list) else {}
