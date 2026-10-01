@@ -25,6 +25,10 @@ _GRAPHQL_URL = "https://graphql.anilist.co"
 class AniListClientError(Exception):
     """AniList client base error."""
 
+    def __init__(self, message: str, reason_code: str = 'provider_unavailable'):
+        super().__init__(message)
+        self.reason_code = reason_code
+
 
 class AniListRateLimitError(AniListClientError):
     """AniList returned 429."""
@@ -105,9 +109,9 @@ class AniListClient:
                 timeout=self._timeout,
             )
         except httpx.TimeoutException as e:
-            raise AniListClientError("AniList 请求超时") from e
+            raise AniListClientError("AniList 请求超时", 'provider_timeout') from e
         except Exception as e:
-            raise AniListClientError(f"AniList 请求异常: {e}") from e
+            raise AniListClientError("AniList 请求异常", 'provider_network_error') from e
 
         if resp.status_code == 429:
             retry_after = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
@@ -124,12 +128,15 @@ class AniListClient:
             raise AniListClientError(f"AniList 服务端错误 ({resp.status_code})")
 
         if resp.status_code != 200:
-            raise AniListClientError(f"AniList 请求失败 ({resp.status_code}): {resp.text[:200]}")
+            raise AniListClientError(f"AniList 请求失败 ({resp.status_code})",
+                                    'provider_unauthorized' if resp.status_code in {401, 403} else 'provider_unavailable')
 
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise AniListClientError('AniList 响应格式无效', 'provider_invalid_response') from exc
         if data.get("errors"):
-            message = data["errors"][0].get("message", "GraphQL 错误")
-            raise AniListClientError(f"AniList GraphQL 错误: {message}")
+            raise AniListClientError("AniList GraphQL 错误", 'provider_invalid_response')
 
         self._response_cache[cache_key] = deepcopy(data)
         return data
@@ -182,6 +189,27 @@ class AniListClient:
             data = self._request(gql, variables)
             results = data.get("data", {}).get("Page", {}).get("media", []) or []
         return results
+
+    def search_names(self, query: str, per_page: int = 3) -> list[dict]:
+        """恢复只读取公开名称证据；不请求图、简介、人物或评分。"""
+        if not query:
+            return []
+        gql = """
+        query ($search: String, $perPage: Int) {
+          Page(page: 1, perPage: $perPage) {
+            media(type: ANIME, search: $search, sort: SEARCH_MATCH) {
+              id
+              title { native romaji english }
+              synonyms
+              format
+              seasonYear
+              externalLinks { site url }
+            }
+          }
+        }
+        """
+        data = self._request(gql, {'search': query, 'perPage': max(1, min(per_page, 3))})
+        return data.get('data', {}).get('Page', {}).get('media', []) or []
 
 
 def extract_tmdb_link(media: dict) -> tuple[int | None, str]:

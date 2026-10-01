@@ -136,11 +136,12 @@ class BangumiClient:
         user_agent: str = "",
         base_url: str = BANGUMI_BASE_URL,
         timeout: float = 15.0,
+        public_only: bool = False,
     ):
         config = load_config()
         # 显式 access_token 优先；否则统一运行时解析（config cache → 安全存储），
         # CM 暂时故障恢复后无需重启即可恢复普通 authenticated 业务请求
-        self.access_token = access_token or resolve_bangumi_access_token()
+        self.access_token = '' if public_only else access_token or resolve_bangumi_access_token()
         # User-Agent 是应用身份，不应携带用户姓名、昵称或其他个人配置。
         # 保留参数只为兼容旧调用方，但请求始终使用统一的公开应用标识。
         self.user_agent = DEFAULT_BANGUMI_USER_AGENT

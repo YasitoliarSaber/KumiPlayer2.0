@@ -95,7 +95,10 @@ class V4JobRunner:
                 provider = self.recovery_provider
                 if provider is recover_metadata:
                     def provider(target):
-                        return recover_metadata(target, should_cancel=lambda: cancel_requested(self.database, job_id))
+                        from app.media_v4.jobs.alias_cache import RecoveryCache
+
+                        return recover_metadata(target, cache=RecoveryCache(self.database),
+                                                should_cancel=lambda: cancel_requested(self.database, job_id))
             self.scrape.process(
                 job_id,
                 provider,
