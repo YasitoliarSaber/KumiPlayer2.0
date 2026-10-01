@@ -97,7 +97,7 @@ def test_deleted_openlist_baseline_is_rejected_before_network(confirmed_source, 
     monkeypatch.setattr(media_v4, "_database", database)
     monkeypatch.setattr(media_v4, "load_config", lambda: config)
     monkeypatch.setattr(media_v4, "resolve_openlist_credentials", lambda: ("fixture", "fixture", "available"))
-    monkeypatch.setattr(media_v4, "openlist_root_id", lambda *_: evidence.root_id)
+    monkeypatch.setattr(media_v4, "openlist_root_id", lambda *_, **_kwargs: evidence.root_id)
 
     def no_network(*_args, **_kwargs):
         pytest.fail("退役来源不能使用旧基线或发起增量网络枚举")

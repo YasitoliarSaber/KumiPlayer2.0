@@ -129,6 +129,13 @@ def test_confirmed_scope_reads_metadata_state_and_separates_retained(tmp_path):
         states = ["ready", "waiting_metadata"] + ["ready"] * (len(work_ids) - 2)
         for index, work_id in enumerate(work_ids):
             metadata = {"metadata_state": states[index]}
+            if states[index] == 'ready':
+                # 计数夹具也须满足分集资料门控，不能仅声明 ready。
+                metadata['episode_mappings'] = [
+                    {'episode_id': row['episode_id'], 'provider_episode_id': 'fixture-' + row['episode_id'],
+                     'title': '完整分集标题', 'still_url': 'https://image.tmdb.org/t/p/w500/fixture.jpg'}
+                    for row in conn.execute('SELECT episode_id FROM episodes WHERE work_id=?', (work_id,))
+                ]
             if index == 0:
                 metadata["metadata_source"] = "current"
             if index == 1:
@@ -148,9 +155,9 @@ def test_confirmed_scope_reads_metadata_state_and_separates_retained(tmp_path):
 
 
 def test_scan_scope_leaves_works_unknown_instead_of_zero(tmp_path):
+    from app.media_v4.persistence.repositories import V4Repository
     from app.media_v4.projection.source_libraries import list_source_cards
     from app.media_v4.sources.adapters import SourceEntry, to_source_evidence
-    from app.media_v4.persistence.repositories import V4Repository
 
     database = _database(tmp_path)
     with database.connect() as conn:

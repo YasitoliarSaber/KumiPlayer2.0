@@ -54,7 +54,7 @@ def _seed_work(database, *, work_id, title, provider="pan115", season_count=2, e
                 conn.execute(
                     "INSERT INTO assets(asset_id, evidence_id, root_id, source_locator, playback_locator) "
                     "VALUES (?, ?, 'root-p', ?, ?)",
-                    (asset_id, evidence_id, f"K:\Anime\{work_id}\S{season:02d}E{episode:02d}.mkv", f"K:\Anime\{work_id}\S{season:02d}E{episode:02d}.mkv"),
+                    (asset_id, evidence_id, fr"K:\Anime\{work_id}\S{season:02d}E{episode:02d}.mkv", fr"K:\Anime\{work_id}\S{season:02d}E{episode:02d}.mkv"),
                 )
                 conn.execute(
                     "INSERT OR IGNORE INTO parsed_facts(parsed_fact_id, evidence_id, parser_version, work_title, title_candidates_json, media_type, group_type) "
@@ -138,10 +138,15 @@ def test_detail_title_and_artwork_and_folder_commands(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
     from app.api import media_v4
+    from app.media_v4.jobs.scrape import V4ScrapeService
 
     database = _fresh_database(tmp_path)
     monkeypatch.setattr(media_v4, "_database", database)
     _seed_work(database, work_id="w1", title="原始标题")
+    # 打开目录的 exists 查询限定在临时目录，不检查夹具中的挂载盘符。
+    with database.connect() as conn:
+        conn.execute("UPDATE assets SET playback_locator = ? WHERE root_id = 'root-p'",
+                     (str(tmp_path / 'media' / 'w1' / 'episode.mkv'),))
 
     application = FastAPI()
     application.include_router(media_v4.router)
@@ -166,7 +171,11 @@ def test_detail_title_and_artwork_and_folder_commands(tmp_path, monkeypatch):
     assert folder.status_code == 200, folder.text
     assert folder.json()["folder"].endswith("w1")
 
-    # 重跑刮削 job（进入同一 V4 job 链）
+    # 手工 SQL 夹具没有确认阶段的初始作业；缺作业应拒绝，不能绕过 V4 链。
+    missing = client.post("/api/v4/works/w1/scrape")
+    assert missing.status_code == 409
+    V4ScrapeService(database).enqueue_for_revision('rev-p')
+    # 重跑已有刮削 job（进入同一 V4 job 链）。
     scrape = client.post("/api/v4/works/w1/scrape")
     assert scrape.status_code == 200, scrape.text
     assert scrape.json()["status"] == "queued"
@@ -237,7 +246,7 @@ def test_tracking_scan_all_enqueues_incremental_for_openlist_roots(tmp_path, mon
     config = SimpleNamespace(
         openlist_server_url="https://openlist.example.test",
         openlist_remote_root="/",
-        openlist_mount_root="X:\OpenList",
+        openlist_mount_root=r"X:\OpenList",
         openlist_routes=[OpenListRouteConfig(route_id="route-anime", remote_prefix="/Anime", provider_id="pan115")],
     )
     monkeypatch.setattr(tracking_v4, "load_config", lambda: config)
