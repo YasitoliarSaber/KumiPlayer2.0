@@ -131,6 +131,20 @@ class SourceScanRequest(BaseModel):
     source_display_name: str = ""
     # 继续一次因请求预算暂停的扫描：复用同一 scan_id，frontier 断点才有效。
     resume_scan_id: str = ""
+    connection_id: str = ""
+
+
+def _select_openlist_config(identity: str = ""):
+    from app.core.openlist_connections import select_connection
+
+    try:
+        return select_connection(load_config(), identity)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+
+
+def _openlist_credentials(identity: str = ""):
+    return resolve_openlist_credentials(identity) if identity and identity != "legacy" else resolve_openlist_credentials()
 
 
 class SourceCardRenameRequest(BaseModel):
@@ -291,6 +305,7 @@ def _configured_cloud_roots(config) -> list[str]:
     for route in getattr(config, "openlist_routes", ()) or ():
         local_path = route.get("local_path", "") if isinstance(route, dict) else getattr(route, "local_path", "")
         roots.append(str(local_path or ""))
+    roots.extend(str(record.openlist_mount_root or "") for record in getattr(config, "openlist_connections", ()))
     return [root for root in roots if root.strip()]
 
 
@@ -635,8 +650,8 @@ def scan_source(request: SourceScanRequest):
             root_source_mode = "tree_openlist"
             from app.api.openlist_v4 import _configured_routes, _remote_root
 
-            config = load_config()
-            username, _password, credential_state = resolve_openlist_credentials()
+            config = _select_openlist_config(request.connection_id)
+            username, _password, credential_state = _openlist_credentials(request.connection_id)
             if credential_state == "unavailable":
                 raise HTTPException(status_code=503, detail="本机凭据管理器暂时不可用，请稍后重试")
             if not config.openlist_server_url or not username:
@@ -647,7 +662,7 @@ def scan_source(request: SourceScanRequest):
             if not route_id:
                 raise HTTPException(status_code=409, detail="当前 OpenList 目录未匹配已保存的内容来源路由")
             content_provider = routed_provider
-            root_id = openlist_root_id(config.openlist_server_url, username, remote_root)
+            root_id = openlist_root_id(config.openlist_server_url, username, remote_root, connection_id=request.connection_id)
             if not config.openlist_mount_root:
                 raise HTTPException(status_code=409, detail="当前内容来源尚未配置本地挂载路径，请先在设置页完成来源映射")
             local_root = derive_local_path(config.openlist_mount_root, _remote_root(config), remote_root)
@@ -726,8 +741,8 @@ def scan_source(request: SourceScanRequest):
         elif request.source == "openlist":
             from app.api.openlist_v4 import _client, _configured_routes, _remote_root
 
-            config = load_config()
-            username, _password, credential_state = resolve_openlist_credentials()
+            config = _select_openlist_config(request.connection_id)
+            username, _password, credential_state = _openlist_credentials(request.connection_id)
             if credential_state == "unavailable":
                 raise HTTPException(status_code=503, detail="本机凭据管理器暂时不可用，请稍后重试")
             if not config.openlist_mount_root:
@@ -738,7 +753,7 @@ def scan_source(request: SourceScanRequest):
             if not route_id:
                 raise HTTPException(status_code=409, detail="当前 OpenList 目录未匹配已保存的内容来源路由")
             content_provider = routed_provider
-            root_id = openlist_root_id(config.openlist_server_url, username, remote_root)
+            root_id = openlist_root_id(config.openlist_server_url, username, remote_root, connection_id=request.connection_id)
             openlist_playback_root = derive_local_path(
                 config.openlist_mount_root,
                 _remote_root(config),
@@ -1346,6 +1361,12 @@ def _durable_draft_finalizer(
     )
 
 
+def _connection_request_guard(config) -> dict:
+    from app.core.openlist_connections import connection_fingerprint, connection_id
+
+    return {"connection_fingerprint": connection_fingerprint(config)} if connection_id(config) != "legacy" else {}
+
+
 def _openlist_scan_request(request: SourceScanRequest, provider: str, remote_root: str, config, routes) -> dict:
     """序列化 OpenList 扫描参数；只含非敏感路由与根信息，凭据执行期解析。"""
 
@@ -1353,6 +1374,8 @@ def _openlist_scan_request(request: SourceScanRequest, provider: str, remote_roo
 
     return {
         "remote_root": remote_root,
+        "connection_id": request.connection_id or "legacy",
+        **_connection_request_guard(config),
         "mapping_root": _remote_root(config),
         "mount_root": config.openlist_mount_root,
         "provider": provider,
@@ -1431,7 +1454,8 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
     if request.source == "hybrid":
         from app.api.openlist_v4 import _configured_routes, _remote_root
 
-        username, _password, credential_state = resolve_openlist_credentials()
+        config = _select_openlist_config(request.connection_id)
+        username, _password, credential_state = _openlist_credentials(request.connection_id)
         if credential_state == "unavailable":
             raise HTTPException(status_code=503, detail="本机凭据管理器暂时不可用，请稍后重试")
         if not config.openlist_server_url or not username:
@@ -1444,7 +1468,7 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
         if not config.openlist_mount_root:
             raise HTTPException(status_code=409, detail="当前内容来源尚未配置本地挂载路径，请先在设置页完成来源映射")
         configured_roots = [derive_local_path(config.openlist_mount_root, _remote_root(config), remote_root)]
-        root_id = openlist_root_id(config.openlist_server_url, username, remote_root)
+        root_id = openlist_root_id(config.openlist_server_url, username, remote_root, connection_id=request.connection_id)
     else:
         if not configured_roots:
             raise HTTPException(status_code=409, detail="当前内容来源尚未配置本地挂载路径，请先在设置页完成来源映射")
@@ -1494,6 +1518,8 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
             "source_mode": source_mode,
             "request": {
                 "provider": content_provider,
+                "connection_id": request.connection_id or "legacy",
+                **(_connection_request_guard(config) if request.source == "hybrid" else {}),
                 "route_id": route_id,
                 "revision_id": request.revision_id.strip(),
                 "source_display_name": request.source_display_name or "",
@@ -1538,8 +1564,8 @@ def start_durable_scan(request: SourceScanRequest):
     from app.api.openlist_v4 import _configured_routes, _remote_root
     from app.media_v4.sources.source_scan_runner import get_source_scan_runner
 
-    config = load_config()
-    username, _password, credential_state = resolve_openlist_credentials()
+    config = _select_openlist_config(request.connection_id)
+    username, _password, credential_state = _openlist_credentials(request.connection_id)
     if credential_state == "unavailable":
         raise HTTPException(status_code=503, detail="本机凭据管理器暂时不可用，请稍后重试")
     if not config.openlist_server_url or not username:
@@ -1551,7 +1577,7 @@ def start_durable_scan(request: SourceScanRequest):
     route_id, routed_provider = provider_for_remote(routes, remote_root)
     if not route_id:
         raise HTTPException(status_code=409, detail="当前 OpenList 目录未匹配已保存的内容来源路由")
-    root_id = openlist_root_id(config.openlist_server_url, username, remote_root)
+    root_id = openlist_root_id(config.openlist_server_url, username, remote_root, connection_id=request.connection_id)
     database = get_database()
     scan_mode = request.scan_mode or "full"
     playback_root = derive_local_path(
@@ -1875,7 +1901,7 @@ def work_delete_confirm(work_id: str, request: WorkDeleteConfirmRequest):
 
 
 @router.get("/sources/openlist/status")
-def openlist_status(remote_root: str = ""):
+def openlist_status(remote_root: str = "", connection_id: str = ""):
     """查询所选 OpenList 目录的来源根级状态：root_id、来源模式与是否已有已确认基线。
 
     只读查询，不发起 OpenList 网络请求；前端据此决定展示“完整扫描并建立基线”
@@ -1884,14 +1910,14 @@ def openlist_status(remote_root: str = ""):
 
     from app.api.openlist_v4 import _remote_root
 
-    config = load_config()
-    username, _password, credential_state = resolve_openlist_credentials()
+    config = _select_openlist_config(connection_id)
+    username, _password, credential_state = _openlist_credentials(connection_id)
     if credential_state == "unavailable":
         raise HTTPException(status_code=503, detail="本机凭据管理器暂时不可用，请稍后重试")
     if not config.openlist_server_url or not username:
         raise HTTPException(status_code=400, detail="请先在设置页完成 OpenList 连接配置")
     remote_root = normalize_remote_path(remote_root.strip() or _remote_root(config))
-    root_id = openlist_root_id(config.openlist_server_url, username, remote_root)
+    root_id = openlist_root_id(config.openlist_server_url, username, remote_root, connection_id=connection_id)
     source_mode = ""
     last_scan_mode = ""
     with get_database().connect() as conn:

@@ -100,6 +100,31 @@ async function enterImport() {
   fireEvent.click(await screen.findByRole('button', { name: '导入媒体' }))
 }
 
+test('首次导入选择另一个连接后使用其目录、路由、基线和持久任务身份', async () => {
+  const connection = (connection_id: string, name: string, remote: string) => ({
+    connection_id, name, openlist_configured: true, openlist_server_url: 'http://localhost:5244',
+    openlist_remote_root: remote, openlist_mount_root: 'X:\\', openlist_username_masked: 'f***e',
+    openlist_routes: [{ ...routes[0], route_id: `route-${connection_id}`, remote_prefix: remote, local_path: `X:\\${name}` }],
+  })
+  const a = connection('legacy', '连接甲', '/甲')
+  const b = connection('ol-b', '连接乙', '/乙')
+  config.getConfig.mockResolvedValue({ ...a, local_root: '', openlist_connections: [a, b] })
+  openlist.getRoutes.mockImplementation(async (id?: string) => ({ routes: id === 'ol-b' ? b.openlist_routes : a.openlist_routes }))
+  render(<MediaManagementPage />)
+  await enterImport()
+  fireEvent.click(screen.getByRole('button', { name: 'OpenList' }))
+  const selector = await screen.findByRole('combobox', { name: 'OpenList 连接' })
+  fireEvent.change(selector, { target: { value: 'ol-b' } })
+  await waitFor(() => expect(openlist.browse).toHaveBeenLastCalledWith('/乙', 1, false, 100, 'ol-b'))
+  await waitFor(() => expect(api.openlistStatus).toHaveBeenLastCalledWith('/乙', 'ol-b'))
+  await waitFor(() => expect(screen.getByRole('button', { name: '完整扫描并建立基线' })).toBeEnabled())
+  fireEvent.click(screen.getByRole('button', { name: '完整扫描并建立基线' }))
+  await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({
+    connection_id: 'ol-b', source: 'openlist', root_path: '/乙', source_root: 'X:\\连接乙',
+  })))
+  await screen.findByRole('heading', { name: '检查识别结果' })
+})
+
 test('本地目录读取设置中的默认路径，并以简洁文案表达扫描范围', async () => {
   render(<MediaManagementPage />)
   await enterImport()

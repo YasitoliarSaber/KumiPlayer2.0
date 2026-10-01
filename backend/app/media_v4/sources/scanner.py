@@ -640,8 +640,10 @@ def tree_root_id(
     return "root_" + digest
 
 
-def openlist_root_id(server_url: str, username: str, remote_root: str) -> str:
+def openlist_root_id(server_url: str, username: str, remote_root: str, *, connection_id: str = "") -> str:
     identity = "\x1f".join((server_url.strip().casefold(), username.strip().casefold(), normalize_remote_path(remote_root)))
+    if connection_id and connection_id != "legacy":
+        identity = "\x1f".join((connection_id, normalize_remote_path(remote_root)))
     return "root_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
 
 

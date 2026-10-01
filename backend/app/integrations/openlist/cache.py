@@ -41,12 +41,14 @@ _ENTRY_FIELDS = ("name", "is_dir", "size", "modified", "remote_path")
 _cache_lock = threading.RLock()
 
 
-def connection_key(server_url: str, username: str, remote_root: str) -> str:
+def connection_key(server_url: str, username: str, remote_root: str, *, connection_id: str = "") -> str:
     """连接身份哈希：server_url + username + remote_root 的组合指纹。
 
     不包含密码；Token 从不进入缓存模块。
     """
     raw = f"{server_url}|{username}|{normalize_remote_path(remote_root or '/')}"
+    if connection_id and connection_id != "legacy":
+        raw = f"{connection_id}|{raw}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 

@@ -40,6 +40,7 @@ export interface OpenListBrowseResult {
 }
 //: 连接测试请求契约：候选配置（KEEP SAVED / 显式新值语义由后端解析）
 export interface OpenListTestConnectionPayload {
+  connection_id?: string
   server_url: string
   remote_root: string
   username: string
@@ -74,6 +75,8 @@ export interface OpenListTelemetrySummary {
 
 
 export interface OpenListConfigPayload {
+  connection_id?: string
+  name?: string
   server_url: string
   remote_root: string
   mount_root: string
@@ -118,21 +121,22 @@ export interface OpenListPrefetchResult {
 }
 
 export const openlistApi = {
+  createConnection: (name: string) => api.post<{ connection_id: string }>('/api/openlist/connections', { name }),
   testConnection: (payload: OpenListTestConnectionPayload) =>
     api.post<OpenListTestResult>('/api/openlist/test-connection', payload),
   saveConfig: (payload: OpenListConfigPayload) =>
     api.post<OpenListSaveResult>('/api/openlist/config', payload),
-  browse: (path = '', page = 1, refresh = false, perPage = 100) =>
+  browse: (path = '', page = 1, refresh = false, perPage = 100, connectionId?: string) =>
     api.get<OpenListBrowseResult>(
-      `/api/openlist/browse?path=${encodeURIComponent(path)}&page=${page}&per_page=${perPage}&refresh=${refresh ? 'true' : 'false'}&cache_only=${refresh ? 'false' : 'true'}`,
+      `/api/openlist/browse?path=${encodeURIComponent(path)}&page=${page}&per_page=${perPage}&refresh=${refresh ? 'true' : 'false'}&cache_only=${refresh ? 'false' : 'true'}${connectionId ? `&connection_id=${encodeURIComponent(connectionId)}` : ''}`,
     ),
-  prefetch: (paths: string[]) =>
-    api.post<OpenListPrefetchResult>('/api/openlist/prefetch', { paths }),
-  getRoutes: () => api.get<OpenListRoutesResult>('/api/openlist/routes'),
-  discoverRoutes: () => api.post<OpenListDiscoverResult>('/api/openlist/routes/discover', {}),
-  saveRoutes: (routes: OpenListRouteItem[]) =>
-    api.put<OpenListRoutesResult>('/api/openlist/routes', { routes }),
+  prefetch: (paths: string[], connectionId?: string) =>
+    api.post<OpenListPrefetchResult>('/api/openlist/prefetch', { paths, ...(connectionId ? { connection_id: connectionId } : {}) }),
+  getRoutes: (connectionId?: string) => api.get<OpenListRoutesResult>(`/api/openlist/routes${connectionId ? `?connection_id=${encodeURIComponent(connectionId)}` : ''}`),
+  discoverRoutes: (connectionId?: string) => api.post<OpenListDiscoverResult>(`/api/openlist/routes/discover${connectionId ? `?connection_id=${encodeURIComponent(connectionId)}` : ''}`, {}),
+  saveRoutes: (routes: OpenListRouteItem[], connectionId?: string) =>
+    api.put<OpenListRoutesResult>('/api/openlist/routes', { routes, ...(connectionId ? { connection_id: connectionId } : {}) }),
   // HYB-6：今日 KumiPlayer → OpenList 请求成本遥测（只读）
-  getTelemetryToday: () =>
-    api.get<OpenListTelemetrySummary>('/api/openlist/telemetry/today'),
+  getTelemetryToday: (connectionId?: string) =>
+    api.get<OpenListTelemetrySummary>(`/api/openlist/telemetry/today${connectionId ? `?connection_id=${encodeURIComponent(connectionId)}` : ''}`),
 }

@@ -58,7 +58,7 @@ vi.mock('../../src/stores/ui', () => ({
   },
 }));
 vi.mock('../../src/components/settings/OpenListSettingsPanel', () => ({
-  default: () => <div data-testid="openlist-settings-panel">既有 OpenList 连接设置</div>,
+  default: ({ config }: { config: { openlist_server_url: string } }) => <div data-testid="openlist-settings-panel">既有 OpenList 连接设置<span>{config.openlist_server_url}</span></div>,
 }));
 vi.mock('../../src/components/settings/OpenListSourceRoutes', () => ({
   default: () => <div data-testid="openlist-source-routes">既有 OpenList 来源目录</div>,
@@ -117,6 +117,18 @@ describe('SettingsPage 信息架构', () => {
     expect(openListSection).toBeVisible();
     expect(sourceSection).not.toBeVisible();
     expect(openListNavigation).toHaveAttribute('aria-current', 'location');
+  });
+
+  test('设置分类复用原面板并切换到独立连接', async () => {
+    const b = { ...config, connection_id: 'ol-b', name: '连接乙', openlist_server_url: 'https://second.example.test', openlist_routes: [] };
+    api.getConfig.mockResolvedValue({ ...config, openlist_connections: [
+      { ...config, connection_id: 'legacy', name: '连接甲', openlist_routes: [] }, b,
+    ] });
+    render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'OpenList 设置' }));
+    fireEvent.change(await screen.findByRole('combobox', { name: 'OpenList 连接' }), { target: { value: 'ol-b' } });
+    expect(await screen.findByText('https://second.example.test')).toBeVisible();
+    expect(screen.queryByText('https://openlist.example.test')).not.toBeInTheDocument();
   });
 
   test('按 V4 数据流保留稳定设置分类，并将联网与重配入口放在对应位置', async () => {

@@ -3,7 +3,24 @@
 import { api } from './client';
 import type { OpenListRoute } from './types';
 
+export interface OpenListConnectionConfig {
+  connector_type?: 'openlist'
+  connection_id: string
+  name: string
+  openlist_server_url: string
+  openlist_remote_root: string
+  openlist_mount_root: string
+  openlist_configured: boolean
+  openlist_username_masked: string
+  openlist_cache_ttl_minutes: number
+  openlist_prefetch_limit: number
+  openlist_routes: OpenListRoute[]
+}
+
 export interface PublicConfig {
+  openlist_connections?: OpenListConnectionConfig[]
+  openlist_connection_name?: string
+  openlist_connection_id?: string
   setup_completed: boolean
   setup_version: number
   mpv_path: string

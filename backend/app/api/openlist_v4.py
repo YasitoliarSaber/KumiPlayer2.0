@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import ipaddress
+import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
@@ -17,6 +18,14 @@ from pydantic import BaseModel, ConfigDict
 
 from app.core.config import load_config, resolve_openlist_credentials, save_config
 from app.core.credential_store import CredentialStoreError
+from app.core.data_lock import DATA_WRITE_LOCK
+from app.core.openlist_connections import (
+    OpenListConnectionConfig,
+    connection_id,
+    public_connections,
+    save_selected_connection,
+    select_connection,
+)
 from app.integrations.openlist.cache import connection_key, read_cache, write_cache
 from app.integrations.openlist.client import (
     OpenListClient,
@@ -58,6 +67,7 @@ class TestConnectionRequest(BaseModel):
     username: str = ""
     password: str = ""
     allow_insecure_http: bool = False
+    connection_id: str = ""
 
 
 class SaveConfigRequest(BaseModel):
@@ -72,12 +82,61 @@ class SaveConfigRequest(BaseModel):
     cache_ttl_minutes: int | None = None
     prefetch_limit: int | None = None
     skip_verification: bool = False
+    connection_id: str = ""
+    name: str | None = None
 
 
 class PrefetchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     paths: list[str] = []
+    connection_id: str = ""
+
+
+class ConnectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = "新连接"
+
+
+def _connection_config(identity: str = ""):
+    try:
+        return select_connection(load_config(), identity)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+
+
+def _saved_credentials(config):
+    identity = connection_id(config)
+    if identity != "legacy":
+        with DATA_WRITE_LOCK:
+            current = _connection_config(identity)
+            if any(getattr(config, key) != getattr(current, key) for key in (
+                "openlist_server_url", "openlist_remote_root", "openlist_mount_root", "openlist_username",
+            )):
+                raise HTTPException(status_code=409, detail="连接设置已改变，请重新读取此连接后继续")
+            return resolve_openlist_credentials(identity)
+    # 保持旧单连接调用约定，兼容已有注入与凭据三态测试。
+    return resolve_openlist_credentials()
+
+
+@router.get("/connections")
+def get_connections():
+    return {"connections": public_connections(load_config())}
+
+
+@router.post("/connections")
+def create_connection(req: ConnectionRequest):
+    name = req.name.strip()
+    if not name or len(name) > 80:
+        raise HTTPException(status_code=400, detail="连接名称需为 1 到 80 个字符")
+    with DATA_WRITE_LOCK:
+        candidate = copy.deepcopy(load_config())
+        if len(candidate.openlist_connections) >= 20:
+            raise HTTPException(status_code=400, detail="最多保存 20 个新增连接")
+        identity = "ol_" + uuid.uuid4().hex
+        candidate.openlist_connections.append(OpenListConnectionConfig(identity, name))
+        save_config(candidate)
+    return {"connection_id": identity}
 
 
 class RouteItem(BaseModel):
@@ -94,6 +153,7 @@ class SaveRoutesRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     routes: list[RouteItem]
+    connection_id: str = ""
 
 
 def _is_loopback_http(url: str) -> bool:
@@ -109,8 +169,8 @@ def _is_loopback_http(url: str) -> bool:
         return False
 
 
-def _credentials() -> tuple[str, str]:
-    username, password, state = resolve_openlist_credentials()
+def _credentials(config=None) -> tuple[str, str]:
+    username, password, state = _saved_credentials(config) if config is not None else resolve_openlist_credentials()
     if state == "unavailable":
         raise HTTPException(status_code=503, detail="本机凭据管理器暂时不可用，请稍后重试")
     if not username or not password:
@@ -122,7 +182,7 @@ def _client(config, username: str | None = None, password: str | None = None) ->
     user, pwd = (
         (username, password)
         if username is not None and password is not None
-        else _credentials()
+        else _credentials(config)
     )
     if not config.openlist_server_url or not user or not pwd:
         raise HTTPException(status_code=400, detail=_NOT_CONFIGURED)
@@ -132,6 +192,7 @@ def _client(config, username: str | None = None, password: str | None = None) ->
             user,
             pwd,
             client_factory=OpenListClient,
+            connection_id=connection_id(config),
         )
     except OpenListError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
@@ -234,9 +295,9 @@ def _configured_routes(config) -> list[OpenListRouteConfig]:
 
 @router.post("/test-connection")
 def test_connection(req: TestConnectionRequest):
-    config = load_config()
+    config = _connection_config(req.connection_id)
     server_url = (req.server_url or config.openlist_server_url).strip()
-    saved_username, saved_password, credential_state = resolve_openlist_credentials()
+    saved_username, saved_password, credential_state = _saved_credentials(config)
     username = req.username.strip() or saved_username
     password = req.password or saved_password
     if req.username.strip() and req.username.strip() != saved_username and not req.password:
@@ -301,8 +362,8 @@ def save_connection_config(req: SaveConfigRequest):
     if not mount_root:
         raise HTTPException(status_code=400, detail="请填写 OpenList 对应的本地挂载根路径")
 
-    config = load_config()
-    old_username, old_password, credential_state = resolve_openlist_credentials()
+    config = _connection_config(req.connection_id)
+    old_username, old_password, credential_state = _saved_credentials(config)
     if credential_state == "unavailable":
         raise HTTPException(status_code=503, detail="本机凭据管理器暂时不可用，无法安全保存配置")
     username = req.username.strip() or old_username
@@ -352,12 +413,14 @@ def save_connection_config(req: SaveConfigRequest):
         candidate.openlist_prefetch_limit = max(0, min(int(req.prefetch_limit), _MAX_PREFETCH))
     if endpoint_changed:
         candidate.openlist_routes = []
+    if req.name is not None and (not req.name.strip() or len(req.name.strip()) > 80):
+        raise HTTPException(status_code=400, detail="连接名称需为 1 到 80 个字符")
     try:
-        save_config(candidate)
+        save_selected_connection(candidate, name=req.name.strip() if req.name is not None else None)
     except CredentialStoreError:
         raise HTTPException(status_code=500, detail="OpenList 配置保存失败，本机凭据服务异常") from None
     if remote_changed:
-        clear_openlist_client_pool()
+        clear_openlist_client_pool(connection_id=connection_id(config))
     message = "OpenList 连接配置已保存"
     if endpoint_changed:
         message += "（远端地址或根目录已变更，内容来源路由已重置，请重新配置）"
@@ -375,18 +438,18 @@ def save_connection_config(req: SaveConfigRequest):
 
 
 @router.get("/browse")
-def browse(path: str = "", page: int = 1, per_page: int = _DEFAULT_PER_PAGE, refresh: bool = False, cache_only: bool = False):
+def browse(path: str = "", page: int = 1, per_page: int = _DEFAULT_PER_PAGE, refresh: bool = False, cache_only: bool = False, connection_id: str = ""):
     if page < 1 or per_page < 1 or per_page > _MAX_PER_PAGE:
         raise HTTPException(status_code=400, detail="page 必须大于等于 1，per_page 必须在 1 到 100 之间")
-    config = load_config()
+    config = _connection_config(connection_id)
     root = _remote_root(config)
     try:
         normalized = normalize_remote_path(path or root)
     except OpenListError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     _ensure_within_root(root, normalized)
-    username, password = _credentials()
-    conn_key = connection_key(config.openlist_server_url, username, root)
+    username, password = _credentials(config)
+    conn_key = connection_key(config.openlist_server_url, username, root, connection_id=connection_id)
     # 健康记录/限速用的是**规范化后**的服务地址键（客户端内部即如此计算）；
     # 这里若用原始配置值，带尾斜杠或 /dav 的地址会读写到另一行记录，
     # 导致 UI 的重试与浏览器准入判断互相不一致。
@@ -470,13 +533,13 @@ def browse(path: str = "", page: int = 1, per_page: int = _DEFAULT_PER_PAGE, ref
 
 @router.post("/prefetch")
 def prefetch(req: PrefetchRequest):
-    config = load_config()
+    config = _connection_config(req.connection_id)
     limit = max(0, min(int(config.openlist_prefetch_limit or 12), _MAX_PREFETCH))
     if limit <= 0 or not req.paths:
         return {"prefetched": 0, "skipped": len(req.paths), "busy": False, "cancelled": True}
     root = _remote_root(config)
-    username, password = _credentials()
-    conn_key = connection_key(config.openlist_server_url, username, root)
+    username, password = _credentials(config)
+    conn_key = connection_key(config.openlist_server_url, username, root, connection_id=req.connection_id)
     paths: list[str] = []
     for raw in req.paths[:limit]:
         try:
@@ -514,14 +577,14 @@ def prefetch(req: PrefetchRequest):
 
 
 @router.get("/routes")
-def get_routes():
-    config = load_config()
+def get_routes(connection_id: str = ""):
+    config = _connection_config(connection_id)
     return {"routes": [_route_public(route, config) for route in _configured_routes(config)]}
 
 
 @router.post("/routes/discover")
-def discover_routes():
-    config = load_config()
+def discover_routes(connection_id: str = ""):
+    config = _connection_config(connection_id)
     root = _remote_root(config)
     client = _client(config)
     entries: list[dict[str, Any]] = []
@@ -563,11 +626,17 @@ def discover_routes():
 
 @router.put("/routes")
 def save_routes(req: SaveRoutesRequest):
-    config = load_config()
+    config = _connection_config(req.connection_id)
     root = _remote_root(config)
     routes: list[OpenListRouteConfig] = []
     seen: set[str] = set()
+    owned = {route.route_id for route in _configured_routes(config)}
+    seen_ids: set[str] = set()
     for item in req.routes:
+        if item.route_id and (item.route_id not in owned or item.route_id in seen_ids):
+            raise HTTPException(status_code=400, detail="路由标识不属于此连接或已重复")
+        if item.route_id:
+            seen_ids.add(item.route_id)
         try:
             prefix = normalize_route_prefix(item.remote_prefix)
         except (ValueError, OpenListError) as exc:
@@ -591,16 +660,16 @@ def save_routes(req: SaveRoutesRequest):
         )
     candidate = copy.deepcopy(config)
     candidate.openlist_routes = routes
-    save_config(candidate)
+    save_selected_connection(candidate)
     return {"routes": [_route_public(route, candidate) for route in routes]}
 
 
 @router.get("/telemetry/today")
-def openlist_telemetry_today():
+def openlist_telemetry_today(connection_id: str = ""):
     from app.integrations.openlist.telemetry import daily_summary
 
-    config = load_config()
-    username, _password, state = resolve_openlist_credentials()
+    config = _connection_config(connection_id)
+    username, _password, state = _saved_credentials(config)
     if state != "found" or not config.openlist_server_url or not username:
         return {
             "fs_list": 0,

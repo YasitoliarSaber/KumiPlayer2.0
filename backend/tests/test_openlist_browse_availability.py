@@ -13,7 +13,7 @@ def setup_browse(monkeypatch):
     monkeypatch.setattr(api, "load_config", lambda: SimpleNamespace(
         openlist_remote_root="/", openlist_server_url="https://openlist.example",
     ))
-    monkeypatch.setattr(api, "_credentials", lambda: ("user", "password"))
+    monkeypatch.setattr(api, "_credentials", lambda _config=None: ("user", "password"))
     monkeypatch.setattr(api, "read_cache", lambda *_a, **_k: {
         "fresh": True, "entries": [{"name": "old", "is_dir": True}],
         "page": 1, "per_page": 100, "total": 1, "has_more": False,

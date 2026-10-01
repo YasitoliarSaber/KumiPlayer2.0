@@ -31,6 +31,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+
 from app.integrations.openlist.governor import (
     OpenListRequestGovernor,
     get_governor,
@@ -766,6 +767,7 @@ def get_openlist_client(
     password: str,
     *,
     client_factory=None,
+    connection_id: str = "",
     **kwargs,
 ) -> OpenListClient:
     """取得同一连接的进程内共享客户端。
@@ -781,6 +783,8 @@ def get_openlist_client(
     :func:`clear_openlist_client_pool` 隔离，生产调用不会传入它们。
     """
     key = _client_pool_key(server_url, username)
+    if connection_id and connection_id != "legacy":
+        key = connection_id + ":" + key
     with _CLIENT_POOL_LOCK:
         existing = _CLIENT_POOL.get(key)
         if existing is not None:
@@ -797,10 +801,15 @@ def get_openlist_client(
         return client
 
 
-def clear_openlist_client_pool() -> None:
+def clear_openlist_client_pool(*, connection_id: str | None = None) -> None:
     """清除进程内会话（测试与连接配置切换使用；不会写入或删除远端数据）。"""
     with _CLIENT_POOL_LOCK:
-        _CLIENT_POOL.clear()
+        if connection_id is None:
+            _CLIENT_POOL.clear()
+        else:
+            for key in list(_CLIENT_POOL):
+                if (connection_id == "legacy" and ":" not in key) or key.startswith(connection_id + ":"):
+                    _CLIENT_POOL.pop(key, None)
 
 
 def _safe_int(value: Any) -> int | None:

@@ -124,6 +124,7 @@ export function mapProbeCode(code: string): OpenListConnectionState {
 }
 
 export interface OpenListDraft {
+  name?: string;
   server_url: string;
   remote_root: string;
   mount_root: string;
@@ -163,7 +164,7 @@ export default function OpenListSettingsPanel({
   useEffect(() => {
     let alive = true;
     openlistApi
-      .getTelemetryToday()
+      .getTelemetryToday(config.openlist_connection_id)
       .then((data) => { if (alive) setTelemetry(data); })
       .catch(() => { /* 遥测展示尽力而为 */ });
     return () => { alive = false; };
@@ -179,6 +180,7 @@ export default function OpenListSettingsPanel({
   // 当前 draft 相对「已保存配置」的修改状态（用于按钮语义）
   const dirtyKeys = useMemo(() => {
     const changed: Array<keyof OpenListDraft> = [];
+    if (draft.name !== undefined && draft.name.trim() !== (config.openlist_connection_name || '默认连接')) changed.push('name');
     if (draft.server_url.trim() !== (config.openlist_server_url || '')) changed.push('server_url');
     if (draft.remote_root.trim() !== (config.openlist_remote_root || '/')) changed.push('remote_root');
     if (draft.mount_root.trim() !== (config.openlist_mount_root || '')) changed.push('mount_root');
@@ -195,6 +197,8 @@ export default function OpenListSettingsPanel({
   const busy = actionLock !== null || Boolean(externalBusy);
 
   const buildPayload = (): OpenListConfigPayload => ({
+    ...(draft.name !== undefined ? { name: draft.name } : {}),
+    ...(config.openlist_connection_id ? { connection_id: config.openlist_connection_id } : {}),
     server_url: draft.server_url,
     remote_root: draft.remote_root,
     mount_root: draft.mount_root,
@@ -211,6 +215,7 @@ export default function OpenListSettingsPanel({
   const buildTestPayload = () => {
     const full = buildPayload();
     return {
+      ...(full.connection_id ? { connection_id: full.connection_id } : {}),
       server_url: full.server_url,
       remote_root: full.remote_root,
       username: full.username,
@@ -314,6 +319,10 @@ export default function OpenListSettingsPanel({
 
       {editorOpen && (
         <fieldset className="sources-openlist-editor" disabled={busy} aria-label="连接设置">
+          {draft.name !== undefined && <label className="settings-config-row">
+            <span>连接名称</span>
+            <input value={draft.name} maxLength={80} onChange={(event) => handleDraftChange('name', event.target.value)} className="settings-input" autoComplete="off" />
+          </label>}
           <label className="settings-config-row">
             <span>OpenList 地址</span>
             <input type="url" value={draft.server_url} onChange={(event) => handleDraftChange('server_url', event.target.value)} className="settings-input" placeholder="http://localhost:5244" autoComplete="url" />

@@ -4,6 +4,7 @@ import { ArrowSync24Regular, Cloud24Regular, FolderOpen24Regular } from '@fluent
 import { openlistApi, type OpenListBrowseResult } from '../../api/openlist'
 
 interface OpenListFolderBrowserProps {
+  connectionId?: string
   configured: boolean
   initialPath: string
   onPathChange: (path: string) => void
@@ -33,6 +34,7 @@ function crumbsFor(path: string, root: string) {
 }
 
 export default function OpenListFolderBrowser({
+  connectionId,
   configured,
   initialPath,
   onPathChange,
@@ -64,7 +66,7 @@ export default function OpenListFolderBrowser({
     onLoadingChange?.(true)
     setError('')
     try {
-      const next = await openlistApi.browse(path, page, refresh, 100)
+      const next = await (connectionId ? openlistApi.browse(path, page, refresh, 100, connectionId) : openlistApi.browse(path, page, refresh, 100))
       if (generation !== generationRef.current) return
       setResult((current) => append && current
         ? { ...next, entries: [...current.entries, ...next.entries] }
@@ -86,10 +88,19 @@ export default function OpenListFolderBrowser({
   }
 
   useEffect(() => {
+    ++generationRef.current
+    initialized.current = false
+    setResult(null)
+    setError('')
+    setRequestedPath(initialPath || '/')
+    onAvailabilityChange?.(false)
+  }, [connectionId])
+
+  useEffect(() => {
     if (!configured || initialized.current) return
     initialized.current = true
     void browse(initialPath || '/')
-  }, [configured, initialPath])
+  }, [configured, initialPath, connectionId])
 
   const crumbs = useMemo(
     () => crumbsFor(result?.path || requestedPath, result?.remote_root || '/'),

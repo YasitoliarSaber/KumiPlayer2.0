@@ -424,6 +424,7 @@ def list_source_cards(database: V4Database) -> list[dict]:
             "source_locator": str(root["source_locator"] or ""),
             "display_path": _display_path(str(root["source_locator"] or ""), str(root["provider"] or "")),
             "tree_file_path": tree_file_path,
+            "connection_id": str(scan_request.get("connection_id") or "legacy") if isinstance(scan_request, dict) else "legacy",
             "import_completed_at": import_completed_at,
             "playback_locator": str(root["playback_locator"] or ""),
             "route_id": str(root["route_id"] or ""),

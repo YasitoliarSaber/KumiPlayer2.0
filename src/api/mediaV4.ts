@@ -103,6 +103,7 @@ export interface V4LibraryCard {
 }
 
 export interface V4SourceLibraryCard {
+  connection_id?: string
   root_id: string
   provider: string
   ingest_method: string
@@ -642,10 +643,11 @@ export const mediaV4Api = {
   revisionEvidence: (revisionId: string) =>
     api.get<{ revision_id: string; status: string; entries: V4SourceEvidence[] }>(`/api/v4/imports/${encodeURIComponent(revisionId)}/evidence`),
 
-  openlistStatus: (remoteRoot: string) =>
-    api.get<V4OpenlistBaselineStatus>(`/api/v4/sources/openlist/status?remote_root=${encodeURIComponent(remoteRoot)}`),
+  openlistStatus: (remoteRoot: string, connectionId?: string) =>
+    api.get<V4OpenlistBaselineStatus>(`/api/v4/sources/openlist/status?remote_root=${encodeURIComponent(remoteRoot)}${connectionId ? `&connection_id=${encodeURIComponent(connectionId)}` : ''}`),
 
   startDurableScan: (request: {
+    connection_id?: string
     source?: string
     root_path?: string
     tree_file?: string

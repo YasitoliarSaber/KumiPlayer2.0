@@ -243,6 +243,8 @@ def test_tracking_scan_all_enqueues_incremental_for_openlist_roots(tmp_path, mon
     monkeypatch.setattr(tracking_v4, "load_config", lambda: config)
     monkeypatch.setattr(tracking_v4, "resolve_openlist_credentials", lambda: ("kumi", "secret", "available"))
     from app.api import openlist_v4
+    monkeypatch.setattr('app.media_v4.sources.source_scan_runner.get_source_scan_runner',
+                        lambda _: SimpleNamespace(wake=lambda: None))
 
     monkeypatch.setattr(openlist_v4, "_client", lambda _config: object())
     monkeypatch.setattr(media_v4, "_configured_mirror_root", lambda: None)
@@ -254,7 +256,7 @@ def test_tracking_scan_all_enqueues_incremental_for_openlist_roots(tmp_path, mon
     assert response.status_code == 200, response.text
     tasks = response.json()["tasks"]
     assert tasks, response.text
-    assert tasks[0]["status"] == "running"
+    assert tasks[0]["status"] == "queued"
     assert tasks[0]["remote_root"] == "/Anime"
 
 

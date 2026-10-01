@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Button, Spinner } from '@fluentui/react-components';
 import {
   Database,
@@ -23,16 +23,14 @@ import type { TaskRecord } from '../api/types';
 import { useUiStore, type AppearanceMode } from '../stores/ui';
 import { BANGUMI_ACCESS_TOKEN_URL, getTmdbCredentialError, TMDB_API_SETTINGS_URL } from '../config/credentials';
 import DecodedImage from '../components/ui/DecodedImage';
-import OpenListSettingsPanel from '../components/settings/OpenListSettingsPanel';
+import OpenListSettingsPanel, { type OpenListDraft } from '../components/settings/OpenListSettingsPanel';
+import OpenListConnectionPicker from '../components/settings/OpenListConnectionPicker';
+import { openlistConnections, selectOpenlistConnection } from '../api/openlistConnections';
 import OpenListSourceRoutes from '../components/settings/OpenListSourceRoutes';
 import '../styles/settings-media-sources.css';
 import '../styles/settings-navigation.css';
 type SettingsTab = 'appearance' | 'sources' | 'openlist' | 'scrape' | 'player' | 'bangumi';
 type SourceKey = 'pan115' | 'baidu' | 'local';
-type OpenListDraft = Pick<OpenListConfigPayload, 'server_url' | 'remote_root' | 'mount_root' | 'username' | 'password'> & {
-  cache_ttl: string;
-  prefetch_limit: string;
-};
 
 const sectionTabs: Array<{ key: SettingsTab; label: string; icon: LucideIcon }> = [
   { key: 'bangumi', label: '账户与同步', icon: UserRound },
@@ -74,7 +72,12 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
   const loadLibrary = useLibraryStore((state) => state.loadLibrary);
   const { appearanceMode, setAppearanceMode, goPlayerTuning } = useUiStore();
   const [activeSection, setActiveSection] = useState<SettingsTab>('bangumi');
-  const [config, setConfig] = useState<PublicConfig | null>(null);
+  const [baseConfig, setConfig] = useState<PublicConfig | null>(null);
+  const [selectedConnectionId, setSelectedConnectionId] = useState('legacy');
+  const [connectionBusy, setConnectionBusy] = useState('');
+  const config = useMemo(() => baseConfig ? selectOpenlistConnection(baseConfig, selectedConnectionId) : null, [baseConfig, selectedConnectionId]);
+  const selectedConnectionRef = useRef(selectedConnectionId);
+  selectedConnectionRef.current = selectedConnectionId;
   const [configLoading, setConfigLoading] = useState(false);
   const [mpvRuntime, setMpvRuntime] = useState<MpvRuntimeStatus | null>(null);
   const [operationMessage, setOperationMessage] = useState('');
@@ -120,6 +123,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
   useEffect(() => {
     if (!config) return;
     setOpenlistDraft({
+      name: config.openlist_connection_name || '默认连接',
       server_url: config.openlist_server_url,
       remote_root: config.openlist_remote_root || '/',
       mount_root: config.openlist_mount_root,
@@ -128,12 +132,14 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
       cache_ttl: String(config.openlist_cache_ttl_minutes ?? 1440),
       prefetch_limit: String(config.openlist_prefetch_limit ?? 12),
     });
-  }, [config?.openlist_server_url, config?.openlist_remote_root, config?.openlist_mount_root, config?.openlist_configured, config?.openlist_cache_ttl_minutes, config?.openlist_prefetch_limit]);
+  }, [selectedConnectionId, config?.openlist_connection_name, config?.openlist_server_url, config?.openlist_remote_root, config?.openlist_mount_root, config?.openlist_configured, config?.openlist_cache_ttl_minutes, config?.openlist_prefetch_limit]);
 
   // 刷新来源目录（discover）：远端顶层目录 + 提供商建议合并进可编辑草稿。
   // auto=true 为启动时的自动读取（文案引导直接保存），false 为手动点击刷新。
   async function discoverRoutes(auto: boolean) {
-    const result = await openlistApi.discoverRoutes();
+    const identity = selectedConnectionId;
+    const result = await openlistApi.discoverRoutes(identity);
+    if (identity !== selectedConnectionRef.current) return;
     setRouteDiscoverItems(result.items);
     const saved = new Map(routeDraft.map((item) => [item.remote_prefix, item]));
     const discovered: OpenListRouteItem[] = result.items.map((item) => {
@@ -164,7 +170,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
     setRoutesLoaded(false);
     setRouteDiscoverItems([]);
     routeAutoDiscoverRef.current = false;
-    void openlistApi.getRoutes()
+    void openlistApi.getRoutes(selectedConnectionId)
       .then((result) => {
         if (cancelled) return;
         setOpenlistRoutes(result.routes);
@@ -183,7 +189,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
         if (!cancelled) setRoutesLoaded(true);
       });
     return () => { cancelled = true; };
-  }, [config?.openlist_configured, config?.openlist_server_url, config?.openlist_remote_root]);
+  }, [selectedConnectionId, config?.openlist_configured, config?.openlist_server_url, config?.openlist_remote_root]);
 
   // 已配置连接但没有任何已保存路由时，自动读取一次顶层目录建议；
   // 失败静默（保留手动「刷新来源目录」入口），避免每次重启都要求手动刷新。
@@ -414,13 +420,38 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
   const renderOpenList = () => (
     <PanelStack>
       <SectionIntro title="OpenList 设置" />
+      {baseConfig && <div className="settings-field-list">
+        <OpenListConnectionPicker connections={openlistConnections(baseConfig)} value={selectedConnectionId} disabled={Boolean(activeAction || connectionBusy)} onChange={(identity) => {
+          setSelectedConnectionId(identity);
+          setOpenlistNotice('');
+          setRouteNotice('');
+          setOpenlistRoutes([]);
+          setRouteDraft([]);
+          setRouteDiscoverItems([]);
+          setRoutesLoaded(false);
+        }} />
+        <Button appearance="secondary" disabled={Boolean(activeAction || connectionBusy)} onClick={() => void (async () => {
+          setConnectionBusy('add');
+          try {
+            const result = await openlistApi.createConnection('新连接');
+            await loadConfig();
+            setSelectedConnectionId(result.connection_id);
+            setOpenlistNotice('请填写新连接的地址、挂载位置和账号。');
+            setOpenlistNoticeKind('info');
+          } catch (error) { setOpenlistNotice((error as Error).message); setOpenlistNoticeKind('error'); }
+          finally { setConnectionBusy(''); }
+        })()}>添加连接</Button>
+      </div>}
       {config && (
         <SettingsSection title="连接服务">
           <OpenListSettingsPanel
+            key={selectedConnectionId}
             config={config}
             draft={openlistDraft}
             onChangeDraft={updateOpenlistDraft}
             onSaveConnection={async (payload, skipVerification) => {
+              setConnectionBusy('save');
+              try {
               const result = await openlistApi.saveConfig({
                 ...payload,
                 skip_verification: skipVerification ?? false,
@@ -433,14 +464,18 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
               report(result.message);
               // 由面板决定是否显示"连接正常"：只有后端确实探测成功才算
               return { verified: result.verified === true };
+              } finally { setConnectionBusy(''); }
             }}
             onTestConnection={async (payload) => {
+              setConnectionBusy('test');
+              try {
               // REWORK P0：allow_insecure_http 由面板风险确认状态决定，
               // 不在父级 hardcode true；返回后端 machine status code
               const result = await openlistApi.testConnection(payload);
               setOpenlistNoticeKind(result.ok ? 'success' : 'error');
               setOpenlistNotice(result.message);
               return result;
+              } finally { setConnectionBusy(''); }
             }}
             notice={openlistNotice}
             noticeKind={openlistNoticeKind}
@@ -455,15 +490,18 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
       {config && (
         <SettingsSection title="选择来源目录">
           <OpenListSourceRoutes
+            key={selectedConnectionId}
             configured={config.openlist_configured}
             routes={openlistRoutes}
             draft={routeDraft}
             discoverItems={routeDiscoverItems}
             notice={routeNotice}
             busy={activeAction}
-            onDiscover={() => discoverRoutes(false)}
+            onDiscover={async () => { setConnectionBusy('discover'); try { await discoverRoutes(false); } finally { setConnectionBusy(''); } }}
             onSave={async () => {
-              const result = await openlistApi.saveRoutes(routeDraft);
+              setConnectionBusy('routes');
+              try {
+              const result = await openlistApi.saveRoutes(routeDraft, selectedConnectionId);
               setOpenlistRoutes(result.routes);
               // 回填已保存路由（含后端生成的 route_id）：
               // 新发现目录保存后不再是「未保存更改」，重复保存也不会反复生成新 route_id。
@@ -476,6 +514,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
               })));
               setRouteNotice('来源目录已保存。可前往媒体管理选择目录并导入。');
               report('来源目录已保存');
+              } finally { setConnectionBusy(''); }
             }}
             onUpdateDraft={updateRouteDraft}
           />

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Checkbox, Dialog, DialogActions, DialogBody, DialogContent, DialogSurface, DialogTitle, Field, FluentProvider, Input, MessageBar, MessageBarBody, ProgressBar, Select, Spinner } from '@fluentui/react-components'
+import { openlistConnections, selectOpenlistConnection } from '../api/openlistConnections'
+import OpenListConnectionPicker from '../components/settings/OpenListConnectionPicker'
 import {
   Add24Regular,
   ArrowLeft24Regular,
@@ -294,7 +296,9 @@ export default function MediaManagementPage() {
   const [path, setPath] = useState('')
   const [provider, setProvider] = useState<Exclude<ProviderId, 'local' | 'other'>>('pan115')
   const [remoteRoot, setRemoteRoot] = useState('')
-  const [config, setConfig] = useState<PublicConfig | null>(null)
+  const [baseConfig, setConfig] = useState<PublicConfig | null>(null)
+  const [selectedConnectionId, setSelectedConnectionId] = useState('legacy')
+  const config = useMemo(() => baseConfig ? selectOpenlistConnection(baseConfig, selectedConnectionId) : null, [baseConfig, selectedConnectionId])
   const [routes, setRoutes] = useState<OpenListRoute[]>([])
   const [remoteBrowsing, setRemoteBrowsing] = useState(false)
   const [remoteAvailable, setRemoteAvailable] = useState(false)
@@ -350,20 +354,30 @@ export default function MediaManagementPage() {
 
   useEffect(() => {
     let alive = true
-    void Promise.all([
-      configApi.getConfig(),
-      openlistApi.getRoutes().catch(() => ({ routes: [] as OpenListRoute[] })),
-    ]).then(([nextConfig, routeResult]) => {
+    void configApi.getConfig().then((nextConfig) => {
       if (!alive) return
       setConfig(nextConfig)
-      setRoutes(routeResult.routes.length > 0 ? routeResult.routes : nextConfig.openlist_routes || [])
+      const initialConnection = openlistConnections(nextConfig).find((c) => c.openlist_configured)
+      setSelectedConnectionId(initialConnection?.connection_id || 'legacy')
       setPath((current) => current || nextConfig.local_root || '')
-      setRemoteRoot((current) => current || nextConfig.openlist_remote_root || '/')
+      setRemoteRoot((current) => current || initialConnection?.openlist_remote_root || '/')
     }).catch((cause) => {
       if (alive) setError(userFacingPageError(cause, '无法读取媒体来源设置'))
     })
     return () => { alive = false }
   }, [])
+
+  useEffect(() => {
+    if (!baseConfig) return
+    let cancelled = false
+    setRoutes([])
+    const selected = selectOpenlistConnection(baseConfig, selectedConnectionId)
+    const load = selectedConnectionId === 'legacy' ? openlistApi.getRoutes() : openlistApi.getRoutes(selectedConnectionId)
+    void load.then((result) => {
+      if (!cancelled) setRoutes(result.routes.length ? result.routes : selected.openlist_routes || [])
+    }).catch(() => { if (!cancelled) setRoutes(selected.openlist_routes || []) })
+    return () => { cancelled = true }
+  }, [baseConfig, selectedConnectionId])
 
   const refreshSourceCards = useCallback(async () => {
     if (sourceCardsRefreshInFlight.current) return
@@ -395,13 +409,13 @@ export default function MediaManagementPage() {
     const requestId = ++openlistBaselineRequest.current
     setOpenlistBaseline(null)
     try {
-      const status = await mediaV4Api.openlistStatus(remote)
+      const status = await (selectedConnectionId === 'legacy' ? mediaV4Api.openlistStatus(remote) : mediaV4Api.openlistStatus(remote, selectedConnectionId))
       if (requestId === openlistBaselineRequest.current) setOpenlistBaseline(status)
     } catch {
       // 凭据/连接未就绪时不阻塞浏览；扫描动作会给出可操作错误。
       if (requestId === openlistBaselineRequest.current) setOpenlistBaseline(null)
     }
-  }, [])
+  }, [selectedConnectionId])
 
   useEffect(() => {
     // 删除后返回相同目录也必须重新查询，不能沿用页面驻留期间的基线提示。
@@ -677,6 +691,7 @@ export default function MediaManagementPage() {
       }
       {
         const task = await mediaV4Api.startDurableScan({
+          ...(requiresOpenListConfig ? { connection_id: selectedConnectionId } : {}),
           source: requestSource,
           root_path: requestSource === 'local' ? path : kind === 'hybrid' ? remoteRoot : requestSource === 'openlist' ? remoteRoot : providerRoot(selectedProvider, remoteRoot) || 'tree',
           tree_file: requestSource === 'tree' || kind === 'hybrid' ? path : '',
@@ -873,6 +888,10 @@ export default function MediaManagementPage() {
   }
 
   const setSourceInputsFromCard = (card: V4SourceLibraryCard) => {
+    setSelectedConnectionId(card.connection_id || 'legacy')
+    setRemoteAvailable(false)
+    ++openlistBaselineRequest.current
+    setOpenlistBaseline(null)
     setBrowserSession((current) => current + 1)
     const nextProvider = card.provider === 'baidu' || card.provider === 'quark' ? card.provider : 'pan115'
     setProvider(nextProvider)
@@ -931,6 +950,7 @@ export default function MediaManagementPage() {
           // 用新 scan_id 会从根目录重扫，等于把已花的请求全部作废。
           await mediaV4Api.startDurableScan({
             source: 'openlist',
+            connection_id: card.connection_id || 'legacy',
             root_path: card.source_locator,
             provider: card.provider,
             source_root: '',
@@ -1325,6 +1345,21 @@ export default function MediaManagementPage() {
     }
   }
 
+  const renderConnectionPicker = () => baseConfig && <OpenListConnectionPicker
+    connections={openlistConnections(baseConfig)} value={selectedConnectionId} disabled={Boolean(busy)}
+    onChange={(identity) => {
+      ++openlistBaselineRequest.current
+      setOpenlistBaseline(null)
+      setRemoteAvailable(false)
+      setRemoteBrowsing(false)
+      setRoutes([])
+      setSelectedConnectionId(identity)
+      setRemoteRoot(selectOpenlistConnection(baseConfig, identity).openlist_remote_root || '/')
+      setBrowserSession((current) => current + 1)
+      clearResultState()
+    }}
+  />
+
   return (
     <div className="media-flow-page media-v4-page">
       <header className="media-flow-header">
@@ -1569,7 +1604,8 @@ export default function MediaManagementPage() {
 
           {kind === 'openlist' && (
             <div className="media-v4-workspace-body">
-              <OpenListFolderBrowser key={`openlist-${browserSession}`} configured={Boolean(config?.openlist_configured)} initialPath={remoteRoot || config?.openlist_remote_root || '/'} onLoadingChange={setRemoteBrowsing} onAvailabilityChange={setRemoteAvailable} onPathChange={handleRemotePathChange} onGoSettings={goSettings} />
+              {renderConnectionPicker()}
+              <OpenListFolderBrowser connectionId={selectedConnectionId === 'legacy' ? undefined : selectedConnectionId} key={`openlist-${selectedConnectionId}-${browserSession}`} configured={Boolean(config?.openlist_configured)} initialPath={remoteRoot || config?.openlist_remote_root || '/'} onLoadingChange={setRemoteBrowsing} onAvailabilityChange={setRemoteAvailable} onPathChange={handleRemotePathChange} onGoSettings={goSettings} />
               <div className="media-v4-mapping-note">
                 <Cloud24Regular aria-hidden="true" />
                 <div><strong>{selectedRemoteRoute ? '已匹配播放路径' : '当前目录尚未匹配播放路径'}</strong><span>{selectedRemoteRoute ? '播放位置由已保存的 OpenList 路由推导。' : '请先进入一个已配置内容来源的目录，才能开始扫描。'}</span></div>
@@ -1615,7 +1651,8 @@ export default function MediaManagementPage() {
                 </div>
                 <div className="media-v4-field-block">
                   <div className="media-v4-field-copy"><span className="media-v4-action-index">后续</span><strong>选择同一 OpenList 目录</strong><span>确认 TXT 基线后，增量只核对新增和变化目录。</span></div>
-                  <OpenListFolderBrowser key={`hybrid-${browserSession}`} configured={Boolean(config?.openlist_configured)} initialPath={remoteRoot || config?.openlist_remote_root || '/'} onLoadingChange={setRemoteBrowsing} onAvailabilityChange={setRemoteAvailable} onPathChange={handleRemotePathChange} onGoSettings={goSettings} />
+                  {renderConnectionPicker()}
+                  <OpenListFolderBrowser connectionId={selectedConnectionId === 'legacy' ? undefined : selectedConnectionId} key={`hybrid-${selectedConnectionId}-${browserSession}`} configured={Boolean(config?.openlist_configured)} initialPath={remoteRoot || config?.openlist_remote_root || '/'} onLoadingChange={setRemoteBrowsing} onAvailabilityChange={setRemoteAvailable} onPathChange={handleRemotePathChange} onGoSettings={goSettings} />
                 </div>
               </div>
               <div className="media-v4-mapping-note">

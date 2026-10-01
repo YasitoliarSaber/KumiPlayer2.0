@@ -9,6 +9,12 @@ from pathlib import Path
 from app.core.atomic_json import write_json_atomic
 from app.core.credential_store import SECURE_CREDENTIAL_STORE, CredentialStoreError
 from app.core.data_lock import DATA_WRITE_LOCK
+from app.core.openlist_connections import (
+    OpenListConnectionConfig,
+    credential_bindings,
+    public_connections,
+    select_connection,
+)
 from app.core.paths import get_data_dir
 
 _logger = logging.getLogger(__name__)
@@ -60,7 +66,7 @@ class AppConfig:
     local_root: str = ""
     directory_tree_dir: str = ""
 
-    # OpenList 目录连接（单实例，不按提供商重复配置）
+    # 旧 OpenList 连接字段保持兼容；新增连接以稳定标识隔离配置与凭据。
     # openlist_remote_root: OpenList 服务侧远端总根（如 /）
     # openlist_mount_root: 对应的本地总挂载根（如 K:\）
     # openlist_username / openlist_password 存 Windows Credential Manager
@@ -75,6 +81,8 @@ class AppConfig:
     openlist_cache_ttl_minutes: int = 1440
     openlist_prefetch_limit: int = 12
     openlist_routes: list = field(default_factory=list)
+    openlist_connection_name: str = "默认连接"
+    openlist_connections: list[OpenListConnectionConfig] = field(default_factory=list)
 
     # TMDB
     tmdb_bearer_token: str = ""
@@ -135,6 +143,7 @@ class AppConfig:
         password = d.pop("openlist_password", "")
         d["openlist_configured"] = bool(username and password)
         d["openlist_username_masked"] = _mask_username(username)
+        d["openlist_connections"] = public_connections(self)
         return d
 
 
@@ -164,7 +173,7 @@ def openlist_credential_state() -> str:
         return "unavailable"
     return "found" if (username and password) else "missing"
 
-def resolve_openlist_credentials() -> tuple[str, str, str]:
+def resolve_openlist_credentials(connection_id: str = "") -> tuple[str, str, str]:
     """解析真实已保存的 OpenList 凭据，返回 ``(username, password, state)``。
 
     ``state`` 固定为 ``found`` / ``missing`` / ``unavailable``。
@@ -178,17 +187,18 @@ def resolve_openlist_credentials() -> tuple[str, str, str]:
       绝不触发任何 mutation。
     """
     if not _credential_storage_enabled():
-        cfg = load_config()
+        cfg = select_connection(load_config(), connection_id)
         if cfg.openlist_username and cfg.openlist_password:
             return cfg.openlist_username, cfg.openlist_password, "found"
         return "", "", "missing"
     try:
-        cached = load_config()
+        cached = select_connection(load_config(), connection_id)
         if cached.openlist_username and cached.openlist_password:
             return cached.openlist_username, cached.openlist_password, "found"
         # stale/partial cache：直接回源读取 secure store（恢复后无需重启）
-        username = SECURE_CREDENTIAL_STORE.read("openlist_username")
-        password = SECURE_CREDENTIAL_STORE.read("openlist_password")
+        prefix = f"openlist:{connection_id}:" if connection_id and connection_id != "legacy" else "openlist_"
+        username = SECURE_CREDENTIAL_STORE.read(prefix + "username")
+        password = SECURE_CREDENTIAL_STORE.read(prefix + "password")
     except CredentialStoreError:
         return "", "", "unavailable"
     if username and password:
@@ -231,6 +241,10 @@ def _persist_config_payload(config: AppConfig, *, cleared_keys: set[str] | None 
         payload = asdict(config)
         written: list[tuple[str, str]] = []  # (key, 旧值)
         cleared = cleared_keys or set()
+        if CONFIG_FILE is None and not _credential_storage_enabled() and any(
+            c.openlist_username or c.openlist_password for c in config.openlist_connections
+        ):
+            raise CredentialStoreError("本机安全凭据存储不可用，无法保存新增连接凭据")
         if _credential_storage_enabled():
             # 凭据由安全存储接管：捕获本次待处理凭据新值后统一置空，
             # 杜绝明文凭据写入 config.json。
@@ -240,11 +254,16 @@ def _persist_config_payload(config: AppConfig, *, cleared_keys: set[str] | None 
             }
             for key in _CREDENTIAL_FIELDS:
                 payload[key] = ""
+            for index, record in enumerate(config.openlist_connections):
+                for attr in ("openlist_username", "openlist_password"):
+                    key = f"openlist:{record.connection_id}:{attr.removeprefix('openlist_')}"
+                    pending_values[key] = getattr(record, attr)
+                    payload["openlist_connections"][index][attr] = ""
             # 只处理需要 SET / CLEAR 的字段；KEEP 字段完全不读写安全存储，
             # 无关配置保存在 store 暂时不可读时也正常成功。
             pending = [
                 key
-                for key in _CREDENTIAL_FIELDS
+                for key in pending_values
                 if pending_values.get(key) or key in cleared
             ]
             try:
@@ -308,6 +327,13 @@ def _hydrate_secure_credentials(config: AppConfig, file_data: dict) -> bool:
         stored_value = SECURE_CREDENTIAL_STORE.read(key)
         if stored_value:
             setattr(config, key, stored_value)
+    for target, attr, key in credential_bindings(config):
+        legacy_value = getattr(target, attr)
+        if legacy_value:
+            SECURE_CREDENTIAL_STORE.write(key, legacy_value)
+            migrated_plaintext = True
+        else:
+            setattr(target, attr, SECURE_CREDENTIAL_STORE.read(key) or "")
     return migrated_plaintext
 
 
@@ -331,15 +357,23 @@ def load_config(force_reload: bool = False) -> AppConfig:
             valid_keys = {f.name for f in AppConfig.__dataclass_fields__.values()}
             filtered = {k: v for k, v in data.items() if k in valid_keys}
             # 嵌套 dataclass 字段反序列化（OpenList 路由表）
+            from app.integrations.openlist.providers import OpenListRouteConfig
+
             routes = filtered.get("openlist_routes") or []
             if isinstance(routes, list):
-                from app.integrations.openlist.providers import OpenListRouteConfig
-
                 filtered["openlist_routes"] = [
                     OpenListRouteConfig(**item) for item in routes if isinstance(item, dict)
                 ]
             else:
                 filtered["openlist_routes"] = []
+            connections = []
+            for item in filtered.get("openlist_connections") or []:
+                record = dict(item)
+                record["openlist_routes"] = [OpenListRouteConfig(**r) for r in record.get("openlist_routes", [])]
+                connections.append(OpenListConnectionConfig(**record))
+            if len({c.connection_id for c in connections}) != len(connections):
+                raise ValueError("OpenList 连接标识重复")
+            filtered["openlist_connections"] = connections
             config = AppConfig(**filtered)
             try:
                 migrated_credentials = _hydrate_secure_credentials(config, data)
