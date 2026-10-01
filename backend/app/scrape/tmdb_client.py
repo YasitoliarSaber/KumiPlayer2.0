@@ -439,7 +439,7 @@ class TMDBClient:
         """
         params = {
             "language": self._language,
-            "append_to_response": "images,credits,external_ids,alternative_titles,translations,content_ratings",
+            "append_to_response": "images,external_ids,alternative_titles,translations,content_ratings",
             "include_image_language": _IMAGE_LANGUAGES,
         }
         return self._request("GET", f"/tv/{tmdb_id}", params=params)
@@ -451,16 +451,16 @@ class TMDBClient:
         """
         params = {
             "language": self._language,
-            "append_to_response": "images,credits,external_ids,alternative_titles,translations,release_dates",
+            "append_to_response": "images,external_ids,alternative_titles,translations,release_dates",
             "include_image_language": _IMAGE_LANGUAGES,
         }
         return self._request("GET", f"/movie/{tmdb_id}", params=params)
 
     def get_tv_season_detail(self, tmdb_id: int, season_number: int) -> dict:
-        """获取 TV 季详情（含图片、演职员、翻译）"""
+        """获取 TV 季详情（含图片、外部 ID、翻译）"""
         params = {
             "language": self._language,
-            "append_to_response": "images,credits,external_ids,translations",
+            "append_to_response": "images,external_ids,translations",
             "include_image_language": _IMAGE_LANGUAGES,
         }
         return self._request("GET", f"/tv/{tmdb_id}/season/{season_number}", params=params)
@@ -479,10 +479,10 @@ class TMDBClient:
         season_number: int,
         episode_number: int,
     ) -> dict:
-        """获取 TV 单集详情（含图片、演职员、翻译）"""
+        """获取 TV 单集详情（含图片、外部 ID、翻译）"""
         params = {
             "language": self._language,
-            "append_to_response": "images,credits,external_ids,translations",
+            "append_to_response": "images,external_ids,translations",
             "include_image_language": _IMAGE_LANGUAGES,
         }
         return self._request(

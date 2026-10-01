@@ -1006,7 +1006,8 @@ def _extract_aliases(detail: dict, media_type: str) -> list[str]:
     """从详情 alternative_titles / translations 提取可信本地化标题别名。"""
 
     aliases: list[str] = []
-    alternative = (detail.get("alternative_titles") or {}).get("results") or []
+    alternative_key = "titles" if media_type == "movie" else "results"
+    alternative = (detail.get("alternative_titles") or {}).get(alternative_key) or []
     for item in alternative:
         title = str(item.get("title") or "").strip()
         if title:
