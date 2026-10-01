@@ -78,6 +78,8 @@ class ConfigPatch(BaseModel):
     anilist_rate_limit: float | None = None
     anilist_timeout: int | None = None
     deepseek_api_key: str | None = None
+    alias_web_recovery_enabled: bool | None = None
+    websearch_api_key: str | None = None
     tmdb_rate_limit: float | None = None
     tmdb_max_retries: int | None = None
     tmdb_timeout: int | None = None

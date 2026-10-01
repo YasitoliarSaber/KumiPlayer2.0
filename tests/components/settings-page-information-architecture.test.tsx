@@ -79,6 +79,20 @@ const config = {
 };
 
 describe('SettingsPage 信息架构', () => {
+  test('联网名称核对复用元数据分类，默认关闭并独立保存密钥', async () => {
+    api.getConfig.mockResolvedValue({ ...config, alias_web_recovery_enabled: false, websearch_configured: true, deepseek_configured: true });
+    api.patchConfig.mockImplementation(async (patch) => ({ ...config, ...patch, websearch_configured: true, deepseek_configured: true }));
+    render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: '元数据与图片' }));
+    fireEvent.click(screen.getByText('联网名称核对（可选）'));
+    expect(screen.getByRole('combobox', { name: '联网名称核对' })).toHaveValue('off');
+    expect(screen.getByLabelText('Tavily 搜索密钥')).toHaveValue('');
+    expect(screen.getByLabelText('DeepSeek 密钥')).toHaveValue('');
+    fireEvent.change(screen.getByLabelText('Tavily 搜索密钥'), { target: { value: 'fixture-search' } });
+    fireEvent.click(within(screen.getByLabelText('Tavily 搜索密钥').parentElement!).getByRole('button', { name: '保存' }));
+    expect(api.patchConfig).toHaveBeenCalledWith({ websearch_api_key: 'fixture-search' });
+    expect(screen.getByText(/只发送作品名称与年份/)).toBeVisible();
+  });
   beforeEach(() => {
     api.getConfig.mockResolvedValue(config);
     api.getMpvRuntime.mockResolvedValue({

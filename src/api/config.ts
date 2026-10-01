@@ -55,6 +55,10 @@ export interface PublicConfig {
   anilist_rate_limit: number
   anilist_timeout: number
   deepseek_api_key: string
+  deepseek_configured?: boolean
+  alias_web_recovery_enabled?: boolean
+  websearch_api_key?: string
+  websearch_configured?: boolean
   tmdb_rate_limit: number
   tmdb_max_retries: number
   tmdb_timeout: number

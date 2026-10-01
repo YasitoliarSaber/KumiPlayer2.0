@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Button, Spinner } from '@fluentui/react-components';
 import {
   Database,
@@ -394,6 +394,21 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
               ]}
               onSave={(value) => saveConfig({ artwork_storage_mode: value as PublicConfig['artwork_storage_mode'] })}
             />
+          </div>
+        </SettingsSection>
+      )}
+      {config && (
+        <SettingsSection title="联网名称核对（可选）" collapsible>
+          <div className="settings-field-list">
+            <span className="field-help">仅在常规刮削无法安全确认名称时使用。只发送作品名称与年份进行搜索，并将相关公开网页内容交给 DeepSeek 提取名称；不发送文件路径或网盘账户，结果仍由 TMDB 核对。</span>
+            <SelectRow label="联网名称核对" value={config.alias_web_recovery_enabled ? 'on' : 'off'}
+              options={[{ value: 'off', label: '关闭（默认）' }, { value: 'on', label: '启用' }]}
+              onSave={(value) => saveConfig({ alias_web_recovery_enabled: value === 'on' })} />
+            <ConfigRow label="Tavily 搜索密钥" secret value={config.websearch_configured ? 'configured' : ''}
+              placeholder="粘贴应用使用的 Tavily API Key" onSave={(value) => saveConfig({ websearch_api_key: value.trim() })} />
+            <ConfigRow label="DeepSeek 密钥" secret value={config.deepseek_configured || config.deepseek_api_key ? 'configured' : ''}
+              placeholder="粘贴 DeepSeek API Key" onSave={(value) => saveConfig({ deepseek_api_key: value.trim() })} />
+            <span className="field-help">需同时保存两个密钥并启用开关；密钥保存在本机安全凭据存储中。</span>
           </div>
         </SettingsSection>
       )}
@@ -833,15 +848,16 @@ function SettingsSection({ title, action, children, collapsible = false, classNa
 }
 
 function ConfigRow({ label, value, onSave, secret = false, placeholder = '' }: { label: string; value: string; onSave: (value: string) => void; secret?: boolean; placeholder?: string }) {
+  const inputId = useId();
   const initialDraft = secret ? '' : value || '';
   const [draft, setDraft] = useState(initialDraft);
   useEffect(() => setDraft(secret ? '' : value || ''), [secret, value]);
   const resolvedPlaceholder = secret && value ? '已配置；粘贴新凭据可替换' : placeholder;
   return (
     <div className="settings-config-row">
-      <label>{label}</label>
-      <input type={secret ? 'password' : 'text'} value={draft} onChange={(event) => setDraft(event.target.value)} className="settings-input" placeholder={resolvedPlaceholder} autoComplete={secret ? 'off' : undefined} />
-      <GhostButton onClick={() => onSave(draft)} disabled={secret && !draft.trim()}>保存</GhostButton>
+      <label htmlFor={inputId}>{label}</label>
+      <input id={inputId} type={secret ? 'password' : 'text'} value={draft} onChange={(event) => setDraft(event.target.value)} className="settings-input" placeholder={resolvedPlaceholder} autoComplete={secret ? 'off' : undefined} />
+      <GhostButton onClick={() => { onSave(draft); if (secret) setDraft(''); }} disabled={secret && !draft.trim()}>保存</GhostButton>
     </div>
   );
 }
@@ -859,12 +875,13 @@ function NumberRow({ label, value, onSave }: { label: string; value: number; onS
 }
 
 function SelectRow({ label, value, options, onSave }: { label: string; value: string; options: Array<{ value: string; label: string }>; onSave: (value: string) => void }) {
+  const inputId = useId();
   const [draft, setDraft] = useState(value || '');
   useEffect(() => setDraft(value || ''), [value]);
   return (
     <div className="settings-config-row">
-      <label>{label}</label>
-      <select value={draft} onChange={(event) => setDraft(event.target.value)} className="settings-input">
+      <label htmlFor={inputId}>{label}</label>
+      <select id={inputId} value={draft} onChange={(event) => setDraft(event.target.value)} className="settings-input">
         {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
       </select>
       <GhostButton onClick={() => onSave(draft)}>保存</GhostButton>

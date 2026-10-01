@@ -23,7 +23,7 @@ _logger = logging.getLogger(__name__)
 CONFIG_FILE: Path | None = None
 DEFAULT_BANGUMI_USER_AGENT = "KumiPlayer/2.0 (+https://github.com/kumiplayer/kumiplayer)"
 # 需要脱敏的字段
-_SENSITIVE_FIELDS = {"tmdb_bearer_token", "deepseek_api_key", "bangumi_access_token", "openlist_password"}
+_SENSITIVE_FIELDS = {"tmdb_bearer_token", "deepseek_api_key", "websearch_api_key", "bangumi_access_token", "openlist_password"}
 # 需要存入 Windows Credential Manager 的字段（含不脱敏但同样不落配置文件的用户名）
 _CREDENTIAL_FIELDS = _SENSITIVE_FIELDS | {"openlist_username"}
 
@@ -97,6 +97,9 @@ class AppConfig:
 
     # DeepSeek
     deepseek_api_key: str = ""
+    # 可选的后置联网名称核对；应用自己的搜索凭据，不复用开发工具凭据。
+    alias_web_recovery_enabled: bool = False
+    websearch_api_key: str = ""
     tmdb_rate_limit: float = 0.12
     tmdb_max_retries: int = 2
     tmdb_timeout: int = 10
@@ -130,6 +133,8 @@ class AppConfig:
     def to_public_dict(self) -> dict:
         """返回脱敏后的配置字典，用于 API 响应"""
         d = asdict(self)
+        d["websearch_configured"] = bool(d.pop("websearch_api_key", ""))
+        d["deepseek_configured"] = bool(self.deepseek_api_key)
         for key in _SENSITIVE_FIELDS:
             val = d.get(key, "")
             if val:
@@ -153,6 +158,20 @@ _cached_config: AppConfig | None = None
 def _credential_storage_enabled() -> bool:
     """测试覆盖配置文件时保持隔离；正式 Windows 配置使用凭据管理器。"""
     return CONFIG_FILE is None and SECURE_CREDENTIAL_STORE.available
+
+
+def resolve_name_recovery_credentials() -> tuple[str, str]:
+    """读取应用的搜索/名称提取凭据；安全存储读取失败时关闭本次救援。"""
+    config = load_config()
+    if CONFIG_FILE is not None:
+        return config.websearch_api_key, config.deepseek_api_key
+    if not _credential_storage_enabled():
+        return "", ""
+    try:
+        return (config.websearch_api_key or SECURE_CREDENTIAL_STORE.read("websearch_api_key") or "",
+                config.deepseek_api_key or SECURE_CREDENTIAL_STORE.read("deepseek_api_key") or "")
+    except CredentialStoreError:
+        return "", ""
 
 
 def openlist_credential_state() -> str:
@@ -241,6 +260,9 @@ def _persist_config_payload(config: AppConfig, *, cleared_keys: set[str] | None 
         payload = asdict(config)
         written: list[tuple[str, str]] = []  # (key, 旧值)
         cleared = cleared_keys or set()
+        if (CONFIG_FILE is None and not _credential_storage_enabled()
+                and (config.websearch_api_key or config.deepseek_api_key)):
+            raise CredentialStoreError("本机安全凭据存储不可用，无法保存联网核对凭据")
         if CONFIG_FILE is None and not _credential_storage_enabled() and any(
             c.openlist_username or c.openlist_password for c in config.openlist_connections
         ):

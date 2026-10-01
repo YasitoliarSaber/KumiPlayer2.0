@@ -3,8 +3,9 @@
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-from app.core.config import load_config
+from app.core.config import load_config, resolve_name_recovery_credentials
 from app.media_v4.jobs.metadata import _target_titles, default_metadata_provider
+from app.media_v4.jobs.web_name_recovery import web_names
 from app.scrape.alias_contract import AliasEvidence, clean_aliases
 from app.scrape.provider_budget import ProviderDeferred, acquire, cool_down
 
@@ -86,7 +87,13 @@ def recover_metadata(target: dict, *, metadata_provider: Callable = default_meta
     if (result.get("metadata_state") == "ready" or target.get("provider_bindings")
             or result.get("reason_code") not in NAME_REASONS or should_cancel()):
         return {**result, "alias_recovery_trace": trace}
-    for name_provider in name_providers if name_providers is not None else (anilist_names, bangumi_names):
+    providers = name_providers
+    if providers is None:
+        providers = [anilist_names, bangumi_names]
+        if (getattr(load_config(), 'alias_web_recovery_enabled', False)
+                and all(resolve_name_recovery_credentials())):
+            providers.append(web_names)
+    for name_provider in providers:
         if should_cancel():
             break
         cached = cache.get(target, name_provider.__name__) if cache is not None else None
