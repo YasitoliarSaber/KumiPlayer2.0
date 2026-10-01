@@ -31,7 +31,8 @@ test('unknown 视频保留未分季并可播放，不显示 S00E00', async () =>
   expect(container.textContent).not.toContain('S00E00');
   expect(container.textContent).toContain('未分季');
   expect(container.textContent).toContain('资料已保留，刷新失败');
-  expect(container.textContent).toContain('剧集资料 1/2');
+  // 详情页的映射进度文案已由「剧集资料」改为「分集资料」（提交 1e5e6d4）。
+  expect(container.textContent).toContain('分集资料 1/2');
   expect(container.querySelector('[data-episode-id="unknown-b"]')).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: '播放第 ? 集：未知内容甲' }));
   await waitFor(() => expect(play).toHaveBeenCalled());
