@@ -14,6 +14,7 @@ from app.playback.mpv_runtime import (
     check_mpv_runtime,
     get_mpv_manifest_path,
     load_runtime_manifest,
+    resolve_external_mpv_path,
 )
 
 SW_SHOW = 5
@@ -120,6 +121,9 @@ def start_mpv(
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
     }
+    if external_mode:
+        # 整合包辅助程序和相对资源以自身目录为基准，不能继承后端工作目录。
+        kwargs["cwd"] = str(executable.parent)
     startupinfo = _windows_startupinfo()
     if startupinfo is not None:
         kwargs["startupinfo"] = startupinfo
@@ -187,11 +191,7 @@ def _resolve_player_executable() -> tuple[Path, bool]:
     external_path = str(getattr(config, "external_mpv_path", "") or "").strip() or str(
         getattr(config, "mpv_path", "") or ""
     ).strip()
-    if not external_path or not Path(external_path).is_file():
-        raise RuntimeError(
-            "外部播放器不可用：请在设置中选择有效的 MPV 可执行文件（当前播放模式为外部整合包）"
-        )
-    return Path(external_path), True
+    return resolve_external_mpv_path(external_path), True
 
 
 def _build_mpv_args(

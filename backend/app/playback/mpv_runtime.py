@@ -83,6 +83,7 @@ def _build_file_snapshot(
     """
     runtime_dir = get_mpv_runtime_dir()
     config_dir = get_mpv_config_dir()
+    layer_dir = get_kumiplayer_layer_dir()
     manifest_path = get_mpv_manifest_path()
     snapshot: dict = {}
 
@@ -108,15 +109,18 @@ def _build_file_snapshot(
                 pass
 
     # 配置与脚本文件
-    for name in REQUIRED_CONFIG_FILES:
+    for name in ("mpv.conf", "input.conf"):
         target = config_dir / name
         try:
             stat = target.stat()
             snapshot[str(target)] = (stat.st_mtime_ns, stat.st_size)
         except OSError:
             pass
-    for name in REQUIRED_SCRIPTS:
-        target = config_dir / "scripts" / name
+    for target in (
+        *(layer_dir / name for name in REQUIRED_CONFIG_FILES),
+        *(layer_dir / "scripts" / name for name in REQUIRED_SCRIPTS),
+        *(config_dir / "scripts" / name for name in REQUIRED_SCRIPTS),
+    ):
         try:
             stat = target.stat()
             snapshot[str(target)] = (stat.st_mtime_ns, stat.st_size)
@@ -180,6 +184,14 @@ def _load_disk_runtime_check() -> dict | None:
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(data, dict) or not isinstance(data.get("file_snapshot"), dict):
+        return None
+    # 旧快照只跟踪 portable_config，不能证明现在独立的自有层仍然完整。
+    layer_dir = get_kumiplayer_layer_dir()
+    required_paths = (
+        *(layer_dir / name for name in REQUIRED_CONFIG_FILES),
+        *(layer_dir / "scripts" / name for name in REQUIRED_SCRIPTS),
+    )
+    if any(str(path) not in data["file_snapshot"] for path in required_paths):
         return None
     return data
 
@@ -287,6 +299,8 @@ def read_mpv_version(exe: Path) -> tuple[str, str]:
             encoding="utf-8",
             errors="replace",
             timeout=_VERSION_TIMEOUT_SECONDS,
+            cwd=str(exe.parent),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except subprocess.TimeoutExpired:
         return "", "mpv 版本检测超时"
@@ -296,6 +310,34 @@ def read_mpv_version(exe: Path) -> tuple[str, str]:
         return "", (result.stderr.strip()[:120] or "mpv 版本检测失败")
     first_line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else "unknown"
     return first_line, ""
+
+
+def resolve_external_mpv_path(value: str) -> Path:
+    """接受 MPV 可执行文件或整合包目录，不搜索 PATH、不静默回退。"""
+    raw = str(value or "").strip().strip('"')
+    target = Path(raw).expanduser()
+    if raw and target.is_dir():
+        target = target / "mpv.exe"
+    if not raw or target.suffix.casefold() != ".exe" or not target.is_file():
+        raise RuntimeError("外部播放器不可用：请选择 MPV 可执行文件或包含 mpv.exe 的整合包目录")
+    return target.resolve()
+
+
+def inspect_external_mpv(value: str) -> dict:
+    """只检查用户选择的整合包；不注入脚本、不修改配置。"""
+    try:
+        executable = resolve_external_mpv_path(value)
+    except (RuntimeError, OSError, ValueError) as exc:
+        return {"ok": False, "message": str(exc)}
+    version, error = read_mpv_version(executable)
+    if error or not version.casefold().startswith("mpv "):
+        return {"ok": False, "message": error or "所选程序未返回有效的 MPV 版本"}
+    return {
+        "ok": True,
+        "message": f"外部播放器已就绪: {version}",
+        "version": version,
+        "executable_path": str(executable),
+    }
 
 
 def check_mpv_runtime(*, verify_files: bool = True) -> dict:
@@ -421,7 +463,6 @@ def build_mpv_playback_args(
         args = [str(executable)]
         if ipc_server:
             args.append(f"--input-ipc-server={ipc_server}")
-        args.append(f"--start={max(0.0, start_position):.3f}")
         args.extend([
             f"--title={window_title or 'KumiPlayer'}",
             f"--force-media-title={media_title or Path(first_file).stem}",
@@ -431,7 +472,7 @@ def build_mpv_playback_args(
         ])
         if not fallback:
             args.extend(["--force-window=immediate", "--focus-on=all", "--window-minimized=no"])
-        args.extend(playlist_paths or ([first_file] if first_file else []))
+        args.extend(_playlist_args(playlist_paths, first_file, start_position))
         return args
 
     config_dir = get_mpv_config_dir()
@@ -505,14 +546,12 @@ def build_mpv_playback_args(
         pass
     if ipc_server:
         args.append(f"--input-ipc-server={ipc_server}")
-    args.append(f"--start={max(0.0, start_position):.3f}")
     args.extend([
         f"--title={window_title or 'KumiPlayer'}",
         f"--force-media-title={media_title or Path(first_file).stem}",
         "--save-position-on-quit=no",
         "--no-resume-playback",
         "--autocreate-playlist=no",
-        "--reset-on-next-file=start",
         "--no-terminal",
     ])
     if not fallback:
@@ -529,5 +568,14 @@ def build_mpv_playback_args(
             "--auto-window-resize=no",
             "--fullscreen=no",
         ])
-    args.extend(playlist_paths or ([first_file] if first_file else []))
+    args.extend(_playlist_args(playlist_paths, first_file, start_position))
     return args
+
+
+def _playlist_args(playlist_paths: list[str] | None, first_file: str, start_position: float) -> list[str]:
+    paths = playlist_paths or ([first_file] if first_file else [])
+    if not paths:
+        return []
+    # --start 是持久选项；reset-on-next-file 也会恢复到命令行起点。
+    # 用 MPV 文件局部参数组，让续播只作用于首个条目，下一集从头播放。
+    return ["--{", f"--start={max(0.0, start_position):.3f}", paths[0], "--}", *paths[1:]]

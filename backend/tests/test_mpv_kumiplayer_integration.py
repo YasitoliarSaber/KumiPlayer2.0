@@ -10,9 +10,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from fastapi.testclient import TestClient
+
 from app.core.config import invalidate_config_cache
 from app.main import app
-from fastapi.testclient import TestClient
 
 
 @pytest.fixture
@@ -691,6 +692,38 @@ def test_mpv_runtime_cache_invalidates_on_config_change(tmp_path, monkeypatch):
     assert status3["files_valid"] is True
 
 
+@pytest.mark.parametrize("relative_path", ["mpv.conf", "scripts/kumiplayer_anime4k.lua"])
+def test_mpv_runtime_cache_tracks_own_layer_files(tmp_path, monkeypatch, relative_path):
+    from app.playback import mpv_runtime
+
+    _setup_runtime(tmp_path, monkeypatch)
+    monkeypatch.setattr(mpv_runtime, "read_mpv_version", lambda _: ("mpv v0.41.0", ""))
+    mpv_runtime.invalidate_mpv_runtime_cache()
+    assert mpv_runtime.check_mpv_runtime(verify_files=True)["configuration_available"] is True
+    (tmp_path / "kumiplayer" / relative_path).unlink()
+
+    assert mpv_runtime.check_mpv_runtime(verify_files=False)["configuration_available"] is False
+
+
+def test_disk_cache_without_own_layer_is_not_reused(tmp_path, monkeypatch):
+    from app.playback import mpv_runtime
+
+    _setup_runtime(tmp_path, monkeypatch)
+    monkeypatch.setattr(mpv_runtime, "read_mpv_version", lambda _: ("mpv v0.41.0", ""))
+    mpv_runtime.invalidate_mpv_runtime_cache()
+    mpv_runtime.check_mpv_runtime(verify_files=True)
+    disk = mpv_runtime._load_disk_runtime_check()
+    disk["file_snapshot"] = {
+        key: value for key, value in disk["file_snapshot"].items()
+        if "kumiplayer" not in Path(key).parts
+    }
+    mpv_runtime._runtime_check_path().write_text(json.dumps(disk), encoding="utf-8")
+    mpv_runtime.invalidate_mpv_runtime_cache()
+    (tmp_path / "kumiplayer" / "mpv.conf").unlink()
+
+    assert mpv_runtime.check_mpv_runtime(verify_files=False)["configuration_available"] is False
+
+
 def test_mpv_runtime_cache_invalidates_on_script_change(tmp_path, monkeypatch):
     """修改必需 Lua 脚本后缓存应失效，播放链路须重新校验。"""
     from app.playback import mpv_runtime
@@ -837,7 +870,7 @@ def test_start_mpv_blocks_popen_when_lua_script_is_missing(tmp_path, monkeypatch
     with patch("app.playback.mpv_runtime.read_mpv_version") as mock_version:
         mock_version.return_value = ("mpv v0.41.0", "")
         with patch("subprocess.Popen") as mock_popen:
-            with pytest.raises(FileNotFoundError, match="KumiPlayer MPV 插件缺失"):
+            with pytest.raises(RuntimeError, match="KumiPlayer 播放配置不完整"):
                 mpv.start_mpv(str(strm))
             mock_popen.assert_not_called()
 

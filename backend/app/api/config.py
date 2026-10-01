@@ -15,7 +15,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,7 +27,7 @@ from app.core.config import (
 )
 from app.core.runtime import get_default_mirror_dir, get_mpv_config_dir, get_mpv_runtime_dir
 from app.integrations.bangumi import BangumiClient, BangumiError
-from app.playback.mpv_runtime import check_mpv_runtime
+from app.playback.mpv_runtime import check_mpv_runtime, inspect_external_mpv, resolve_external_mpv_path
 from app.scrape.tmdb_client import TMDBClient
 
 router = APIRouter(prefix="/api/config", tags=["config"])
@@ -113,6 +113,13 @@ class MpvPathRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mpv_path: str
+    player_mode: Literal["internal", "external"] = "internal"
+
+
+class MpvConfigDirectoryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    player_mode: Literal["internal", "external"] = "internal"
 
 
 def _probe_media_path_states(
@@ -354,21 +361,29 @@ def get_setup_status():
 @router.post("/test/mpv-path")
 def test_mpv_path(req: MpvPathRequest):
     """验证尚未保存的 MPV 路径，供首次启动引导使用。"""
+    if req.player_mode == "external":
+        return inspect_external_mpv(req.mpv_path)
     return _inspect_mpv(req.mpv_path.strip(), require_file=True)
 
 
 @router.post("/setup/complete")
 def complete_setup(req: SetupCompleteRequest):
-    # 首次引导不再要求用户选择外部 MPV；播放默认使用内置干净 MPV，缺失时明确报错。
-    runtime_status = check_mpv_runtime(verify_files=True)
-    if not runtime_status["available"]:
-        raise HTTPException(status_code=400, detail="KumiPlayer 内置播放器未就绪，请修复后重试")
-    if not runtime_status["manifest_valid"]:
-        raise HTTPException(status_code=400, detail="KumiPlayer 内置 MPV 运行时清单缺失或非法，无法完成设置")
-    if not runtime_status["files_valid"]:
-        raise HTTPException(status_code=400, detail="KumiPlayer 内置 MPV 运行文件校验失败，无法完成设置")
-    if not runtime_status["configuration_available"]:
-        raise HTTPException(status_code=400, detail="KumiPlayer 播放配置不完整，无法完成设置")
+    # 重新运行引导时沿用已保存模式，外部整合包不依赖内置运行时。
+    config = copy.deepcopy(load_config())
+    if config.player_mode == "external":
+        status = inspect_external_mpv(config.external_mpv_path or config.mpv_path)
+        if not status["ok"]:
+            raise HTTPException(status_code=400, detail=status["message"])
+    else:
+        runtime_status = check_mpv_runtime(verify_files=True)
+        if not runtime_status["available"]:
+            raise HTTPException(status_code=400, detail="KumiPlayer 内置播放器未就绪，请修复后重试")
+        if not runtime_status["manifest_valid"]:
+            raise HTTPException(status_code=400, detail="KumiPlayer 内置 MPV 运行时清单缺失或非法，无法完成设置")
+        if not runtime_status["files_valid"]:
+            raise HTTPException(status_code=400, detail="KumiPlayer 内置 MPV 运行文件校验失败，无法完成设置")
+        if not runtime_status["configuration_available"]:
+            raise HTTPException(status_code=400, detail="KumiPlayer 播放配置不完整，无法完成设置")
 
     mirror_dir = Path(req.mirror_dir).expanduser()
 
@@ -396,7 +411,6 @@ def complete_setup(req: SetupCompleteRequest):
     ):
         raise HTTPException(status_code=400, detail="目录树文件目录不存在或不可访问")
 
-    config = load_config()
     # mpv_path 仅保留数据兼容；旧值不删除，但播放不再以它为依据。
     requested_mpv_path = req.mpv_path.strip()
     if requested_mpv_path:
@@ -454,13 +468,22 @@ def get_mpv_runtime_status():
 
 
 @router.post("/mpv-runtime/open-config")
-def open_mpv_config_dir():
-    """在资源管理器中打开 KumiPlayer 内置 MPV 的配置目录（快捷设置入口）。
+def open_mpv_config_dir(req: MpvConfigDirectoryRequest | None = None):
+    """打开所选模式的 MPV 配置目录（不传模式时沿用内置入口）。
 
-    只打开 KumiPlayer 自有的 mpv 配置目录（portable_config），不接受前端传入的
-    任意路径，避免把"打开文件夹"能力暴露成任意路径打开接口。
+    外部模式只使用已保存的播放器路径，不接受前端传入任意目录，
+    不创建或改写整合包配置。
     """
     config_dir = get_mpv_config_dir()
+    if req is not None and req.player_mode == "external":
+        config = load_config()
+        try:
+            executable = resolve_external_mpv_path(config.external_mpv_path or config.mpv_path)
+        except (RuntimeError, OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        portable_dir = executable.parent / "portable_config"
+        # 没有便携配置时打开整合包根目录，不猜测或创建用户全局配置。
+        config_dir = portable_dir if portable_dir.is_dir() else executable.parent
     if not config_dir.is_dir():
         raise HTTPException(status_code=404, detail=f"配置目录不存在: {config_dir}")
     try:

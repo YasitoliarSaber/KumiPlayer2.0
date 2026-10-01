@@ -73,6 +73,7 @@ export interface MpvValidationResult {
   ok: boolean
   message: string
   version?: string
+  executable_path?: string
   integration_dir: string
   integration_available: boolean
   plugin_available: boolean
@@ -115,9 +116,11 @@ export const configApi = {
   getConfig: () => api.get<PublicConfig>('/api/config'),
   patchConfig: (patch: Partial<PublicConfig>) => api.patch<PublicConfig>('/api/config', patch),
   getMpvRuntime: () => api.get<MpvRuntimeStatus>('/api/config/mpv-runtime'),
-  openMpvConfigDir: () => api.post<{ ok: boolean; config_dir: string }>('/api/config/mpv-runtime/open-config'),
-  testMpv: () => api.post<{ ok: boolean; message: string }>('/api/config/test/mpv'),
-  testMpvPath: (mpvPath: string) => api.post<MpvValidationResult>('/api/config/test/mpv-path', { mpv_path: mpvPath }),
+  openMpvConfigDir: (playerMode?: PublicConfig['player_mode']) => api.post<{ ok: boolean; config_dir: string }>('/api/config/mpv-runtime/open-config', playerMode ? { player_mode: playerMode } : undefined),
+  testMpv: (mpvPath?: string, playerMode?: PublicConfig['player_mode']) => mpvPath !== undefined || playerMode
+    ? api.post<MpvValidationResult>('/api/config/test/mpv-path', { mpv_path: mpvPath || '', player_mode: playerMode || 'internal' })
+    : api.post<MpvValidationResult>('/api/config/test/mpv'),
+  testMpvPath: (mpvPath: string, playerMode?: PublicConfig['player_mode']) => api.post<MpvValidationResult>('/api/config/test/mpv-path', { mpv_path: mpvPath, ...(playerMode ? { player_mode: playerMode } : {}) }),
   completeSetup: (payload: SetupCompletePayload) => api.post<PublicConfig>('/api/config/setup/complete', payload),
   testTmdb: () => api.post<{ ok: boolean; message: string }>('/api/config/test/tmdb'),
   testDeepseek: () => api.post<{ ok: boolean; message: string }>('/api/config/test/deepseek'),
