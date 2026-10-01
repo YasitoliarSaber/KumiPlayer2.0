@@ -365,6 +365,10 @@ export interface V4WorkExecutionDetail {
     artifacts: Array<{ file_name: string; status: string }>
   }
   metadata_job_status: string
+  name_recovery?: {
+    status: string
+    steps: Array<{ provider: string; status: string; reason_code: string; cache_status: string; aliases: string[] }>
+  } | null
   scrape?: {
     metadata_state: string
     metadata_reason?: string

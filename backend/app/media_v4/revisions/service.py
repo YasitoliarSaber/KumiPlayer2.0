@@ -3042,7 +3042,7 @@ class V4RevisionService:
                 raise KeyError(work_id)
 
             job_rows = conn.execute(
-                "SELECT job_id, job_type, status, attempts, last_error, finished_at, updated_at "
+                "SELECT job_id, job_type, status, attempts, last_error, finished_at, updated_at, result_json "
                 "FROM jobs WHERE revision_id = ? AND work_id = ? "
                 "ORDER BY job_type, updated_at DESC, job_id",
                 (revision_id, work_id),
@@ -3223,6 +3223,9 @@ class V4RevisionService:
                              if row["job_type"] in {"scrape_work", "recover_work_aliases"}), None)
 
         mirror_status = str(mirror_job["status"]) if mirror_job else ""
+        from app.media_v4.jobs.recovery_diagnostics import name_recovery_summary
+
+        name_recovery = name_recovery_summary(metadata_job)
         artifacts = [
             {"file_name": str(row["target_path"]).replace("\\", "/").rsplit("/", 1)[-1], "status": str(row["status"] or "")}
             for row in artifact_rows
@@ -3264,7 +3267,8 @@ class V4RevisionService:
             "season_results": _safe_season_results(metadata.get("season_results")),
         }
         has_detail = bool(
-            episodes
+            name_recovery
+            or episodes
             or artifacts
             or season_rows
             or bool(metadata.get("season_results"))
@@ -3297,6 +3301,7 @@ class V4RevisionService:
                 "artifacts": artifacts,
             },
             "metadata_job_status": str(metadata_job["status"]) if metadata_job else "",
+            "name_recovery": name_recovery,
             "scrape": scrape_summary,
             "seasons": [
                 {

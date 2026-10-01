@@ -294,6 +294,23 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
                   <div className="media-v4-work-progress-hint" role="status">部分图片未下载成功，可重新下载；不影响浏览和播放。</div>
                 )}
               </div>
+              {detail.detail.name_recovery && (
+                <div className="media-v4-work-detail-section">
+                  <h4>名称核对</h4>
+                  <div className="media-v4-work-detail-facts">
+                    <span>{({ queued: '等待核对', running: '正在核对', cancelled: '已终止', failed: '核对未完成', succeeded: '本次核对已结束' } as Record<string, string>)[detail.detail.name_recovery.status] || '核对记录'}</span>
+                  </div>
+                  {detail.detail.name_recovery.steps.map((step, index) => (
+                    <div className="media-v4-work-progress-hint" key={`${step.provider}-${index}`}>
+                      <strong>{step.provider}</strong> · {step.status === 'unavailable'
+                        ? ({ provider_timeout: '请求超时', provider_network_error: '网络不可用', provider_unauthorized: '需要检查连接凭据', provider_rate_limited: '请求受限，稍后继续', provider_invalid_response: '返回资料无法读取' } as Record<string, string>)[step.reason_code] || '服务暂时不可用'
+                        : step.status === 'retry' ? '已重试在线资料' : step.aliases.length ? '已读取名称' : '未找到可用名称'}
+                      {step.cache_status === 'hit' && '（使用已保存的名称证据）'}
+                      {step.aliases.length > 0 && <div>{step.aliases.join('、')}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
               {scrapeHasContent && scrape && (
                 <div className="media-v4-work-detail-section">
                   <h4>刮削结果</h4>

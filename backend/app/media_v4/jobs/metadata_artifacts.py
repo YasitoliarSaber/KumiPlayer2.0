@@ -290,6 +290,9 @@ def _materialize_local_artwork(
     on_progress=None,
 ) -> None:
     published = published or {}
+    from app.media_v4.jobs.artwork_provenance import artwork_download_status, ensure_artwork_provenance
+
+    ensure_artwork_provenance(metadata)
 
     def tick() -> None:
         """每张图前后报一次心跳：下载阶段可能持续数分钟，不能让它看起来像失联。"""
@@ -329,12 +332,15 @@ def _materialize_local_artwork(
                     thumb_path = work_dir / f"episode-{episode['episode_id']}-thumb.jpg"
                 if take_existing("episode_thumb", thumb_path):
                     scraped["local_thumb_path"] = str(thumb_path)
+                    artwork_download_status(metadata, 'still', published[('episode_thumb', str(thumb_path))],
+                                            episode_id=str(episode.get('episode_id') or ''))
                     continue
                 tick()
                 try:
                     digest = _download_artwork(still_url, thumb_path, client=client)
                 except (OSError, httpx.HTTPError):
                     digest = ""
+                artwork_download_status(metadata, 'still', digest, episode_id=str(episode.get('episode_id') or ''))
                 if digest:
                     artifacts.append(("episode_thumb", thumb_path, digest))
                     scraped["local_thumb_path"] = str(thumb_path)
@@ -351,12 +357,15 @@ def _materialize_local_artwork(
             artwork_path = work_dir / filename
             if take_existing(artifact_type, artwork_path):
                 metadata[f"local_{artifact_type}_path"] = str(artwork_path)
+                artwork_download_status(metadata, {'fanart': 'backdrop', 'clearlogo': 'logo'}.get(artifact_type, artifact_type),
+                                        published[(artifact_type, str(artwork_path))])
                 continue
             tick()
             try:
                 digest = _download_artwork(url, artwork_path, client=client)
             except (OSError, httpx.HTTPError):
                 digest = ""
+            artwork_download_status(metadata, {'fanart': 'backdrop', 'clearlogo': 'logo'}.get(artifact_type, artifact_type), digest)
             if digest:
                 artifacts.append((artifact_type, artwork_path, digest))
                 metadata[f"local_{artifact_type}_path"] = str(artwork_path)

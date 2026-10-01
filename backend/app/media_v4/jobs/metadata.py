@@ -863,8 +863,10 @@ def _finalize_metadata_result(target: dict, result: dict) -> dict:
         metadata_refresh_error = str(finalized.get("reason") or "").strip()
     finalized["metadata_refresh_error"] = metadata_refresh_error
     finalized.setdefault("retryable", False)
+    from app.media_v4.jobs.artwork_provenance import ensure_artwork_provenance
     from app.media_v4.jobs.metadata_quality import require_regular_episode_metadata
 
+    ensure_artwork_provenance(finalized)
     return require_regular_episode_metadata(target.get('episodes') or [], finalized)
 
 
@@ -1923,7 +1925,7 @@ def _map_continuous_season(
         mapped.append(copy)
     # 唯一标题/规则产生的新对应不能占用另一个本地 Episode 已使用的在线集。
     # 同一集的多 Asset 在图里共享 Episode ID，不会被误判为这里的冲突。
-    claims: dict[tuple[int, int], set[str]] = {}
+    claims: dict[tuple[object, object], set[str]] = {}
     for item in mapped:
         if _is_special_episode(item):
             continue

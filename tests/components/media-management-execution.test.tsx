@@ -527,6 +527,25 @@ function renderProgressWithDetail(units: Array<Record<string, unknown>>, overrid
   )
 }
 
+test('作品展开详情显示名称证据缓存与超时原因，不把核对结束当成资料成功', async () => {
+  const fetchWorkDetail = vi.fn().mockResolvedValue({
+    work: { title: '待核对作品', media_type: 'tv', provider: 'local', provider_id: '', metadata_state: 'waiting_review', metadata_reason: '' },
+    mirror: { status: 'succeeded', error: '', artifact_count: 0, artifacts: [] },
+    seasons: [], episodes: [], episode_total: 0, has_detail: true,
+    name_recovery: { status: 'succeeded', steps: [
+      { provider: 'AniList', status: 'completed', cache_status: 'hit', aliases: ['独立作品 副标题'], reason_code: '' },
+      { provider: 'Bangumi', status: 'unavailable', cache_status: 'miss', aliases: [], reason_code: 'provider_timeout' },
+    ] },
+  })
+  renderProgressWithDetail([workUnit('w-name', '待核对作品', 'needs_attention')], {}, fetchWorkDetail)
+  expect(await screen.findByText('名称核对')).toBeVisible()
+  expect(screen.getByText('独立作品 副标题')).toBeVisible()
+  expect(screen.getByText(/使用已保存的名称证据/)).toBeVisible()
+  expect(screen.getByText(/请求超时/)).toBeVisible()
+  expect(screen.getByText('本次核对已结束')).toBeVisible()
+  expect(screen.queryByText('在线资料已完成')).toBeNull()
+})
+
 test('展开已完成作品后读取并显示作品信息、镜像结果与剧集结果', async () => {
   const fetchWorkDetail = vi.fn().mockResolvedValue({
     revision_id: 'rev-exec',
