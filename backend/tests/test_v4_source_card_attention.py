@@ -30,11 +30,15 @@ def _completed_source(tmp_path):
     service.confirm('rev')
     with database.connect() as conn:
         wid = conn.execute('SELECT work_id FROM works').fetchone()[0]
+        # 本组验证关系/维护计数；成功资料夹具仍须满足真实分集完整性合同。
+        mappings = [{'episode_id': row['episode_id'], 'provider_episode_id': 'fixture-' + row['episode_id'],
+                     'title': '完整分集标题', 'still_url': 'https://image.tmdb.org/t/p/w500/fixture.jpg'}
+                    for row in conn.execute('SELECT episode_id FROM episodes WHERE work_id=?', (wid,))]
         conn.execute("UPDATE jobs SET status='succeeded'")
         conn.execute(
             "INSERT INTO scrape_bindings(binding_id,revision_id,work_id,provider,provider_id,metadata_json,status,created_at,updated_at) "
             "VALUES ('sb','rev',?,'tmdb','42',?,'confirmed','now','now')",
-            (wid, json.dumps({'metadata_state': 'ready'})),
+            (wid, json.dumps({'metadata_state': 'ready', 'episode_mappings': mappings})),
         )
     return database, wid
 
