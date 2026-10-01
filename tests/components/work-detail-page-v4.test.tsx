@@ -115,6 +115,7 @@ test('首次进入优先显示正片季度并把特别篇排在最后', async ()
       { season_id: 'season-special', season_number: 0, group_type: 'special', label: '特别篇', episode_count: 1 },
       { season_id: 'season-2', season_number: 2, group_type: 'season', label: '第 2 季', episode_count: 1 },
       { season_id: 'season-1', season_number: 1, group_type: 'season', label: '第 1 季', episode_count: 1 },
+      { season_id: 'season-unknown', season_number: null, group_type: 'unassigned', label: '未分季', episode_count: 1 },
     ],
     episodes: [
       { ...work.episodes[0], episode_id: 'special-1', season_number: 0, episode_number: null, special_number: 1, title: '露营小剧场', group_type: 'special', kind: 'special' },
@@ -130,11 +131,15 @@ test('首次进入优先显示正片季度并把特别篇排在最后', async ()
 
   render(<WorkDetailPage />);
 
-  expect(await screen.findByText('第一季启程')).toBeVisible();
+  await waitFor(() => expect(screen.getByRole('combobox', { name: '选择季度' })).toHaveTextContent('第1季'));
+  expect(screen.getByText('第一季启程')).toBeVisible();
   expect(screen.queryByText('露营小剧场')).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole('combobox', { name: '选择季度' }));
   const options = screen.getAllByRole('option').map((option) => option.textContent);
-  expect(options).toEqual(['第1季', '第2季', '特别篇']);
+  expect(options).toEqual(['第1季', '第2季', '未分季', '特别篇']);
+  fireEvent.click(screen.getByRole('option', { name: '特别篇' }));
+  expect(screen.getByRole('button', { name: '播放特别篇 1：露营小剧场' })).toBeVisible();
+  expect(screen.queryByText('第一季启程')).not.toBeInTheDocument();
 });
 
 test('用户切换季度后重新进入同一作品仍恢复该季度', async () => {
@@ -356,18 +361,18 @@ test('缺图特别篇整组使用紧凑列表，混合图片仍保持集顺序�
   expect(await screen.findByRole('menuitem', { name: '已看完' })).toBeVisible();
 });
 
-test('全部有图的特别篇继续使用横向卡片', async () => {
+test('全部有图的特别篇也显示原名列表', async () => {
   const specialWork = {
     ...work,
     seasons: [{ season_id: 'specials', season_number: 0, group_type: 'special', label: '特别篇', episode_count: 1 }],
-    episodes: [{ ...work.episodes[0], episode_id: 'special-pictured', season_number: 0, special_number: 1, title: 'SP01 - 图片小剧场', group_type: 'special', kind: 'special' }],
+    episodes: [{ ...work.episodes[0], episode_id: 'special-pictured', season_number: 0, special_number: 1, title: 'SP01 - 图片小剧场', original_filename: '[Group] Show - 14.5 [1080p].mkv', group_type: 'special', kind: 'special' }],
   };
   useUiStore.setState({ selectedSeasonNumber: 0, selectedSeasonByWork: {} });
   useLibraryStore.setState({ works: [specialWork as never], getWorkDetail: vi.fn().mockResolvedValue(specialWork) });
   const { container } = render(<WorkDetailPage />);
-  await screen.findByText('图片小剧场');
-  expect(container.querySelector('.detail-episode-grid.thumbnail-strip')).not.toBeNull();
-  expect(container.querySelector('.detail-special-list')).toBeNull();
+  await screen.findByText('[Group] Show - 14.5 [1080p].mkv');
+  expect(container.querySelector('.detail-episode-grid.thumbnail-strip')).toBeNull();
+  expect(container.querySelector('.detail-special-list')).not.toBeNull();
 });
 
 test('关联与推荐优先本地海报，只有横图或图片失败时保留文字占位', async () => {

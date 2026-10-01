@@ -2511,8 +2511,8 @@ class V4RevisionService:
                             INSERT INTO revision_bindings(
                                 binding_id, revision_id, evidence_id, work_id, season_id,
                                 episode_id, edition_id, asset_id, confidence, decision_source,
-                                reasons_json, override_json
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                reasons_json, override_json, resolved_json
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 str(uuid.uuid4()),
@@ -2527,6 +2527,16 @@ class V4RevisionService:
                                 "manual_override" if evidence.evidence_id in override_payloads else "resolver",
                                 json.dumps(facts.reasons, ensure_ascii=False),
                                 json.dumps(override_payloads.get(evidence.evidence_id, {}), ensure_ascii=False),
+                                canonical_json({
+                                    "contract_version": 1,
+                                    "content_class": facts.content_class,
+                                    "media_type": work_media_type[episode.work_key],
+                                    "season_kind": episode.season_kind,
+                                    "local_season_number": episode.local_season_number,
+                                    "local_episode_number": episode.local_episode_number,
+                                    "absolute_episode_number": episode.absolute_episode_number,
+                                    "special_number": episode.special_number,
+                                }),
                             ),
                         )
                     for work_asset in work_assets_by_evidence.get(evidence.evidence_id, []):

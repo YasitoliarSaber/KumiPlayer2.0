@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 
 from app.media_v4.domain.identity import (
     CONTENT_CLASS_MOVIE,
+    CONTENT_CLASS_PLAYABLE_SPECIAL,
     NON_IMPORTABLE_CONTENT_CLASSES,
     SEASON_KIND_REGULAR,
     canonical_json,
@@ -197,7 +198,9 @@ def mirror_relative_path(
     label = asset_label(asset_id, playback_locator)
     if is_movie or content_class == CONTENT_CLASS_MOVIE:
         return f"{work_dir}/{MOVIE_STEM}-{label}.strm"
-    if content_class in NON_IMPORTABLE_CONTENT_CLASSES or season_kind == SEASON_KIND_SPECIAL:
+    if content_class in NON_IMPORTABLE_CONTENT_CLASSES or (
+        season_kind == SEASON_KIND_SPECIAL and content_class != CONTENT_CLASS_PLAYABLE_SPECIAL
+    ):
         raise NonMaterializableArtifact("附属/特别篇内容没有对应 binding，不生成镜像")
     directory = _coordinate_directory(
         season_kind=season_kind,

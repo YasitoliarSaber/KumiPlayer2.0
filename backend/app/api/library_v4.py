@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from pathlib import PurePosixPath
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -333,6 +334,7 @@ def get_work_detail(work_id: str):
                     work_title=str(work["preferred_title"] or ""),
                     scraped_special_title_counts=scraped_special_title_counts,
                 ),
+                "original_filename": PurePosixPath(str(row["relative_path"] or "").replace("\\", "/")).name,
                 "plot": scraped_episode.get("plot") or "",
                 "runtime": scraped_episode.get("runtime"),
                 "thumb_path": (

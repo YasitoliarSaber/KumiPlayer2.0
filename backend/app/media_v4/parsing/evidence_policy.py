@@ -27,6 +27,7 @@ from app.media_v4.domain.identity import (
     CONTENT_CLASS_ATTACHED_SPECIAL,
     CONTENT_CLASS_AUXILIARY,
     CONTENT_CLASS_MOVIE,
+    CONTENT_CLASS_PLAYABLE_SPECIAL,
     CONTENT_CLASS_REGULAR,
     CONTENT_CLASS_STANDALONE,
     CONTENT_CLASS_UNKNOWN,
@@ -125,6 +126,24 @@ _ATTACHED_FILE_RES = (
 #: 发行形式（不构成排除依据）：单独出现时保留可播放身份。
 _RELEASE_FORM_RE = re.compile(r"(?i)(?<![A-Za-z])(?:OVA|OAD)(?![A-Za-z])")
 _ANNOTATED_RELEASE_RE = re.compile(r"(?i)[\[【]\s*\d{1,3}\s*\(\s*(?:OVA|OAD)\s*\d*\s*\)\s*[\]】]")
+
+# 只接受集号位置的非整数，不能把声道、帧率或版本号切成集号。
+_FRACTION_EPISODE_RES = (
+    re.compile(r"(?i)(?<![A-Za-z])S\d{1,2}\s*E(\d{1,3}\.\d+)(?![\d.A-Za-z])"),
+    re.compile(r"第\s*(\d{1,3}\.\d+)\s*[集话話]"),
+    re.compile(r"[\[【(]\s*(\d{1,3}\.\d+)\s*[\]】)]"),
+    re.compile(r"(?i)(?:^|[\s_-])(?:EP?\s*)?(\d{1,3}\.\d+)(?=$|\s*[-\[【])"),
+)
+
+
+def fractional_episode_token(tokens: FilenameTokens) -> str:
+    for pattern in _FRACTION_EPISODE_RES:
+        match = pattern.search(tokens.stem)
+        if match and not _TECHNICAL_TOKEN_RE.fullmatch(match.group(1)):
+            token = match.group(1)
+            if int(token.partition(".")[2]) != 0:
+                return token
+    return ""
 
 #: 电影证据。
 _MOVIE_FILE_RES = (
@@ -629,6 +648,28 @@ def classify_content(
             traces=tuple(traces),
         )
 
+    # 用户 2026-10-01 的有限准入：小数集、第零集和明确季度内 OVA/OAD。
+    # 与历史 attached_special 分开，避免把 SP/花絮等旧排除条目全面开放。
+    explicit_tv_season = (
+        numbering.season is not None and numbering.season > 0
+        and numbering.numbering.season_origin in {ORIGIN_EXPLICIT_FILENAME, ORIGIN_EXPLICIT_DIRECTORY}
+    )
+    fraction = fractional_episode_token(tokens)
+    zero = numbering.episode == 0
+    selected_release = bool(release_form) and explicit_tv_season
+    if (fraction or zero or selected_release) and not (
+        movie_hit or movie_dir or provisional_movie or standalone_hit or standalone_dir
+    ):
+        reason = "fractional_episode" if fraction else "zero_episode" if zero else "season_release_special"
+        trace(CONTENT_CLASS_PLAYABLE_SPECIAL, ORIGIN_FILENAME, reason)
+        return ContentClassification(
+            content_class=CONTENT_CLASS_PLAYABLE_SPECIAL,
+            classification_state=CLASSIFICATION_EXPLICIT,
+            media_type=MEDIA_TYPE_TV,
+            reasons=("明确特别篇保留原名，归入特别篇分类",),
+            traces=tuple(traces),
+        )
+
     # 2. 明确附属关系（SP/S00/映像特典，或整段附属目录名）。
     release_form_only = release_form is not None and not modified_before_attached
     if attached_hit or attached_dir is not None or (provisional_special and not release_form_only):
@@ -966,7 +1007,7 @@ def group_type_for(content_class: str, numbering: NumberingFacts, media_type: st
 
     if content_class == CONTENT_CLASS_AUXILIARY:
         return "auxiliary"
-    if content_class == CONTENT_CLASS_ATTACHED_SPECIAL:
+    if content_class in {CONTENT_CLASS_ATTACHED_SPECIAL, CONTENT_CLASS_PLAYABLE_SPECIAL}:
         return "special"
     if content_class == CONTENT_CLASS_MOVIE or media_type == MEDIA_TYPE_MOVIE:
         return "movie"

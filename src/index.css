@@ -12618,7 +12618,7 @@ body,
 .detail-page .detail-special-number { flex: 0 0 26px; color: var(--text-muted); font-size: 13px; font-variant-numeric: tabular-nums; text-align: center; }
 .detail-page .detail-special-thumb { flex: 0 0 72px; width: 72px; height: 44px; border-radius: 4px; object-fit: cover; }
 .detail-page .detail-special-copy { flex: 1; min-width: 0; display: grid; gap: 4px; }
-.detail-page .detail-special-copy strong { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; font-size: 14px; line-height: 1.45; }
+.detail-page .detail-special-copy strong { display: block; overflow-wrap: anywhere; font-size: 14px; line-height: 1.45; }
 .detail-page .detail-special-meta { display: flex; flex-wrap: wrap; gap: 10px; color: var(--text-muted); font-size: 12px; }
 .detail-page .detail-special-status { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; color: var(--text-muted); font-size: 12px; }
 .detail-page .detail-special-row.watched .detail-special-status { color: var(--accent-strong); }

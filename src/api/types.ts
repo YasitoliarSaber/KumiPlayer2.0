@@ -143,6 +143,7 @@ export interface EpisodeIndex {
   numbering_status?: string
   episode_number: number | null
   special_number?: number | null
+  original_filename?: string
   title: string
   plot?: string
   runtime?: number

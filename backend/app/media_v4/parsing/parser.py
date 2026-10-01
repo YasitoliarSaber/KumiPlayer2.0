@@ -7,11 +7,13 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 from app.media_v4.domain.identity import (
     CONTENT_CLASS_ATTACHED_SPECIAL,
     CONTENT_CLASS_MOVIE,
+    CONTENT_CLASS_PLAYABLE_SPECIAL,
     NON_IMPORTABLE_CONTENT_CLASSES,
     ORIGIN_LOCAL_UNSCOPED,
     DecisionTrace,
@@ -27,6 +29,7 @@ from app.media_v4.parsing.evidence_policy import (
     arbitrate_title,
     classify_content,
     collect_nearest_semantic_directory_tokens,
+    fractional_episode_token,
     group_type_for,
     parse_numbering,
     tokenize_filename,
@@ -390,7 +393,7 @@ def _parse_sidecar_nfo(evidence: SourceEvidence) -> tuple[int | None, str, str, 
 class V4Parser:
     """从一个 SourceEvidence 生成一个不可变 ParsedFacts。"""
 
-    VERSION = "v4-parser-6"
+    VERSION = "v4-parser-7"
 
     @classmethod
     def _parsed_fact_id(cls, evidence: SourceEvidence) -> str:
@@ -586,6 +589,13 @@ class V4Parser:
                 series_group=resolved_series_group,
                 special_number=special_number,
             )
+        if classification.content_class == CONTENT_CLASS_PLAYABLE_SPECIAL:
+            # 小数与零是发布内编号，不是 TMDB S00 集号；分配本地身份时保留原 token。
+            episode_token = fractional_episode_token(tokens) or episode_token or "0"
+            special_number = None
+            numbering = replace(numbering, episode=None, absolute=None, episode_range=None, candidates=())
+            episode_range = None
+            episode_title = stem
         # 第 4 步最终校验：普通与特别篇分支都可能残留方括号碎片或纯发布参数
         # （实测 `…[S01E01][Ma10p_2160p][x265_flac_ass].mkv` → 标题 `]`）。
         episode_title = _sanitize_episode_title(episode_title)
@@ -594,6 +604,8 @@ class V4Parser:
         # 只有编号的（`第002集.mp4`）显示「第 2 集」，避免整季都叫"未命名"。
         if not episode_title and cjk_episode is not None:
             episode_title = cjk_episode_title or f"第 {cjk_episode} 集"
+        if classification.content_class == CONTENT_CLASS_PLAYABLE_SPECIAL:
+            episode_title = stem
         # 标题优先级：明确文件作品标题 > 最近非结构目录的唯一标题 > 识别器候选。
         title_decision = arbitrate_title(
             tokens,
@@ -668,7 +680,7 @@ class V4Parser:
             season_candidate=numbering.season,
             episode_candidate=numbering.episode,
             absolute_episode_candidate=numbering.absolute,
-            special_candidate=classification.content_class == CONTENT_CLASS_ATTACHED_SPECIAL,
+            special_candidate=classification.content_class in {CONTENT_CLASS_ATTACHED_SPECIAL, CONTENT_CLASS_PLAYABLE_SPECIAL},
             episode_range=numbering.episode_range or episode_range,
             special_number=special_number,
             tmdb_hint_id=hint_decision.tmdb_id,

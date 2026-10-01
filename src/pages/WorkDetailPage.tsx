@@ -586,9 +586,8 @@ export default function WorkDetailPage() {
     });
   }, [work, selectedSeasonKey, selectedSeasonNumber]);
 
-  // 同组只要有特别篇缺图就统一用列表，保持源剧集顺序。
-  const useSpecialList = episodes.some((episode: any) => isSpecialEpisode(episode))
-    && episodes.some((episode: any) => !String(episode.thumb_path || '').trim());
+  // 特别篇统一使用原名列表，不随剧照是否齐全改变布局。
+  const useSpecialList = episodes.some((episode: any) => isSpecialEpisode(episode));
 
   const scrollEpisodeStrip = (direction: -1 | 1) => {
     const strip = episodeStripRef.current;
@@ -1671,9 +1670,12 @@ export default function WorkDetailPage() {
             className={useSpecialList ? 'detail-special-list' : 'detail-episode-grid thumbnail-strip'}
           >
             {episodes.map((episode: any, episodeIndex: number) => {
-              const rawEpisodeTitle = episode.title || episodeFallbackTitle(episode);
+              const rawEpisodeTitle = (isSpecialEpisode(episode) && episode.original_filename)
+                || episode.title || episodeFallbackTitle(episode);
               const cleanedTitle = cleanDisplayTitle(rawEpisodeTitle, episodeFallbackTitle(episode), { preserveTitle: isSpecialEpisode(episode) });
-              const episodeTitle = isSpecialEpisode(episode) ? stripSpecialEpisodeCode(cleanedTitle) : cleanedTitle;
+              const episodeTitle = isSpecialEpisode(episode) && episode.original_filename
+                ? episode.original_filename
+                : isSpecialEpisode(episode) ? stripSpecialEpisodeCode(cleanedTitle) : cleanedTitle;
               const isWatched = watchedEpisodeIds.has(episode.episode_id);
               const isCurrent = continueTarget?.episode_id === episode.episode_id;
               // 缺图时保持占位：把整页背景图复制给每集卡片会让几十个
@@ -2161,10 +2163,10 @@ function resolveInitialSeason(work: any, workId: string) {
 
 function orderDetailSeasons(seasons: any[]) {
   return [...seasons].sort((left, right) => {
-    if ((left?.season_number == null) !== (right?.season_number == null)) return left?.season_number == null ? 1 : -1;
     const leftSpecial = normalizedGroupType(left?.group_type) === 'special' || left?.season_number === 0;
     const rightSpecial = normalizedGroupType(right?.group_type) === 'special' || right?.season_number === 0;
     if (leftSpecial !== rightSpecial) return leftSpecial ? 1 : -1;
+    if ((left?.season_number == null) !== (right?.season_number == null)) return left?.season_number == null ? 1 : -1;
     const seasonDiff = Number(left?.season_number ?? 0) - Number(right?.season_number ?? 0);
     if (seasonDiff !== 0) return seasonDiff;
     return seasonOptionKey(left).localeCompare(seasonOptionKey(right));

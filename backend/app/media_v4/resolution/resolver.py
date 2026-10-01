@@ -18,6 +18,7 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from app.media_v4.domain.identity import (
+    CONTENT_CLASS_PLAYABLE_SPECIAL,
     CONTENT_CLASS_UNKNOWN,
     NON_IMPORTABLE_CONTENT_CLASSES,
     ORIGIN_DIRECTORY,
@@ -623,11 +624,22 @@ def _local_special_identity(
     evidence: SourceEvidence,
     facts: ParsedFacts,
 ) -> tuple[str, int, int | None] | None:
+    if facts.content_class == CONTENT_CLASS_PLAYABLE_SPECIAL:
+        token = (facts.episode_token_raw or "").strip()
+        fractional = re.fullmatch(r"(\d+)\.(\d+)", token)
+        if fractional:
+            # 保留小数位的前导零：14.05 与 14.5 不能合并成同一视频。
+            fraction = fractional[2].rstrip("0")
+            return (_special_context(evidence) + ":fraction:" + fraction, int(fractional[1]), int(fraction))
+        if any(trace.rule_id == "zero_episode" for trace in facts.decision_trace):
+            return (_special_context(evidence) + ":zero", 0, 0)
     match = _LOCAL_SPECIAL_TOKEN.fullmatch((facts.episode_token_raw or "").strip())
     if not match:
+        if facts.content_class == CONTENT_CLASS_PLAYABLE_SPECIAL:
+            return (_special_context(evidence) + ":" + _normalize_title(facts.episode_title), 0, 0)
         return None
     return (
-        _special_context(evidence),
+        _special_context(evidence) + (":" + match[1].upper() if facts.content_class == CONTENT_CLASS_PLAYABLE_SPECIAL else ""),
         int(match.group(2)),
         int(match.group(3)) if match.group(3) is not None else None,
     )
