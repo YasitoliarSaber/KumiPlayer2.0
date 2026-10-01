@@ -176,3 +176,30 @@ test('recent 卡片本地背景缺失时回退远程 fanart', () => {
   expect(image.getAttribute('src')).toContain('remote-fanart');
   expect(image.getAttribute('src')).not.toContain('/api/assets/thumbnail');
 });
+
+test('海报占位区分加载与失败，图片地址改变后清除旧错误', async () => {
+  const { rerender } = render(<PosterCard work={work('w1')} thumbnailWidth={384} />);
+  expect(screen.getByText('图片加载中')).toBeVisible();
+  const image = screen.getByRole('img');
+  expect(image).toHaveAttribute('loading', 'lazy');
+  expect(image).not.toHaveAttribute('fetchpriority', 'high');
+  fireEvent.error(image);
+  expect(screen.getByText('图片暂不可用')).toBeVisible();
+  expect(screen.queryByText('图片加载中')).toBeNull();
+
+  rerender(<PosterCard work={{ ...work('w1'), poster_path: '/local/new-poster.jpg' }} thumbnailWidth={384} />);
+  expect(screen.queryByText('图片暂不可用')).toBeNull();
+  expect(screen.getByText('图片加载中')).toBeVisible();
+
+  Object.defineProperty(image, 'decode', { configurable: true, value: vi.fn().mockResolvedValue(undefined) });
+  await act(async () => { fireEvent.load(image); });
+  expect(screen.queryByText('图片加载中')).toBeNull();
+});
+
+test('尚未测量的海报只展示标题，不声称图片正在加载', () => {
+  render(<PosterCard work={work('w1')} deferImage />);
+  expect(screen.queryByRole('img')).toBeNull();
+  expect(screen.queryByText('图片加载中')).toBeNull();
+  expect(screen.queryByText('图片暂不可用')).toBeNull();
+  expect(screen.getAllByText('作品w1').length).toBeGreaterThan(0);
+});

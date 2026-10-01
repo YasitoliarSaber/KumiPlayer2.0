@@ -5,7 +5,8 @@ import { cleanDisplayTitle } from '../../utils/title';
 import { buildAssetUrl, isRemoteAssetPath } from '../../api/assets';
 import { isScrollRecentlyActive } from '../../utils/scrollGesture';
 import { preferredArtworkPath } from '../../utils/artwork';
-import DecodedImage from '../ui/DecodedImage';
+import DecodedImage, { type ImageState } from '../ui/DecodedImage';
+import './PosterCard.css';
 
 interface PosterCardProps {
   work: any;
@@ -13,6 +14,8 @@ interface PosterCardProps {
   recentLabel?: string;
   thumbnailWidth?: number;
   localArtworkOnly?: boolean;
+  deferImage?: boolean;
+  preloadImage?: boolean;
 }
 
 function PosterCard({
@@ -21,7 +24,10 @@ function PosterCard({
   recentLabel = '',
   thumbnailWidth = 0,
   localArtworkOnly = false,
+  deferImage = false,
+  preloadImage = false,
 }: PosterCardProps) {
+  const [imageState, setImageState] = useState<ImageState>('loading');
   const seriesCardImageMode = useUiStore((state) => state.seriesCardImageMode);
   // 该 prop 仍是调用方的公开 API（分类页会传），但第 6 步移除"失败回退原图"后
   // 组件内不再需要它；显式标记为有意保留，避免 noUnusedLocals 报错。
@@ -105,12 +111,19 @@ function PosterCard({
           <span title={displayTitle}>
             {displayTitle}
           </span>
+          {!deferImage && imageUrl && imageState !== 'ready' && (
+            <small className="poster-placeholder-state">
+              {imageState === 'loading' ? '图片加载中' : '图片暂不可用'}
+            </small>
+          )}
         </div>
-        {imageUrl && (
+        {!deferImage && imageUrl && (
           <DecodedImage
             src={imageUrl}
             alt={displayTitle}
-            loading="lazy"
+            loading={preloadImage ? 'eager' : 'lazy'}
+            fetchPriority={preloadImage ? 'auto' : undefined}
+            onStateChange={setImageState}
             className="poster-image"
           />
         )}

@@ -1,6 +1,7 @@
-import { act, fireEvent, render } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, expect, test, vi } from 'vitest';
 import VirtualizedPosterGrid from '../../src/components/library/VirtualizedPosterGrid';
+import { calculatePosterGridMetrics } from '../../src/components/library/posterGridMetrics';
 
 // 探针：cleanDisplayTitle 在 PosterCard 每次实际渲染时都会执行。
 // memo 化后，虚拟窗口平移时仍保持可见的卡片不应重复执行该渲染工作。
@@ -94,4 +95,56 @@ test('虚拟窗口平移一行时，保持可见的海报卡不重复执行渲�
   // memo 化前：网格重渲染会带动所有可见卡片重跑渲染函数 → 计数继续增长。
   // memo 化后：props 未变的卡片被跳过 → 计数保持不变。
   expect(cleanTitleCalls.get('作品10')).toBe(before);
+});
+
+test('首轮挂载到完成测量期间，不给图片设置原图地址', () => {
+  const imageSources: string[] = [];
+  const originalSetAttribute = Element.prototype.setAttribute;
+  vi.spyOn(Element.prototype, 'setAttribute').mockImplementation(function (this: Element, name, value) {
+    if (this.tagName === 'IMG' && name === 'src') imageSources.push(value);
+    originalSetAttribute.call(this, name, value);
+  });
+
+  render(<VirtualizedPosterGrid works={[work('w1', '作品1')]} columns={4} />);
+
+  expect(imageSources.length).toBeGreaterThan(0);
+  expect(imageSources.every((src) => src.includes('/api/assets/thumbnail?'))).toBe(true);
+});
+
+test('宽度为零时只挂载可辨认卡片壳，恢复尺寸后才请求缩略图', async () => {
+  Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 0 });
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 0, top: 0 } as DOMRect);
+  render(<VirtualizedPosterGrid works={[work('w1', '作品1')]} columns={4} />);
+
+  expect(screen.getByRole('button', { name: /作品1/ })).toBeTruthy();
+  expect(screen.queryByRole('img')).toBeNull();
+
+  Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 1000 });
+  fireEvent.resize(window);
+  await act(async () => {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  });
+  expect(screen.getByRole('img')).toHaveAttribute('src', expect.stringContaining('/api/assets/thumbnail?'));
+});
+
+test('缓冲两行的挂载窗口提前加载图片且数量受窗口计算约束', async () => {
+  const works = Array.from({ length: 200 }, (_, index) => work(`w${index}`, `作品${index}`));
+  render(<main className="app-main"><VirtualizedPosterGrid works={works} columns={4} /></main>);
+  const main = document.querySelector<HTMLElement>('.app-main')!;
+  main.scrollTop = 2500;
+  fireEvent.scroll(main);
+  await act(async () => {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  });
+  const gap = Math.max(22, Math.min(32, window.innerWidth * 0.0155));
+  const { rowHeight } = calculatePosterGridMetrics({ width: 1000, gap, requestedColumns: 4, imageMode: 'poster', metaHeight: 62 });
+  const firstRow = Math.floor(2500 / rowHeight) - 2;
+  const lastRow = Math.ceil((2500 + 900) / rowHeight) + 2;
+  const images = screen.getAllByRole('img');
+  expect(images).toHaveLength((lastRow - firstRow + 1) * 4);
+  expect(images[0]).toHaveAttribute('alt', `作品${firstRow * 4}`);
+  for (const image of images) {
+    expect(image).toHaveAttribute('loading', 'eager');
+    expect(image).toHaveAttribute('fetchpriority', 'auto');
+  }
 });

@@ -11,7 +11,7 @@ interface VirtualizedPosterGridProps {
   localArtworkOnly?: boolean;
 }
 
-const OVERSCAN_ROWS = 1;
+const OVERSCAN_ROWS = 2;
 
 // 缩略图档选择：按卡片 CSS 宽度 × DPR 向上取最近档，不超过 512。
 // 384 覆盖单列 140-256px @ DPR2，512 覆盖更大列宽或高 DPR。
@@ -55,7 +55,9 @@ export default function VirtualizedPosterGrid({
       if (!element) return;
       const rect = element.getBoundingClientRect();
       const containerRect = scrollContainer?.getBoundingClientRect();
-      const width = element.clientWidth || rect.width || 1;
+      const width = element.clientWidth || rect.width;
+      // 隐藏窗口尚无有效尺寸时保留卡片壳，不能按假宽度请求图片。
+      if (width <= 0) return;
       const gap = readGridGap(element);
       const metaHeight = readCssLength(element, '--poster-card-meta-height', 62);
       const metrics = calculatePosterGridMetrics({
@@ -177,6 +179,8 @@ export default function VirtualizedPosterGrid({
             work={work}
             recentLabel={recentLabel}
             thumbnailWidth={thumbnailWidth}
+            deferImage={thumbnailWidth === 0}
+            preloadImage
             localArtworkOnly={localArtworkOnly}
           />
         ))}
