@@ -45,7 +45,7 @@ export interface PublicConfig {
   bangumi_user_agent: string
   auto_play_next_episode: boolean
   mpv_anime4k_mode: 'off' | 'a' | 'b' | 'c' | 'a+a' | 'b+b' | 'c+a'
-  mpv_anime4k_quality: 'light' | 'balanced' | 'high'
+  mpv_anime4k_quality: 'fast' | 'light' | 'balanced' | 'high'
   series_card_image_mode: 'poster' | 'fanart'
   poster_size: number
   heartbeat_enabled: boolean

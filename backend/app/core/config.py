@@ -104,7 +104,7 @@ class AppConfig:
     auto_play_next_episode: bool = True
 
     # MPV 播放器调节（Anime4K 永久默认值）
-    # mode: off|a|b|c|a+a|b+b|c+a ; quality: light|balanced|high
+    # mode: off|a|b|c|a+a|b+b|c+a ; quality: fast|light|balanced|high
     mpv_anime4k_mode: str = "off"
     mpv_anime4k_quality: str = "balanced"
 

@@ -314,3 +314,9 @@ def test_external_mode_never_overrides_the_pack_thumbnail_backend():
 
     args = _args(external=True, first_file="D:/a.mkv", ipc_server=r"\.\pipe\kumi")
     assert not any("thumbfast" in arg for arg in args), args
+
+
+def test_external_mode_does_not_auto_fallback_to_english_subtitles():
+    args = _args(external=True, first_file="D:/a.mkv")
+    assert "--subs-fallback=no" in args
+    assert not any(arg.startswith("--slang=") for arg in args)

@@ -43,7 +43,7 @@
       "notices": [
         "mpv/licenses/thumbfast/MPL-2.0.txt"
       ],
-      "distribution_notes": "源码内嵌 MPL-2.0 声明；网络/音频缩略图默认关闭；缓存仅写 data/mpv-state/thumbfast/"
+      "distribution_notes": "源码内嵌 MPL-2.0 声明；KumiPlayer 增加切集回调代际保护；网络/音频缩略图默认关闭；缓存仅写 data/mpv-state/thumbfast/"
     },
     {
       "component": "Anime4K",

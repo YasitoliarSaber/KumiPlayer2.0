@@ -142,6 +142,7 @@ local disabled = false
 local force_disabled = false
 local spawn_waiting = false
 local spawn_working = false
+local spawn_generation = 0
 local script_written = false
 
 local dirty = false
@@ -507,11 +508,15 @@ local function spawn(time)
     table.insert(args, "--")
     table.insert(args, path)
 
+    spawn_generation = spawn_generation + 1
+    local request_generation = spawn_generation
     spawned = true
     spawn_waiting = true
 
     subprocess(args, true,
         function(success, result)
+            -- playback_only 子进程会在切集时取消，旧回调不得覆盖新视频的状态或弹错误。
+            if request_generation ~= spawn_generation then return end
             if spawn_waiting and (success == false or (result.status ~= 0 and result.status ~= -2)) then
                 spawned = false
                 spawn_waiting = false
@@ -891,6 +896,8 @@ local function sync_changes(prop, val)
 end
 
 local function file_load()
+    spawn_generation = spawn_generation + 1
+    spawn_waiting = false
     clear()
     spawned = false
     real_w, real_h = nil, nil

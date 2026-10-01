@@ -453,10 +453,10 @@ def build_mpv_playback_args(
     internal（默认）：使用 --config-dir 只加载 KumiPlayer 自有配置（MPV 官方手册：
     指定配置目录会忽略全局、用户与 MPV_HOME 配置），并隔离可写状态到数据目录。
 
-    external：**零注入**。用户自备的 MPV 整合包必须完全自主：不传 --config-dir /
+    external：不注入配置或脚本。用户自备的 MPV 整合包自主运行：不传 --config-dir /
     --include / --script / --script-opts，只追加本次会话必需的命令行参数（IPC、
     进度起点、标题、受控播放列表与窗口行为），因此整合包的配置、脚本、着色器
-    与界面都不会被 KumiPlayer 覆盖或改写。
+    与界面都不会被 KumiPlayer 覆盖或改写。仅阻止自动回退到非首选语言字幕。
     """
 
     if external:
@@ -469,6 +469,7 @@ def build_mpv_playback_args(
             "--save-position-on-quit=no",
             "--no-resume-playback",
             "--autocreate-playlist=no",
+            "--subs-fallback=no",
         ])
         if not fallback:
             args.extend(["--force-window=immediate", "--focus-on=all", "--window-minimized=no"])
@@ -535,7 +536,7 @@ def build_mpv_playback_args(
         _quality = getattr(_cfg, "mpv_anime4k_quality", "balanced") or "balanced"
         if _mode not in {"off", "a", "b", "c", "a+a", "b+b", "c+a"}:
             _mode = "off"
-        if _quality not in {"light", "balanced", "high"}:
+        if _quality not in {"fast", "light", "balanced", "high"}:
             _quality = "balanced"
         # 同样使用 `<脚本名>-` 前缀；脚本侧改为 mp.options.read_options 读取，
         # 因此这里的命令行值会覆盖 kumiplayer_anime4k.conf 的静态默认值。

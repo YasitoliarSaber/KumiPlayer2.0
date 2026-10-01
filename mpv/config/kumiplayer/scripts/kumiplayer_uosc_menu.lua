@@ -58,6 +58,7 @@ local MODES = {
 }
 
 local QUALITIES = {
+    { value = "fast", title = "极速 · 单层" },
     { value = "light", title = "轻量" },
     { value = "balanced", title = "均衡" },
     { value = "high", title = "高质量" },

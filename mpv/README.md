@@ -41,7 +41,7 @@ mpv.exe
   --script=<kumiplayer/scripts/*.lua>     # 自有层脚本（与整合包 scripts/ 自动加载并行）
   --script-opt=thumbfast-thumbnail=<状态目录>
   --script-opt=kumiplayer_anime4k-default_mode=<off|a|b|c|a+a|b+b|c+a>
-  --script-opt=kumiplayer_anime4k-default_quality=<light|balanced|high>
+  --script-opt=kumiplayer_anime4k-default_quality=<fast|light|balanced|high>
   --script-opt=kumiplayer_anime4k-shaders_dir=<自有层 shaders 绝对路径>
 ```
 
@@ -65,7 +65,7 @@ mpv.exe
 | `--config-dir=<dir>` | 替换配置目录 | ❌ 仅内置模式 | 整合包自己的配置会完全不加载 |
 | `--script-opts=` / `--input-conf=` | 覆盖 | ❌ 禁用 | 见上文覆盖语义说明 |
 
-**当前实现采用零注入**：即使追加式脚本也可能覆盖快捷键或改变着色器，因此外部模式不传任何配置或脚本选项。上表仅解释官方机制，不代表允许默认启用外部注入。会话参数包含 IPC、窗口/媒体标题、受控播放列表、`--save-position-on-quit=no`、`--no-resume-playback`、`--autocreate-playlist=no`。内外模式的续播起点均使用 `--{ --start=... 首个文件 --}` 文件局部参数组，避免下一集继承上一集的续播位置。
+**当前实现不注入配置或脚本**：即使追加式脚本也可能覆盖快捷键或改变着色器，因此外部模式不传配置或脚本选项。上表仅解释官方机制，不代表允许默认启用外部注入。会话参数包含 IPC、窗口/媒体标题、受控播放列表、`--save-position-on-quit=no`、`--no-resume-playback`、`--autocreate-playlist=no`；另以 `--subs-fallback=no` 阻止无首选字幕时自动回退英语轨，仍可手动选取任意字幕。内外模式的续播起点均使用 `--{ --start=... 首个文件 --}` 文件局部参数组，避免下一集继承上一集的续播位置。
 
 ### 自有层逐项适用性
 

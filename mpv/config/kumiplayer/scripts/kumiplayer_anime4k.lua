@@ -1,8 +1,8 @@
 -- KumiPlayer Anime4K 控制器
 --
 -- 职责：
--- 1. 定义六种官方模式（A/B/C/A+A/B+B/C+A）× 三种质量档位（light/balanced/high）
---    的 Anime4K v4 官方多 shader 链映射（链顺序来自官方模板与 v4.0.1 实际文件）；
+-- 1. 定义六种官方模式（A/B/C/A+A/B+B/C+A）与四种质量档位；轻量及以上
+--    使用 Anime4K v4 多 shader 链（链顺序来自官方模板与 v4.0.1 实际文件）；
 -- 2. 文件载入时记录基础 glsl-shaders 列表；
 -- 3. 根据永久默认值或当前视频临时覆盖，构建 Anime4K 附加链；
 -- 4. 关闭 Anime4K 时恢复基础列表，不误删 KumiPlayer 自有 shader；
@@ -15,7 +15,7 @@
 --   kumiplayer_anime4k clear-session [request_id]                  清除临时覆盖（恢复永久默认）
 --   kumiplayer_anime4k set-default <mode> <quality> [request_id]   后端保存的下一视频默认值
 --   kumiplayer_anime4k get-state [request_id]                      查询当前状态
--- 值域 mode: off|a|b|c|a+a|b+b|c+a ; quality: light|balanced|high
+-- 值域 mode: off|a|b|c|a+a|b+b|c+a ; quality: fast|light|balanced|high
 --
 -- 状态广播（唯一权威）：脚本在**实际执行后**广播
 --   kumiplayer_anime4k-state <mode> <quality> <session_mode> <session_quality> <applied> \
@@ -61,7 +61,7 @@ local QUALITIES = {
 }
 
 local VALID_MODES = { off = true, a = true, b = true, c = true, ["a+a"] = true, ["b+b"] = true, ["c+a"] = true }
-local VALID_QUALITIES = { light = true, balanced = true, high = true }
+local VALID_QUALITIES = { fast = true, light = true, balanced = true, high = true }
 
 local state = {
     default_mode = "off",
@@ -130,6 +130,19 @@ local function build_chain(mode, quality)
 
     local function add(name)
         table.insert(chain, anime4k_dir .. name)
+    end
+
+    -- 低配档参考整合包的单 shader 策略，不串联两次放大与二次修复。
+    -- 增强模式在此档保留对应的基础算法风格；需要完整增强链可选轻量及以上。
+    if quality == "fast" then
+        if mode_cfg.kind == "restore_soft" then
+            add("Anime4K_Restore_CNN_Soft_S.glsl")
+        elseif mode_cfg.kind == "upscale_denoise" then
+            add("Anime4K_Upscale_CNN_x2_S.glsl")
+        else
+            add("Anime4K_Restore_CNN_S.glsl")
+        end
+        return chain
     end
 
     -- 统一首段 Clamp_Highlights

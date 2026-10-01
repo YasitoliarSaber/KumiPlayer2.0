@@ -13,7 +13,7 @@ import { useUiStore } from '../stores/ui';
 import '../styles/player-tuning.css';
 
 type Anime4kMode = 'off' | 'a' | 'b' | 'c' | 'a+a' | 'b+b' | 'c+a';
-type Anime4kQuality = 'light' | 'balanced' | 'high';
+type Anime4kQuality = 'fast' | 'light' | 'balanced' | 'high';
 type PlayerMode = 'internal' | 'external';
 
 const PLAYER_MODE_OPTIONS: Array<{ value: PlayerMode; label: string }> = [
@@ -32,6 +32,7 @@ const MODE_OPTIONS: Array<{ value: Anime4kMode; label: string }> = [
 ];
 
 const QUALITY_OPTIONS: Array<{ value: Anime4kQuality; label: string }> = [
+  { value: 'fast', label: '极速 · 单层（低配推荐）' },
   { value: 'light', label: '轻量' },
   { value: 'balanced', label: '均衡' },
   { value: 'high', label: '高质量' },
@@ -230,10 +231,11 @@ export default function PlayerTuningPage() {
         <summary>如何选择效果与质量</summary>
         <ul className="player-tuning-help">
           <li>“模式”选择的是<strong>算法族</strong>（Restore / Upscale_Denoise / 二次增强），不是性能档位。Mode C 使用 Upscale_Denoise 链，并不是最轻量的选项。</li>
-          <li>“质量”是<strong>成本档位</strong>：它决定链中 CNN 模型的大小（轻量 M/S、均衡 L/M、高质量 VL/M）。降低质量能减轻 GPU 负担，但 4K 源片仍可能超出帧预算。</li>
+          <li>“极速”只运行一个较小的着色器，适合低配电脑；轻量及以上才使用完整多层链。极速下增强模式会简化为对应的基础算法。</li>
+          <li>“质量”是<strong>成本档位</strong>：轻量及以上决定完整链中 CNN 模型的大小（轻量 M/S、均衡 L/M、高质量 VL/M）。降低质量能减轻 GPU 负担，但 4K 源片仍可能超出帧预算。</li>
           <li>当前默认是“关闭”，需要时再手动开启；播放中右键菜单可临时切换，只影响当前视频，不改这里的默认值。</li>
-          <li>不确定时从 Mode A + 均衡质量开始，播放中比较 Mode B、Mode C，保留观感最好的一个。</li>
-          <li>增强模式（A+A / B+B / C+A）的链更长、渲染开销更高，建议在显示放大至少 2× 时使用，否则可能过锐或劣化。</li>
+          <li>低配电脑先试 Mode A + 极速；如果仍不流畅，就关闭 Anime4K。性能足够时再比较其他模式与质量。</li>
+          <li>轻量及以上的增强模式（A+A / B+B / C+A）链更长、渲染开销更高，建议在显示放大至少 2× 时使用，否则可能过锐或劣化。</li>
           <li>播放 4K 视频出现掉帧时，先关闭 Anime4K 确认是否恢复流畅；仅降到“轻量”也可能不足。较低分辨率视频可再试轻量档或更短模式。“已应用”只代表着色器链已下发并被 MPV 接受，不代表当前 GPU 帧预算已经足够。</li>
         </ul>
         </details>

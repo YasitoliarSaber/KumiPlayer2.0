@@ -311,6 +311,12 @@ class TestPatchConfig:
         assert data["mpv_path"] == "C:/mpv/mpv.exe"
         assert data["tmdb_language"] == "en-US"
 
+    def test_patch_fast_anime4k_quality(self, client, temp_config):
+        resp = client.patch("/api/config", json={"mpv_anime4k_quality": "fast"})
+        assert resp.status_code == 200
+        assert resp.json()["mpv_anime4k_quality"] == "fast"
+        assert json.loads(temp_config.read_text(encoding="utf-8"))["mpv_anime4k_quality"] == "fast"
+
     def test_patch_server_port(self, client, temp_config):
         """后端端口应能通过设置保存并返回"""
         resp = client.patch("/api/config", json={"server_port": 8765})

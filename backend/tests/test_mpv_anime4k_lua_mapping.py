@@ -88,6 +88,21 @@ def test_anime4k_lua_chain_matches_official_structure():
         assert len(chain) == expected_lengths[mode], f"{mode} 链长度 {len(chain)} != {expected_lengths[mode]}"
 
 
+def test_fast_quality_uses_one_bundled_shader_without_multistage_upscaling():
+    text = LUA_PATH.read_text(encoding="utf-8")
+    assert 'fast = true' in text
+    assert 'if quality == "fast" then' in text
+    fast_branch = text.split('if quality == "fast" then', 1)[1].split('return chain', 1)[0]
+    assert fast_branch.count('add("Anime4K_') == 3
+    assert "AutoDownscalePre" not in fast_branch
+    for shader in (
+        "Anime4K_Restore_CNN_S.glsl",
+        "Anime4K_Restore_CNN_Soft_S.glsl",
+        "Anime4K_Upscale_CNN_x2_S.glsl",
+    ):
+        assert (SHADER_DIR / shader).is_file()
+
+
 def test_anime4k_lua_declares_script_message_contract():
     """脚本消息契约与施工说明一致。"""
     text = LUA_PATH.read_text(encoding="utf-8")

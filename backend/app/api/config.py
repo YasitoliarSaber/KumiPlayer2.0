@@ -220,8 +220,8 @@ def patch_config(req: ConfigPatch):
     # Anime4K 枚举校验：非法 mode/quality 拒绝，不传给 MPV
     if "mpv_anime4k_mode" in patch_dict and patch_dict["mpv_anime4k_mode"] not in {"off", "a", "b", "c", "a+a", "b+b", "c+a"}:
         raise HTTPException(status_code=400, detail="mpv_anime4k_mode 只能是 off|a|b|c|a+a|b+b|c+a")
-    if "mpv_anime4k_quality" in patch_dict and patch_dict["mpv_anime4k_quality"] not in {"light", "balanced", "high"}:
-        raise HTTPException(status_code=400, detail="mpv_anime4k_quality 只能是 light|balanced|high")
+    if "mpv_anime4k_quality" in patch_dict and patch_dict["mpv_anime4k_quality"] not in {"fast", "light", "balanced", "high"}:
+        raise HTTPException(status_code=400, detail="mpv_anime4k_quality 只能是 fast|light|balanced|high")
     if "player_mode" in patch_dict and patch_dict["player_mode"] not in {"internal", "external"}:
         raise HTTPException(status_code=400, detail="player_mode 只能是 internal|external")
 

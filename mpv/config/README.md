@@ -45,7 +45,7 @@ mpv.exe
   --script=<kumiplayer/scripts/*.lua>   # KumiPlayer 自有脚本（与整合包 scripts/ 并行；可重复）
   --script-opt=thumbfast-thumbnail=...  # 追加式注入，务必用 --script-opt
   --script-opt=kumiplayer_anime4k-default_mode=<off|a|b|c|a+a|b+b|c+a>
-  --script-opt=kumiplayer_anime4k-default_quality=<light|balanced|high>
+  --script-opt=kumiplayer_anime4k-default_quality=<fast|light|balanced|high>
   --script-opt=kumiplayer_anime4k-shaders_dir=<kumiplayer/shaders 绝对路径>
 ```
 

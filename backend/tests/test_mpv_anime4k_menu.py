@@ -103,7 +103,7 @@ def test_menu_state_comes_from_anime4k_receipt():
 
 def test_menu_contains_only_compact_mode_and_quality_submenus():
     text = MENU_LUA.read_text(encoding="utf-8")
-    # 右键菜单仅保留官方模式原名与三档质量，不能再塞入说明页、性能页或长提示。
+    # 右键菜单保留官方模式原名与四档质量，不增加说明页或长提示。
     for title in (
         "Anime4K Mode A",
         "Anime4K Mode B",
@@ -113,7 +113,7 @@ def test_menu_contains_only_compact_mode_and_quality_submenus():
         "Anime4K Mode C+A",
     ):
         assert title in text
-    for quality in ("light", "balanced", "high"):
+    for quality in ("fast", "light", "balanced", "high"):
         assert f'"{quality}"' in text
     for removed_entry in (
         "build_info_items",
@@ -261,7 +261,6 @@ def test_lua_scripts_load_in_isolated_mpv(tmp_path):
     """
 
     import json
-    import shutil
     import subprocess
 
     mpv = PROJECT_ROOT / "mpv/runtime/mpv.exe"
