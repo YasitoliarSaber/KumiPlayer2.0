@@ -3,13 +3,14 @@
 编号映射合同（C-004 / CHECK-007A）：本地分季与线上连续编号之间只有带版本的
 已核验 local→Provider 偏移规则、明确 absolute 来源或已有逐条映射才允许映射；
 前季文件数、季内最大集号、缺集与播出间隔都只是诊断，不构成偏移依据。证据不足
-时返回原编号副本并记录唯一原因，不猜 S1E1、不补 0、不抛错，作品资料仍为 ready。
+时返回原编号副本并记录唯一原因，不猜 S1E1、不补 0、不抛错；正片资料缺项仍 failed。
 """
 from copy import deepcopy
 from datetime import date, timedelta
 from types import SimpleNamespace
 
 import pytest
+
 from app.media_v4.jobs import metadata
 from app.scrape.tmdb_client import TMDBClientError
 
@@ -31,7 +32,7 @@ def test_local_seasons_map_to_continuous_online_episodes(monkeypatch, counts):
             local.append({'episode_id': f'{season}-{number}', 'season_id': str(season),
                           'local_season_number': season, 'local_episode_number': number})
             remote.append({'episode_number': len(remote) + 1, 'id': len(remote) + 100,
-                           'name': f'S{season}E{number}',
+                           'name': f'S{season}E{number}', 'still_path': '/fixture.jpg',
                            'air_date': str(date(2016 + season * 3, 1, 1) + timedelta(days=number * 7))})
     requested = []
 
@@ -49,6 +50,7 @@ def test_local_seasons_map_to_continuous_online_episodes(monkeypatch, counts):
         def select_best_poster(self, _images): return ''
         def select_best_backdrop(self, _images): return ''
         def select_best_logo(self, _images): return ''
+        def build_image_url(self, path, size): return f'https://image.tmdb.org/t/p/{size}{path}'
 
     monkeypatch.setattr(metadata, 'TMDBClient', Client)
     monkeypatch.setattr(metadata, 'load_config', lambda: SimpleNamespace(tmdb_bearer_token='fixture'))
@@ -56,12 +58,11 @@ def test_local_seasons_map_to_continuous_online_episodes(monkeypatch, counts):
               'provider_bindings': [{'provider': 'tmdb', 'provider_id': '42', 'media_type': 'tv'}]}
     original = deepcopy(target)
 
-    # C-004：本地分季 + 线上单季连续编号本身不是偏移依据；不猜、不崩、也不把
-    # 整部作品降级成资料失败。
+    # 同季同集仍可映射；仅凭前季文件数不能映射后续季，也不能把缺项写成 ready。
     result = metadata.default_metadata_provider(target)
-    assert result['metadata_state'] == 'ready'
-    assert result['episode_mappings'] == []
-    assert result['episode_mapping_status'] == 'unmapped'
+    assert result['metadata_state'] == 'failed'
+    assert len(result['episode_mappings']) == counts[0]
+    assert result['episode_mapping_status'] == 'partial'
     assert result['unmapped_reason_codes'] == ['insufficient_numbering_evidence']
     assert requested == [1]
     assert target == original
@@ -131,9 +132,11 @@ def test_incomplete_previous_season_does_not_guess_wrong_offset():
         {'episode_number': 11, 'id': 11, 'air_date': '2022-03-20'},
     ]}
     mapped = metadata._map_continuous_season(episodes, remote)
-    assert all(row['unmapped_reason'] == 'insufficient_numbering_evidence' for row in mapped)
-    assert [_numbers(row) for row in mapped] == episodes
-    assert all('provider_episode_number' not in row for row in mapped)
+    assert mapped[0]['provider_episode_number'] == 10
+    assert mapped[1]['unmapped_reason'] == 'insufficient_numbering_evidence'
+    assert _numbers(mapped[1]) == episodes[1]
+    assert 'provider_episode_number' not in mapped[1]
+    assert episodes[0] == {'episode_id': 'first', 'local_season_number': 1, 'local_episode_number': 10}
 
 
 def test_absolute_numbers_are_not_offset_twice():
@@ -155,4 +158,6 @@ def test_absolute_numbers_are_not_offset_twice():
     guessed = metadata._map_continuous_season(episodes, remote)
     assert 'provider_episode_number' not in guessed[1]
     assert guessed[1]['unmapped_reason'] == 'insufficient_numbering_evidence'
-    assert [_numbers(row) for row in guessed] == episodes
+    assert _numbers(guessed[1]) == episodes[1]
+    assert guessed[0]['provider_episode_number'] == 12
+    assert 'provider_episode_number' not in episodes[0]

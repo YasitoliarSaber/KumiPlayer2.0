@@ -8,6 +8,10 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from app.core.config import load_config
+from app.media_v4.jobs.provider_numbering import (
+    normalized_episode_title,
+    verified_tmdb_season_offsets,
+)
 from app.media_v4.resolution.candidates import query_variants, strip_season_marker
 from app.media_v4.resolution.ranker import CandidateRanker, RankedCandidate
 from app.scrape.tmdb_client import (
@@ -80,6 +84,7 @@ PROVIDER_FAILURE_STATES = frozenset({"source_unavailable", "failed"})
 MAPPING_BASIS_EXISTING = "existing_mapping"
 MAPPING_BASIS_ABSOLUTE = "explicit_absolute"
 MAPPING_BASIS_VERIFIED_OFFSET = "verified_season_offset"
+MAPPING_BASIS_EPISODE_TITLE = "verified_episode_title"
 MAPPING_BASIS_PROVIDER_BOUNDARY = "provider_season_boundary"
 MAPPING_BASIS_SINGLE_PROVIDER_SEASON = "single_provider_season"
 
@@ -595,7 +600,8 @@ def _normalize_verified_offsets(raw: Any) -> dict[int, dict]:
             provider_season = _positive_int(value.get("provider_season_number"))
             if provider_season:
                 rule["provider_season_number"] = provider_season
-            for extra in ("previous_season_total", "provider_boundary"):
+            for extra in ("previous_season_total", "provider_boundary", "max_local_episode_number",
+                          "episode_title_aliases", "source_url"):
                 if value.get(extra) is not None:
                     rule[extra] = value.get(extra)
         else:
@@ -1581,6 +1587,14 @@ def _build_tv_episode_mappings(
     if continuous_scope:
         online_season = fetch(1)
         if online_season is not None:
+            # 规则属于 Provider 编号层，不写回 confirmed revision。显式已核验规则优先。
+            catalog_offsets = verified_tmdb_season_offsets(provider_id)
+            if any(item.get("local_season_number") == 1 and not _is_special_episode(item)
+                   for item in local_episodes):
+                # S01 正片已存在时，不把同作品 S02 标签例外也塞进 S01 的同一集。
+                catalog_offsets = {s: r for s, r in catalog_offsets.items()
+                                   if not r.get("episode_title_aliases")}
+            verified_offsets = {**catalog_offsets, **verified_offsets}
             local_episodes = _map_continuous_season(
                 local_episodes,
                 online_season,
@@ -1766,6 +1780,8 @@ def _build_tv_episode_mappings(
             result.append(mapping)
             basis = str(episode.get("mapping_basis") or "")
             if basis:
+                mapping["mapping_basis"] = basis
+                mapping["mapping_evidence"] = dict(episode.get("mapping_evidence") or {})
                 _record_mapping_basis(diagnostics, basis)
     return result
 
@@ -1780,8 +1796,8 @@ def _map_continuous_season(
 ) -> list[dict]:
     """只生成线上编号副本，不改本地分季，也不推断偏移（C-004）。
 
-    充分依据只有三种：本集已有的适用逐条 Provider mapping、明确 absolute 来源且
-    在线该集存在、带版本的已核验 local→Provider 季度偏移规则。文件数量、季内最大
+    充分依据包括本集已有的适用逐条 Provider mapping、明确 absolute 来源且
+    在线该集存在、带版本的已核验偏移规则、唯一一致的分集标题。文件数量、季内最大
     集号、播出间隔都不再参与推断——证据不足就返回原编号副本并记录
     ``unmapped_reason=insufficient_numbering_evidence``，不抛错、不补 0、不猜 S1E1。
 
@@ -1791,6 +1807,17 @@ def _map_continuous_season(
 
     remote = _remote_episodes_by_number(online_season)
     rules = _normalize_verified_offsets(verified_offsets)
+    title_numbers: dict[str, list[int]] = {}
+    local_title_counts: dict[str, int] = {}
+    for item in episodes:
+        if not _is_special_episode(item):
+            title = normalized_episode_title(item.get("display_title"))
+            if title:
+                local_title_counts[title] = local_title_counts.get(title, 0) + 1
+    for remote_number, item in remote.items():
+        title = normalized_episode_title(item.get("name"))
+        if title and str(item.get("id") or "").strip():
+            title_numbers.setdefault(title, []).append(remote_number)
     mapped: list[dict] = []
     for episode in episodes:
         copy = dict(episode)
@@ -1831,14 +1858,40 @@ def _map_continuous_season(
             # 3) 带版本的已核验 local→Provider 偏移规则（允许季号缺口）。
             rule = rules[season]
             candidate = int(rule["offset"]) + number
-            if absolute is not None and absolute != candidate:
+            maximum = _positive_int(rule.get("max_local_episode_number"))
+            aliases = rule.get("episode_title_aliases")
+            local_title = normalized_episode_title(episode.get("display_title"))
+            title_matches = title_numbers.get(local_title, [])
+            title_verified = True
+            if isinstance(aliases, dict):
+                title = normalized_episode_title(episode.get("display_title"))
+                alias = normalized_episode_title(aliases.get(number) or aliases.get(str(number)))
+                online_title = normalized_episode_title((remote.get(candidate) or {}).get("name"))
+                title_verified = bool(title and title in {alias, online_title})
+            if (maximum is not None and number > maximum) or not title_verified:
+                reason = UNMAPPED_INSUFFICIENT_EVIDENCE
+            elif len(title_matches) == 1 and title_matches[0] != candidate:
+                reason = UNMAPPED_NUMBERING_CONFLICT
+            elif absolute is not None and absolute != candidate:
                 reason = UNMAPPED_NUMBERING_CONFLICT
             elif candidate in remote:
                 target_number = candidate
                 basis = str(rule.get("basis") or MAPPING_BASIS_VERIFIED_OFFSET)
-                evidence = dict(rule)
+                evidence = {key: value for key, value in rule.items() if key != "episode_title_aliases"}
+                if isinstance(aliases, dict):
+                    evidence["matched_title"] = title
             elif reason is None:
                 reason = UNMAPPED_PROVIDER_RESOURCE_MISSING
+        if (target_number is None and absolute is None and season and season not in rules
+                and existing_number is None and existing_season in {None, provider_season_number}):
+            # 本地季号不同时，可用唯一分集标题直接定位在线集；同季明确编号仍优先。
+            title = normalized_episode_title(episode.get("display_title"))
+            matches = title_numbers.get(title, [])
+            if (len(matches) == 1 and local_title_counts.get(title) == 1
+                    and (season != provider_season_number or number == matches[0])):
+                target_number, basis = matches[0], MAPPING_BASIS_EPISODE_TITLE
+                evidence = {'rule_version': 'unique_episode_title-v1',
+                            'provider_episode_number': target_number, 'matched_title': title}
         if (target_number is None and absolute is None and season == provider_season_number
                 and season not in rules and number in remote and existing_season in {None, provider_season_number}
                 and existing_number is None):
@@ -1865,6 +1918,27 @@ def _map_continuous_season(
             copy["unmapped_reason"] = reason
             _record_unmapped(diagnostics, episode, reason)
         mapped.append(copy)
+    # 唯一标题/规则产生的新对应不能占用另一个本地 Episode 已使用的在线集。
+    # 同一集的多 Asset 在图里共享 Episode ID，不会被误判为这里的冲突。
+    claims: dict[tuple[int, int], set[str]] = {}
+    for item in mapped:
+        if _is_special_episode(item):
+            continue
+        provider_season = _positive_int(item.get("provider_season_number"))
+        provider_number = _positive_int(item.get("provider_episode_number"))
+        if provider_season and provider_number:
+            claims.setdefault((provider_season, provider_number), set()).add(_episode_key(item))
+    for item in mapped:
+        claim = (item.get("provider_season_number"), item.get("provider_episode_number"))
+        if (len(claims.get(claim, set())) > 1
+                and item.get("mapping_basis") in {MAPPING_BASIS_EPISODE_TITLE, MAPPING_BASIS_VERIFIED_OFFSET,
+                                                 MAPPING_BASIS_PROVIDER_BOUNDARY}):
+            item.pop("provider_season_number", None)
+            item.pop("provider_episode_number", None)
+            item.pop("mapping_basis", None)
+            item.pop("mapping_evidence", None)
+            item["unmapped_reason"] = UNMAPPED_NUMBERING_CONFLICT
+            _record_unmapped(diagnostics, item, UNMAPPED_NUMBERING_CONFLICT)
     return mapped
 
 
