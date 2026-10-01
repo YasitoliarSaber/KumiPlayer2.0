@@ -172,6 +172,10 @@ class BangumiClient:
     def get_collection(self, username: str, subject_id: int) -> dict[str, Any]:
         return self._request("GET", f"/v0/users/{username}/collections/{subject_id}", auth_required=True)
 
+    def get_subject(self, subject_id: int) -> dict[str, Any]:
+        """公开条目名称读取；不读人物或操作用户收藏。"""
+        return self._request("GET", f"/v0/subjects/{subject_id}")
+
     def set_collection(self, subject_id: int, collection_type: int) -> dict[str, Any]:
         body = {"type": collection_type}
         return self._request("POST", f"/v0/users/-/collections/{subject_id}", json=body, auth_required=True)

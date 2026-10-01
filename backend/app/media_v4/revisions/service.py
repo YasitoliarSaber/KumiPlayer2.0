@@ -3042,7 +3042,7 @@ class V4RevisionService:
                 raise KeyError(work_id)
 
             job_rows = conn.execute(
-                "SELECT job_id, job_type, status, attempts, last_error, finished_at "
+                "SELECT job_id, job_type, status, attempts, last_error, finished_at, updated_at "
                 "FROM jobs WHERE revision_id = ? AND work_id = ? "
                 "ORDER BY job_type, updated_at DESC, job_id",
                 (revision_id, work_id),
@@ -3219,7 +3219,8 @@ class V4RevisionService:
             })
 
         mirror_job = next((dict(row) for row in job_rows if row["job_type"] == "materialize_mirror"), None)
-        metadata_job = next((dict(row) for row in job_rows if row["job_type"] == "scrape_work"), None)
+        metadata_job = next((dict(row) for row in sorted(job_rows, key=lambda row: row['updated_at'], reverse=True)
+                             if row["job_type"] in {"scrape_work", "recover_work_aliases"}), None)
 
         mirror_status = str(mirror_job["status"]) if mirror_job else ""
         artifacts = [
@@ -3406,12 +3407,15 @@ class V4RevisionService:
             if job_type == "materialize_mirror":
                 stage["mirror"].append(job)
                 jobs_by_work.setdefault(work_id, {})["mirror"] = job
-            elif job_type == "scrape_work":
-                stage["metadata"].append(job)
-                jobs_by_work.setdefault(work_id, {})["metadata"] = job
+            elif job_type in {"scrape_work", "recover_work_aliases"}:
+                pair = jobs_by_work.setdefault(work_id, {})
+                previous = pair.get("metadata")
+                if previous is None or str(job['updated_at']) > str(previous['updated_at']):
+                    pair["metadata"] = job
             elif job_type == "refresh_projection":
                 stage["projection"].append(job)
 
+        stage['metadata'] = [pair['metadata'] for pair in jobs_by_work.values() if 'metadata' in pair]
         work_units: list[dict] = []
         for work_id in work_ids:
             work = works.get(work_id, {})

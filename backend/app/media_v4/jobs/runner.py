@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from app.core.paths import get_mirror_root
+from app.media_v4.jobs.alias_recovery import NAME_REASONS, RETRY_REASONS, recover_metadata
 from app.media_v4.jobs.cleanup import V4ArtifactCleanup
 from app.media_v4.jobs.control import cancel_requested, claim_running, heartbeat, mark_cancelled, now
 from app.media_v4.jobs.metadata import default_metadata_provider
@@ -37,18 +40,21 @@ class V4JobRunner:
     _LOCAL_JOB_TYPES = frozenset({
         "materialize_mirror",
         "scrape_work",
+        "recover_work_aliases",
         "refresh_projection",
         "cleanup_superseded_artifacts",
         "delete_source_library",
     })
 
-    def __init__(self, database: V4Database, metadata_provider: Callable[[dict], dict] | None = None):
+    def __init__(self, database: V4Database, metadata_provider: Callable[[dict], dict] | None = None,
+                 *, recovery_provider: Callable[[dict], dict] | None = None):
         self.database = database
         self.materializer = V4MirrorMaterializer(database)
         self.cleanup = V4ArtifactCleanup(database)
         self.scrape = V4ScrapeService(database)
         self.projection = V4LibraryProjection(database)
         self.metadata_provider = metadata_provider or default_metadata_provider
+        self.recovery_provider = recovery_provider or (recover_metadata if metadata_provider is None else None)
 
     def process_job(self, job_id: str, *, mirror_root: str | Path | None = None) -> JobRunResult:
         with self.database.connect() as conn:
@@ -81,12 +87,29 @@ class V4JobRunner:
             materialized = self.materializer.process(job_id, mirror_root or get_mirror_root())
             return JobRunResult(job_id, job["job_type"], materialized.status, materialized=materialized)
 
-        if job["job_type"] == "scrape_work":
+        if job["job_type"] in {"scrape_work", "recover_work_aliases"}:
+            provider = self.metadata_provider
+            if job["job_type"] == "recover_work_aliases":
+                if self.recovery_provider is None:
+                    raise ValueError("未配置名称恢复执行器")
+                provider = self.recovery_provider
+                if provider is recover_metadata:
+                    def provider(target):
+                        return recover_metadata(target, should_cancel=lambda: cancel_requested(self.database, job_id))
             self.scrape.process(
                 job_id,
-                self.metadata_provider,
+                provider,
                 mirror_root=mirror_root or get_mirror_root(),
             )
+            if job['job_type'] == 'recover_work_aliases':
+                with self.database.connect() as conn:
+                    current = conn.execute('SELECT * FROM jobs WHERE job_id=?', (job_id,)).fetchone()
+                    payload = json.loads(current['result_json'] or '{}')
+                    delay = int(payload.get('alias_deferred_seconds') or 0)
+                    if delay and current['status'] == 'succeeded' and int(current['attempts']) < 3 and not current['cancel_requested']:
+                        payload['next_retry_at'] = (datetime.now(UTC) + timedelta(seconds=min(delay, 86400))).isoformat()
+                        conn.execute("UPDATE jobs SET status='queued',result_json=?,finished_at='',updated_at=? WHERE job_id=?",
+                                     (json.dumps(payload, ensure_ascii=False), now(), job_id))
             return JobRunResult(job_id, job["job_type"], self._current_status(job_id))
 
         if job["job_type"] == "cleanup_superseded_artifacts":
@@ -159,6 +182,7 @@ class V4JobRunner:
 
     def process_available(self, *, mirror_root: str | Path | None = None) -> list[JobRunResult]:
         self.recover_stale_jobs()
+        self.schedule_recovery()
         with self.database.connect() as conn:
             rows = conn.execute(
                 """
@@ -166,13 +190,14 @@ class V4JobRunner:
                 FROM jobs
                 WHERE status = 'queued'
                   AND job_type IN (
-                      'materialize_mirror', 'scrape_work', 'refresh_projection',
+                      'materialize_mirror', 'scrape_work', 'recover_work_aliases', 'refresh_projection',
                       'cleanup_superseded_artifacts', 'delete_source_library'
                   )
                 ORDER BY CASE job_type
                     WHEN 'delete_source_library' THEN 0
                     WHEN 'materialize_mirror' THEN 1
                     WHEN 'scrape_work' THEN 2
+                    WHEN 'recover_work_aliases' THEN 2
                     WHEN 'refresh_projection' THEN 3
                     WHEN 'cleanup_superseded_artifacts' THEN 4
                     ELSE 9 END,
@@ -182,6 +207,7 @@ class V4JobRunner:
         results: list[JobRunResult] = []
         scrape_job_ids: list[str] = []
         deferred_job_ids: list[str] = []
+        recovery_job_ids: list[str] = []
         for row in rows:
             with self.database.connect() as conn:
                 job = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (row["job_id"],)).fetchone()
@@ -205,6 +231,9 @@ class V4JobRunner:
             if job_type == "scrape_work":
                 scrape_job_ids.append(str(row["job_id"]))
                 continue
+            if job_type == "recover_work_aliases":
+                recovery_job_ids.append(str(row["job_id"]))
+                continue
             results.append(self.process_job(row["job_id"], mirror_root=mirror_root))
 
         if scrape_job_ids:
@@ -217,6 +246,19 @@ class V4JobRunner:
                 # 按队列顺序读取结果，保持 API/测试的稳定可观察顺序；如果任一
                 # 任务失败，executor 仍先安全等待已领取的同批任务退出。
                 results.extend(future.result() for future in futures)
+
+        self.schedule_recovery()
+        with self.database.connect() as conn:
+            recovery_job_ids = [str(row[0]) for row in conn.execute(
+                "SELECT job_id FROM jobs WHERE job_type='recover_work_aliases' AND status='queued' ORDER BY created_at,job_id",
+            )]
+        for job_id in recovery_job_ids:
+            with self.database.connect() as conn:
+                job = conn.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            if job and self._prerequisites_succeeded(dict(job)):
+                results.append(self.process_job(job_id, mirror_root=mirror_root))
+        # 每波最多十部；仍有待恢复作品时，下轮继续，投影不得越过未排程作品。
+        self.schedule_recovery()
 
         for job_id in deferred_job_ids:
             with self.database.connect() as conn:
@@ -232,8 +274,48 @@ class V4JobRunner:
             results.append(self.process_job(job_id, mirror_root=mirror_root))
         return results
 
+    def schedule_recovery(self) -> int:
+        """首轮全体收口后事务去重；取消/退役 revision 不产生新作业。"""
+        if self.recovery_provider is None:
+            return 0
+        created = 0
+        with self.database.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT j.* FROM jobs j JOIN import_revisions ir ON ir.revision_id=j.revision_id "
+                "JOIN source_roots sr ON sr.root_id=ir.root_id JOIN works w ON w.work_id=j.work_id "
+                "WHERE j.job_type='scrape_work' AND j.status='succeeded' AND ir.status='confirmed' "
+                "AND sr.retired_at='' AND w.status='active' AND NOT EXISTS ("
+                "SELECT 1 FROM jobs p WHERE p.revision_id=j.revision_id AND ((p.cancel_requested=1 AND p.job_type!='recover_work_aliases') "
+                "OR (p.job_type IN ('materialize_mirror','scrape_work') AND p.status IN ('queued','running')))) "
+                "ORDER BY j.created_at,j.job_id",
+            ).fetchall()
+            for row in rows:
+                result = json.loads(row['result_json'] or '{}')
+                primary = str(result.get('reason_code') or result.get('refresh_reason_code')
+                              or next(iter(result.get('reason_codes') or []), ''))
+                reasons = {primary}
+                if not reasons & (NAME_REASONS | RETRY_REASONS):
+                    continue
+                key = f"recover_work_aliases:{row['revision_id']}:{row['work_id']}:{row['attempts']}"
+                if conn.execute("SELECT 1 FROM jobs WHERE idempotency_key=?", (key,)).fetchone():
+                    continue
+                active = conn.execute("SELECT COUNT(*) FROM jobs WHERE job_type='recover_work_aliases' AND status IN ('queued','running')").fetchone()[0]
+                if active >= 10:
+                    break
+                stamp = now()
+                conn.execute(
+                    "INSERT INTO jobs(job_id,job_type,revision_id,work_id,idempotency_key,created_at,updated_at) "
+                    "VALUES (?,'recover_work_aliases',?,?,?,?,?)",
+                    (str(uuid.uuid4()), row['revision_id'], row['work_id'], key, stamp, stamp),
+                )
+                created += 1
+        return created
+
     def _prerequisites_succeeded(self, job: dict) -> bool:
         job_type = str(job["job_type"])
+        if job_type in {"refresh_projection", "cleanup_superseded_artifacts"}:
+            self.schedule_recovery()
         if job_type == "materialize_mirror":
             return True
         if job_type == "delete_source_library":
@@ -244,16 +326,22 @@ class V4JobRunner:
         if job_type == "scrape_work":
             predicate = "job_type = 'materialize_mirror' AND work_id = ?"
             params = (job["revision_id"], job.get("work_id"))
+        elif job_type == "recover_work_aliases":
+            payload = json.loads(job.get('result_json') or '{}')
+            if payload.get('next_retry_at', '') > now():
+                return False
+            predicate = "job_type IN ('materialize_mirror','scrape_work')"
+            params = (job["revision_id"],)
         elif job_type == "refresh_projection":
-            predicate = "job_type IN ('materialize_mirror', 'scrape_work')"
+            predicate = "job_type IN ('materialize_mirror', 'scrape_work', 'recover_work_aliases')"
             params = (job["revision_id"],)
         elif job_type == "cleanup_superseded_artifacts":
-            predicate = "job_type IN ('materialize_mirror', 'scrape_work', 'refresh_projection')"
+            predicate = "job_type IN ('materialize_mirror', 'scrape_work', 'recover_work_aliases', 'refresh_projection')"
             params = (job["revision_id"],)
         else:
             return False
         with self.database.connect() as conn:
-            pending = "status IN ('queued', 'running')" if job_type in {'refresh_projection', 'cleanup_superseded_artifacts'} else "status != 'succeeded'"
+            pending = "status IN ('queued', 'running')" if job_type in {'refresh_projection', 'cleanup_superseded_artifacts', 'recover_work_aliases'} else "status != 'succeeded'"
             blocked = conn.execute(
                 f"SELECT 1 FROM jobs WHERE revision_id = ? AND {predicate} "
                 f"AND {pending} LIMIT 1",
@@ -340,6 +428,9 @@ class V4JobRunner:
                         "UPDATE jobs SET status = 'cancelled', finished_at = ?, heartbeat_at = ?, updated_at = ? WHERE job_id = ?",
                         (stamp, stamp, stamp, job_id),
                     )
+                elif row['job_type'] == 'recover_work_aliases' and int(row['attempts']) < 3:
+                    conn.execute("UPDATE jobs SET status='queued',last_error='名称核对中断，继续处理',updated_at=? WHERE job_id=?",
+                                 (stamp, job_id))
                 else:
                     conn.execute(
                         """

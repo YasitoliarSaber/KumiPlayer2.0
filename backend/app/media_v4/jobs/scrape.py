@@ -257,6 +257,9 @@ def _job_result_payload(
         "retained_snapshot_id": str(result.get("retained_snapshot_id") or ""),
         "produced_artifact_ids": list(produced_artifact_ids),
         "reason_codes": _reason_codes(result),
+        "reason_code": str(result.get("reason_code") or ""),
+        "alias_recovery_trace": result.get("alias_recovery_trace") or [],
+        "alias_deferred_seconds": int(result.get("alias_deferred_seconds") or 0),
     }
 
 
@@ -382,6 +385,10 @@ class V4ScrapeService:
                 raise RuntimeError("该作品缺少可重试的刮削任务")
             if job["status"] == "running":
                 raise RuntimeError("该作品正在获取媒体信息")
+            if conn.execute("SELECT 1 FROM jobs WHERE revision_id=? AND work_id=? "
+                            "AND job_type='recover_work_aliases' AND status='running' LIMIT 1",
+                            (revision_id, work_id)).fetchone():
+                raise RuntimeError("该作品正在核对名称，请等待或取消后重试")
             now = _now()
             # 守卫必须写进 UPDATE 本身：先 SELECT 判 running 再 UPDATE 是读后写，
             # 并发两次重试时后到的会把已被执行器领取的 running 改回 queued，
@@ -399,6 +406,9 @@ class V4ScrapeService:
             )
             if updated.rowcount != 1:
                 raise RuntimeError("该作品正在获取媒体信息")
+            conn.execute("UPDATE jobs SET status='cancelled',cancel_requested=1,updated_at=? "
+                         "WHERE revision_id=? AND work_id=? AND job_type='recover_work_aliases' AND status='queued'",
+                         (_now(), revision_id, work_id))
             conn.execute("INSERT OR REPLACE INTO v4_meta(key,value) VALUES ('library_projection_dirty',?)", (now,))
             refreshed = conn.execute(
                 "SELECT * FROM jobs WHERE job_id = ?", (job["job_id"],)
@@ -490,7 +500,7 @@ class V4ScrapeService:
             job = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
             if job is None:
                 raise KeyError(job_id)
-            if job["job_type"] != "scrape_work":
+            if job["job_type"] not in {"scrape_work", "recover_work_aliases"}:
                 raise ValueError(f"不是刮削任务: {job['job_type']}")
             if job["status"] == "cancelled" or bool(job["cancel_requested"]):
                 # 同来源的新 revision 已确认后，旧任务可能刚好迟到。它已经失去活动

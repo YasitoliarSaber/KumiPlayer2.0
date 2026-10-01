@@ -408,9 +408,11 @@ def _rank_metadata_candidates(
 ) -> tuple[list[RankedCandidate], RankedCandidate | None, str]:
     """把多次搜索结果统一交给 CandidateRanker 决策。"""
 
+    # 恢复来源只提供检索词；身份证据仍来自 confirmed Work 的本地标题变体。
+    identity_titles = _search_titles(target) if "recovery_search_queries" in target else titles
     candidates = enrich_candidate_aliases(
         [_candidate_summary(item) for item in results_by_id.values()],
-        titles,
+        identity_titles,
         max_details=8,
         client=client,
     )
@@ -418,7 +420,7 @@ def _rank_metadata_candidates(
     ranked = ranker.rank(
         {
             "preferred_title": target.get("preferred_title") or "",
-            "queries": titles,
+            "queries": identity_titles,
             "media_type": media_type,
             "year": target.get("year"),
             "show_type": target.get("show_type") or "",
@@ -1205,7 +1207,7 @@ def _fetch_provider_metadata(target: dict) -> dict:
                     "ranked_candidates": [],
                 }
             else:
-                titles = _search_titles(target)
+                titles = target.get("recovery_search_queries") or _search_titles(target)
                 attempted_queries: list[dict] = []
                 results_by_id: dict[str, dict] = {}
                 search_errors: list[TMDBClientError] = []

@@ -405,7 +405,7 @@ def list_source_cards(database: V4Database) -> list[dict]:
             overall_status = "needs_attention"
             card_progress.update(state=overall_status, message="有任务需要处理")
         import_jobs = [job for job in jobs_by_revision.get(revision_id, [])
-                       if job["job_type"] in {"materialize_mirror", "scrape_work", "refresh_projection"}]
+                       if job["job_type"] in {"materialize_mirror", "scrape_work", "recover_work_aliases", "refresh_projection"}]
         import_completed_at = max((str(job["finished_at"] or "") for job in import_jobs), default="") if (
             import_jobs and all(job["status"] == "succeeded" and job["finished_at"] for job in import_jobs)
         ) else ""
@@ -684,6 +684,7 @@ def _active_task(scan, job, revision_id: str, progress: dict) -> dict | None:
     labels = {
         "materialize_mirror": "正在准备播放文件",
         "scrape_work": "正在获取媒体信息",
+        "recover_work_aliases": "正在核对作品名称",
         "refresh_projection": "正在更新媒体库",
         "cleanup_superseded_artifacts": "正在整理旧文件",
         "delete_source_library": "正在删除该来源的媒体库",

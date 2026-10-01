@@ -167,6 +167,11 @@ def test_successful_scrape_marks_projection_dirty_and_becomes_visible_before_fin
             "provider_id": "9",
             "title": "Runner Online",
             "plot": "published before the final projection job",
+            "episode_mappings": [dict(episode, provider_episode_id=str(episode['episode_id']),
+                                      provider_season_number=episode['local_season_number'],
+                                      provider_episode_number=episode['local_episode_number'],
+                                      title='Online episode', still_url='https://image.tmdb.org/t/p/original/episode.jpg')
+                                 for episode in _target['episodes']],
             "poster_url": "https://image.tmdb.org/t/p/w780/poster.jpg",
             "fanart_url": "https://image.tmdb.org/t/p/w1280/fanart.jpg",
         },

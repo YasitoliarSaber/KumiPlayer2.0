@@ -10,10 +10,12 @@ import re
 import time
 from copy import deepcopy
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
 from app.core.config import load_config
+from app.scrape.provider_budget import ProviderDeferred, acquire, cool_down
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,10 @@ class AniListClientError(Exception):
 class AniListRateLimitError(AniListClientError):
     """AniList returned 429."""
 
+    def __init__(self, message: str, retry_after: int = 60):
+        super().__init__(message)
+        self.retry_after = retry_after
+
 
 class AniListClient:
     """Tiny synchronous AniList GraphQL client."""
@@ -36,6 +42,7 @@ class AniListClient:
         rate_limit: float | None = None,
         timeout: int | None = None,
         _http_client: Any | None = None,
+        should_cancel=lambda: False,
     ):
         config = load_config()
         self._rate_limit = rate_limit if rate_limit is not None else config.anilist_rate_limit
@@ -45,6 +52,7 @@ class AniListClient:
         self._owned_client: httpx.Client | None = None
         self._last_request_time = 0.0
         self._response_cache: dict[tuple[str, tuple[tuple[str, str], ...]], dict] = {}
+        self._should_cancel = should_cancel
 
     def _get_client(self):
         if self._client is not None:
@@ -71,10 +79,13 @@ class AniListClient:
 
     def _rate_limit_wait(self) -> None:
         interval = max(0.0, float(self._rate_limit or 0.0))
-        elapsed = time.time() - self._last_request_time
-        if elapsed < interval:
-            time.sleep(interval - elapsed)
-        self._last_request_time = time.time()
+        if interval:
+            try:
+                acquire("anilist", max(3.0, interval), self._should_cancel)
+            except ProviderDeferred as exc:
+                raise AniListRateLimitError("AniList 冷却等待", exc.retry_after) from exc
+        elif self._should_cancel():
+            raise RuntimeError("AniList request cancelled")
 
     def _request(self, query: str, variables: dict | None = None) -> dict:
         variables = variables or {}
@@ -101,10 +112,13 @@ class AniListClient:
         if resp.status_code == 429:
             retry_after = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
             wait_time = _safe_int(retry_after, 5)
-            wait_time = max(1, min(wait_time, 30))
-            logger.warning("AniList 429 rate limited, wait %s seconds", wait_time)
-            time.sleep(wait_time)
-            raise AniListRateLimitError("AniList 速率限制")
+            wait_time = max(1, min(wait_time, 86400))
+            cool_down("anilist", wait_time)
+            raise AniListRateLimitError("AniList 速率限制", wait_time)
+
+        if resp.headers.get("X-RateLimit-Remaining") == "0":
+            reset = _safe_int(resp.headers.get("X-RateLimit-Reset"), int(time.time()) + 60)
+            cool_down("anilist", max(1, reset - int(time.time())))
 
         if resp.status_code >= 500:
             raise AniListClientError(f"AniList 服务端错误 ({resp.status_code})")
@@ -173,16 +187,17 @@ class AniListClient:
 def extract_tmdb_link(media: dict) -> tuple[int | None, str]:
     """Return (tmdb_id, tmdb_type) from AniList external links when present."""
     for link in media.get("externalLinks") or []:
-        site = (link.get("site") or "").lower()
-        url = link.get("url") or ""
-        if "movie database" not in site and "tmdb" not in site and "themoviedb.org" not in url:
+        try:
+            parsed = urlsplit(str(link.get("url") or ""))
+            if (parsed.scheme != "https" or parsed.hostname not in {"themoviedb.org", "www.themoviedb.org"}
+                    or parsed.port not in {None, 443} or parsed.username or parsed.password
+                    or parsed.query or parsed.fragment):
+                continue
+        except ValueError:
             continue
-        match = re.search(r"themoviedb\.org/(tv|movie)/(\d+)", url, flags=re.IGNORECASE)
+        match = re.fullmatch(r"/(tv|movie)/([1-9]\d*)/?", parsed.path)
         if match:
             return int(match.group(2)), match.group(1).lower()
-        match = re.search(r"(?:tmdb|themoviedb)[^0-9]*(\d+)", url, flags=re.IGNORECASE)
-        if match:
-            return int(match.group(1)), ""
     return None, ""
 
 
