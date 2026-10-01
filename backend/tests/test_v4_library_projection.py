@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 
 def _entry(evidence_id: str):
     from app.media_v4.domain.models import ParsedFacts, SourceEvidence
@@ -394,7 +396,15 @@ def _two_bindings(tmp_path, *, failure_newer: bool):
             """,
             (
                 work_id,
-                '{"title":"A","metadata_state":"ready","poster_url":"https://image.tmdb.org/t/p/w500/a.jpg"}',
+                json.dumps({
+                    'title': 'A', 'metadata_state': 'ready',
+                    'poster_url': 'https://image.tmdb.org/t/p/w500/a.jpg',
+                    'episode_mappings': [
+                        {'episode_id': row['episode_id'], 'provider_episode_id': '9001', 'title': 'Episode',
+                         'still_url': 'https://image.tmdb.org/t/p/w500/still.jpg'}
+                        for row in conn.execute('SELECT episode_id FROM episodes')
+                    ],
+                }),
                 "2026-09-09T00:00:00+00:00",
                 ready_at,
             ),

@@ -45,6 +45,8 @@ def test_season_refresh_preserves_other_season_mappings(tmp_path, monkeypatch):
             'fanart_url': 'https://image.tmdb.org/t/p/original/fanart.jpg',
             'episode_mappings': [
                 {'episode_id': item['episode_id'], 'title': f'Pass {len(seen)} season {item["local_season_number"]}',
+                 'provider_episode_id': str(1000 + item['local_season_number']),
+                 'still_url': 'https://image.tmdb.org/t/p/w500/still.jpg',
                  'provider_season_number': item['local_season_number'], 'provider_episode_number': 1}
                 for item in target['episodes']
             ],

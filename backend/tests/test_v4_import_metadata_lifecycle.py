@@ -34,6 +34,8 @@ def provider(target):
         'poster_url': 'https://image.tmdb.org/t/p/original/poster.jpg',
         'fanart_url': 'https://image.tmdb.org/t/p/original/fanart.jpg',
         'episode_mappings': [dict(e, title='Episode', provider_season_number=1,
+                                  provider_episode_id=str(1000 + e['local_episode_number']),
+                                  still_url='https://image.tmdb.org/t/p/original/episode.jpg',
                                   provider_episode_number=e['local_episode_number'])
                              for e in target['episodes']],
     }
@@ -72,6 +74,59 @@ def test_rescan_retains_success_and_unchanged_import_makes_no_request(tmp_path, 
         assert conn.execute('SELECT COUNT(*) FROM revision_metadata_refs').fetchone()[0] == 2
         outcome = json.loads(conn.execute("SELECT result_json FROM jobs WHERE revision_id='r2' AND job_type='scrape_work'").fetchone()[0])
         assert outcome['outcome'] == 'reused'
+
+
+def test_historical_ready_with_zero_mappings_is_not_reused_or_counted_complete(tmp_path, monkeypatch):
+    """历史伪成功快照不能再复用，实际补全后才重新就绪。"""
+    from app.media_v4.persistence import metadata_lifecycle
+    from app.media_v4.persistence.metadata_lifecycle import select_applicable_snapshot
+    publish = metadata_lifecycle.publish_snapshot
+    bad = {}
+
+    def publish_historical(conn, **kwargs):
+        bad.update(kwargs['metadata'])
+        bad.update(episode_mappings=[], reason_code='episode_mapping_incomplete',
+                   episode_mapping_status='unmapped', mapped_count=0, total_count=1)
+        return publish(conn, **{**kwargs, 'metadata': bad})
+
+    monkeypatch.setattr(metadata_lifecycle, 'publish_snapshot', publish_historical)
+    database, mirror = prepare(tmp_path, monkeypatch)
+    monkeypatch.setattr(metadata_lifecycle, 'publish_snapshot', publish)
+    with database.connect() as conn:
+        snapshot = conn.execute('SELECT * FROM metadata_snapshots').fetchone()
+        conn.execute('UPDATE scrape_bindings SET metadata_json=?', (json.dumps(bad),))
+        # 模拟升级前已发布的投影缓存，不能等下一次导入才纠正假就绪。
+        cached = dict(bad)
+        cached.pop('episode_metadata_status', None)
+        conn.execute('UPDATE library_cards SET metadata_json=?', (json.dumps(cached),))
+        conn.execute("DELETE FROM v4_meta WHERE key='library_projection_dirty'")
+    assert V4LibraryProjection(database).ensure_current().cards[0]['metadata']['metadata_state'] == 'failed'
+    from app.api import library_v4
+    monkeypatch.setattr(library_v4, 'get_database', lambda: database)
+    assert library_v4.get_library()['works'] == []
+    assert library_v4.get_library(include_all=True)['works'][0]['metadata_state'] == 'failed'
+    service = V4RevisionService(database)
+    progress = service.get_execution_progress('r1')
+    assert progress['work_units'][0]['metadata_state'] == 'failed'
+    assert progress['overall_status'] == 'needs_attention'
+    from app.media_v4.projection.source_libraries import _metadata_ready_count
+    assert _metadata_ready_count(progress) == 0
+    detail = service.get_work_execution_detail('r1', snapshot['work_id'])
+    assert detail['work']['metadata_reason_code'] == 'episode_mapping_incomplete'
+    confirm(database, 'r2')
+    with database.connect() as conn:
+        assert select_applicable_snapshot(conn, 'r2', snapshot['work_id']) is None
+    card = V4LibraryProjection(database).ensure_current().cards[0]
+    assert card['metadata']['metadata_state'] != 'ready'
+    calls = []
+
+    def fixed_provider(target):
+        calls.append(target['work_id'])
+        return provider(target)
+
+    V4JobRunner(database, metadata_provider=fixed_provider).process_available(mirror_root=mirror)
+    assert calls == [snapshot['work_id']]
+    assert V4LibraryProjection(database).ensure_current().cards[0]['metadata']['metadata_state'] == 'ready'
 
 
 def test_append_failed_refresh_keeps_success_files_and_current_members(tmp_path, monkeypatch):

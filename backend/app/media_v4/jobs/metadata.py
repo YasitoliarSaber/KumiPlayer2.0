@@ -22,8 +22,8 @@ _METADATA_STATES = frozenset({"ready", "waiting_metadata", "waiting_review", "so
 # --- C-005：Provider 编号映射与诚实状态 -------------------------------------
 #
 # 执行状态、作品资料、剧集映射、产物与刷新各自独立：没有映射到在线条目不等于
-# 远端服务故障，剧集资料缺项也不把整部作品的资料降级。旧枚举 ``metadata_state``
-# 继续返回给老消费者，但不再承担"编号是否完整"的表达。
+# 远端服务故障。作品信息可保留，但正片映射、标题或在线缩略图缺项时，整体
+# metadata_state 不能标为 ready；特别篇的可选资料缺项单独处理。
 
 IDENTITY_STATUS_CONFIRMED = "confirmed"
 IDENTITY_STATUS_UNRESOLVED = "unresolved"
@@ -855,7 +855,9 @@ def _finalize_metadata_result(target: dict, result: dict) -> dict:
         metadata_refresh_error = str(finalized.get("reason") or "").strip()
     finalized["metadata_refresh_error"] = metadata_refresh_error
     finalized.setdefault("retryable", False)
-    return finalized
+    from app.media_v4.jobs.metadata_quality import require_regular_episode_metadata
+
+    return require_regular_episode_metadata(target.get('episodes') or [], finalized)
 
 
 def _is_special_episode(episode: dict) -> bool:
@@ -1837,6 +1839,14 @@ def _map_continuous_season(
                 evidence = dict(rule)
             elif reason is None:
                 reason = UNMAPPED_PROVIDER_RESOURCE_MISSING
+        if (target_number is None and absolute is None and season == provider_season_number
+                and season not in rules and number in remote and existing_season in {None, provider_season_number}
+                and existing_number is None):
+            # 同季同集的命名空间对应不需要跨季偏移；后续季仍须独立编号证据。
+            target_number = number
+            basis = MAPPING_BASIS_SINGLE_PROVIDER_SEASON
+            evidence = {'local_season_number': season, 'local_episode_number': number,
+                        'provider_season_number': provider_season_number, 'rule_version': 'same_season_number'}
         if target_number is not None:
             copy["provider_season_number"] = provider_season_number
             copy["provider_episode_number"] = target_number

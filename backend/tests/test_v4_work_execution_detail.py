@@ -100,7 +100,7 @@ def _seed_confirmed_work(database, *, revision_id: str = "rev-detail", work_id: 
                     "title": f"远程第{index}集全名",
                     "plot": "",
                     "runtime": 24,
-                    "still_url": "",
+                    "still_url": "https://image.tmdb.org/t/p/w500/fixture.jpg",
                 }
                 for index in (1, 2)
             ],
@@ -119,12 +119,8 @@ def _seed_confirmed_work(database, *, revision_id: str = "rev-detail", work_id: 
     return work_id
 
 
-def test_detail_falls_back_to_binding_status_when_metadata_lacks_state(tmp_path, monkeypatch):
-    """历史快照的 `metadata_json` 可能没有 `metadata_state`：必须用绑定行状态兜底。
-
-    同一份数据在进度列表显示 `confirmed`、在执行详情显示空状态，是评审发现的
-    投影不一致（详情投影里刚补的兜底被 `_artifact_view` 的空返回覆盖）。
-    """
+def test_legacy_binding_status_cannot_hide_missing_episode_metadata(tmp_path, monkeypatch):
+    """缺状态且没有分集资料的历史 confirmed 绑定不能冒充完整刮削。"""
 
     client, database = _client(tmp_path, monkeypatch)
     work_id = _seed_confirmed_work(database)
@@ -138,7 +134,8 @@ def test_detail_falls_back_to_binding_status_when_metadata_lacks_state(tmp_path,
         f"/api/v4/revisions/rev-detail/works/{work_id}/execution-detail"
     ).json()
 
-    assert body["work"]["metadata_state"] == "confirmed", "缺状态时必须退回绑定行状态，而不是空值"
+    assert body["work"]["metadata_state"] == "failed"
+    assert body["work"]["metadata_reason_code"] == "episode_mapping_incomplete"
 
 
 def test_detail_prefers_metadata_state_over_binding_status(tmp_path, monkeypatch):

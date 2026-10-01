@@ -79,6 +79,12 @@ def _seed_work(
                 (f"job-{work_id}-{index}", job_type, revision_id, work_id, f"ik-{work_id}-{index}", job_status, attempts, last_error),
             )
         if scrape_status is not None:
+            if scrape_status == 'confirmed' and scrape_metadata is None:
+                scrape_metadata = {'episode_mappings': [
+                    {'episode_id': key, 'provider_episode_id': str(1000 + index), 'title': 'Episode',
+                     'still_url': 'https://image.tmdb.org/t/p/w500/fixture.jpg'}
+                    for index, key in enumerate(episode_ids)
+                ]}
             conn.execute(
                 "INSERT INTO scrape_bindings(binding_id, revision_id, work_id, provider, provider_id, metadata_json, status, created_at, updated_at) "
                 "VALUES (?, ?, ?, 'pan115', '1', ?, ?, 'now', 'now')",
@@ -147,7 +153,10 @@ def test_ready_metadata_state_is_completed(tmp_path):
     _seed_work(database, "rev-progress", work_id="w-ready", title="已就绪", episode_ids=["ep-ready"], asset_count=1, jobs=[
         ("materialize_mirror", "succeeded", 1, ""),
         ("scrape_work", "succeeded", 1, ""),
-    ], scrape_status="confirmed", scrape_metadata={"metadata_state": "ready"})
+    ], scrape_status="confirmed", scrape_metadata={"metadata_state": "ready", "episode_mappings": [
+        {'episode_id': 'ep-ready', 'provider_episode_id': '9001', 'title': 'Episode',
+         'still_url': 'https://image.tmdb.org/t/p/w500/fixture.jpg'}
+    ]})
     _seed_projection_job(database, "rev-progress", "succeeded")
 
     progress = _progress(database)

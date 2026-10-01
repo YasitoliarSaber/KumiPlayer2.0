@@ -81,6 +81,9 @@ def select_applicable_snapshot(conn, revision_id: str, work_id: str) -> dict | N
             continue
         result = dict(row)
         result['metadata'] = json.loads(row['metadata_json'])
+        # 历史版本曾把正片缺项保存为 ready；不能继续复用这个伪成功结果。
+        if result['metadata'].get('reason_code') in {'episode_mapping_incomplete', 'episode_details_incomplete'}:
+            continue
         old_signatures = json.loads(row['episode_signatures_json'])
         current = current_episode_signatures(conn, revision_id, work_id)
         valid = {key for key, value in current.items() if old_signatures.get(key) == value}
@@ -88,6 +91,11 @@ def select_applicable_snapshot(conn, revision_id: str, work_id: str) -> dict | N
             item for item in result['metadata'].get('episode_mappings', [])
             if str(item.get('episode_id')) in valid
         ]
+        from app.media_v4.jobs.metadata_quality import current_episode_metadata
+        # 增量新增成员不应废弃旧成员的有效资料，但不能据此宣称覆盖新增成员。
+        result['metadata'] = current_episode_metadata(conn, revision_id, work_id, result['metadata'], valid)
+        if result['metadata'].get('metadata_state') != 'ready':
+            continue
         result['covers_members'] = set(current) <= valid
         result['artifacts'] = artifacts
         return result
@@ -254,6 +262,8 @@ def referenced_metadata(conn, work_id: str, revision_id: str | None = None) -> d
                     episode_mapping_status=('not_applicable' if not total else 'complete' if len(mapped) == total else 'partial' if mapped else 'unmapped'),
                     metadata_state='ready', metadata_snapshot_id=row['snapshot_id'],
                     metadata_source='current' if row['created_by_revision_id'] == row['revision_id'] else 'retained')
+    from app.media_v4.jobs.metadata_quality import current_episode_metadata
+    metadata = current_episode_metadata(conn, revision_id, work_id, metadata)
     attempt = conn.execute("SELECT status,result_json,last_error FROM jobs WHERE revision_id=? AND work_id=? AND job_type='scrape_work' ORDER BY updated_at DESC LIMIT 1",
                            (row['revision_id'], work_id)).fetchone()
     result = json.loads(attempt['result_json'] or '{}') if attempt else {}

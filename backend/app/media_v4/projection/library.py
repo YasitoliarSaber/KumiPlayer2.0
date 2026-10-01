@@ -85,7 +85,12 @@ class V4LibraryProjection:
             dirty = conn.execute(
                 "SELECT 1 FROM v4_meta WHERE key = 'library_projection_dirty'"
             ).fetchone()
-        if snapshot is None or dirty is not None:
+        needs_episode_gate = snapshot is not None and any(
+            card.get('media_type') == 'tv' and card.get('metadata', {}).get('metadata_state') == 'ready'
+            and 'episode_metadata_status' not in card.get('metadata', {})
+            for card in snapshot.cards
+        )
+        if snapshot is None or dirty is not None or needs_episode_gate:
             return self.rebuild()
         return snapshot
 
@@ -284,6 +289,8 @@ class V4LibraryProjection:
                     retained_metadata = referenced_metadata(conn, str(row['work_id']))
                     if retained_metadata is not None:
                         metadata = {**metadata, **retained_metadata}
+                    from app.media_v4.jobs.metadata_quality import current_episode_metadata
+                    metadata = current_episode_metadata(conn, None, str(row['work_id']), metadata)
                     show_type = str(row["show_type"] or "")
                     card_type = str(row["card_type"] or "")
                     metadata["show_type"] = show_type

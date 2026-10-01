@@ -111,10 +111,14 @@ def _install_client(
                 raise error
             return {
                 "episodes": [
-                    {"episode_number": number, "id": 1000 + number, "name": f"E{number}"}
+                    {"episode_number": number, "id": 1000 + number, "name": f"E{number}", "still_path": "/fixture.jpg"}
                     for number in seasons.get(season_number, [])
                 ]
             }
+
+        @staticmethod
+        def build_image_url(path, _size='original', **_kwargs):
+            return f"https://image.tmdb.org/t/p/original{path}" if path else ""
 
         @staticmethod
         def select_best_poster(_images):
@@ -157,8 +161,21 @@ def _unmapped_reason(result: dict, episode_id: str) -> str:
 # --- CHECK-007A：编号证据不足就不猜 -----------------------------------------
 
 
+def test_mixed_local_seasons_preserve_first_season_mapping_without_guessing_second(monkeypatch):
+    _install_client(monkeypatch, detail=_continuous_detail(24), seasons={1: list(range(1, 25))})
+    target = _target([_episode(f's{season}e{number}', season=season, episode=number)
+                      for season in (1, 2) for number in range(1, 13)])
+    original = deepcopy(target)
+    result = metadata_module.default_metadata_provider(target)
+    assert set(_mapped_ids(result)) == {f's1e{number}' for number in range(1, 13)}
+    assert (result['mapped_count'], result['total_count']) == (12, 24)
+    assert result['metadata_state'] == 'failed'
+    assert result['reason_code'] == 'episode_mapping_incomplete'
+    assert target == original
+
+
 def test_only_second_season_is_not_mapped_to_first_episode(monkeypatch):
-    """CHECK-007A: 只有 S2、无绝对编号时既不能映射成 S1E1，也不能失败。"""
+    """CHECK-007A: 只有 S2、无绝对编号时不得猜成 S1E1，必须保留待处理缺项。"""
 
     _install_client(
         monkeypatch, detail=_continuous_detail(24), seasons={1: list(range(1, 13))}
@@ -168,7 +185,7 @@ def test_only_second_season_is_not_mapped_to_first_episode(monkeypatch):
 
     result = metadata_module.default_metadata_provider(target)
 
-    assert result["metadata_state"] == "ready"
+    assert result["metadata_state"] == "failed"
     assert result["episode_mappings"] == []
     assert result["episode_mapping_status"] == "unmapped"
     assert result["mapped_count"] == 0 and result["total_count"] == 1
@@ -201,9 +218,12 @@ def test_missing_or_partial_coverage_never_guesses_offset(monkeypatch, episodes)
 
     result = metadata_module.default_metadata_provider(target)
 
-    assert result["episode_mappings"] == []
-    assert result["metadata_state"] in {"ready", "waiting_review"}
+    expected_mapped = [e['episode_id'] for e in episodes if e['local_season_number'] == 1]
+    assert _mapped_ids(result) == expected_mapped
+    assert result["metadata_state"] == "failed"
     for episode in episodes:
+        if episode['episode_id'] in expected_mapped:
+            continue
         assert _unmapped_reason(result, episode["episode_id"]) in {
             "insufficient_numbering_evidence",
             "unknown_local_season",
@@ -320,7 +340,7 @@ def test_remote_missing_episode_is_recorded_as_missing_only(monkeypatch):
 
     assert _mapped_ids(result) == ["s2e1", "s2e2"]
     assert _unmapped_reason(result, "s2e3") == "provider_resource_missing"
-    assert result["metadata_state"] == "ready"
+    assert result["metadata_state"] == "failed"
     assert result["work_metadata_status"] == "ready"
     assert result["episode_mapping_status"] == "partial"
 
@@ -343,7 +363,7 @@ def test_two_unmatched_episodes_report_unmapped_zero_of_two(monkeypatch):
     assert result["episode_mapping_status"] == "unmapped"
     assert (result["mapped_count"], result["total_count"]) == (0, 2)
     assert sorted(result["unmapped_episode_ids"]) == ["s1e1", "s1e2"]
-    assert result["metadata_state"] == "ready"
+    assert result["metadata_state"] == "failed"
     assert result["work_metadata_status"] == "ready"
     assert result["retryable"] is False
     assert set(result["unmapped_reason_codes"]) == {"provider_resource_missing"}
@@ -366,7 +386,7 @@ def test_partial_coverage_reports_exact_counts(monkeypatch, available, expected_
 
     assert result["episode_mapping_status"] == "partial"
     assert (result["mapped_count"], result["total_count"]) == (len(available), 6)
-    assert result["metadata_state"] == "ready"
+    assert result["metadata_state"] == "failed"
     assert result["retryable"] is False
     assert {
         episode_id: _unmapped_reason(result, episode_id) for episode_id in sorted(expected_reasons)
@@ -374,14 +394,14 @@ def test_partial_coverage_reports_exact_counts(monkeypatch, available, expected_
 
 
 def test_missing_episodes_are_not_reported_as_service_outage(monkeypatch):
-    """CHECK-007B: 四集缺项仍是资料可用 + 映射 partial，不写成服务不可用。"""
+    """CHECK-007B: 四集缺项保留作品信息、整体未完成，不写成服务不可用。"""
 
     _install_client(monkeypatch, detail=_continuous_detail(4), seasons={1: []})
     target = _target([_episode(f"s1e{n}", season=1, episode=n) for n in range(1, 5)])
 
     result = metadata_module.default_metadata_provider(target)
 
-    assert result["metadata_state"] == "ready"
+    assert result["metadata_state"] == "failed"
     assert result["reason_code"] == "episode_mapping_incomplete"
     assert result["episode_mapping_status"] == "unmapped"
     assert (result["mapped_count"], result["total_count"]) == (0, 4)
@@ -467,7 +487,7 @@ def test_scrape_job_records_mapping_state_and_keeps_metadata(tmp_path, monkeypat
     assert payload["mapped_count"] == 0 and payload["total_count"] == 1
     assert payload["retryable"] is False
     assert payload["unmapped_reasons"][0]["reason"] == "insufficient_numbering_evidence"
-    assert binding["status"] == "confirmed"
+    assert binding["status"] == "failed"
     stored = json.loads(binding["metadata_json"])
     assert stored["title"] == "Show"
     assert stored["work_metadata_status"] == "ready"
@@ -521,7 +541,7 @@ def test_season_failures_are_classified_by_reason(monkeypatch, error, expected_r
     season_result = (result.get("season_results") or [{}])[0]
     if expected_reason == "provider_resource_missing":
         # 404 是明确“该季在线不存在”，不能写成服务不可用。
-        assert result["metadata_state"] == "ready"
+        assert result["metadata_state"] == "failed"
         assert season_result.get("status") == "provider_resource_missing"
     else:
         assert result["metadata_state"] == "source_unavailable"

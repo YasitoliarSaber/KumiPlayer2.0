@@ -98,7 +98,9 @@ def _friendly_metadata_reason(status: str, value: str, reason_code: str = "") ->
     if normalized_code == "provider_rate_limited":
         return "在线资料请求过于频繁，请稍后重试。"
     if normalized_code == "episode_mapping_incomplete":
-        return "部分剧集资料暂不可用，作品信息已保留，可稍后重试。"
+        return "正片尚未全部匹配在线分集资料，请检查在线分季与集号对应关系。"
+    if normalized_code == "episode_details_incomplete":
+        return "正片分集资料缺少标题或在线缩略图，刮削尚未完成。"
     if normalized_code == "artifact_incomplete":
         return "媒体资料已获取，但部分图片下载或发布失败。"
     if normalized_code == "mirror_root_missing":
@@ -253,6 +255,13 @@ def metadata_recovery_policy(metadata: dict | None, *, binding_status: str = "")
         # 特别篇线上条目是可选补全。作品身份、正片和本地 NFO 已经就绪时，
         # 不再把“没有对应条目”投影成待处理任务；详细页面另行展示 warning。
         return {"reason": "", "action": "none", "hint": ""}
+
+    if reason_code in {"episode_mapping_incomplete", "episode_details_incomplete"} and state == "failed":
+        return {
+            "reason": _friendly_metadata_reason(state, raw_reason, reason_code),
+            "action": "retry_metadata",
+            "hint": "作品信息已保留。请核对在线分季与集号对应关系；标题或图片缺项可重新获取资料。",
+        }
 
     if reason_code in {"no_candidates", "ambiguous_candidates"} or state == "waiting_review":
         action = "choose_candidate"
@@ -3142,10 +3151,18 @@ class V4RevisionService:
             retained = referenced_metadata(conn, work_id, revision_id)
         if retained:
             metadata = retained
-            metadata_state = 'ready'
+            metadata_state = str(retained.get('metadata_state') or 'failed')
             provider = str(retained.get('provider') or '')
             provider_id = str(retained.get('provider_id') or '')
             mappings_by_episode = {str(m['episode_id']): m for m in retained.get('episode_mappings', [])}
+
+        if metadata or scrape_row is not None:
+            from app.media_v4.jobs.metadata_quality import current_episode_metadata
+            with self.database.connect() as conn:
+                metadata = current_episode_metadata(conn, revision_id, work_id,
+                                                    {**metadata, 'metadata_state': metadata_state})
+            metadata_state = str(metadata.get('metadata_state') or metadata_state)
+            metadata_reason_code = str(metadata.get('reason_code') or '')
 
         file_by_episode: dict[str, dict] = {}
         for row in asset_rows:
@@ -3358,8 +3375,18 @@ class V4RevisionService:
                 retained = referenced_metadata(conn, current_work_id, revision_id)
                 if retained:
                     scrape_rows[current_work_id] = {**scrape_rows.get(current_work_id, {}),
-                        'status': 'confirmed', 'binding_status': 'confirmed', 'metadata_state': 'ready',
+                        'status': 'confirmed' if retained.get('metadata_state') == 'ready' else 'failed',
+                        'binding_status': 'confirmed' if retained.get('metadata_state') == 'ready' else 'failed',
+                        'metadata_state': retained.get('metadata_state', 'failed'),
+                        'reason_code': retained.get('reason_code', ''),
                         'metadata': retained}
+                if current_work_id in scrape_rows:
+                    from app.media_v4.jobs.metadata_quality import current_episode_metadata
+                    row = scrape_rows[current_work_id]
+                    row['metadata'] = current_episode_metadata(conn, revision_id, current_work_id,
+                        {**row['metadata'], 'metadata_state': row['metadata_state']})
+                    row['metadata_state'] = row['metadata'].get('metadata_state', row['metadata_state'])
+                    row['reason_code'] = row['metadata'].get('reason_code', row.get('reason_code', ''))
         jobs_by_work: dict[str, dict] = {}
         stage: dict[str, list[dict]] = {"mirror": [], "metadata": [], "projection": []}
         for row in job_rows:

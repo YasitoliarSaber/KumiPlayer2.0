@@ -56,8 +56,8 @@ def _patch_scrape_env(tmp_path, monkeypatch):
     return tmp_path / "mirror"
 
 
-def _ready_metadata(provider_id="42"):
-    return {
+def _ready_metadata(provider_id="42", target=None):
+    result = {
         "provider": "tmdb",
         "provider_id": provider_id,
         "media_type": "tv",
@@ -66,6 +66,15 @@ def _ready_metadata(provider_id="42"):
         "poster_url": "https://image.tmdb.org/t/p/w780/p.jpg",
         "fanart_url": "https://image.tmdb.org/t/p/original/f.jpg",
     }
+    if target is not None:
+        result['episode_mappings'] = [
+            {'episode_id': item['episode_id'], 'provider_episode_id': '9001', 'title': 'Episode',
+             'provider_season_number': item['local_season_number'],
+             'provider_episode_number': item['local_episode_number'],
+             'still_url': 'https://image.tmdb.org/t/p/w500/still.jpg'}
+            for item in target['episodes']
+        ]
+    return result
 
 def test_scrape_targets_are_grouped_by_work_and_do_not_reparse(tmp_path, monkeypatch):
     from app.media_v4.jobs.scrape import V4ScrapeService
@@ -363,6 +372,7 @@ def test_missing_artwork_keeps_metadata_ready_and_marks_artifacts_degraded(tmp_p
     monkeypatch.setattr(completeness_module, "load_config", local_config)
 
     database = V4Database(tmp_path / "artifact-degraded.db")
+    monkeypatch.setattr(artifacts_module, "_download_artwork", lambda *_args, **_kwargs: "")
     database.initialize()
     revisions = V4RevisionService(database)
     revisions.create_draft("rev-artifact", [_entry("a")])
@@ -373,7 +383,7 @@ def test_missing_artwork_keeps_metadata_ready_and_marks_artifacts_degraded(tmp_p
     # provider 资料完整，只是远端没有可用图片地址 → 本地产物完整性必然失败。
     scrape.process(
         job["job_id"],
-        lambda _target: {**_ready_metadata(), "poster_url": "", "fanart_url": ""},
+        lambda _target: {**_ready_metadata(target=_target), "poster_url": "", "fanart_url": ""},
         mirror_root=mirror_root,
     )
 
@@ -416,6 +426,11 @@ def test_legacy_artwork_only_failure_reads_as_ready_without_rewriting_data(tmp_p
             "provider": "tmdb", "provider_id": "42", "media_type": "tv", "title": "Show",
             "metadata_state": "failed", "reason": "海报下载或发布失败",
             "completeness": ["海报下载或发布失败"],
+            "episode_mappings": [{
+                "episode_id": conn.execute('SELECT episode_id FROM episodes').fetchone()[0],
+                "provider_episode_id": "9001", "title": "Episode",
+                "still_url": "https://image.tmdb.org/t/p/w500/still.jpg",
+            }],
         }
         conn.execute(
             "INSERT INTO scrape_bindings (binding_id, revision_id, work_id, provider, provider_id, "
@@ -459,6 +474,7 @@ def test_retry_artifacts_republishes_without_asking_provider_again(tmp_path, mon
     monkeypatch.setattr(completeness_module, "load_config", local_config)
 
     database = V4Database(tmp_path / "artifact-retry.db")
+    monkeypatch.setattr(artifacts_module, "_download_artwork", lambda *_args, **_kwargs: "")
     database.initialize()
     revisions = V4RevisionService(database)
     revisions.create_draft("rev-retry-artifact", [_entry("a")])
@@ -467,7 +483,7 @@ def test_retry_artifacts_republishes_without_asking_provider_again(tmp_path, mon
     job = scrape.enqueue_for_revision("rev-retry-artifact")[0]
     scrape.process(
         job["job_id"],
-        lambda _target: {**_ready_metadata(), "poster_url": "", "fanart_url": ""},
+        lambda _target: {**_ready_metadata(target=_target), "poster_url": "", "fanart_url": ""},
         mirror_root=mirror_root,
     )
 
@@ -547,7 +563,7 @@ def test_confirmed_scrape_receives_regular_alias_but_not_bonus_or_history(tmp_pa
 
         def get_tv_season_episodes(self, provider_id, season):
             assert provider_id == 91234
-            return {"episodes": [{"id": 9000 + season, "episode_number": 1, "name": "Episode"}]}
+            return {"episodes": [{"id": 9000 + season, "episode_number": 1, "name": "Episode", "still_path": "/still.jpg"}]}
 
         @staticmethod
         def select_best_poster(_images):
@@ -656,6 +672,8 @@ def test_scrape_shared_provider_identity_keeps_both_local_works_playable(tmp_pat
             "episode_mappings": [{
                 "episode_id": target_episode_id,
                 "provider_episode_id": "9901",
+                "title": "Episode",
+                "still_url": "https://image.tmdb.org/t/p/w500/still.jpg",
             }],
             "season_mappings": [{
                 "season_id": target_season_id,
@@ -800,6 +818,8 @@ def test_local_artwork_mode_materializes_episode_stills_as_v4_artifacts(tmp_path
             "episode_mappings": [{
                 "episode_id": episode_id,
                 "still_url": "https://image.tmdb.org/t/p/w500/still.jpg",
+                "provider_episode_id": "9001",
+                "title": "Episode",
             }],
         },
         mirror_root=mirror_root,

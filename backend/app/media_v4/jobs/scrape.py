@@ -191,6 +191,10 @@ def _job_outcome(ready: bool, result: dict) -> str:
             else "partial"
         )
     state = str(result.get("metadata_state") or "")
+    if state == "failed" and result.get("reason_code") in {
+        "episode_mapping_incomplete", "episode_details_incomplete",
+    }:
+        return "partial"
     if state in {"source_unavailable", "failed"}:
         return "unavailable"
     return "skipped"
