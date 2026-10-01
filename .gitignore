@@ -113,6 +113,8 @@ generated-images/
 .pytest_tmp/
 output/
 tmp/
+# Piolium 代码审阅产物（本地审计报告与 findings，绝不提交）
+piolium/
 
 # 本地施工文档（不提交）
 施工文档0812/
