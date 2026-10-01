@@ -16,6 +16,15 @@
   line-height: 20px;
 }
 
+/* 「最近观看」是继续播放入口：标题下只留一个更弱化的项目数。 */
+.recent-page .page-title-block .recent-count {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+}
+
 .recent-watch-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
@@ -26,7 +35,7 @@
 .recent-watch-card {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   width: 100%;
   max-width: 360px;
   min-width: 0;
@@ -79,13 +88,14 @@
   object-fit: cover;
 }
 
+/* 进度只由图片底部的 3px 确定型进度条表达，不再重复文字百分比。 */
 .recent-watch-progress {
   position: absolute;
   right: 0;
   bottom: 0;
   left: 0;
   height: 3px;
-  background: color-mix(in srgb, var(--text) 20%, transparent);
+  background: color-mix(in srgb, #000 42%, transparent);
 }
 
 .recent-watch-progress > span {
@@ -94,11 +104,12 @@
   background: var(--accent);
 }
 
+/* 文字区只允许三层：作品名 / 集号·剩余 / 时间。 */
 .recent-watch-copy {
   display: grid;
   width: 100%;
   min-width: 0;
-  gap: 6px;
+  gap: 3px;
 }
 
 .recent-watch-title {
@@ -114,30 +125,38 @@
 
 .recent-watch-position {
   display: flex;
-  flex-wrap: wrap;
+  min-width: 0;
   align-items: baseline;
-  gap: 4px 10px;
+  gap: 6px;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 400;
-  line-height: 20px;
+  line-height: 19px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .recent-watch-code {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
   color: var(--text);
   font-weight: 500;
+  text-overflow: ellipsis;
 }
 
-.recent-watch-duration {
-  white-space: nowrap;
+.recent-watch-separator {
+  color: color-mix(in srgb, var(--text-muted) 72%, transparent);
+}
+
+.recent-watch-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .recent-watch-time {
-  color: var(--text-muted);
-  font-size: 12px;
+  color: color-mix(in srgb, var(--text-muted) 88%, transparent);
+  font-size: 11.5px;
   font-weight: 400;
-  line-height: 18px;
+  line-height: 17px;
 }

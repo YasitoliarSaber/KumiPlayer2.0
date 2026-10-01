@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   recentEpisodeLabel,
-  recentProgressLabel,
+  recentRemainingLabel,
   recentTimeLabel,
 } from '../../src/pages/RecentPage'
 import type { PlaybackHistoryItem } from '../../src/api/types'
@@ -23,23 +23,26 @@ function item(overrides: Partial<PlaybackHistoryItem> = {}): PlaybackHistoryItem
   }
 }
 
-describe('「最近播放」标签（规格 §12）', () => {
-  it('同时给出集号、进度与时间，而不是只显示作品', () => {
+describe('「最近观看」标签（继续播放入口，不是播放日志）', () => {
+  it('第二层给集号与剩余时间，第三层给时间；不输出精确位置/总时长/百分比', () => {
     const label = recentEpisodeLabel(item(), NOW)
     expect(label).toContain('S01E03')
-    expect(label).toContain('12:34 / 24:00')
-    expect(label).toContain('52%')
+    expect(label).toContain('还剩 12 分钟')
     expect(label).toContain('今天 21:20')
     expect(label).not.toContain('最近播放')
+    // 调试式文案必须彻底消失：不同时以文本展示位置、总时长与百分比。
+    expect(label).not.toMatch(/\d+:\d+\s*\/\s*\d+:\d+/)
+    expect(label).not.toContain('%')
   })
 
-  it('缺集号与集标题时仍给出进度与时间（绝不退化成只有"最近播放"）', () => {
+  it('缺集号与集标题时仍给出剩余时间与时间（绝不退化成只有"最近播放"）', () => {
     const label = recentEpisodeLabel(
       item({ season_number: null, episode_number: null, episode_title: undefined }),
       NOW,
     )
-    expect(label).toContain('12:34 / 24:00')
+    expect(label).toContain('还剩 12 分钟')
     expect(label).toContain('今天 21:20')
+    expect(label).not.toContain('%')
   })
 
   it('使用后端 /history 的快照字段（真实返回形状）', () => {
@@ -54,13 +57,19 @@ describe('「最近播放」标签（规格 §12）', () => {
       NOW,
     )
     expect(label).toContain('S01E03')
-    expect(label).toContain('12:34 / 24:00')
+    expect(label).toContain('还剩 12 分钟')
     expect(label).not.toBe('最近播放')
   })
 
-  it('已看完与无进度分别给出明确文案', () => {
-    expect(recentProgressLabel(item({ completed: true }))).toBe('已看完')
-    expect(recentProgressLabel(item({ position: 0 }))).toBe('')
+  it('已看完、长片与缺少总时长分别给出明确文案', () => {
+    expect(recentRemainingLabel(item({ completed: true }))).toBe('已看完 ✓')
+    // 电影 2:00:08 看了 46:20 → 1 小时 14 分（向上取整）。
+    expect(recentRemainingLabel(item({ position: 2780, duration: 7208 }))).toBe('还剩 1 小时 14 分')
+    // 剩余不足一小时只给分钟。
+    expect(recentRemainingLabel(item({ position: 100, duration: 1500 }))).toBe('还剩 24 分钟')
+    // 没有总时长时不给任何精确数字。
+    expect(recentRemainingLabel(item({ duration: 0 }))).toBe('继续观看')
+    expect(recentRemainingLabel(item({ position: 0, duration: 0 }))).toBe('继续观看')
   })
 
   it('保留未知编号与第零季，不补成第一集', () => {

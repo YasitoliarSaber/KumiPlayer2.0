@@ -25,14 +25,18 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-test('最近观看使用对应集缩略图，并将编号、进度、时间分行显示', () => {
+test('最近观看使用对应集缩略图，并按集号·剩余时间·时间三层显示', () => {
   render(<RecentPage />);
   const card = screen.getByRole('button', { name: /异世界归来的舅舅.*S01E06/ });
   const image = screen.getByRole('img');
   expect(image.getAttribute('src')).toContain('episode-six-thumb');
   expect(image.getAttribute('src')).not.toContain('work-backdrop');
   expect(screen.getByText('S01E06')).toBeVisible();
-  expect(screen.getByText('11:34 / 23:42 · 49%')).toBeVisible();
+  // 2026-10-01 规格：继续观看只给剩余时间，不再显示 `位置 / 总时长 · 百分比`。
+  expect(screen.getByText('还剩 13 分钟')).toBeVisible();
+  expect(screen.queryByText('11:34 / 23:42 · 49%')).toBeNull();
+  expect(card.textContent).not.toMatch(/\d+:\d+\s*\/\s*\d+:\d+/);
+  expect(card.textContent).not.toContain('%');
   expect(screen.queryByText(/最近播放：/)).toBeNull();
   expect(card.querySelector('time')).toHaveAttribute('datetime', history.updated_at);
   fireEvent.click(card);
@@ -51,6 +55,8 @@ test('最近观看的数量与实际卡片一致，窄屏也不丢掉记录', ()
   const works = Array.from({ length: 7 }, (_, i) => ({ ...work, work_id: `w-${i}`, title: `作品 ${i}` }));
   useLibraryStore.setState({ works, history: works.map((item) => ({ ...history, work_id: item.work_id })) });
   render(<RecentPage />);
-  expect(screen.getByText('最近 7 部')).toBeVisible();
+  // 标题下只留弱化的项目数，不再写「最近 N 部」。
+  expect(screen.getByText('7 个项目')).toBeVisible();
+  expect(screen.queryByText('最近 7 部')).toBeNull();
   expect(screen.getAllByRole('button', { name: /作品/ })).toHaveLength(7);
 });

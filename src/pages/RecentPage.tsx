@@ -36,9 +36,9 @@ export default function RecentPage() {
     <div className="recent-page">
       <header className="page-title-block">
         <h1>最近观看</h1>
-        <p>
-          最近 {recentWorks.length} 部
-        </p>
+        {/* 「最近观看」是继续播放入口，不是播放历史日志：标题下只留一个弱化的项目数，
+            不再写「最近 N 部」这种没有行动价值的信息。 */}
+        {hasContent && <p className="recent-count">{recentWorks.length} 个项目</p>}
       </header>
 
       {!hasContent ? (
@@ -58,7 +58,7 @@ export default function RecentPage() {
               work={item.work}
               history={item.history}
               episodeLabel={item.work.media_type === 'movie' ? '电影' : recentEpisodeCode(item.history)}
-              progressLabel={recentProgressLabel(item.history)}
+              statusLabel={recentRemainingLabel(item.history)}
               timeLabel={recentTimeLabel(item.history.played_at || item.history.updated_at)}
             />
           ))}
@@ -97,25 +97,29 @@ function recentViewingPriority(
   return recency + frequency;
 }
 
-function formatClock(seconds: number) {
-  const total = Math.max(0, Math.floor(seconds));
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const secs = total % 60;
-  return hours > 0
-    ? `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
-    : `${minutes}:${String(secs).padStart(2, '0')}`;
-}
-
-/** 播放进度文案：`12:34 / 24:00 · 52%`；看完显示"已看完"。 */
-export function recentProgressLabel(item: PlaybackHistoryItem) {
-  if (item.completed) return '已看完';
+/**
+ * 「最近观看」卡片第二层的状态文案（规格：继续观看，不是播放日志）。
+ *
+ * - 已看完：`已看完 ✓`；
+ * - 有总时长：`还剩 23 分钟` / `还剩 1 小时 14 分`（向上取整，宁可高估不多报）；
+ * - 缺总时长或没有可用进度：`继续观看`。
+ *
+ * 刻意**不再**输出 `12:34 / 24:00 · 52%` 这类调试信息：精确位置、总时长与百分比
+ * 不同时以文本展示，百分比由图片底部的进度条表达。
+ */
+export function recentRemainingLabel(item: PlaybackHistoryItem) {
+  if (item.completed) return '已看完 ✓';
   const position = Number(item.position ?? 0);
-  if (!Number.isFinite(position) || position <= 0) return '';
   const duration = Number(item.duration ?? 0);
-  if (!Number.isFinite(duration) || duration <= 0) return `看到 ${formatClock(position)}`;
-  const percent = Math.min(100, Math.round((position / duration) * 100));
-  return `${formatClock(position)} / ${formatClock(duration)} · ${percent}%`;
+  if (!Number.isFinite(position) || !Number.isFinite(duration) || duration <= 0) return '继续观看';
+  const remaining = duration - position;
+  if (!Number.isFinite(remaining) || remaining <= 0) return '继续观看';
+  if (remaining < 60) return '还剩不到 1 分钟';
+  const minutes = Math.max(1, Math.ceil(remaining / 60));
+  if (minutes < 60) return `还剩 ${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest === 0 ? `还剩 ${hours} 小时` : `还剩 ${hours} 小时 ${rest} 分`;
 }
 
 /** 最近播放时间：今天 / 昨天 / 月日 + 时刻。 */
@@ -131,10 +135,11 @@ export function recentTimeLabel(value: string, now: Date = new Date()) {
 
 /**
  * 「最近播放」必须回答：**看了哪一部、哪一集、看到哪、什么时候**（规格 §12）。
- * 只显示作品名不算最近播放；缺集号/集标题时至少给出进度与时间，绝不只留"最近播放"。
+ * 只显示作品名不算最近播放；缺集号/集标题时至少给出剩余进度与时间，绝不只留"最近播放"。
+ * 该汇总文案用于卡片无障碍名称，与卡片三层结构保持一致（不含精确位置/总时长/百分比）。
  */
 export function recentEpisodeLabel(item: PlaybackHistoryItem, now: Date = new Date()) {
-  return [recentEpisodeCode(item), recentProgressLabel(item), recentTimeLabel(item.played_at || item.updated_at, now)]
+  return [recentEpisodeCode(item), recentRemainingLabel(item), recentTimeLabel(item.played_at || item.updated_at, now)]
     .filter((part) => Boolean(part))
     .join(' · ');
 }

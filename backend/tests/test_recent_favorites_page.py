@@ -14,8 +14,13 @@ def test_recent_and_favorites_have_independent_pages_and_sidebar_entries():
     css = (ROOT / "src" / "index.css").read_text(encoding="utf-8")
 
     assert "const recentWorks = selectRecentWorks(sourceWorks, history);" in page
-    assert "recentWorks.slice(0, RECENT_SECTION_LIMIT)" in page
     assert "recentViewingPriority" in page
+    # 「最近观看」是继续播放入口而不是播放历史日志（2026-10-01 规格）：
+    # 卡片第二层走剩余时间文案，不再输出 `位置 / 总时长 · 百分比` 这类调试信息；
+    # 当前实现显示全部最近作品，已不再按 RECENT_SECTION_LIMIT 截断。
+    assert "statusLabel={recentRemainingLabel(" in page
+    assert "recentProgressLabel" not in page
+    assert "RECENT_SECTION_LIMIT" not in page
     assert "selectFavoriteWorks" not in page
     assert "我的收藏" not in page
     assert "selectFavoriteWorks" in favorites_page
@@ -43,7 +48,7 @@ def test_recent_and_favorites_render_as_unframed_content_grids():
     assert "FAVORITE_GROUPS" not in favorites_page
     assert "收藏的番剧" not in favorites_page
     assert "recent-section" not in favorites_page
-    assert "recent-card-grid" in recent_page
+    assert "recent-watch-grid" in recent_page
     assert "category-grid-wrap favorites-grid-wrap" in favorites_page
     assert "works={favoriteWorks}" in favorites_page
     assert "VirtualizedPosterGrid" in favorites_page
