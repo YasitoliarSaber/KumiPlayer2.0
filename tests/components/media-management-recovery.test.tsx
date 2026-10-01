@@ -41,7 +41,7 @@ const routes = [
   { route_id: 'route-115', label: '115 网盘', remote_prefix: '/115', provider_id: 'pan115', enabled: true, local_path: 'K:\\115网盘', local_available: true },
 ]
 
-function browseResult(path: string, cacheStatus: 'fresh' | 'stale' | 'none' = 'fresh') {
+function browseResult(path: string, cacheStatus: 'fresh' | 'stale' | 'none' = 'none') {
   return {
     path,
     parent_path: path === '/' ? null : '/',
@@ -138,32 +138,34 @@ test('未确认草稿不进入媒体库概览，只有确认后的来源才建�
   expect(api.revisionEvidence).not.toHaveBeenCalled()
 })
 
-test('OpenList 缓存过期时展示提示且刷新可获取最新', async () => {
+test('OpenList 缓存过期时隐藏历史列表且显式检查可恢复', async () => {
   openlist.browse.mockImplementation(async (path: string) => browseResult(path || '/', 'stale'))
   render(<OpenListFolderBrowser configured initialPath="/" onPathChange={() => undefined} onGoSettings={() => undefined} />)
-  expect(await screen.findByText(/缓存的目录列表/)).toBeVisible()
+  expect(await screen.findByText(/连接未验证/)).toBeVisible()
+  expect(screen.queryByRole('button', { name: '打开文件夹 Anime' })).not.toBeInTheDocument()
 
   openlist.browse.mockImplementation(async (path: string) => browseResult(path || '/', 'none'))
-  fireEvent.click(screen.getByRole('button', { name: '刷新当前层' }))
+  fireEvent.click(screen.getByRole('button', { name: '检查当前目录' }))
   await waitFor(() => expect(openlist.browse).toHaveBeenCalledWith('/', 1, true, 100))
-  expect(await screen.findByText(/远端最新/)).toBeVisible()
+  expect(await screen.findByText(/本次读取成功/)).toBeVisible()
 })
 
 test('OpenList 有效缓存不会冒充远端最新', async () => {
   openlist.browse.mockImplementation(async (path: string) => browseResult(path || '/', 'fresh'))
   render(<OpenListFolderBrowser configured initialPath="/" onPathChange={() => undefined} onGoSettings={() => undefined} />)
 
-  expect(await screen.findByText(/缓存有效/)).toBeVisible()
-  expect(screen.queryByText(/远端最新/)).not.toBeInTheDocument()
+  expect(await screen.findByText(/连接未验证/)).toBeVisible()
+  expect(screen.queryByRole('button', { name: '打开文件夹 Anime' })).not.toBeInTheDocument()
+  expect(screen.queryByText(/本次读取成功/)).not.toBeInTheDocument()
 })
 
 test('OpenList 慢响应不覆盖新目录（最新请求获胜）', async () => {
   let resolveSlow: (value: ReturnType<typeof browseResult>) => void = () => undefined
   const slow = new Promise<ReturnType<typeof browseResult>>((resolve) => { resolveSlow = resolve })
   openlist.browse
-    .mockReturnValueOnce(Promise.resolve(browseResult('/115', 'fresh'))) // 初始浏览（快，返回 /115）
+    .mockReturnValueOnce(Promise.resolve(browseResult('/115', 'none'))) // 初始浏览（快，返回 /115）
     .mockReturnValueOnce(slow)                                           // 打开 Anime（慢）
-    .mockReturnValueOnce(Promise.resolve(browseResult('/', 'fresh')))    // 面包屑返回根（快）
+    .mockReturnValueOnce(Promise.resolve(browseResult('/', 'none')))    // 面包屑返回根（快）
   render(<OpenListFolderBrowser configured initialPath="/" onPathChange={() => undefined} onGoSettings={() => undefined} />)
   fireEvent.click(await screen.findByRole('button', { name: '打开文件夹 Anime' }))
   await waitFor(() => expect(openlist.browse).toHaveBeenCalledTimes(2))
@@ -172,7 +174,7 @@ test('OpenList 慢响应不覆盖新目录（最新请求获胜）', async () =>
   await waitFor(() => expect(openlist.browse).toHaveBeenCalledTimes(3))
   await screen.findByText(/当前目录：\//)
   // 慢响应迟到：不得覆盖当前路径。
-  resolveSlow(browseResult('/115/Anime-old', 'fresh'))
+  resolveSlow(browseResult('/115/Anime-old', 'none'))
   await new Promise((resolve) => setTimeout(resolve, 80))
   expect(screen.getByText(/当前目录：\//)).toBeVisible()
   expect(screen.queryByText(/Anime-old/)).not.toBeInTheDocument()

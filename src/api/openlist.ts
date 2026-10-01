@@ -24,6 +24,7 @@ export interface OpenListCacheMeta {
 // browse 契约（模块4 C3）：一次请求只拉一页（page >= 1, 1 <= per_page <= 100）。
 // total > 0 表示总数已知（has_more = page*per_page < total）；total = 0 表示未知（has_more = len(entries) == per_page）。
 export interface OpenListBrowseResult {
+  connection_state?: 'verified' | 'unverified'
   path: string
   parent_path: string | null
   remote_root: string
@@ -123,7 +124,7 @@ export const openlistApi = {
     api.post<OpenListSaveResult>('/api/openlist/config', payload),
   browse: (path = '', page = 1, refresh = false, perPage = 100) =>
     api.get<OpenListBrowseResult>(
-      `/api/openlist/browse?path=${encodeURIComponent(path)}&page=${page}&per_page=${perPage}&refresh=${refresh ? 'true' : 'false'}`,
+      `/api/openlist/browse?path=${encodeURIComponent(path)}&page=${page}&per_page=${perPage}&refresh=${refresh ? 'true' : 'false'}&cache_only=${refresh ? 'false' : 'true'}`,
     ),
   prefetch: (paths: string[]) =>
     api.post<OpenListPrefetchResult>('/api/openlist/prefetch', { paths }),

@@ -156,7 +156,7 @@ test('OpenList 首次完整扫描建立基线，确认前增量被禁用', async
   expect(screen.getByRole('button', { name: '完整扫描并建立基线' })).toBeDisabled()
   expect(screen.getByRole('button', { name: '增量扫描' })).toBeDisabled()
   fireEvent.click(await screen.findByRole('button', { name: '打开文件夹 Anime' }))
-  await waitFor(() => expect(openlist.browse).toHaveBeenCalledWith('/115/Anime', 1, false, 100))
+  await waitFor(() => expect(openlist.browse).toHaveBeenCalledWith('/115/Anime', 1, true, 100))
   await screen.findByText(/当前目录：\/115\/Anime/)
   fireEvent.click(screen.getByRole('button', { name: '完整扫描并建立基线' }))
 

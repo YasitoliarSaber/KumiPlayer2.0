@@ -8,6 +8,7 @@ interface OpenListFolderBrowserProps {
   initialPath: string
   onPathChange: (path: string) => void
   onLoadingChange?: (loading: boolean) => void
+  onAvailabilityChange?: (available: boolean) => void
   onGoSettings: () => void
 }
 
@@ -36,12 +37,14 @@ export default function OpenListFolderBrowser({
   initialPath,
   onPathChange,
   onLoadingChange,
+  onAvailabilityChange,
   onGoSettings,
 }: OpenListFolderBrowserProps) {
   const [result, setResult] = useState<OpenListBrowseResult | null>(null)
   const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState('')
+  const [requestedPath, setRequestedPath] = useState(initialPath || '/')
   const initialized = useRef(false)
   // P-004：浏览请求 generation 竞态保护——只有最新请求可以提交状态；
   // 快速进入慢目录再返回时，较慢的旧响应不能覆盖新目录。
@@ -55,6 +58,8 @@ export default function OpenListFolderBrowser({
 
   const browse = async (path: string, page = 1, refresh = false, append = false) => {
     const generation = ++generationRef.current
+    setRequestedPath(path)
+    onAvailabilityChange?.(false)
     append ? setLoadingMore(true) : setLoading(true)
     onLoadingChange?.(true)
     setError('')
@@ -64,9 +69,13 @@ export default function OpenListFolderBrowser({
       setResult((current) => append && current
         ? { ...next, entries: [...current.entries, ...next.entries] }
         : next)
-      onPathChange(next.path)
+      const verified = next.connection_state === 'verified'
+        || (!next.connection_state && !next.cache.cached && !next.cache.refresh_failed)
+      onAvailabilityChange?.(verified)
+      if (verified) onPathChange(next.path)
     } catch (cause) {
       if (generation !== generationRef.current) return
+      setResult(null)
       setError(cause instanceof Error ? cause.message : '无法读取 OpenList 目录')
     } finally {
       if (generation !== generationRef.current) return
@@ -83,9 +92,12 @@ export default function OpenListFolderBrowser({
   }, [configured, initialPath])
 
   const crumbs = useMemo(
-    () => crumbsFor(result?.path || initialPath || '/', result?.remote_root || '/'),
-    [initialPath, result?.path, result?.remote_root],
+    () => crumbsFor(result?.path || requestedPath, result?.remote_root || '/'),
+    [requestedPath, result?.path, result?.remote_root],
   )
+  const verified = Boolean(result && !result.cache.refresh_failed && (
+    result.connection_state === 'verified' || (!result.connection_state && !result.cache.cached)
+  ))
 
   if (!configured) {
     return (
@@ -107,23 +119,22 @@ export default function OpenListFolderBrowser({
             <span key={crumb.path}>
               {index > 0 && <span aria-hidden="true">›</span>}
               {index < crumbs.length - 1
-                ? <button type="button" onClick={() => void browse(crumb.path)}>{crumb.label}</button>
+                ? <button type="button" onClick={() => void browse(crumb.path, 1, true)}>{crumb.label}</button>
                 : <strong>{crumb.label}</strong>}
             </span>
           ))}
         </nav>
         <div className="media-v4-browser-actions">
-          <Button appearance="secondary" disabled={!result?.parent_path || loading} onClick={() => result?.parent_path && void browse(result.parent_path)}>上一级</Button>
-          <Button appearance="secondary" icon={<ArrowSync24Regular />} disabled={loading} onClick={() => void browse(result?.path || initialPath || '/', 1, true)}>刷新当前层</Button>
+          <Button appearance="secondary" disabled={!result?.parent_path || loading} onClick={() => result?.parent_path && void browse(result.parent_path, 1, true)}>上一级</Button>
+          <Button appearance="secondary" icon={<ArrowSync24Regular />} disabled={loading} onClick={() => void browse(result?.path || requestedPath, 1, true)}>{result && !verified ? '检查当前目录' : '刷新当前层'}</Button>
         </div>
       </div>
 
-      {error && <div className="media-flow-alert error" role="alert"><span>{error}</span><Button appearance="secondary" size="small" onClick={() => void browse(result?.path || initialPath || '/', 1, true)}>重试</Button></div>}
-      {result?.cache.status === 'stale' && !loading && <div className="media-openlist-cache-hint" role="status"><ArrowSync24Regular aria-hidden="true" /><span>当前显示的是缓存的目录列表，远端可能已变化；可点击“刷新当前层”获取最新内容。</span></div>}
-      {result?.cache.refresh_failed && <div className="media-openlist-cache-hint refresh-failed" role="status"><span>缓存刷新失败，仍在显示上次成功读取的目录列表。</span></div>}
+      {error && <div className="media-flow-alert error" role="alert"><span>{error}</span><Button appearance="secondary" size="small" onClick={() => void browse(requestedPath, 1, true)}>重试</Button></div>}
+      {result && !verified && !loading && <div className="media-openlist-cache-hint" role="status"><Cloud24Regular aria-hidden="true" /><span>{result.cache.refresh_failed ? '当前无法连接网盘，历史目录已隐藏。' : '连接未验证，历史目录已隐藏。可稍后检查当前目录。'}</span></div>}
       {result?.cache.refreshing && <div className="media-openlist-cache-hint" role="status"><Spinner size="tiny" /><span>正在刷新目录缓存…</span></div>}
       {loading && <div className="media-openlist-loading"><Spinner size="small" />正在读取目录…</div>}
-      {!loading && result && (
+      {!loading && result && verified && (
         <>
           <div className="media-openlist-entries" role="list" aria-label="远端目录条目">
             {result.entries.map((entry) => entry.is_dir ? (
@@ -131,7 +142,7 @@ export default function OpenListFolderBrowser({
                 <button
                   type="button"
                   aria-label={`打开文件夹 ${entry.name}`}
-                  onClick={() => void browse(entry.remote_path)}
+                  onClick={() => void browse(entry.remote_path, 1, true)}
                 >
                   <FolderOpen24Regular /><span>{entry.name}</span><span className="media-openlist-entry-arrow" aria-hidden="true">›</span>
                 </button>
@@ -144,8 +155,8 @@ export default function OpenListFolderBrowser({
           </div>
           {result.entries.length === 0 && <div className="media-v4-browser-empty">此目录没有可浏览的内容。</div>}
           <div className="media-openlist-foot">
-            <span title={result.path}>当前目录：{result.path} · 已加载 {result.entries.length}{result.total > 0 ? ` / ${result.total}` : ''} 项{result.cache.status === 'fresh' && !result.cache.refreshing ? ' · 缓存有效' : result.cache.status === 'none' && !result.cache.refreshing ? ' · 远端最新' : ''}</span>
-            {result.has_more && <Button appearance="secondary" disabled={loadingMore} onClick={() => void browse(result.path, result.page + 1, false, true)}>{loadingMore ? '正在加载…' : '加载更多'}</Button>}
+            <span title={result.path}>当前目录：{result.path} · 已加载 {result.entries.length}{result.total > 0 ? ` / ${result.total}` : ''} 项 · 本次读取成功</span>
+            {result.has_more && <Button appearance="secondary" disabled={loadingMore} onClick={() => void browse(result.path, result.page + 1, true, true)}>{loadingMore ? '正在加载…' : '加载更多'}</Button>}
           </div>
         </>
       )}

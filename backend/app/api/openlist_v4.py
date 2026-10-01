@@ -199,6 +199,8 @@ def _browse_response(
         "has_more": has_more,
         "truncated": False,
         "cache": cache,
+        # 缓存期限只描述历史数据，不能证明本次浏览时远端可连接。
+        "connection_state": "verified" if not cache.get("cached") and cache.get("upstream_checked", False) else "unverified",
     }
 
 
@@ -373,7 +375,7 @@ def save_connection_config(req: SaveConfigRequest):
 
 
 @router.get("/browse")
-def browse(path: str = "", page: int = 1, per_page: int = _DEFAULT_PER_PAGE, refresh: bool = False):
+def browse(path: str = "", page: int = 1, per_page: int = _DEFAULT_PER_PAGE, refresh: bool = False, cache_only: bool = False):
     if page < 1 or per_page < 1 or per_page > _MAX_PER_PAGE:
         raise HTTPException(status_code=400, detail="page 必须大于等于 1，per_page 必须在 1 到 100 之间")
     config = load_config()
@@ -391,12 +393,18 @@ def browse(path: str = "", page: int = 1, per_page: int = _DEFAULT_PER_PAGE, ref
     health_key = governor_connection_key(
         normalize_openlist_server_url(config.openlist_server_url), username
     )
-    # 浏览是**用户显式操作**：非滥用类冷却先解除并真实尝试一次；只有
-    # risk_control / rate_limit 这类真正的滥用信号才会零请求直接拒绝（423）。
-    source_health.clear_cooldown(health_key)
-    allowed, _health = source_health.peek_request_allowed(health_key, interactive=True)
+    # 缓存命中不是用户确认重试，不能清除连接失败/冷却状态。
+    # 仅显式刷新允许尝试恢复非风控类连接；风控/限流冷却仍不可绕过。
+    if refresh:
+        source_health.clear_cooldown(health_key)
+    allowed, _health = source_health.peek_request_allowed(health_key, interactive=refresh)
+    if not allowed:
+        raise HTTPException(status_code=423, detail="该来源已暂停请求，请等待冷却结束后再检查连接")
+    if (not refresh and _health.last_failure_at > _health.last_success_at
+            and _health.reason_kind in source_health.BREAKER_RELEVANT_KINDS | {"unreachable", "auth"}):
+        raise HTTPException(status_code=400, detail="上次读取失败，当前连接未恢复；请稍后检查当前目录")
     cached = read_cache(conn_key, normalized, page=page, per_page=per_page)
-    if not refresh and cached is not None and cached["fresh"]:
+    if not refresh and cached is not None and (cached["fresh"] or cache_only):
         return _browse_response(
             normalized,
             root,
@@ -407,44 +415,23 @@ def browse(path: str = "", page: int = 1, per_page: int = _DEFAULT_PER_PAGE, ref
             has_more=cached["has_more"],
             cache={
                 "cached": True,
-                "status": "fresh",
+                "status": "fresh" if cached["fresh"] else "stale",
                 "refreshing": False,
                 "refresh_failed": False,
                 "fetched_at": cached["fetched_at"],
                 "expires_at": cached["expires_at"],
             },
         )
-    if not allowed:
-        raise HTTPException(status_code=423, detail="远端网盘疑似触发访问保护，KumiPlayer 已暂停该来源的自动请求")
-    try:
-        payload = _page_payload(
-            _client(config, username, password),
-            normalized,
-            page,
-            per_page,
-            refresh=refresh,
+    if cache_only and not refresh:
+        return _browse_response(
+            normalized, root, [], page=page, per_page=per_page, total=0, has_more=False,
+            cache={"cached": False, "status": "none", "refreshing": False,
+                   "refresh_failed": False, "fetched_at": None, "expires_at": None},
         )
-    except HTTPException as exc:
-        if cached is not None and not refresh:
-            return _browse_response(
-                normalized,
-                root,
-                cached["entries"],
-                page=cached["page"],
-                per_page=cached["per_page"],
-                total=cached["total"],
-                has_more=cached["has_more"],
-                cache={
-                    "cached": True,
-                    "status": "stale",
-                    "refreshing": False,
-                    "refresh_failed": True,
-                    "error": str(exc.detail),
-                    "fetched_at": cached["fetched_at"],
-                    "expires_at": cached["expires_at"],
-                },
-            )
-        raise
+    # 当前请求失败就返回失败，不以历史目录兜底成成功响应。
+    payload = _page_payload(
+        _client(config, username, password), normalized, page, per_page, refresh=refresh,
+    )
     ttl = max(1, int(config.openlist_cache_ttl_minutes or 1440))
     write_cache(
         conn_key,
@@ -467,6 +454,9 @@ def browse(path: str = "", page: int = 1, per_page: int = _DEFAULT_PER_PAGE, ref
         cache={
             "cached": False,
             "status": "none",
+            # OpenList 自身也有缓存；普通 fs/list 成功不能证明网盘上游可用。
+            # 只有用户明确检查当前层（refresh=True）才确认本次上游读取。
+            "upstream_checked": refresh,
             "refreshing": False,
             "refresh_failed": False,
             "fetched_at": None,

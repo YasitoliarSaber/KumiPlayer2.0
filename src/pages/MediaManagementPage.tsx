@@ -297,6 +297,7 @@ export default function MediaManagementPage() {
   const [config, setConfig] = useState<PublicConfig | null>(null)
   const [routes, setRoutes] = useState<OpenListRoute[]>([])
   const [remoteBrowsing, setRemoteBrowsing] = useState(false)
+  const [remoteAvailable, setRemoteAvailable] = useState(false)
   const [browserSession, setBrowserSession] = useState(0)
   const [openlistBaseline, setOpenlistBaseline] = useState<V4OpenlistBaselineStatus | null>(null)
   const openlistBaselineRequest = useRef(0)
@@ -521,9 +522,9 @@ export default function MediaManagementPage() {
   const activeStep = workflowStage === 'source' ? 0 : workflowStage === 'review' ? 1 : 2
   const selectedRemoteRoute = routeForPath(routes, remoteRoot)
   const canScan = kind === 'openlist'
-    ? Boolean(config?.openlist_configured && remoteRoot && selectedRemoteRoute?.local_path)
+    ? Boolean(remoteAvailable && config?.openlist_configured && remoteRoot && selectedRemoteRoute?.local_path)
     : kind === 'hybrid'
-      ? Boolean(path.trim() && config?.openlist_configured && remoteRoot && selectedRemoteRoute?.local_path)
+      ? Boolean(remoteAvailable && path.trim() && config?.openlist_configured && remoteRoot && selectedRemoteRoute?.local_path)
       : kind === 'tree'
         ? Boolean(path.trim() && providerRoot(provider))
         : Boolean(path.trim())
@@ -745,7 +746,13 @@ export default function MediaManagementPage() {
       setWorkflowStage('review')
       goManageView('import')
     } catch (cause) {
-      if (isCurrentRun()) setError(userFacingPageError(cause, '来源扫描失败'))
+      if (isCurrentRun()) {
+        setError(userFacingPageError(cause, '来源扫描失败'))
+        if (requiresOpenListConfig) {
+          setRemoteAvailable(false)
+          setBrowserSession((current) => current + 1)
+        }
+      }
     } finally {
       if (isCurrentRun()) {
         setScanTask(null)
@@ -1562,7 +1569,7 @@ export default function MediaManagementPage() {
 
           {kind === 'openlist' && (
             <div className="media-v4-workspace-body">
-              <OpenListFolderBrowser key={`openlist-${browserSession}`} configured={Boolean(config?.openlist_configured)} initialPath={remoteRoot || config?.openlist_remote_root || '/'} onLoadingChange={setRemoteBrowsing} onPathChange={handleRemotePathChange} onGoSettings={goSettings} />
+              <OpenListFolderBrowser key={`openlist-${browserSession}`} configured={Boolean(config?.openlist_configured)} initialPath={remoteRoot || config?.openlist_remote_root || '/'} onLoadingChange={setRemoteBrowsing} onAvailabilityChange={setRemoteAvailable} onPathChange={handleRemotePathChange} onGoSettings={goSettings} />
               <div className="media-v4-mapping-note">
                 <Cloud24Regular aria-hidden="true" />
                 <div><strong>{selectedRemoteRoute ? '已匹配播放路径' : '当前目录尚未匹配播放路径'}</strong><span>{selectedRemoteRoute ? '播放位置由已保存的 OpenList 路由推导。' : '请先进入一个已配置内容来源的目录，才能开始扫描。'}</span></div>
@@ -1608,7 +1615,7 @@ export default function MediaManagementPage() {
                 </div>
                 <div className="media-v4-field-block">
                   <div className="media-v4-field-copy"><span className="media-v4-action-index">后续</span><strong>选择同一 OpenList 目录</strong><span>确认 TXT 基线后，增量只核对新增和变化目录。</span></div>
-                  <OpenListFolderBrowser key={`hybrid-${browserSession}`} configured={Boolean(config?.openlist_configured)} initialPath={remoteRoot || config?.openlist_remote_root || '/'} onLoadingChange={setRemoteBrowsing} onPathChange={handleRemotePathChange} onGoSettings={goSettings} />
+                  <OpenListFolderBrowser key={`hybrid-${browserSession}`} configured={Boolean(config?.openlist_configured)} initialPath={remoteRoot || config?.openlist_remote_root || '/'} onLoadingChange={setRemoteBrowsing} onAvailabilityChange={setRemoteAvailable} onPathChange={handleRemotePathChange} onGoSettings={goSettings} />
                 </div>
               </div>
               <div className="media-v4-mapping-note">
