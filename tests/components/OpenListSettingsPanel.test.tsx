@@ -77,7 +77,6 @@ describe('OpenListSettingsPanel', () => {
 
   test('未配置时暴露初始设置（用户名密码输入框可见）', () => {
     renderPanel({ config: baseConfig({ openlist_configured: false, openlist_server_url: '' }) });
-    fireEvent.click(screen.getByText('管理连接'));
     // 未配置时用户名/密码输入框直接可见（credentialsOpen 初始 true）
     expect(screen.getByPlaceholderText('OpenList 用户名')).toBeTruthy();
     expect(screen.getByPlaceholderText('OpenList 密码')).toBeTruthy();
@@ -144,6 +143,21 @@ describe('OpenListSettingsPanel', () => {
 });
 
 describe('REWORK：状态与安全语义', () => {
+  test('首次配置直接显示必需字段', () => {
+    renderPanel({ config: baseConfig({ openlist_configured: false }) });
+    expect(screen.getByPlaceholderText('OpenList 用户名')).toBeVisible();
+  });
+
+  test('收起编辑区时检查连接的错误仍然可见', () => {
+    renderPanel({ notice: '服务暂时不可达', noticeKind: 'error' });
+    expect(screen.getByRole('alert')).toHaveTextContent('服务暂时不可达');
+  });
+
+  test('提前加载设为零时保持禁用，不回退成默认值', async () => {
+    const { onSaveConnection } = renderPanel({ draft: baseDraft({ prefetch_limit: '0' }) });
+    fireEvent.click(screen.getByText('保存设置'));
+    expect(onSaveConnection).toHaveBeenCalledWith(expect.objectContaining({ prefetch_limit: 0 }), false);
+  });
   test('saved config 初始显示 saved_unverified（登录信息已保存，尚未检查当前连接）', async () => {
     renderPanel();
     expect(await screen.findByText(/尚未检查当前连接/)).toBeTruthy();
@@ -349,6 +363,7 @@ describe('提示条交互', () => {
 
   test('挂载后展示今日遥测摘要', async () => {
     renderPanel();
+    fireEvent.click(screen.getByText('管理连接'));
     // 措辞改为“共 N 次（读取目录 x 次、登录 y 次）”，不再使用"目录/登录"斜杠缩写
     expect(await screen.findByText(/共 4 次（读取目录 3 次、登录 1 次）/)).toBeTruthy();
     expect(openlistApi.getTelemetryToday).toHaveBeenCalled();

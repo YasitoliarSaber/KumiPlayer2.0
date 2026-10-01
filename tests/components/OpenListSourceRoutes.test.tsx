@@ -53,13 +53,18 @@ function renderRoutes(props: Partial<Parameters<typeof OpenListSourceRoutes>[0]>
 }
 
 describe('OpenListSourceRoutes', () => {
+  test('直接选择网盘类型，无需先展开编辑', () => {
+    const { onUpdateDraft } = renderRoutes();
+    fireEvent.change(screen.getByRole('combobox', { name: '115网盘的网盘类型' }), { target: { value: 'baidu' } });
+    expect(onUpdateDraft).toHaveBeenCalledWith('/115网盘', { provider_id: 'baidu' });
+  });
   test('紧凑卡片渲染：名称 / 远端目录 / 内容提供商 / 推导路径', () => {
     renderRoutes();
     expect(screen.getByText('115网盘')).toBeTruthy();
     expect(screen.getByText('/115网盘')).toBeTruthy();
-    expect(screen.getByText(/内容提供商：115 网盘/)).toBeTruthy();
-    expect(screen.getByText('K:\\115网盘')).toBeTruthy();
-    expect(screen.getByText('夸克网盘')).toBeTruthy();
+    expect(screen.getByRole('combobox', { name: '115网盘的网盘类型' })).toHaveValue('pan115');
+    expect(screen.queryByText('K:\\115网盘')).toBeNull();
+    expect(screen.getByRole('combobox', { name: '夸克网盘的网盘类型' })).toHaveValue('quark');
     expect(screen.getByText('/夸克网盘')).toBeTruthy();
   });
 
@@ -72,10 +77,9 @@ describe('OpenListSourceRoutes', () => {
     renderRoutes();
     fireEvent.click(screen.getAllByText('编辑')[0]);
     expect(screen.getByText('显示名称')).toBeTruthy();
-    expect(screen.getByText('内容提供商')).toBeTruthy();
-    expect(screen.getByText('可作为媒体来源')).toBeTruthy();
-    expect(screen.getByText('远端路径（只读）')).toBeTruthy();
-    expect(screen.getByText('推导路径（只读）')).toBeTruthy();
+    expect(screen.getAllByRole('checkbox')).toHaveLength(2);
+    expect(screen.getByText('本地播放路径')).toBeTruthy();
+    expect(screen.getByText('K:\\115网盘')).toBeTruthy();
   });
 
   test('enabled 开关切换触发 onUpdateDraft', () => {
@@ -131,7 +135,7 @@ describe('OpenListSourceRoutes', () => {
       ],
     });
     expect(screen.getByText(/有 1 项更改尚未保存/)).toBeTruthy();
-    expect(screen.getByText('新发现的目录，确认内容提供商后保存生效')).toBeTruthy();
+    expect(screen.getByText('新发现的目录，确认网盘类型后保存生效')).toBeTruthy();
     // 保存按钮立即可用：确认建议提供商后可以直接保存，不再要求先改动某个字段
     expect((screen.getByText('保存更改') as HTMLButtonElement).disabled).toBe(false);
   });
@@ -157,7 +161,7 @@ describe('OpenListSourceRoutes', () => {
       />,
     );
     expect(screen.queryByText(/有 1 项更改尚未保存/)).toBeNull();
-    expect(screen.queryByText('新发现的目录，确认内容提供商后保存生效')).toBeNull();
+    expect(screen.queryByText('新发现的目录，确认网盘类型后保存生效')).toBeNull();
     expect((screen.getByText('保存更改') as HTMLButtonElement).disabled).toBe(true);
   });
 

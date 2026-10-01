@@ -81,7 +81,7 @@ describe('PlayerTuningPage', () => {
     expect(await screen.findByText('已打开 MPV 配置文件夹')).toBeTruthy();
   });
 
-  it('点击后展开 Anime4K 选项（浮层渲染，不常驻文档流）', async () => {
+  it('使用原生选择器切换 Anime4K，关闭时禁用质量而保留已选质量', async () => {
     (configApi.getConfig as ReturnType<typeof vi.fn>).mockResolvedValue({
       mpv_anime4k_mode: 'off',
       mpv_anime4k_quality: 'balanced',
@@ -89,10 +89,31 @@ describe('PlayerTuningPage', () => {
     render(<PlayerTuningPage />);
 
     await screen.findByText('关闭');
-    fireEvent.click(screen.getByRole('combobox', { name: '模式' }));
+    const mode = screen.getByRole('combobox', { name: '模式' });
+    const quality = screen.getByRole('combobox', { name: '质量' });
+    expect(mode.tagName).toBe('SELECT');
+    expect(quality).toBeDisabled();
+    fireEvent.change(mode, { target: { value: 'a' } });
+    expect(quality).toBeEnabled();
+    expect(quality).toHaveValue('balanced');
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+  });
+});
 
-    // 与项目内已验证范例（DetailSeasonPicker）一致：弹层走浮层渲染，
-    // 不再使用 inlinePopup（那会让选项常驻展开并遮挡下方内容）。
-    expect(await screen.findByRole('listbox')).toBeTruthy();
+describe('Anime4K 模式与质量的语义说明（F-012）', () => {
+  it('明确模式是算法族、质量是成本档位，且不把 C 写成最轻量', async () => {
+    (configApi.getConfig as ReturnType<typeof vi.fn>).mockResolvedValue({
+      mpv_anime4k_mode: 'off',
+      mpv_anime4k_quality: 'balanced',
+    });
+    render(<PlayerTuningPage />);
+    fireEvent.click(await screen.findByText('如何选择效果与质量'));
+
+    expect(screen.getByText(/选择的是/)).toBeTruthy();
+    expect(screen.getByText('算法族')).toBeTruthy();
+    expect(screen.getByText('成本档位')).toBeTruthy();
+    expect(screen.getByText(/Mode C 使用 Upscale_Denoise 链，并不是最轻量的选项/)).toBeTruthy();
+    // “已应用”不能等同于“画质已经足够流畅”。
+    expect(screen.getByText(/不代表当前 GPU 帧预算已经足够/)).toBeTruthy();
   });
 });

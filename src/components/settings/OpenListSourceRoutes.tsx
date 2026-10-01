@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { Button } from '@fluentui/react-components';
-import { openlistApi, type OpenListDiscoverItem, type OpenListRouteItem } from '../../api/openlist';
+import { Button, Select } from '@fluentui/react-components';
+import { type OpenListDiscoverItem, type OpenListRouteItem } from '../../api/openlist';
 import type { OpenListRoute, ProviderId } from '../../api/types';
 
 /**
@@ -95,10 +95,9 @@ export default function OpenListSourceRoutes({
     routes.find((route) => route.remote_prefix === prefix)?.local_path ?? '';
 
   return (
-    <div className="sources-routes-panel">
+    <div className="sources-routes-panel sources-route-selection">
       <div className="sources-openlist-card-head">
-        <strong>来源目录</strong>
-        <span className="sources-route-summary">KumiPlayer 会读取 OpenList 顶层目录，你只需要确认每个目录来自哪个网盘。</span>
+        <span className="sources-route-summary">勾选需要导入的目录，确认对应网盘后保存。未勾选的目录仍可浏览。</span>
       </div>
 
       {!configured ? (
@@ -126,52 +125,33 @@ export default function OpenListSourceRoutes({
               const isExpanded = Boolean(expanded[route.remote_prefix]);
               const isDirty = isItemDirty(route);
               const isNewItem = route.route_id === '';
-              const providerLabel = ROUTE_PROVIDER_OPTIONS.find((option) => option.value === route.provider_id)?.label ?? route.provider_id;
               return (
                 <div key={route.remote_prefix} className="sources-route-card">
                   <div className="sources-route-card-main">
                     <label className="sources-route-card-name" title="不作为媒体来源时取消勾选（仍可浏览）">
-                      <input type="checkbox" checked={route.enabled} onChange={(event) => handleUpdate(route.remote_prefix, { enabled: event.target.checked })} />
-                      <span>{route.label || route.remote_prefix}</span>
+                      <input type="checkbox" checked={route.enabled} disabled={isBusy} onChange={(event) => handleUpdate(route.remote_prefix, { enabled: event.target.checked })} />
+                      <span><strong>{route.label || route.remote_prefix}</strong><small>{route.remote_prefix}</small></span>
                     </label>
-                    <div className="sources-route-card-paths">
-                      <span>远端目录：<code>{route.remote_prefix}</code></span>
-                      <span>内容提供商：{providerLabel}</span>
-                      {localPath && <span>推导路径：<code>{localPath}</code></span>}
-                    </div>
-                    <Button appearance="secondary" size="small" onClick={() => toggleEdit(route.remote_prefix)} className="settings-ghost-btn fluent-settings-btn">
+                    <Select aria-label={`${route.label || route.remote_prefix}的网盘类型`} value={route.provider_id} disabled={isBusy} onChange={(event) => handleUpdate(route.remote_prefix, { provider_id: event.target.value as ProviderId })}>
+                      {ROUTE_PROVIDER_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                    </Select>
+                    <Button appearance="subtle" size="small" aria-expanded={isExpanded} onClick={() => toggleEdit(route.remote_prefix)} className="settings-ghost-btn fluent-settings-btn">
                       {isExpanded ? '收起' : '编辑'}
                     </Button>
                   </div>
                   {isDirty && (
                     <span className="sources-dirty-hint">
-                      {isNewItem ? '新发现的目录，确认内容提供商后保存生效' : '该项有未保存的更改'}
+                      {isNewItem ? '新发现的目录，确认网盘类型后保存生效' : '未保存'}
                     </span>
                   )}
                   {isExpanded && (
                     <div className="sources-route-card-edit">
                       <label className="settings-config-row">
                         <span>显示名称</span>
-                        <input type="text" value={route.label} onChange={(event) => handleUpdate(route.remote_prefix, { label: event.target.value })} className="settings-input" />
-                      </label>
-                      <label className="settings-config-row">
-                        <span>内容提供商</span>
-                        <select value={route.provider_id} onChange={(event) => handleUpdate(route.remote_prefix, { provider_id: event.target.value as ProviderId })} className="settings-input">
-                          {ROUTE_PROVIDER_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value}>{option.label}</option>
-                          ))}
-                        </select>
-                      </label>
-                      <label className="settings-route-enabled" title="不作为媒体来源时取消勾选（仍可浏览）">
-                        <input type="checkbox" checked={route.enabled} onChange={(event) => handleUpdate(route.remote_prefix, { enabled: event.target.checked })} />
-                        <span>可作为媒体来源</span>
+                        <input type="text" value={route.label} disabled={isBusy} onChange={(event) => handleUpdate(route.remote_prefix, { label: event.target.value })} className="settings-input" />
                       </label>
                       <div className="settings-config-row settings-openlist-derived">
-                        <span>远端路径（只读）</span>
-                        <output>{route.remote_prefix}</output>
-                      </div>
-                      <div className="settings-config-row settings-openlist-derived">
-                        <span>推导路径（只读）</span>
+                        <span>本地播放路径</span>
                         <output>{localPath || '填写挂载位置后自动推导'}</output>
                       </div>
                     </div>

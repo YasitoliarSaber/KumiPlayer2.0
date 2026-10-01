@@ -1,0 +1,37 @@
+@layer pages {
+  .player-tuning-page--compact {
+    width: min(100%, 880px);
+    margin: 0 auto;
+    display: grid;
+    gap: 16px;
+    padding: 24px 28px 40px;
+    color: var(--text);
+  }
+  .player-tuning-page--compact .player-tuning-header { display: flex; align-items: center; gap: 12px; margin: 0 0 4px; }
+  .player-tuning-page--compact .player-tuning-header h2 { margin: 2px 0 0; font-size: 24px; }
+  .player-tuning-page--compact .player-tuning-kicker { color: var(--text-secondary); font-size: 12px; }
+  .player-tuning-page--compact .player-tuning-section { display: grid; gap: 14px; padding: 20px; margin: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-raised); box-shadow: none; }
+  .player-tuning-page--compact .player-tuning-section h3 { margin: 0; font-size: 15px; font-weight: 600; }
+  .player-tuning-page--compact .player-tuning-note { margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
+  .player-tuning-page--compact .player-tuning-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  .player-tuning-page--compact .player-tuning-field { display: grid; gap: 8px; min-width: 0; }
+  .player-tuning-page--compact .player-tuning-field > label { font-size: 13px; font-weight: 500; }
+  .player-tuning-page--compact .player-tuning-path-row { display: flex; gap: 8px; min-width: 0; }
+  .player-tuning-page--compact .player-tuning-path-row > .fui-Input { flex: 1; min-width: 0; }
+  .player-tuning-page--compact .player-tuning-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .player-tuning-page--compact .player-tuning-help-details { border-top: 1px solid var(--border); padding-top: 12px; }
+  .player-tuning-page--compact .player-tuning-help-details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; padding: 4px 0; }
+  .player-tuning-page--compact .player-tuning-help-details summary:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 4px; }
+  .player-tuning-page--compact .player-tuning-help { margin: 12px 0 0; padding-left: 20px; color: var(--text-secondary); font-size: 13px; line-height: 1.7; }
+  .player-tuning-page--compact .player-tuning-loading,
+  .player-tuning-page--compact .player-tuning-error,
+  .player-tuning-page--compact .player-tuning-saved { display: flex; align-items: center; gap: 8px; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+  .player-tuning-page--compact .player-tuning-error { color: var(--colorStatusDangerForeground1); }
+  .player-tuning-page--compact .player-tuning-saved { color: var(--colorStatusSuccessForeground1); }
+  .player-tuning-page--compact .player-tuning-actions { display: flex; justify-content: flex-end; margin: 0; padding: 0; }
+  @media (max-width: 640px) {
+    .player-tuning-page--compact { padding: 16px 12px 28px; }
+    .player-tuning-page--compact .player-tuning-section { padding: 16px; }
+    .player-tuning-page--compact .player-tuning-fields { grid-template-columns: 1fr; }
+  }
+}

@@ -5,14 +5,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_settings_outline_click_locks_target_and_disables_smooth_scroll():
+def test_settings_navigation_switches_panels_without_scroll_observers():
     page = (ROOT / "src/pages/SettingsPage.tsx").read_text(encoding="utf-8")
 
-    assert "navigationTargetRef" in page
-    assert "if (navigationTargetRef.current) return;" in page
-    assert "root.style.scrollBehavior = 'auto';" in page
-    assert "scrollIntoView({ behavior: 'auto', block: 'start' })" in page
-    assert "scrollIntoView({ behavior: 'smooth'" not in page
+    assert "hidden={activeSection !== tab.key}" in page
+    assert "aria-controls={sectionId(tab.key)}" in page
+    assert "scrollTo({ top: 0, behavior: 'auto' })" in page
+    assert "IntersectionObserver" not in page
 
 
 def test_connection_essentials_are_visible_and_misleading_options_are_hidden():

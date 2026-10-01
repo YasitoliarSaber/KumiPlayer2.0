@@ -153,7 +153,7 @@ export default function OpenListSettingsPanel({
     onChangeDraft(key, value);
     if (noticeKind === 'error') clearNotice();
   };
-  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(!config.openlist_configured);
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [allowOpenlistHttp, setAllowOpenlistHttp] = useState(false);
   const [actionLock, setActionLock] = useState<string | null>(null);
@@ -190,7 +190,6 @@ export default function OpenListSettingsPanel({
   }, [draft, config]);
 
   const remoteAffectingDirty = dirtyKeys.some((key) => REMOTE_AFFECTING_KEYS.includes(key));
-  const localOnlyDirty = dirtyKeys.length > 0 && !remoteAffectingDirty;
   const hasDirty = dirtyKeys.length > 0;
 
   const busy = actionLock !== null || Boolean(externalBusy);
@@ -204,7 +203,7 @@ export default function OpenListSettingsPanel({
     // 非回环 HTTP 未确认时不得悄悄放行（REWORK P0：allow_insecure_http 必须来自风险确认）
     allow_insecure_http: allowOpenlistHttp || isNonLoopbackHttp(draft.server_url) === false,
     cache_ttl_minutes: Math.max(1, Number(draft.cache_ttl) || 1440),
-    prefetch_limit: Math.max(0, Math.min(50, Number(draft.prefetch_limit) || 12)),
+    prefetch_limit: draft.prefetch_limit.trim() === '' ? 12 : Math.max(0, Math.min(50, Number(draft.prefetch_limit))),
   });
 
   // Test Connection 专用 payload：后端 TestConnectionRequest 为 extra="forbid"，
@@ -289,45 +288,23 @@ export default function OpenListSettingsPanel({
   const primaryAction = !hasDirty ? handleTest : handleSave;
 
   return (
-    <div className="sources-openlist-card">
+    <div className="sources-openlist-card sources-connection">
       <div className="sources-openlist-card-head">
-        <strong>OpenList</strong>
-        <span className={`sources-openlist-status ${probeState === 'connected' ? 'is-ok' : probeState === 'unconfigured' ? '' : 'is-error'}`}>
+        <strong>{config.openlist_server_url || '添加 OpenList 连接'}</strong>
+        <span className={`sources-openlist-status ${probeState === 'connected' ? 'is-ok' : ['unconfigured', 'saved_unverified', 'checking'].includes(probeState) ? '' : 'is-error'}`}>
           {stateLabel(probeState)}
         </span>
       </div>
 
       <div className="sources-openlist-meta is-stacked">
-        <details className="sources-openlist-intro">
-          <summary>这是什么？</summary>
-          <span className="sources-route-summary">OpenList 负责读取远程目录；115、百度、夸克才是内容来源。通常只需配置一次。</span>
-        </details>
-        {config.openlist_server_url && (
-          <div><span>服务地址</span><code>{config.openlist_server_url}</code></div>
-        )}
-        {config.openlist_mount_root && (
-          <div><span>本地挂载位置</span><code>{config.openlist_mount_root}</code></div>
-        )}
         <div>
           <span>账号密码</span>
           <code>{saved ? '已保存（只存在这台电脑上）' : '未保存'}</code>
         </div>
       </div>
 
-      {telemetry && (
-        <div className="sources-openlist-telemetry is-stacked">
-          <div>
-            <span>今天的请求</span>
-            <code>共 {telemetry.total} 次（读取目录 {telemetry.fs_list} 次、登录 {telemetry.login} 次）</code>
-          </div>
-          <p className="sources-route-hint">
-            这只是 KumiPlayer 向 OpenList 发起的次数，用来判断访问是否过于频繁；网盘实际被访问的次数通常更少。
-          </p>
-        </div>
-      )}
-
       <div className="sources-openlist-actions">
-        <Button appearance="secondary" size="small" onClick={() => setEditorOpen((v) => !v)} className="settings-ghost-btn fluent-settings-btn">
+        <Button appearance="secondary" size="small" aria-expanded={editorOpen} onClick={() => setEditorOpen((v) => !v)} className="settings-ghost-btn fluent-settings-btn" disabled={busy}>
           {editorOpen ? '收起连接设置' : '管理连接'}
         </Button>
         <Button appearance="primary" size="small" onClick={primaryAction} className="settings-primary-btn fluent-settings-btn" disabled={Boolean(busy)}>
@@ -336,28 +313,15 @@ export default function OpenListSettingsPanel({
       </div>
 
       {editorOpen && (
-        <div className="sources-openlist-editor">
+        <fieldset className="sources-openlist-editor" disabled={busy} aria-label="连接设置">
           <label className="settings-config-row">
             <span>OpenList 地址</span>
             <input type="url" value={draft.server_url} onChange={(event) => handleDraftChange('server_url', event.target.value)} className="settings-input" placeholder="http://localhost:5244" autoComplete="url" />
           </label>
-          <div className="sources-webdav-hint">
-            <span>WebDAV：</span>
-            <code>{webdav ? `完整地址 ${webdav}` : '填写 OpenList 地址后自动生成'}</code>
-          </div>
-          <label className="settings-config-row">
-            <span>远端根目录</span>
-            <input type="text" value={draft.remote_root} onChange={(event) => handleDraftChange('remote_root', event.target.value)} className="settings-input" placeholder="/" />
-          </label>
-          <label className="settings-config-row">
-            <span>本地挂载位置</span>
-            <input type="text" value={draft.mount_root} onChange={(event) => handleDraftChange('mount_root', event.target.value)} className="settings-input" placeholder="K:\\" />
-          </label>
-
           <div className="sources-credentials-block">
             {saved ? (
               <div className="sources-credentials-status">
-                登录信息已保存；填写以下两项可一起更新账号密码。
+                保持留空即可沿用已保存的账号密码。
               </div>
             ) : (
               <div className="sources-credentials-status">尚未保存登录信息</div>
@@ -374,7 +338,7 @@ export default function OpenListSettingsPanel({
                   <button type="button" aria-label={showNewPassword ? '隐藏本次输入密码' : '显示本次输入密码'} title={showNewPassword ? '隐藏本次输入密码' : '显示本次输入密码'} onClick={() => setShowNewPassword((value) => !value)}>{showNewPassword ? <EyeOff size={16} /> : <Eye size={16} />}</button>
                 </span>
               </label>
-              <div className="sources-credentials-status">已保存的密码不会回传到界面；眼睛仅显示本次新输入的密码。更换账号或密码时，需要同时填写新的用户名和密码。</div>
+              <div className="sources-credentials-status">已保存的密码不会回传到界面；更换登录信息时，请同时填写用户名和密码。</div>
             </div>
             {skipVerificationOffered && (
               <div className="sources-openlist-actions">
@@ -385,6 +349,23 @@ export default function OpenListSettingsPanel({
               </div>
             )}
           </div>
+
+          <label className="settings-config-row">
+            <span>本地挂载位置</span>
+            <input type="text" value={draft.mount_root} onChange={(event) => handleDraftChange('mount_root', event.target.value)} className="settings-input" placeholder="例如 K:\\" />
+          </label>
+          <p className="sources-route-hint">填写此 OpenList 在资源管理器中的挂载根目录，用于播放视频。</p>
+          <details className="sources-advanced">
+            <summary>远端目录与 WebDAV{draft.remote_root !== '/' ? ' · 自定义目录' : ''}</summary>
+            <div className="sources-advanced-body">
+              <label className="settings-config-row">
+                <span>远端根目录</span>
+                <input type="text" value={draft.remote_root} onChange={(event) => handleDraftChange('remote_root', event.target.value)} className="settings-input" placeholder="/" />
+              </label>
+              <p className="sources-route-hint">远端根目录默认使用 /，应与上方挂载位置对应。</p>
+              <div className="sources-webdav-hint"><span>WebDAV：</span><code>{webdav || '填写服务地址后自动生成'}</code></div>
+            </div>
+          </details>
 
           <details className="sources-advanced">
             <summary>高级设置</summary>
@@ -397,6 +378,7 @@ export default function OpenListSettingsPanel({
                 <span>提前加载子目录（上限 50）</span>
                 <input type="number" min={0} max={50} value={draft.prefetch_limit} onChange={(event) => handleDraftChange('prefetch_limit', event.target.value)} className="settings-input" placeholder="12" />
               </label>
+              {telemetry && <p className="sources-route-hint">今天的请求：共 {telemetry.total} 次（读取目录 {telemetry.fs_list} 次、登录 {telemetry.login} 次）。仅统计 KumiPlayer 向 OpenList 发出的请求。</p>}
             </div>
           </details>
 
@@ -407,8 +389,10 @@ export default function OpenListSettingsPanel({
             </label>
           )}
 
+        </fieldset>
+      )}
           {notice && (
-            <p className={`settings-openlist-notice${noticeKind !== 'info' ? ` ${noticeKind}` : ''}`}>
+            <p role={noticeKind === 'error' ? 'alert' : 'status'} className={`settings-openlist-notice${noticeKind !== 'info' ? ` ${noticeKind}` : ''}`}>
               {noticeKind === 'success' ? <CheckCircle size={14} /> : noticeKind === 'error' ? <XCircle size={14} /> : <Info size={14} />}
               <span>{notice}</span>
               <button
@@ -421,8 +405,6 @@ export default function OpenListSettingsPanel({
               </button>
             </p>
           )}
-        </div>
-      )}
     </div>
   );
 }

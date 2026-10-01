@@ -26,6 +26,7 @@ import DecodedImage from '../components/ui/DecodedImage';
 import OpenListSettingsPanel from '../components/settings/OpenListSettingsPanel';
 import OpenListSourceRoutes from '../components/settings/OpenListSourceRoutes';
 import '../styles/settings-media-sources.css';
+import '../styles/settings-navigation.css';
 type SettingsTab = 'appearance' | 'sources' | 'openlist' | 'scrape' | 'player' | 'bangumi';
 type SourceKey = 'pan115' | 'baidu' | 'local';
 type OpenListDraft = Pick<OpenListConfigPayload, 'server_url' | 'remote_root' | 'mount_root' | 'username' | 'password'> & {
@@ -93,8 +94,6 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
   const [routesLoaded, setRoutesLoaded] = useState(false);
   const routeAutoDiscoverRef = useRef(false);
   const seenLibraryRefreshRef = useRef<Set<string>>(new Set());
-  const navigationTargetRef = useRef<SettingsTab | null>(null);
-  const navigationUnlockTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     void loadCore();
@@ -137,7 +136,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
     const result = await openlistApi.discoverRoutes();
     setRouteDiscoverItems(result.items);
     const saved = new Map(routeDraft.map((item) => [item.remote_prefix, item]));
-    const next: OpenListRouteItem[] = result.items.map((item) => {
+    const discovered: OpenListRouteItem[] = result.items.map((item) => {
       const existing = saved.get(item.remote_prefix);
       if (existing) return existing;
       return {
@@ -148,19 +147,26 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
         enabled: true,
       };
     });
-    setRouteDraft(next);
+    // 临时不可见或位于子目录的已保存来源不因刷新被移除；这里只补充新目录。
+    const knownPrefixes = new Set(discovered.map((item) => item.remote_prefix));
+    setRouteDraft([...discovered, ...routeDraft.filter((item) => !knownPrefixes.has(item.remote_prefix))]);
     setRouteNotice(
       auto
-        ? `已自动读取 ${result.items.length} 个顶层目录；目录名建议仅供参考，确认内容提供商后点击「保存更改」`
-        : `已读取 ${result.items.length} 个顶层目录；目录名建议仅供参考，请确认内容提供商后再保存`,
+        ? `已读取 ${result.items.length} 个目录，请确认网盘类型后保存。`
+        : `已刷新 ${result.items.length} 个目录，原有选择已保留。`,
     );
   }
 
   // 提供商路由：读取已保存路由
   useEffect(() => {
     if (!config?.openlist_configured) return;
+    let cancelled = false;
+    setRoutesLoaded(false);
+    setRouteDiscoverItems([]);
+    routeAutoDiscoverRef.current = false;
     void openlistApi.getRoutes()
       .then((result) => {
+        if (cancelled) return;
         setOpenlistRoutes(result.routes);
         setRouteDraft(result.routes.map((route) => ({
           route_id: route.route_id,
@@ -170,90 +176,31 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
           enabled: route.enabled,
         })));
       })
-      .catch(() => setRouteNotice('读取来源路由失败，请确认 OpenList 连接配置'))
-      .finally(() => setRoutesLoaded(true));
-  }, [config?.openlist_configured, config?.openlist_server_url]);
+      .catch(() => {
+        if (!cancelled) setRouteNotice('读取来源路由失败，请确认 OpenList 连接配置');
+      })
+      .finally(() => {
+        if (!cancelled) setRoutesLoaded(true);
+      });
+    return () => { cancelled = true; };
+  }, [config?.openlist_configured, config?.openlist_server_url, config?.openlist_remote_root]);
 
   // 已配置连接但没有任何已保存路由时，自动读取一次顶层目录建议；
   // 失败静默（保留手动「刷新来源目录」入口），避免每次重启都要求手动刷新。
   useEffect(() => {
-    if (!routesLoaded || routeAutoDiscoverRef.current) return;
+    if (activeSection !== 'openlist' || !config?.openlist_configured || !routesLoaded || routeAutoDiscoverRef.current) return;
     if (openlistRoutes.length > 0 || routeDraft.length > 0 || routeDiscoverItems.length > 0) {
       routeAutoDiscoverRef.current = true;
       return;
     }
     routeAutoDiscoverRef.current = true;
     void discoverRoutes(true).catch(() => undefined);
-  }, [routesLoaded, openlistRoutes.length, routeDraft.length, routeDiscoverItems.length]);
+  }, [activeSection, config?.openlist_configured, routesLoaded, openlistRoutes.length, routeDraft.length, routeDiscoverItems.length]);
 
-
-  useEffect(() => {
-    const sections = sectionTabs
-      .map((tab) => document.getElementById(sectionId(tab.key)))
-      .filter((section): section is HTMLElement => Boolean(section));
-    if (!sections.length) return undefined;
-
-    const observer = new IntersectionObserver((entries) => {
-      if (navigationTargetRef.current) return;
-      const current = entries
-        .filter((entry) => entry.isIntersecting)
-        .sort((left, right) => right.intersectionRatio - left.intersectionRatio)[0];
-      if (!current) return;
-      const matched = sectionTabs.find((tab) => sectionId(tab.key) === current.target.id);
-      if (matched) setActiveSection(matched.key);
-    }, { rootMargin: '-116px 0px -58% 0px', threshold: [0.08, 0.35, 0.65] });
-
-    sections.forEach((section) => observer.observe(section));
-    return () => {
-      observer.disconnect();
-      if (navigationUnlockTimerRef.current != null) {
-        window.clearTimeout(navigationUnlockTimerRef.current);
-      }
-    };
-  }, []);
 
   const selectSection = (key: SettingsTab) => {
-    navigationTargetRef.current = key;
-    if (navigationUnlockTimerRef.current != null) {
-      window.clearTimeout(navigationUnlockTimerRef.current);
-    }
     setActiveSection(key);
-    const target = document.getElementById(sectionId(key));
-    if (!target) {
-      navigationTargetRef.current = null;
-      return;
-    }
-
-    const root = document.documentElement;
-    const body = document.body;
-    const previousRootBehavior = root.style.scrollBehavior;
-    const previousBodyBehavior = body.style.scrollBehavior;
-    root.style.scrollBehavior = 'auto';
-    body.style.scrollBehavior = 'auto';
-    try {
-      target.scrollIntoView({ behavior: 'auto', block: 'start' });
-      const scrollRoot = document.querySelector<HTMLElement>('.app-main');
-      if (scrollRoot) {
-        const isNarrow = typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 760px)').matches;
-        const outline = document.querySelector<HTMLElement>('.settings-outline');
-        const topOffset = isNarrow
-          ? Math.max(Math.ceil(outline?.getBoundingClientRect().height ?? 0), 72) + 12
-          : 32;
-        const targetTop = target.getBoundingClientRect().top - scrollRoot.getBoundingClientRect().top + scrollRoot.scrollTop;
-        scrollRoot.scrollTo({
-          top: Math.max(0, targetTop - topOffset),
-          behavior: 'auto',
-        });
-      }
-    } finally {
-      root.style.scrollBehavior = previousRootBehavior;
-      body.style.scrollBehavior = previousBodyBehavior;
-    }
-
-    navigationUnlockTimerRef.current = window.setTimeout(() => {
-      navigationTargetRef.current = null;
-      navigationUnlockTimerRef.current = null;
-    }, 120);
+    document.querySelector<HTMLElement>('.app-main')?.scrollTo({ top: 0, behavior: 'auto' });
   };
 
   const report = (message: string) => {
@@ -297,7 +244,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
   });
 
   const openMpvConfigDir = () => runAction('打开 MPV 配置文件夹', async () => {
-    await configApi.openMpvConfigDir();
+    await configApi.openMpvConfigDir(config?.player_mode);
     report('已打开 MPV 配置文件夹');
   });
 
@@ -468,7 +415,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
     <PanelStack>
       <SectionIntro title="OpenList 设置" />
       {config && (
-        <SettingsSection title="连接与远端根目录">
+        <SettingsSection title="连接服务">
           <OpenListSettingsPanel
             config={config}
             draft={openlistDraft}
@@ -482,6 +429,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
               setOpenlistNoticeKind('success');
               setOpenlistNotice(result.message);
               await loadConfig();
+              setOpenlistDraft((current) => ({ ...current, username: '', password: '' }));
               report(result.message);
               // 由面板决定是否显示"连接正常"：只有后端确实探测成功才算
               return { verified: result.verified === true };
@@ -505,7 +453,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
         </SettingsSection>
       )}
       {config && (
-        <SettingsSection title="内容路由">
+        <SettingsSection title="选择来源目录">
           <OpenListSourceRoutes
             configured={config.openlist_configured}
             routes={openlistRoutes}
@@ -526,7 +474,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
                 provider_id: route.provider_id,
                 enabled: route.enabled,
               })));
-              setRouteNotice('来源目录已保存；未勾选“可作为媒体来源”的目录仍可浏览，但不能导入');
+              setRouteNotice('来源目录已保存。可前往媒体管理选择目录并导入。');
               report('来源目录已保存');
             }}
             onUpdateDraft={updateRouteDraft}
@@ -542,7 +490,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
       {config && (
         <SettingsSection title="来源根目录">
           <div className="sources-root-panel">
-            <p className="sources-root-note">这些目录只作为 V4 SourceEvidence 扫描入口，不会直接写入媒体库身份。</p>
+            <p className="sources-root-note">只需填写你使用的来源。导入媒体时还可以选择具体文件夹。</p>
             <div className="settings-field-list">
               <ConfigRow label="115 挂载根路径" value={config.pan115_root} onSave={(value) => saveConfig({ pan115_root: value })} />
               <ConfigRow label="百度网盘挂载位置" value={config.baidu_root} onSave={(value) => saveConfig({ baidu_root: value })} />
@@ -559,7 +507,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
           </div>
           <div className="settings-actions">
             <GhostButton onClick={testMediaPaths} busy={activeAction === '验证媒体路径'}>验证媒体路径</GhostButton>
-            <span className="field-help">百度目录树会根据文件名自动补齐“01动画”“新番”等目录，并抽样验证真实视频；无需逐次配置。</span>
+            <span className="field-help">镜像保存播放入口和作品资料，不会移动原始视频。</span>
           </div>
           {mediaPathValidation && (
             <div className="media-path-validation" role="status" aria-label="媒体路径验证结果">
@@ -596,7 +544,22 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
     <PanelStack>
       <SectionIntro title="播放" />
       {config && (
-        <SettingsSection title="内置播放器">
+        <SettingsSection title="当前播放器">
+          <div className="settings-player-choice">
+            <strong>{config.player_mode === 'external' ? '外部 MPV 整合包' : 'KumiPlayer 内置播放器'}</strong>
+            <p>{config.player_mode === 'external' ? '画质、Anime4K 和快捷键由整合包管理，播放进度记录在 KumiPlayer。' : '使用内置 MPV 和默认播放配置，可调整 Anime4K 画质。'}</p>
+          </div>
+          <div className="settings-actions">
+            <PrimaryButton onClick={() => goPlayerTuning()}>播放器与画质设置</PrimaryButton>
+            <GhostButton onClick={() => openMpvConfigDir()} busy={activeAction === '打开 MPV 配置文件夹'} disabled={activeAction !== null}><FolderOpen size={16} aria-hidden="true" />打开 MPV 配置文件夹</GhostButton>
+          </div>
+        </SettingsSection>
+      )}
+      {config && <SettingsSection title="连续播放">
+        <ToggleRow label="自动播放下一集" active={config.auto_play_next_episode} onChange={() => saveConfig({ auto_play_next_episode: !config.auto_play_next_episode })} />
+      </SettingsSection>}
+      {config && (
+        <SettingsSection title="高级与诊断" collapsible>
           <div className="settings-field-list">
             <div className="mpv-runtime-card">
               <div className="mpv-runtime-head">
@@ -607,19 +570,16 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
               </div>
               <div className="mpv-runtime-message">
                 {mpvRuntime?.available && mpvRuntime.manifest_valid && mpvRuntime.files_valid && mpvRuntime.configuration_available
-                  ? 'KumiPlayer 会使用内置播放器和自己的播放配置，不会改写你的全局 MPV。'
+                  ? '内置播放器文件完整，可随时切换使用。'
                   : '重新检测可确认内置播放器是否完整；如仍无法使用，请修复应用安装后重试。'}
               </div>
             </div>
-            <ToggleRow label="自动播放下一集" active={config.auto_play_next_episode} onChange={() => saveConfig({ auto_play_next_episode: !config.auto_play_next_episode })} />
             <ToggleRow label="播放心跳" active={config.heartbeat_enabled} onChange={() => saveConfig({ heartbeat_enabled: !config.heartbeat_enabled })} />
             <NumberRow label="心跳超时秒数" value={config.heartbeat_timeout} onSave={(value) => saveConfig({ heartbeat_timeout: value })} />
             <ToggleRow label="心跳超时后自动结束" active={config.auto_shutdown_on_heartbeat_timeout} onChange={() => saveConfig({ auto_shutdown_on_heartbeat_timeout: !config.auto_shutdown_on_heartbeat_timeout })} />
           </div>
           <div className="settings-actions">
             <GhostButton onClick={() => checkMpvRuntime()} disabled={activeAction !== null}>{activeAction === '检测内置播放器' ? '检测中…' : '重新检测内置播放器'}</GhostButton>
-            <GhostButton onClick={() => openMpvConfigDir()} busy={activeAction === '打开 MPV 配置文件夹'} disabled={activeAction !== null && activeAction !== '打开 MPV 配置文件夹'}><FolderOpen size={16} aria-hidden="true" />打开 MPV 配置文件夹</GhostButton>
-            <GhostButton onClick={() => goPlayerTuning()}>播放器调节（Anime4K 默认效果）</GhostButton>
           </div>
         </SettingsSection>
       )}
@@ -739,7 +699,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
   };
 
   return (
-    <div className="settings-shell settings-shell-settings">
+    <div className="settings-shell settings-shell-settings settings-focused">
       <main className="settings-content fade-in-soft">
         {(configLoading || activeAction) && (
           <div className="settings-loading">
@@ -755,6 +715,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
             <section
               key={tab.key}
               id={sectionId(tab.key)}
+              hidden={activeSection !== tab.key}
               aria-labelledby={`settings-tab-${tab.key}`}
               className="settings-scroll-section settings-anchor-section"
             >
@@ -774,6 +735,8 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
               return (
                 <button
                   key={tab.key}
+                  id={`settings-tab-${tab.key}`}
+                  aria-controls={sectionId(tab.key)}
                   type="button"
                   onClick={() => selectSection(tab.key)}
                   className={`settings-outline-link ${activeSection === tab.key ? 'is-active' : ''}`}

@@ -1,0 +1,92 @@
+/* 分类切换保留面板状态；层内 important 仅用于接管历史设置页 important 布局。 */
+@layer pages {
+  .settings-focused {
+    grid-template-columns: 184px minmax(0, 1fr) !important;
+    max-width: 1180px !important;
+    padding: 28px 32px 56px !important;
+    gap: 28px !important;
+  }
+  .settings-focused .settings-anchor-section[hidden] { display: none !important; }
+  .settings-focused .settings-anchor-section { margin: 0 !important; padding: 0 !important; border: 0 !important; }
+  .settings-focused .settings-intro h2 { font-weight: 600; }
+  .settings-focused .fui-Button { min-height: 32px !important; font-size: 13px !important; line-height: 20px !important; }
+  .settings-focused .settings-outline {
+    border: 0 !important;
+    padding: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+  }
+  .settings-focused .settings-outline-link { min-height: 40px !important; border-radius: 6px !important; }
+  .settings-focused .settings-section {
+    border-radius: 8px !important;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+    background: var(--surface) !important;
+  }
+  .settings-focused .settings-section-head h3 { font-size: 15px !important; }
+  .settings-focused .settings-config-row { grid-template-columns: 144px minmax(0, 1fr) !important; }
+  .settings-focused .settings-input { min-width: 0; width: 100%; min-height: 36px !important; height: 36px !important; padding: 6px 10px !important; font-size: 13px !important; line-height: 20px !important; }
+  .settings-focused .sources-password-input .settings-input { padding-right: 40px !important; }
+  .settings-focused .settings-config-row > span { font-size: 13px !important; }
+  .settings-focused .sources-openlist-card,
+  .settings-focused .sources-routes-panel,
+  .settings-focused .sources-root-panel {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    color: var(--text);
+  }
+  .settings-focused .sources-openlist-editor {
+    border: 0;
+    padding: 14px 0 0;
+    margin: 0;
+    border-top: 1px solid var(--border);
+    border-radius: 0;
+    min-width: 0;
+  }
+  .settings-focused .sources-openlist-card-head { flex-wrap: wrap; }
+  .settings-focused .sources-openlist-card-head strong { font-size: 13px; overflow-wrap: anywhere; }
+  .settings-focused .sources-openlist-status { white-space: normal; border-radius: 4px; color: var(--text-muted); }
+  .settings-focused .sources-openlist-status.is-error { color: var(--danger, #c42b1c); }
+  .settings-focused .sources-openlist-status.is-ok { color: var(--text); background: var(--control-hover); }
+  .settings-focused :is(.sources-route-summary, .sources-route-hint, .sources-credentials-status, .sources-openlist-meta, .sources-webdav-hint, .sources-root-note) {
+    color: var(--text-muted);
+    font-size: 12px !important;
+    line-height: 1.6 !important;
+  }
+  .settings-focused .sources-route-hint { margin: 0; }
+  .settings-focused .sources-webdav-hint { flex-wrap: wrap; overflow-wrap: anywhere; }
+  .settings-focused .sources-advanced {
+    border-top: 1px solid var(--border);
+    margin-top: 4px;
+    padding-top: 4px;
+  }
+  .settings-focused .sources-advanced summary { padding: 10px 0; color: var(--text); }
+  .settings-focused summary:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; border-radius: 4px; }
+  .settings-focused .sources-route-card { border: 0; border-bottom: 1px solid var(--border); border-radius: 0; padding: 12px 0; }
+  .settings-focused .sources-route-card:last-child { border-bottom: 0; }
+  .settings-focused .sources-route-card-main { display: grid; grid-template-columns: minmax(0, 1fr) 150px auto; gap: 12px; }
+  .settings-focused .sources-route-card-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .settings-focused .sources-route-card-name > span { display: grid; gap: 3px; min-width: 0; }
+  .settings-focused .sources-route-card-name strong { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+  .settings-focused .sources-route-card-name small { color: var(--text-muted); font-size: 12px; font-weight: 400; overflow-wrap: anywhere; }
+  .settings-focused .sources-route-card-name input { accent-color: var(--accent-strong); flex: 0 0 auto; }
+  .settings-focused .sources-route-card .fui-Select { min-width: 0; }
+  .settings-focused .sources-dirty-hint { color: var(--text-muted); font-size: 12px; }
+  .settings-focused .settings-openlist-notice { margin: 0; align-items: flex-start; overflow-wrap: anywhere; }
+  .settings-focused .settings-openlist-notice > svg { flex-shrink: 0; margin-top: 2px; }
+  .settings-focused .settings-openlist-notice.success { color: var(--text); background: var(--control-hover); }
+  .settings-focused .settings-openlist-notice.error { color: var(--text); background: color-mix(in srgb, var(--danger, #c42b1c) 10%, var(--surface)); }
+  .settings-focused .settings-player-choice { display: grid; gap: 6px; }
+  .settings-focused .settings-player-choice p { margin: 0; color: var(--text-muted); font-size: 13px; line-height: 1.6; }
+  @media (max-width: 760px) {
+    .settings-focused { grid-template-columns: minmax(0, 1fr) !important; padding: 16px 14px 40px !important; gap: 16px !important; }
+    .settings-focused .settings-outline-popover-wrap { top: 0 !important; max-height: none; background: var(--app-bg); padding: 6px 0 !important; }
+    .settings-focused .settings-outline-nav { scrollbar-width: thin; }
+    .settings-focused .settings-config-row { grid-template-columns: minmax(0, 1fr) !important; gap: 6px; }
+    .settings-focused .sources-route-card-main { grid-template-columns: minmax(0, 1fr) auto; }
+    .settings-focused .sources-route-card-main .fui-Select { grid-column: 1; grid-row: 2; width: 100%; }
+    .settings-focused .sources-route-card-main > button { grid-column: 2; grid-row: 1 / 3; }
+  }
+}

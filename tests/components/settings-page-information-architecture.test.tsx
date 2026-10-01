@@ -114,7 +114,8 @@ describe('SettingsPage 信息架构', () => {
 
     fireEvent.click(openListNavigation);
 
-    expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ behavior: 'auto', block: 'start' });
+    expect(openListSection).toBeVisible();
+    expect(sourceSection).not.toBeVisible();
     expect(openListNavigation).toHaveAttribute('aria-current', 'location');
   });
 
@@ -150,16 +151,19 @@ describe('SettingsPage 信息架构', () => {
     render(<SettingsPage />);
 
     await screen.findByRole('button', { name: /OpenList 设置/ });
+    fireEvent.click(screen.getByRole('button', { name: /^播放$/ }));
 
     expect(screen.queryByText('构建来源')).not.toBeInTheDocument();
     expect(screen.queryByText('支持与赞助')).not.toBeInTheDocument();
     expect(screen.queryByText('KumiPlayer 构建标识')).not.toBeInTheDocument();
+    expect(screen.getByText('KumiPlayer 内置播放器')).toBeVisible();
+    fireEvent.click(screen.getByText('高级与诊断'));
     expect(screen.getByText('内置播放器已就绪')).toBeVisible();
     expect(screen.queryByText('x86_64-pc-windows-msvc')).not.toBeInTheDocument();
     expect(screen.queryByText(/清单：/)).not.toBeInTheDocument();
   });
 
-  test('窄窗口定位时为粘性分类栏留出内容空间', async () => {
+  test('切换分类显示单个面板，并返回内容顶部', async () => {
     const scrollTo = vi.fn();
     window.matchMedia = vi.fn().mockReturnValue({ matches: true });
     HTMLElement.prototype.scrollTo = scrollTo;
@@ -167,6 +171,8 @@ describe('SettingsPage 信息架构', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /OpenList 设置/ }));
 
-    expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ behavior: 'auto' }));
+    expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'auto' });
+    expect(document.getElementById('settings-panel-openlist')).toBeVisible();
+    expect(document.getElementById('settings-panel-bangumi')).not.toBeVisible();
   });
 });
