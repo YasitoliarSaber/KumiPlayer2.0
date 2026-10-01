@@ -37,6 +37,7 @@ from app.media_v4.resolution.identity_contract import (
 from app.media_v4.resolution.identity_policy import historical_identity_conflict
 from app.media_v4.resolution.resolver import MediaResolver
 from app.media_v4.resolution.title_norm import normalize_identity_title
+from app.media_v4.revisions.transport_reason import transport_failure_reason
 from app.media_v4.sources.file_identity import (
     continuity_reuses_asset,
     decide_source_identity,
@@ -74,6 +75,9 @@ def _friendly_job_error(value: str) -> str:
 
 def _friendly_metadata_reason(status: str, value: str, reason_code: str = "") -> str:
     """元数据状态只暴露稳定的恢复说明，不暴露提供方异常细节。"""
+    transport_reason = transport_failure_reason(reason_code, value)
+    if transport_reason:
+        return transport_reason
 
     normalized_code = (reason_code or "").strip().casefold()
     normalized_value = (value or "").strip().casefold()
@@ -179,6 +183,9 @@ def _season_failure_label(item: dict) -> str:
 
 
 def _season_failure_reason(item: dict) -> str:
+    transport_reason = transport_failure_reason(str(item.get("reason_code") or ""), str(item.get("reason") or ""))
+    if transport_reason:
+        return f"{_season_failure_label(item)}{transport_reason}"
     label = _season_failure_label(item)
     code = str(item.get("reason_code") or "").strip().casefold()
     if code in _AUTH_CODES:
@@ -328,6 +335,10 @@ def metadata_recovery_policy(metadata: dict | None, *, binding_status: str = "")
         action = "retry_metadata"
         reason = "在线资料响应异常，可以稍后重试。"
         return {"reason": reason, "action": action, "hint": _metadata_recovery_hint(action)}
+
+    transport_reason = transport_failure_reason(reason_code, raw_reason)
+    if transport_reason:
+        return {"reason": transport_reason, "action": "retry_metadata", "hint": "连接恢复后可重试获取在线资料，本地媒体已保留。"}
 
     action = _metadata_recovery_action_fallback(state, reason_code, raw_reason)
     reason = _friendly_metadata_reason(state, raw_reason, reason_code)

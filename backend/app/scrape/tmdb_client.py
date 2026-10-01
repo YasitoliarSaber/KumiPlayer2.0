@@ -285,7 +285,7 @@ class TMDBClient:
             except httpx.TimeoutException:
                 last_error = TMDBClientError(
                     "TMDB 请求超时",
-                    reason_code="source_unavailable",
+                    reason_code="provider_timeout",
                     retryable=True,
                 )
                 if attempt < self._max_retries - 1:
@@ -301,12 +301,12 @@ class TMDBClient:
                     raise TMDBClientError(
                         "TMDB SSL 证书校验失败：请检查代理/VPN、DNS、杀毒软件 HTTPS 扫描或网络拦截。"
                         "当前连接拿到的证书与 api.themoviedb.org 不匹配。",
-                        reason_code="source_unavailable",
+                        reason_code="provider_tls_error",
                         retryable=False,
                     ) from None
                 last_error = TMDBClientError(
                     f"TMDB 网络连接失败: {e}",
-                    reason_code="source_unavailable",
+                    reason_code="provider_network_error",
                     retryable=True,
                 )
                 if self._fallback_to_direct():
@@ -320,7 +320,7 @@ class TMDBClient:
             except Exception as e:
                 last_error = TMDBClientError(
                     f"TMDB 请求异常: {e}",
-                    reason_code="source_unavailable",
+                    reason_code="provider_proxy_error" if isinstance(e, httpx.ProxyError) else "provider_network_error" if isinstance(e, httpx.TransportError) else "invalid_response",
                     retryable=True,
                 )
                 # httpx.ProxyError 走这里：代理自己出错时同样降级直连。
