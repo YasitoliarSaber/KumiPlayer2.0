@@ -51,6 +51,8 @@ def external_provider(target):
             'title': target['preferred_title'], 'poster_url': 'https://image.tmdb.org/t/p/original/p.jpg',
             'fanart_url': 'https://image.tmdb.org/t/p/original/f.jpg',
             'episode_mappings': [dict(e, title='Online episode', provider_season_number=e['local_season_number'],
+                                     provider_episode_id=str(e['episode_id']),
+                                     still_url='https://image.tmdb.org/t/p/original/episode.jpg',
                                      provider_episode_number=e['local_episode_number']) for e in target['episodes']]}
 
 
@@ -66,6 +68,9 @@ def setup(tmp_path, monkeypatch):
         return httpx.Response(200, content=image, headers={'content-type': 'image/png'})
     monkeypatch.setattr('app.media_v4.jobs.metadata_artifacts._artwork_client',
                         lambda _config: httpx.Client(transport=httpx.MockTransport(artwork_response)))
+    monkeypatch.setattr('app.core.url_guard.socket.getaddrinfo', lambda *_a, **_k: [
+        (None, None, None, None, ('93.184.216.34', 443)),
+    ])
     database = V4Database(tmp_path / 'lifecycle.db')
     database.initialize()
     source = tmp_path / 'source'

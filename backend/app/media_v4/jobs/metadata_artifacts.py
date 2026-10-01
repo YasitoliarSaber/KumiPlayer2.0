@@ -8,11 +8,12 @@ import uuid
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import httpx
 
 from app.core.config import load_config
+from app.core.url_guard import assert_public_dns_resolution, validate_remote_asset_url
 from app.media_v4.jobs.artifact_paths import (
     episode_nfo_relative_path,
     episode_thumb_relative_path,
@@ -142,16 +143,79 @@ def _artwork_client(config) -> httpx.Client:
     )
 
 
+_MAX_ARTWORK_BYTES = 25 * 1024 * 1024
+
+
+def _valid_artwork(payload: bytes, content_type: str) -> bool:
+    """MIME 与文件签名一致；SVG 标题图仅接受无主动内容的 XML。"""
+    if content_type == "image/jpeg":
+        return payload.startswith(b"\xff\xd8\xff")
+    if content_type == "image/png":
+        return payload.startswith(b"\x89PNG\r\n\x1a\n")
+    if content_type == "image/webp":
+        return payload.startswith(b"RIFF") and payload[8:12] == b"WEBP"
+    if content_type != "image/svg+xml" or not payload:
+        return False
+    lowered = payload.lower()
+    if any(token in lowered for token in (b"<!doctype", b"<!entity", b"url(", b"@import")):
+        return False
+    try:
+        root = ET.fromstring(payload)
+    except ET.ParseError:
+        return False
+    if root.tag != "{http://www.w3.org/2000/svg}svg":
+        return False
+    allowed_tags = {"svg", "g", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
+                    "defs", "linearGradient", "radialGradient", "stop", "clipPath", "mask", "use",
+                    "title", "desc", "text", "tspan"}
+    for element in root.iter():
+        if element.tag.removeprefix("{http://www.w3.org/2000/svg}") not in allowed_tags:
+            return False
+        for key, value in element.attrib.items():
+            if key.lower().startswith("on") or (key.endswith("href") and not value.startswith("#")):
+                return False
+    return True
+
+
 def _download_artwork(url: str, path: Path, *, client: httpx.Client) -> str:
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.hostname != "image.tmdb.org":
+    try:
+        parsed = validate_remote_asset_url(url)
+        decoded_path = unquote(parsed.path)
+        if (parsed.hostname != "image.tmdb.org" or parsed.query or parsed.fragment
+                or "\\" in decoded_path or any(part in {".", ".."} for part in decoded_path.split("/"))):
+            return ""
+        assert_public_dns_resolution(parsed.hostname)
+    except ValueError:
         return ""
-    response = client.get(url)
-    response.raise_for_status()
-    content_type = response.headers.get("content-type", "")
-    if not content_type.startswith("image/") or len(response.content) > 25 * 1024 * 1024:
-        return ""
-    return _write_atomic(path, response.content)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with client.stream("GET", url, follow_redirects=False) as response:
+            if response.status_code != 200:
+                if not response.is_redirect:
+                    response.raise_for_status()
+                return ""
+            content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            if content_type not in {"image/jpeg", "image/png", "image/webp", "image/svg+xml"}:
+                return ""
+            length = response.headers.get("content-length")
+            if length and (not length.isdigit() or int(length) > _MAX_ARTWORK_BYTES):
+                return ""
+            path.parent.mkdir(parents=True, exist_ok=True)
+            size = 0
+            digest = hashlib.sha256()
+            with temporary.open("wb") as output:
+                for chunk in response.iter_bytes():
+                    size += len(chunk)
+                    if size > _MAX_ARTWORK_BYTES:
+                        return ""
+                    output.write(chunk)
+                    digest.update(chunk)
+            if not _valid_artwork(temporary.read_bytes(), content_type):
+                return ""
+            os.replace(temporary, path)
+            return digest.hexdigest()
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _artwork_filename(artifact_type: str, source_file_path: str) -> str:
