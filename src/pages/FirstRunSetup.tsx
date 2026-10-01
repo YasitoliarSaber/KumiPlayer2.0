@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, ChevronLeft, ChevronRight, Database, ExternalLink, FolderOpen, KeyRound, Play, RefreshCw, ShieldCheck, Sparkles } from 'lucide-react';
+import { Accordion, AccordionHeader, AccordionItem, AccordionPanel, Radio, RadioGroup } from '@fluentui/react-components';
+import { CheckCircle2, ChevronLeft, ChevronRight, ExternalLink, FolderOpen, KeyRound, Play, RefreshCw, ShieldCheck } from 'lucide-react';
 import { configApi, type MpvRuntimeStatus, type PublicConfig, type SetupCompletePayload } from '../api/config';
 import { BANGUMI_ACCESS_TOKEN_URL, getTmdbCredentialError, TMDB_API_SETTINGS_URL } from '../config/credentials';
 import { pickFolder } from '../platform/folderPicker';
+import '../styles/first-run-refinement.css';
 
 interface FirstRunSetupProps {
   initialConfig: PublicConfig;
@@ -11,10 +13,18 @@ interface FirstRunSetupProps {
   onCancel?: () => void;
 }
 
-const steps = ['欢迎', '播放器', '媒体与镜像', '验证完成'];
+const steps = ['欢迎', '播放器', '媒体来源', '完成设置'];
+const sourceOptions = [
+  { key: 'local_root', name: '本地文件夹', label: '本地媒体根目录', placeholder: '选择你的影视文件夹' },
+  { key: 'pan115_root', name: '115 网盘', label: '115 网盘挂载根目录', placeholder: '选择已挂载到电脑的 115 文件夹' },
+  { key: 'baidu_root', name: '百度网盘', label: '百度网盘挂载位置', placeholder: '选择已挂载到电脑的百度网盘文件夹' },
+] as const;
+type SourceKey = typeof sourceOptions[number]['key'];
 
 export default function FirstRunSetup({ initialConfig, onComplete, mode = 'first-run', onCancel }: FirstRunSetupProps) {
   const isReconfigure = mode === 'reconfigure';
+  const externalPlayer = initialConfig.player_mode === 'external';
+  const playerLabel = externalPlayer ? '外部播放器' : '内置播放器';
   const [step, setStep] = useState(0);
   const [form, setForm] = useState<SetupCompletePayload>({
     mirror_dir: initialConfig.mirror_dir || '',
@@ -26,6 +36,9 @@ export default function FirstRunSetup({ initialConfig, onComplete, mode = 'first
     bangumi_access_token: '',
   });
   const [mpvStatus, setMpvStatus] = useState<MpvRuntimeStatus | null>(null);
+  const [externalStatus, setExternalStatus] = useState<{ ok: boolean; message: string } | null>(null);
+  const [activeSource, setActiveSource] = useState<SourceKey>(sourceOptions.find((source) => initialConfig[source.key]?.trim())?.key || 'local_root');
+  const selectedSource = sourceOptions.find((source) => source.key === activeSource)!;
   const [checkingMpv, setCheckingMpv] = useState(false);
   const [finishing, setFinishing] = useState(false);
   const [error, setError] = useState('');
@@ -39,18 +52,23 @@ export default function FirstRunSetup({ initialConfig, onComplete, mode = 'first
     setCheckingMpv(true);
     setError('');
     try {
-      setMpvStatus(await configApi.getMpvRuntime());
+      if (externalPlayer) {
+        setExternalStatus(await configApi.testMpv(initialConfig.external_mpv_path || initialConfig.mpv_path, 'external'));
+      } else {
+        setMpvStatus(await configApi.getMpvRuntime());
+      }
     } catch (reason) {
       setMpvStatus(null);
-      setError(reason instanceof Error ? reason.message : '内置播放器检测失败');
+      setExternalStatus(null);
+      setError(reason instanceof Error ? reason.message : `${playerLabel}检测失败`);
     } finally {
       setCheckingMpv(false);
     }
   };
 
-  // 首次进入播放器步骤时自动检查一次内置 MPV
+  // 按当前播放模式检查；重新引导不切换播放器。
   useEffect(() => {
-    if (step === 1 && !mpvStatus) {
+    if (step === 1 && !mpvStatus && !externalStatus) {
       void checkMpv();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -62,20 +80,24 @@ export default function FirstRunSetup({ initialConfig, onComplete, mode = 'first
   };
 
   const chooseDirectory = async (key: keyof SetupCompletePayload, title: string) => {
-    const selected = await pickFolder(String(form[key] || ''), title);
-    if (selected) update(key, selected);
+    try {
+      const selected = await pickFolder(String(form[key] || ''), title);
+      if (selected) update(key, selected);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '无法打开文件夹选择器，请手动输入路径');
+    }
   };
 
-  const mpvReady = Boolean(
+  const mpvReady = !checkingMpv && (externalPlayer ? Boolean(externalStatus?.ok) : Boolean(
     mpvStatus?.available
     && mpvStatus.manifest_valid
     && mpvStatus.files_valid
     && mpvStatus.configuration_available,
-  );
+  ));
 
   const goNext = () => {
     if (step === 1 && !mpvReady) {
-      setError('请先确认内置播放器可用');
+      setError(`请先确认${playerLabel}可用`);
       return;
     }
     if (step === 2) {
@@ -101,7 +123,13 @@ export default function FirstRunSetup({ initialConfig, onComplete, mode = 'first
     setFinishing(true);
     setError('');
     try {
-      onComplete(await configApi.completeSetup(form));
+      // 空输入表示保留已有凭据，不发送清空值。
+      const { tmdb_bearer_token, bangumi_access_token, ...paths } = form;
+      onComplete(await configApi.completeSetup({
+        ...paths,
+        ...(tmdb_bearer_token?.trim() ? { tmdb_bearer_token: tmdb_bearer_token.trim() } : {}),
+        ...(bangumi_access_token?.trim() ? { bangumi_access_token: bangumi_access_token.trim() } : {}),
+      }));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '初始化失败，请检查配置');
     } finally {
@@ -110,7 +138,7 @@ export default function FirstRunSetup({ initialConfig, onComplete, mode = 'first
   };
 
   return (
-    <main className="first-run-shell">
+    <main className="first-run-shell first-run-refined">
       <section className="first-run-window" aria-label={isReconfigure ? 'KumiPlayer 初始设置引导' : 'KumiPlayer 首次启动引导'}>
         <header className="first-run-header">
           <div className="first-run-brand"><img src="/brand/kumiplayer-app-icon.svg" alt="" /><strong>KumiPlayer</strong></div>
@@ -123,7 +151,7 @@ export default function FirstRunSetup({ initialConfig, onComplete, mode = 'first
         <div className="first-run-layout">
           <nav className="first-run-steps" aria-label="设置步骤">
             {steps.map((label, index) => (
-              <div key={label} className={`first-run-step ${index === step ? 'active' : ''} ${index < step ? 'done' : ''}`}>
+              <div key={label} aria-current={index === step ? 'step' : undefined} className={`first-run-step ${index === step ? 'active' : ''} ${index < step ? 'done' : ''}`}>
                 <span>{index < step ? <CheckCircle2 size={16} /> : index + 1}</span>
                 <div><strong>{label}</strong><small>{index === step ? '正在设置' : index < step ? '已完成' : '稍后设置'}</small></div>
               </div>
@@ -133,15 +161,12 @@ export default function FirstRunSetup({ initialConfig, onComplete, mode = 'first
           <div className="first-run-content">
             {step === 0 && (
               <div className="first-run-panel first-run-welcome">
-                <span className="first-run-hero-icon"><Sparkles size={28} /></span>
                 <p className="first-run-eyebrow">{isReconfigure ? '重新检查 KumiPlayer 配置' : '欢迎使用 KumiPlayer'}</p>
-                <h1>{isReconfigure ? '重新配置基础环境' : '先完成几项基础设置'}</h1>
-                <p>真实视频始终保留在你的网盘或本地目录中。KumiPlayer 只负责整理媒体、建立可播放的媒体库，不会移动或改名你的原始文件。</p>
+                <h1>{isReconfigure ? '检查你的媒体库设置' : '从你的媒体开始'}</h1>
+                <p>确认播放器，选择媒体文件夹，就可以开始整理和观看。KumiPlayer 不会移动或改名你的原始文件。</p>
                 <div className="first-run-principles">
-                  <article><ShieldCheck size={20} /><div><strong>不移动真实媒体</strong><span>路径检查只读取文件和目录信息。</span></div></article>
-                  <article><Database size={20} /><div><strong>来源先记录，再整理</strong><span>本地目录、挂载网盘和目录树会进入同一条媒体整理链路，后续仍可在媒体管理中确认与修正。</span></div></article>
-                  <article><Play size={20} /><div><strong>内置干净 MPV</strong><span>KumiPlayer 使用自己维护的播放器与配置，不读取或改写你的全局 MPV。</span></div></article>
-                  <article><Database size={20} /><div><strong>配置可以随时修改</strong><span>完成后仍可在设置与媒体管理中调整。</span></div></article>
+                  <article><Play size={20} /><div><strong>{externalPlayer ? '继续使用你的 MPV' : '播放器已随应用提供'}</strong><span>{externalPlayer ? '保留当前整合包及它自己的播放设置。' : '检查内置 MPV 后即可继续。'}</span></div></article>
+                  <article><ShieldCheck size={20} /><div><strong>配置可以随时修改</strong><span>更多来源、海报和观看同步都可以稍后在设置中添加。</span></div></article>
                 </div>
               </div>
             )}
@@ -149,65 +174,66 @@ export default function FirstRunSetup({ initialConfig, onComplete, mode = 'first
             {step === 1 && (
               <div className="first-run-panel">
                 <p className="first-run-eyebrow">播放器</p>
-                <h1>内置播放器</h1>
-                <p>KumiPlayer 使用自带的内置 MPV 播放器，只加载自己的配置和脚本，不会读取或改写你的全局 MPV 配置。</p>
-                {!mpvStatus && checkingMpv && (
+                <h1>{playerLabel}</h1>
+                <p>{externalPlayer ? '继续使用你已选择的 MPV 整合包，保留它的画质、快捷键和插件设置。' : '使用随应用提供的 MPV。播放器配置独立保存，不影响你电脑上的其他 MPV。'}</p>
+                {checkingMpv && (
                   <div className="first-run-result" role="status">
-                    <strong>正在检测内置播放器…</strong>
+                    <strong>正在检测{playerLabel}…</strong>
                   </div>
                 )}
-                {mpvStatus && (
+                {!checkingMpv && (mpvStatus || externalStatus) && (
                   <div className={`first-run-result ${mpvReady ? 'success' : 'error'}`}>
-                    <strong>{mpvReady ? '内置播放器已就绪' : '播放器运行时缺失或损坏'}</strong>
-                    <span>{mpvReady ? 'KumiPlayer 会使用内置播放器和自己的播放配置。' : mpvStatus.message}</span>
+                    <strong>{mpvReady ? `${playerLabel}已就绪` : '播放器暂不可用'}</strong>
+                    <span>{mpvReady ? '可以继续下一步。' : (externalPlayer ? externalStatus?.message : mpvStatus?.message)}</span>
                   </div>
                 )}
                 <button className="first-run-secondary" onClick={checkMpv} disabled={checkingMpv}>{checkingMpv ? '正在检测…' : <><RefreshCw size={14} />重新检测</>}</button>
-                {!mpvReady && <p className="first-run-help-link">请检查应用安装目录中的播放器文件是否完整。</p>}
+                {!mpvReady && !checkingMpv && <p className="first-run-help-link">{externalPlayer ? '请确认外部播放器仍在原位置；也可以退出引导，在播放器设置中更换。' : '请检查应用安装目录中的播放器文件是否完整。'}</p>}
               </div>
             )}
 
             {step === 2 && (
               <div className="first-run-panel">
-                <p className="first-run-eyebrow">存储</p>
-                <h1>镜像目录与媒体来源</h1>
-                <p>镜像目录保存 .strm 和刮削元数据。请选择至少一个实际可访问的本地或已挂载网盘根目录；其他来源可以留空。</p>
-                <SetupPathField label="镜像目录（必填）" value={form.mirror_dir} placeholder="选择用于保存镜像的文件夹" onChange={(value) => update('mirror_dir', value)} onPick={() => chooseDirectory('mirror_dir', '选择镜像目录')} />
-                <div className="first-run-source-grid">
-                  <SetupPathField label="115 网盘挂载根目录" value={form.pan115_root || ''} placeholder="例如 H:\\115open" onChange={(value) => update('pan115_root', value)} onPick={() => chooseDirectory('pan115_root', '选择 115 网盘挂载根目录')} compact />
-                  <SetupPathField label="百度网盘挂载位置" value={form.baidu_root || ''} placeholder="例如 H:\\百度网盘" onChange={(value) => update('baidu_root', value)} onPick={() => chooseDirectory('baidu_root', '选择百度网盘挂载位置')} compact />
-                  <SetupPathField label="本地媒体根目录" value={form.local_root || ''} placeholder="你的本地影视目录" onChange={(value) => update('local_root', value)} onPick={() => chooseDirectory('local_root', '选择本地媒体根目录')} compact />
-                  <SetupPathField label="目录树文件目录（可选）" value={form.directory_tree_dir || ''} placeholder="保存网盘目录树 TXT 的文件夹" onChange={(value) => update('directory_tree_dir', value)} onPick={() => chooseDirectory('directory_tree_dir', '选择目录树文件目录')} compact />
+                <p className="first-run-eyebrow">媒体来源</p>
+                <h1>你的媒体放在哪里</h1>
+                <p>先选择一个本地或已挂载的媒体目录。需要多个来源时，切换类型继续填写，已填路径会保留。</p>
+                <RadioGroup className="first-run-source-options" aria-label="媒体来源类型" layout="horizontal" value={activeSource} onChange={(_, data) => setActiveSource(data.value as SourceKey)}>
+                  {sourceOptions.map((source) => <Radio key={source.key} value={source.key} label={`${source.name}${form[source.key]?.trim() ? ' · 已配置' : ''}`} />)}
+                </RadioGroup>
+                <SetupPathField label={selectedSource.label} value={form[activeSource] || ''} placeholder={selectedSource.placeholder} onChange={(value) => update(activeSource, value)} onPick={() => chooseDirectory(activeSource, `选择${selectedSource.label}`)} />
+                <div className="first-run-storage-section">
+                  <SetupPathField label="镜像目录（必填）" value={form.mirror_dir} placeholder="选择媒体库资料的保存位置" onChange={(value) => update('mirror_dir', value)} onPick={() => chooseDirectory('mirror_dir', '选择镜像目录')} />
+                  <p>用于保存播放入口、海报和作品资料，不复制原始视频。</p>
                 </div>
+                <Accordion className="first-run-options" collapsible defaultOpenItems={form.directory_tree_dir ? ['tree'] : []}>
+                  <AccordionItem value="tree">
+                    <AccordionHeader>导入目录树（可选）{form.directory_tree_dir?.trim() ? ' · 已配置' : ''}</AccordionHeader>
+                    <AccordionPanel>
+                      <SetupPathField label="目录树文件目录（可选）" value={form.directory_tree_dir || ''} placeholder="保存网盘目录树 TXT 的文件夹" onChange={(value) => update('directory_tree_dir', value)} onPick={() => chooseDirectory('directory_tree_dir', '选择目录树文件目录')} />
+                    </AccordionPanel>
+                  </AccordionItem>
+                </Accordion>
                 <div className="first-run-path-example">
                   <strong>OpenList 可在完成后添加</strong>
-                  <span>请在「OpenList 设置」中配置连接、远端根目录和内容路由；它并不替代首次配置的可访问媒体根目录。</span>
+                  <span>完成后打开「设置 → OpenList」连接网盘。首次设置仍需一个本地或已挂载的媒体目录。</span>
                 </div>
-                {form.baidu_root?.trim() && (
-                  <div className="first-run-path-example">
-                    <strong>百度目录树会自动补齐作用域</strong>
-                    <code>{form.baidu_root}\01动画\已完结\作品\Season 1\S01E01.mkv</code>
-                    <span>导入 `01动画_文件目录.txt` 时自动识别 `01动画`，无需逐次设置。</span>
-                  </div>
-                )}
               </div>
             )}
 
             {step === 3 && (
               <div className="first-run-panel">
                 <p className="first-run-eyebrow">最后检查</p>
-                <h1>验证并完成</h1>
-                <p>后端会重新验证内置播放器、镜像目录和媒体来源。任何一项失败都不会写入半完成配置。</p>
-                <div className="first-run-path-example">
-                  <strong>运行环境要求</strong>
-                  <span>支持 Windows 10 / 11（含 WebView2）；后端、内置播放器和功能插件随软件安装，内置干净 MPV 无需另行准备。</span>
-                  <span>如缺少运行组件，安装器会联网补齐；整个过程不会改动你的媒体文件。</span>
-                </div>
+                <h1>准备开始使用</h1>
+                <p>完成前会检查播放器和目录是否可用。海报与观看同步可以稍后设置。</p>
                 <div className="first-run-summary">
-                  <SummaryRow label="内置播放器" value={mpvReady ? '已就绪' : '未就绪'} ok={mpvReady} />
+                  <SummaryRow label={playerLabel} value={mpvReady ? '已就绪' : '未就绪'} ok={mpvReady} />
                   <SummaryRow label="镜像目录" value={form.mirror_dir} ok={Boolean(form.mirror_dir?.trim())} />
                   <SummaryRow label="媒体来源" value={`已配置 ${sourceCount} 个来源`} ok={sourceCount > 0} />
                 </div>
+                <Accordion className="first-run-options" collapsible>
+                  <AccordionItem value="credentials">
+                    <AccordionHeader>海报与观看同步（可选）</AccordionHeader>
+                    <AccordionPanel>
                 <div className="first-run-credential-grid">
                   <article className="first-run-credential-card">
                     <div className="first-run-credential-title"><KeyRound size={18} /><div><strong>TMDB API 读取访问令牌</strong><small>可选 · 用于刮削元数据与图片</small></div></div>
@@ -222,7 +248,10 @@ export default function FirstRunSetup({ initialConfig, onComplete, mode = 'first
                     <input aria-label="Bangumi 个人访问令牌" type="password" value={form.bangumi_access_token || ''} onChange={(event) => update('bangumi_access_token', event.target.value)} placeholder="粘贴个人 Access Token" autoComplete="off" />
                   </article>
                 </div>
-                <p className="first-run-credential-security">凭据只保存在本机配置中；填写后会在完成设置前验证，留空也可以稍后配置。</p>
+                <p className="first-run-credential-security">留空会保留已保存的凭据。新凭据验证后保存在 Windows 凭据管理器中。</p>
+                    </AccordionPanel>
+                  </AccordionItem>
+                </Accordion>
               </div>
             )}
 
@@ -250,7 +279,7 @@ function SetupPathField({ label, value, placeholder, onChange, onPick, actionLab
   return (
     <label className={`first-run-path-field ${compact ? 'compact' : ''}`}>
       <span>{label}</span>
-      <div><input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} /><button type="button" onClick={onPick}><FolderOpen size={16} />{actionLabel}</button></div>
+      <div><input aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} /><button type="button" aria-label={`选择${label}`} onClick={onPick}><FolderOpen size={16} />{actionLabel}</button></div>
     </label>
   );
 }

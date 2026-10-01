@@ -87,6 +87,20 @@
         border-radius: 22px;
       }
 
+      .kumi-boot-caption {
+        position: absolute;
+        top: calc(50% + 72px);
+        left: 16px;
+        right: 16px;
+        margin: 0;
+        color: #5f6e78;
+        text-align: center;
+        font: 13px/1.5 'Segoe UI', 'Microsoft YaHei', sans-serif;
+      }
+
+      html[data-theme='cinema'] .kumi-boot-caption { color: #a3a3a3; }
+      html[data-theme='mica'] .kumi-boot-caption { color: #66717b; }
+
       @keyframes kumi-boot-enter {
         to { opacity: 1; transform: scale(1); }
       }
@@ -111,6 +125,7 @@
       <div class="kumi-boot-mark">
         <img src="/brand/kumiplayer-app-icon.svg" alt="" />
       </div>
+      <p class="kumi-boot-caption">正在打开媒体库…</p>
     </div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>

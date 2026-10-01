@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { expect, test, vi } from 'vitest';
 import DecodedImage from '../../src/components/ui/DecodedImage';
 
@@ -86,4 +86,41 @@ test('图片加载失败时保留稳定占位，不暴露浏览器破图或白�
 
   expect(image).toHaveAttribute('data-image-state', 'error');
   expect(image).not.toHaveClass('is-ready');
+});
+
+test('缓存命中也等待解码完成，每次状态变化只通知单卡一次', async () => {
+  const onStateChange = vi.fn();
+  const decode = vi.fn().mockResolvedValue(undefined);
+  vi.spyOn(HTMLImageElement.prototype, 'complete', 'get').mockReturnValue(true);
+  vi.spyOn(HTMLImageElement.prototype, 'naturalWidth', 'get').mockReturnValue(384);
+  Object.defineProperty(HTMLImageElement.prototype, 'decode', { configurable: true, value: decode });
+
+  render(<DecodedImage src="http://127.0.0.1/cached.jpg" alt="缓存海报" onStateChange={onStateChange} />);
+  await waitFor(() => expect(screen.getByRole('img')).toHaveAttribute('data-image-state', 'ready'));
+  expect(decode).toHaveBeenCalledTimes(1);
+  expect(onStateChange.mock.calls.map(([state]) => state)).toEqual(['loading', 'ready']);
+
+  await act(async () => { fireEvent.load(screen.getByRole('img')); });
+  expect(onStateChange.mock.calls.map(([state]) => state)).toEqual(['loading', 'ready']);
+});
+
+test('地址切换后旧图片的异步解码不得覆盖新图片加载状态', async () => {
+  const resolutions: Array<() => void> = [];
+  Object.defineProperty(HTMLImageElement.prototype, 'decode', {
+    configurable: true,
+    value: vi.fn(() => new Promise<void>((resolve) => resolutions.push(resolve))),
+  });
+  const onStateChange = vi.fn();
+  const { rerender } = render(<DecodedImage src="http://127.0.0.1/old.jpg" alt="海报" onStateChange={onStateChange} />);
+  fireEvent.load(screen.getByRole('img'));
+  rerender(<DecodedImage src="http://127.0.0.1/new.jpg" alt="海报" onStateChange={onStateChange} />);
+  fireEvent.load(screen.getByRole('img'));
+
+  await act(async () => { resolutions[0](); });
+  expect(screen.getByRole('img')).toHaveAttribute('data-image-state', 'loading');
+  expect(onStateChange).not.toHaveBeenCalledWith('ready');
+
+  await act(async () => { resolutions[1](); });
+  expect(screen.getByRole('img')).toHaveAttribute('data-image-state', 'ready');
+  expect(onStateChange.mock.calls.map(([state]) => state)).toEqual(['loading', 'ready']);
 });

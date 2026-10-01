@@ -1,8 +1,9 @@
 import { useLayoutEffect, useRef, useState, type ImgHTMLAttributes } from 'react';
 
-type ImageState = 'loading' | 'ready' | 'error';
+export type ImageState = 'loading' | 'ready' | 'error';
 type DecodedImageProps = ImgHTMLAttributes<HTMLImageElement> & {
   onDecoded?: (image: HTMLImageElement) => void;
+  onStateChange?: (state: ImageState) => void;
   revealOnLoad?: boolean;
 };
 
@@ -10,6 +11,7 @@ export default function DecodedImage({
   className = '',
   decoding = 'async',
   onDecoded,
+  onStateChange,
   revealOnLoad = false,
   onError,
   onLoad,
@@ -61,6 +63,10 @@ export default function DecodedImage({
       void revealDecodedImage(image, generation);
     }
   }, [src, revealOnLoad]);
+
+  useLayoutEffect(() => {
+    onStateChange?.(imageState);
+  }, [imageState, onStateChange]);
 
   const stateClassName = imageState === 'ready' ? 'is-ready' : 'is-pending';
 
