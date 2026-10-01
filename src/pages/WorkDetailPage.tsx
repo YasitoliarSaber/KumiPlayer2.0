@@ -586,6 +586,10 @@ export default function WorkDetailPage() {
     });
   }, [work, selectedSeasonKey, selectedSeasonNumber]);
 
+  // 同组只要有特别篇缺图就统一用列表，保持源剧集顺序。
+  const useSpecialList = episodes.some((episode: any) => isSpecialEpisode(episode))
+    && episodes.some((episode: any) => !String(episode.thumb_path || '').trim());
+
   const scrollEpisodeStrip = (direction: -1 | 1) => {
     const strip = episodeStripRef.current;
     if (!strip) return;
@@ -638,7 +642,14 @@ export default function WorkDetailPage() {
   const revealEpisodeInStrip = (index: number) => {
     const strip = episodeStripRef.current;
     const target = strip?.children.item(index) as HTMLElement | null;
-    if (strip && target) scrollEpisodeIntoView(strip, target);
+    if (strip && target) {
+      if (useSpecialList) {
+        target.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
+        target.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true });
+      } else {
+        scrollEpisodeIntoView(strip, target);
+      }
+    }
     setEpisodeQuickGridOpen(false);
   };
 
@@ -688,7 +699,7 @@ export default function WorkDetailPage() {
   const continuePercent = progressPercent(continueProgress);
 
   useEffect(() => {
-    if (!work?.work_id || !continueTarget || !episodes.length) return;
+    if (!work?.work_id || !continueTarget || !episodes.length || useSpecialList) return;
     // 同步观看状态后，只在“继续播放目标”变化时定位一次，避免干扰用户之后的手动浏览。
     const revealKey = `${work.work_id}:${selectedSeasonKey}:${continueTarget.episode_id}:${watchedEpisodeIds.size}`;
     if (autoRevealedEpisodeKeyRef.current === revealKey) return;
@@ -709,7 +720,7 @@ export default function WorkDetailPage() {
       window.cancelAnimationFrame(renderFrame);
       if (layoutFrame) window.cancelAnimationFrame(layoutFrame);
     };
-  }, [work?.work_id, episodes, continueTarget?.episode_id, watchedEpisodeIds.size, selectedSeasonKey]);
+  }, [work?.work_id, episodes, continueTarget?.episode_id, watchedEpisodeIds.size, selectedSeasonKey, useSpecialList]);
 
   // 统一同步：有匹配时调用双向同步（替换旧的逐集上传循环）
   useEffect(() => {
@@ -771,7 +782,7 @@ export default function WorkDetailPage() {
   const isSeries = !isMovie && (work.media_type === 'tv' || (work.episodes || []).length > 0
     || work.show_type === 'anime_series' || work.show_type === 'live_series');
   const continueEpisodeTitle = continueTarget
-    ? cleanDisplayTitle(continueTarget.title || '', episodeFallbackTitle(continueTarget))
+    ? cleanDisplayTitle(continueTarget.title || '', episodeFallbackTitle(continueTarget), { preserveTitle: isSpecialEpisode(continueTarget) })
     : '';
   const continueEpisodeCode = continueTarget ? formatEpisodeCode(continueTarget) : '';
   const continueEpisodeParts = [continueEpisodeCode, continueEpisodeTitle].filter(Boolean);
@@ -1625,6 +1636,7 @@ export default function WorkDetailPage() {
             </div>
             <div className="detail-episode-toolbar" role="toolbar" aria-label="剧集浏览工具">
               <div className="detail-episode-pager" aria-label="剧集翻页">
+                {!useSpecialList && <>
                 <button type="button" className="detail-episode-tool-btn" onClick={() => scrollEpisodeStrip(-1)} aria-label="上一组剧集" title="上一组剧集"><ChevronLeft size={18} /></button>
                 <input
                   ref={episodeStripSliderRef}
@@ -1639,6 +1651,7 @@ export default function WorkDetailPage() {
                   title="拖动定位剧集"
                 />
                 <button type="button" className="detail-episode-tool-btn" onClick={() => scrollEpisodeStrip(1)} aria-label="下一组剧集" title="下一组剧集"><ChevronRight size={18} /></button>
+                </>}
                 <button type="button" className="detail-episode-tool-btn" onClick={() => setEpisodeQuickGridOpen(true)} aria-label="快速选集" title="快速选集"><Grid2X2 size={17} /></button>
               </div>
             </div>
@@ -1655,11 +1668,11 @@ export default function WorkDetailPage() {
           )}
           <div
             ref={episodeStripRef}
-            className="detail-episode-grid thumbnail-strip"
+            className={useSpecialList ? 'detail-special-list' : 'detail-episode-grid thumbnail-strip'}
           >
             {episodes.map((episode: any, episodeIndex: number) => {
               const rawEpisodeTitle = episode.title || episodeFallbackTitle(episode);
-              const cleanedTitle = cleanDisplayTitle(rawEpisodeTitle, episodeFallbackTitle(episode));
+              const cleanedTitle = cleanDisplayTitle(rawEpisodeTitle, episodeFallbackTitle(episode), { preserveTitle: isSpecialEpisode(episode) });
               const episodeTitle = isSpecialEpisode(episode) ? stripSpecialEpisodeCode(cleanedTitle) : cleanedTitle;
               const isWatched = watchedEpisodeIds.has(episode.episode_id);
               const isCurrent = continueTarget?.episode_id === episode.episode_id;
@@ -1670,9 +1683,30 @@ export default function WorkDetailPage() {
                 <div
                   key={episode.episode_id}
                   data-episode-id={episode.episode_id}
-                  className={`episode-item ${isWatched ? 'watched' : ''} ${isCurrent ? 'current' : ''}`}
+                  className={`${useSpecialList ? 'detail-special-row' : 'episode-item'} ${isWatched ? 'watched' : ''} ${isCurrent ? 'current' : ''}`}
                   onContextMenu={(event) => handleEpisodeContextMenu(event, episode)}
                 >
+                  {useSpecialList ? (
+                    <button
+                      className="detail-special-play"
+                      onClick={() => handlePlay(episode.episode_id)}
+                      aria-label={`${isWatched ? '已看完，' : ''}播放${episodeAriaNumberLabel(episode)}：${episodeTitle}`}
+                      aria-current={isCurrent ? 'true' : undefined}
+                    >
+                      <span className="detail-special-number" aria-hidden="true">{episode.special_number ?? episode.episode_number ?? episodeIndex + 1}</span>
+                      {previewImage && <DecodedImage className="detail-special-thumb" src={previewImage} alt="" loading="lazy" />}
+                      <span className="detail-special-copy">
+                        <strong title={rawEpisodeTitle}>{episodeTitle}</strong>
+                        <span className="detail-special-meta">
+                          {episode.source && <span>{episodeSourceLabel(episode.source, episode)}</span>}
+                          {Number(progressByEpisodeId.get(episode.episode_id)?.duration || 0) > 0 && <span>{Math.ceil(Number(progressByEpisodeId.get(episode.episode_id)?.duration) / 60)} 分钟</span>}
+                        </span>
+                      </span>
+                      <span className="detail-special-status">
+                        {isWatched ? <><CheckCircle2 size={16} />已看完</> : <><Play size={15} />{progressPercent(progressByEpisodeId.get(episode.episode_id)) > 0 ? `已看 ${progressPercent(progressByEpisodeId.get(episode.episode_id))}%` : isCurrent ? '待播放' : '播放'}</>}
+                      </span>
+                    </button>
+                  ) : (
                   <button
                     onClick={() => handlePlay(episode.episode_id)}
                     className="episode-button min-w-0 flex flex-1 items-center gap-3 text-left"
@@ -1709,6 +1743,7 @@ export default function WorkDetailPage() {
                     )}
                     </span>
                   </button>
+                  )}
                 </div>
               );
             })}
@@ -1777,7 +1812,7 @@ export default function WorkDetailPage() {
                   key={episode.episode_id}
                   className={`${continueTarget?.episode_id === episode.episode_id ? 'current' : ''} ${watchedEpisodeIds.has(episode.episode_id) ? 'watched' : ''}`}
                   onClick={() => revealEpisodeInStrip(index)}
-                  title={cleanDisplayTitle(episode.title || '', episodeFallbackTitle(episode))}
+                  title={cleanDisplayTitle(episode.title || '', episodeFallbackTitle(episode), { preserveTitle: isSpecialEpisode(episode) })}
                 >
                   {episodeQuickLabel(episode)}
                 </button>
@@ -1794,10 +1829,12 @@ export default function WorkDetailPage() {
           <div className="detail-related-grid">
             {relatedWorks.map((related: any) => {
               const fullRelated = relatedLookup.get(related.work_id);
-              const imagePath = related.fanart_path || related.poster_path || fullRelated?.fanart_path || fullRelated?.poster_path || '';
-              const imageKind = related.fanart_path || fullRelated?.fanart_path ? 'backdrop' : 'poster';
+              const imagePath = preferredArtworkPath({
+                local_poster_path: related.local_poster_path || fullRelated?.local_poster_path,
+                poster_path: related.poster_path || fullRelated?.poster_path,
+              }, 'poster');
               const rating = Number(related.rating ?? fullRelated?.rating ?? 0);
-              const previewImage = imagePath ? assetUrl(imagePath, imageKind) : '';
+              const previewImage = imagePath ? assetUrl(imagePath, 'poster') : '';
               return (
               <button
                 key={related.work_id}
@@ -1806,13 +1843,7 @@ export default function WorkDetailPage() {
                 onMouseEnter={() => prewarmDetailNavigation(related.work_id, previewImage)}
                 onFocus={() => prewarmDetailNavigation(related.work_id, previewImage)}
               >
-                {imagePath ? (
-                  <DecodedImage src={assetUrl(imagePath, imageKind)} alt={related.title} title={related.title} loading="lazy" />
-                ) : (
-                  <div className="detail-related-fallback">
-                    <span title={related.title}>{related.title}</span>
-                  </div>
-                )}
+                <DetailPosterArtwork key={previewImage} src={previewImage} title={related.title} />
                 <div className="detail-related-copy"><strong title={related.title}>{related.title}</strong>{rating > 0 && <span><Star size={14} fill="currentColor" /> {rating.toFixed(1)}</span>}</div>
               </button>
               );
@@ -1825,8 +1856,8 @@ export default function WorkDetailPage() {
           <h2>相关推荐</h2>
           <div className="detail-similar-row">
             {similarWorks.map((item) => {
-              const imagePath = item.fanart_path || item.poster_path;
-              const previewImage = imagePath ? assetUrl(imagePath, item.fanart_path ? 'backdrop' : 'poster') : '';
+              const imagePath = preferredArtworkPath(item, 'poster');
+              const previewImage = imagePath ? assetUrl(imagePath, 'poster') : '';
               return <button
                 key={item.work_id}
                 onClick={() => navigateToWorkDetail(item.work_id)}
@@ -1834,7 +1865,7 @@ export default function WorkDetailPage() {
                 onFocus={() => prewarmDetailNavigation(item.work_id, previewImage)}
                 className="detail-similar-card"
               >
-                {imagePath ? <DecodedImage src={previewImage} alt={item.title} loading="lazy" /> : <span className="detail-related-fallback">{item.title}</span>}
+                <DetailPosterArtwork key={previewImage} src={previewImage} title={item.title} />
                 <strong title={item.title}>{item.title}</strong>
                 {Number(item.rating || 0) > 0 && <small><Star size={13} fill="currentColor" /> {Number(item.rating).toFixed(1)}</small>}
               </button>;
@@ -2017,7 +2048,7 @@ function episodeFallbackTitle(episode: any) {
 function episodeQuickLabel(episode: any) {
   if (!isSpecialEpisode(episode)) return episodeNumberLabel(episode);
   const title = stripSpecialEpisodeCode(
-    cleanDisplayTitle(episode?.title || '', episodeFallbackTitle(episode)),
+    cleanDisplayTitle(episode?.title || '', episodeFallbackTitle(episode), { preserveTitle: true }),
   );
   return title || episodeFallbackTitle(episode);
 }
@@ -2148,6 +2179,14 @@ function bangumiSubjectTypes(showType: string) {
 
 function collectionLabel(type: number) {
   return bangumiCollectionTypes.find((item) => item.value === type)?.label || `状态 ${type}`;
+}
+
+function DetailPosterArtwork({ src, title }: { src: string; title: string }) {
+  const [failed, setFailed] = useState(false);
+  return <span className="detail-poster-artwork">
+    <span className="detail-related-fallback" aria-hidden="true"><Image size={24} /><span>暂无海报</span></span>
+    {src && !failed && <DecodedImage src={src} alt={title} loading="lazy" onError={() => setFailed(true)} />}
+  </span>;
 }
 
 function assetUrl(path: string, kind: 'poster' | 'backdrop' | 'detailBackdrop' | 'candidate' | 'episode' | 'logo' = 'backdrop') {

@@ -3,7 +3,7 @@ const RELEASE_NOISE_PATTERNS = [
   /\b(?:gb|big5|chs|cht|jpn|japanese|sc|tc)\b/gi,
 ];
 
-export function cleanDisplayTitle(value: string, fallback = '') {
+export function cleanDisplayTitle(value: string, fallback = '', options: { preserveTitle?: boolean } = {}) {
   let text = decodeTitleEntities(String(value || fallback || '')).trim();
   if (!text) return fallback;
 
@@ -22,7 +22,7 @@ export function cleanDisplayTitle(value: string, fallback = '') {
     .replace(/^[\s\-_]+|[\s\-_]+$/g, '');
 
   const episodeMatch = text.match(/(?:S\d{1,2}E\d{1,3}|E\d{1,3}|第\s*\d{1,3}\s*[话集]|(?:^|\s)\d{1,3}(?:\s|$)).*$/i);
-  if (episodeMatch && episodeMatch[0].trim().length >= 2) {
+  if (!options.preserveTitle && episodeMatch && episodeMatch[0].trim().length >= 2) {
     text = episodeMatch[0].trim();
   }
 

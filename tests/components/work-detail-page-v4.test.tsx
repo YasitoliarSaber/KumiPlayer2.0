@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, expect, test, vi } from 'vitest';
 import { playbackApi } from '../../src/api/playback';
 import { useLibraryStore } from '../../src/stores/library';
@@ -314,4 +314,76 @@ test('更多菜单只显示已经接通 V4 的操作', async () => {
   expect(screen.getAllByRole('menuitem', { name: /文件夹/ }).length).toBeGreaterThan(0);
   expect(screen.queryByRole('menuitem', { name: /重新刮削/ })).toBeVisible();
   expect(screen.queryByRole('menuitem', { name: '删除该作品' })).toBeVisible();
+});
+
+test('缺图特别篇整组使用紧凑列表，混合图片仍保持集顺序和播放身份', async () => {
+  const play = vi.spyOn(playbackApi, 'play').mockResolvedValue({ ok: true, session_id: 'special-session' } as never);
+  const specialWork = {
+    ...work,
+    seasons: [{ season_id: 'specials', season_number: 0, group_type: 'special', label: '特别篇', episode_count: 14 }],
+    episodes: Array.from({ length: 14 }, (_, index) => ({
+      ...work.episodes[0], episode_id: `special-${index + 1}`, season_number: 0,
+      episode_number: null, special_number: index + 1, group_type: 'special', kind: 'special',
+      title: `SP${index + 1} - 小剧场 ${index + 1}`, thumb_path: index === 1 ? work.episodes[0].thumb_path : '',
+    })),
+  };
+  useUiStore.setState({ selectedSeasonNumber: 0, selectedSeasonByWork: {} });
+  useLibraryStore.setState({ works: [specialWork as never], getWorkDetail: vi.fn().mockResolvedValue(specialWork) });
+  const { container } = render(<WorkDetailPage />);
+  await waitFor(() => expect(container.querySelector('[aria-busy="false"]')).not.toBeNull());
+  await screen.findByText('小剧场 1');
+  expect(screen.getByText('小剧场 10')).toBeVisible();
+  const list = container.querySelector('.detail-special-list')!;
+  expect(list).not.toBeNull();
+  expect(Array.from(list.children, (row) => (row as HTMLElement).dataset.episodeId)).toEqual(
+    specialWork.episodes.map((episode) => episode.episode_id),
+  );
+  expect(container.querySelector('.detail-episode-grid.thumbnail-strip')).toBeNull();
+  expect(list.querySelectorAll('.episode-thumb')).toHaveLength(0);
+  expect(list.querySelectorAll('img')).toHaveLength(1);
+  expect(screen.queryByRole('button', { name: '上一组剧集' })).not.toBeInTheDocument();
+  const reveal = vi.fn();
+  Object.defineProperty(list.children[9], 'scrollIntoView', { configurable: true, value: reveal });
+  fireEvent.click(screen.getByRole('button', { name: '快速选集' }));
+  const chooser = screen.getByRole('dialog', { name: '快速选集' });
+  fireEvent.click(within(chooser).getByRole('button', { name: '小剧场 10' }));
+  expect(reveal).toHaveBeenCalledWith({ block: 'center', inline: 'nearest', behavior: 'smooth' });
+  expect(screen.queryByRole('dialog', { name: '快速选集' })).not.toBeInTheDocument();
+  expect(list.children[9].querySelector('button')).toHaveFocus();
+  fireEvent.click(within(list as HTMLElement).getByRole('button', { name: '播放特别篇 2：小剧场 2' }));
+  await waitFor(() => expect(play).toHaveBeenCalledWith({ work_id: work.work_id, episode_id: 'special-2', asset_id: 'asset-primary' }));
+  fireEvent.contextMenu(list.children[0]);
+  expect(await screen.findByRole('menuitem', { name: '已看完' })).toBeVisible();
+});
+
+test('全部有图的特别篇继续使用横向卡片', async () => {
+  const specialWork = {
+    ...work,
+    seasons: [{ season_id: 'specials', season_number: 0, group_type: 'special', label: '特别篇', episode_count: 1 }],
+    episodes: [{ ...work.episodes[0], episode_id: 'special-pictured', season_number: 0, special_number: 1, title: 'SP01 - 图片小剧场', group_type: 'special', kind: 'special' }],
+  };
+  useUiStore.setState({ selectedSeasonNumber: 0, selectedSeasonByWork: {} });
+  useLibraryStore.setState({ works: [specialWork as never], getWorkDetail: vi.fn().mockResolvedValue(specialWork) });
+  const { container } = render(<WorkDetailPage />);
+  await screen.findByText('图片小剧场');
+  expect(container.querySelector('.detail-episode-grid.thumbnail-strip')).not.toBeNull();
+  expect(container.querySelector('.detail-special-list')).toBeNull();
+});
+
+test('关联与推荐优先本地海报，只有横图或图片失败时保留文字占位', async () => {
+  const related = { ...work, work_id: 'related', title: '关联作品甲', local_poster_path: 'D:/mirror/related-poster.jpg', fanart_path: 'https://image.tmdb.org/t/p/original/related-fanart.jpg' };
+  const similar = { ...work, work_id: 'similar', title: '推荐作品乙', local_poster_path: 'D:/mirror/similar-poster.jpg' };
+  const noPoster = { ...work, work_id: 'no-poster', title: '只有背景图', local_poster_path: '', poster_path: '', fanart_path: 'https://image.tmdb.org/t/p/original/only-fanart.jpg' };
+  const detailWork = { ...work, related_works: [{ work_id: related.work_id, title: related.title, poster_path: 'https://image.tmdb.org/t/p/w500/remote.jpg', fanart_path: related.fanart_path }, { work_id: noPoster.work_id, title: noPoster.title, fanart_path: noPoster.fanart_path }] };
+  useLibraryStore.setState({ works: [detailWork, related, similar, noPoster] as never, getWorkDetail: vi.fn().mockResolvedValue(detailWork) });
+  const { container } = render(<WorkDetailPage />);
+  await screen.findByText('关联作品甲');
+  const relatedCard = container.querySelector('.detail-related-card')!;
+  expect(relatedCard.querySelector('img')?.getAttribute('src')).toContain(encodeURIComponent(related.local_poster_path));
+  expect(container.querySelector('.detail-similar-card img')?.getAttribute('src')).toContain(encodeURIComponent(similar.local_poster_path));
+  expect(container.querySelectorAll('.detail-related-card')[1].querySelector('img')).toBeNull();
+  expect(container.querySelectorAll('.detail-related-card')[1].querySelector('.detail-related-fallback')).toHaveTextContent('暂无海报');
+  fireEvent.error(relatedCard.querySelector('img')!);
+  expect(relatedCard.querySelector('.detail-related-fallback')).toHaveTextContent('暂无海报');
+  expect(relatedCard.querySelector('.detail-related-copy')).toHaveTextContent('关联作品甲');
 });
