@@ -13732,8 +13732,10 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-steps li.complete .media-v4-step-index { border-color: transparent; color: var(--accent-strong); background: transparent; }
 
 .media-v4-message { border-radius: 8px; }
-.media-v4-scan-progress { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 6px 16px; width: min(620px, 100%); }
-.media-v4-scan-progress > span:first-child { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
+.media-v4-scan-progress { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px 16px; width: min(620px, 100%); }
+.media-v4-scan-progress > span:first-child { display: inline-flex; align-items: center; gap: 8px; min-width: 0; font-weight: 600; }
+.media-v4-scan-progress > span:first-child > .fui-Spinner { flex-shrink: 0; }
+.media-v4-scan-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .media-v4-scan-progress > span:nth-child(2) { color: var(--text-secondary); font-size: 12px; text-align: right; }
 .media-v4-scan-progress .fui-ProgressBar { grid-column: 1 / -1; width: 100%; }
 .media-v4-stage-panel {
@@ -13829,7 +13831,7 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 .media-v4-command-row .media-primary-command.fui-Button { flex: 0 0 auto; min-height: 38px; }
 
 .media-v4-workspace-body { display: grid; }
-.media-v4-inline-scan-status { margin-top: 12px; }
+.media-v4-inline-scan-status { display: block; margin-top: 12px; }
 /* 进度行原本嵌在 MessageBar 自身的 4 列网格里，导致“Spinner+标题 / 百分比 /
    进度条”三条基线各走各的。这里把消息体收成单列，排版交给
    .media-v4-scan-progress 自己的网格。 */

@@ -103,8 +103,12 @@ def _friendly_metadata_reason(status: str, value: str, reason_code: str = "") ->
         return "媒体资料已获取，但部分图片下载或发布失败。"
     if normalized_code == "mirror_root_missing":
         return "镜像目录未配置，无法生成元数据文件。"
+    if normalized_code == "no_candidates":
+        return "暂未找到对应的在线作品，已保留本地信息。可调整名称重新搜索，也可以稍后处理。"
+    if normalized_code == "ambiguous_candidates":
+        return "找到了多个可能的在线作品，已保留本地信息。可以选择对应作品补齐资料，也可以稍后处理。"
     if status == "waiting_review":
-        return "在线媒体信息没有唯一匹配，需要确认正确作品后继续。"
+        return "在线作品尚未确定，已保留本地信息。可以选择对应作品补齐资料，也可以稍后处理。"
     if status == "source_unavailable":
         return "在线资料服务暂不可用，请稍后重试"
     if status == "waiting_metadata":
@@ -154,7 +158,7 @@ def _metadata_recovery_action(status: str, reason_code: str = "", reason: str = 
 def _metadata_recovery_hint(action: str) -> str:
     return {
         "review_identity": "请检查识别结果，选择正确作品或修正 Provider 后重试。",
-        "choose_candidate": "请从候选作品中选择正确的一部。",
+        "choose_candidate": "可以搜索并选择对应作品补齐资料，也可以暂不处理。",
         "retry_metadata": "可以稍后重试补齐在线资料。",
         "check_settings": "请先检查 TMDB Token、在线资料或镜像目录设置。",
         "none": "",
@@ -339,6 +343,15 @@ def metadata_recovery_policy(metadata: dict | None, *, binding_status: str = "")
     transport_reason = transport_failure_reason(reason_code, raw_reason)
     if transport_reason:
         return {"reason": transport_reason, "action": "retry_metadata", "hint": "连接恢复后可重试获取在线资料，本地媒体已保留。"}
+
+    if (state == "source_unavailable" and failure_stage == "work_detail"
+            and payload.get("identity_status") == "confirmed"
+            and reason_code != "provider_rate_limited"):
+        return {
+            "reason": "已识别作品，但在线资料暂时获取失败；可以稍后重试。",
+            "action": "retry_metadata",
+            "hint": _metadata_recovery_hint("retry_metadata"),
+        }
 
     action = _metadata_recovery_action_fallback(state, reason_code, raw_reason)
     reason = _friendly_metadata_reason(state, raw_reason, reason_code)

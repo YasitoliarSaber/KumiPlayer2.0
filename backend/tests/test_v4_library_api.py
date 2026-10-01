@@ -45,6 +45,24 @@ def _entry(revision_id: str = "rev-library") -> dict:
     }
 
 
+def _work_id_for_root(conn, root_id: str) -> str:
+    """按来源根精确取目标 Work。
+
+    跨来源不复用结构身份，同一作品在不同 root 下会各自成行；用
+    ``SELECT work_id FROM works LIMIT 1``（无 ORDER BY）取行会让断言随行序变化，
+    因此这里按 root 的已确认 revision 取。
+    """
+
+    row = conn.execute(
+        "SELECT DISTINCT rb.work_id FROM revision_bindings rb "
+        "JOIN import_revisions ir ON ir.revision_id = rb.revision_id "
+        "WHERE ir.root_id = ? AND ir.status = 'confirmed'",
+        (root_id,),
+    ).fetchone()
+    assert row is not None, f"{root_id} 没有已确认的 Work"
+    return str(row["work_id"])
+
+
 def test_detail_deduplicates_episode_rows_but_exposes_all_assets(tmp_path, monkeypatch):
     client, database = _client(tmp_path, monkeypatch)
     assert client.post("/api/v4/imports/preview", json=_entry()).status_code == 200
@@ -175,6 +193,14 @@ def test_detail_only_exposes_latest_confirmed_revision_for_same_root(tmp_path, m
 
 
 def test_detail_excludes_assets_from_retired_source_roots(tmp_path, monkeypatch):
+    """退役来源的资产与作品都必须从读取路径消失。
+
+    目标 Work 按**活动来源**精确选取：跨来源不做结构身份复用（work_source_bindings
+    按 root 过滤），同一作品在两个 root 下会各自成行，因此不能再用
+    ``SELECT work_id FROM works LIMIT 1`` 随机取行（那会以约 1/5～1/3 的概率
+    取到退役根的行而得到 404，与本次断言无关地变成 flaky）。
+    """
+
     client, database = _client(tmp_path, monkeypatch)
     retired = _entry("rev-retired-root")
     retired["root_id"] = "root-retired"
@@ -189,7 +215,8 @@ def test_detail_excludes_assets_from_retired_source_roots(tmp_path, monkeypatch)
     assert client.post("/api/v4/imports/rev-active-root/confirm").status_code == 200
 
     with database.connect() as conn:
-        work_id = conn.execute("SELECT work_id FROM works LIMIT 1").fetchone()["work_id"]
+        active_work_id = _work_id_for_root(conn, "root-active")
+        retired_work_id = _work_id_for_root(conn, "root-retired")
         active_asset_id = conn.execute(
             "SELECT asset_id FROM assets WHERE root_id = 'root-active'"
         ).fetchone()["asset_id"]
@@ -199,11 +226,14 @@ def test_detail_excludes_assets_from_retired_source_roots(tmp_path, monkeypatch)
         )
         conn.commit()
 
-    detail = client.get(f"/api/library/works/{work_id}")
+    detail = client.get(f"/api/library/works/{active_work_id}")
     assert detail.status_code == 200
     episode = detail.json()["episodes"][0]
     assert episode["asset_id"] == active_asset_id
     assert [asset["asset_id"] for asset in episode["assets"]] == [active_asset_id]
+    # 唯一来源已退役的作品必须从媒体库读取路径消失。这里直接改 retired_at、
+    # 绕过删除任务，所以这条不可见规则只能由读接口保证。
+    assert client.get(f"/api/library/works/{retired_work_id}").status_code == 404
 
 
 def test_library_sources_come_from_each_evidence_not_the_first_root_entry(tmp_path, monkeypatch):

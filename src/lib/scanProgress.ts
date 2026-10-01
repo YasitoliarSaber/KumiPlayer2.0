@@ -20,10 +20,13 @@ export function presentScanProgress(scan: ScanProgressInput) {
   }
   if (scan.stage === 'reading_source') {
     const discovered = Math.max(0, scan.discovered_count ?? processed)
-    const directories = scan.directories_pending == null ? '' : ` · 已发现的待读目录 ${scan.directories_pending} 个`
+    const directories = scan.directories_pending == null ? '' : ` · 待读目录 ${scan.directories_pending} 个`
+    const found = discovered > 0 ? `已发现 ${discovered} 个媒体文件` : '正在查找媒体文件'
+    const completed = discovered === 0 && scan.directories_completed != null
+      ? `已读取 ${scan.directories_completed} 个目录 · ` : ''
     return {
       label: scan.current_directory ? `正在读取目录：${scan.current_directory}` : '正在读取媒体来源',
-      detail: `已发现 ${discovered} 个媒体文件${directories}`,
+      detail: `${completed}${found}${directories}`,
       value: undefined,
     }
   }

@@ -283,7 +283,7 @@ def test_needs_attention_exposes_a_safe_human_readable_reason(tmp_path):
 
     unit = _progress(database)["work_units"][0]
     assert unit["metadata_state"] == "waiting_review"
-    assert unit["metadata_reason"] == "在线媒体信息没有唯一匹配，需要确认正确作品后继续。"
+    assert unit["metadata_reason"] == "在线作品尚未确定，已保留本地信息。可以选择对应作品补齐资料，也可以稍后处理。"
 
 
 def test_overall_priority_queued_over_completed(tmp_path):

@@ -1634,10 +1634,10 @@ export default function MediaManagementPage() {
           )}
         </div>
         {busy === 'scan' && scanTask && (
-          <MessageBar className="media-v4-message media-v4-inline-scan-status" intent="info">
+          <MessageBar className="media-v4-message media-v4-inline-scan-status" intent="info" icon={null}>
             <MessageBarBody>
               <div className="media-v4-scan-progress">
-                <span><Spinner size="tiny" />{presentScanProgress(scanTask).label}</span>
+                <span><Spinner size="tiny" /><span className="media-v4-scan-label" title={presentScanProgress(scanTask).label}>{presentScanProgress(scanTask).label}</span></span>
                 <span>{presentScanProgress(scanTask).detail}</span>
                 <ProgressBar
                   value={presentScanProgress(scanTask).value}
