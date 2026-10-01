@@ -876,6 +876,7 @@ def scan_openlist_directory(
                         remote_path=directory, status="scanning", next_page=page,
                     )
                 raise
+            child_directories: list[str] = []
             for item in result.entries:
                 observed_entries += 1
                 if observed_entries > max_entries:
@@ -887,7 +888,7 @@ def scan_openlist_directory(
                             PurePosixPath(remote_path).relative_to(PurePosixPath(selected_root)).as_posix()
                         ] = item.modified
                     if frontier_driven and frontier_add is not None:
-                        frontier_add(remote_paths=[remote_path], depth=depth + 1)
+                        child_directories.append(remote_path)
                     else:
                         assert queue is not None
                         queue.append((remote_path, depth + 1))
@@ -925,6 +926,10 @@ def scan_openlist_directory(
                         processed_count=len(evidence),
                         total_count=0,
                     )
+            # 同页子目录一次登记，减少逐目录打开 SQLite / 提交事务的成本。
+            # 必须先落子目录再推进页游标；失败时当前页可重读，不能丢子树。
+            if child_directories and frontier_add is not None:
+                frontier_add(remote_paths=child_directories, depth=depth + 1)
             total = int(result.total or 0)
             _emit_scan_progress(
                 on_progress,

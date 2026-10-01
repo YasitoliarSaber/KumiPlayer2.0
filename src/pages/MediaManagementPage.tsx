@@ -35,6 +35,7 @@ import { useMediaWorkflowStore } from '../stores/mediaWorkflow'
 import { useUiStore } from '../stores/ui'
 import { getKumiFluentTheme } from '../design/fluentTheme'
 import { summarizeExecutionWorks } from '../lib/mediaSummary'
+import { presentScanProgress } from '../lib/scanProgress'
 
 type ImportKind = 'local' | 'tree' | 'openlist' | 'hybrid'
 type WorkflowStage = 'source' | 'review' | 'execute'
@@ -71,13 +72,16 @@ type DurableScanState = {
   total_count?: number
   /** 读取阶段已发现的媒体文件数；总量未知时用它替代假百分比。 */
   discovered_count?: number
+  current_directory?: string
+  directories_completed?: number
+  directories_pending?: number
   progress?: number | null
   heartbeat_at?: string
   cancel_requested?: boolean
   entries?: V4SourceEvidence[]
 }
 
-type DurableScanTask = Pick<DurableScanState, 'scan_id' | 'status' | 'stage' | 'stage_label' | 'processed_count' | 'total_count' | 'discovered_count' | 'progress' | 'heartbeat_at' | 'cancel_requested'>
+type DurableScanTask = Pick<DurableScanState, 'scan_id' | 'status' | 'stage' | 'stage_label' | 'processed_count' | 'total_count' | 'discovered_count' | 'current_directory' | 'directories_completed' | 'directories_pending' | 'progress' | 'heartbeat_at' | 'cancel_requested'>
 
 const ACTIVE_REVISION_KEY = 'kumiplayer.media-v4.active-revision'
 const TRANSIENT_BACKEND_RETRY_DELAY_MS = 300
@@ -193,6 +197,10 @@ function scanTaskFromState(state: DurableScanState): DurableScanTask {
     stage_label: state.stage_label,
     processed_count: state.processed_count,
     total_count: state.total_count,
+    discovered_count: state.discovered_count,
+    current_directory: state.current_directory,
+    directories_completed: state.directories_completed,
+    directories_pending: state.directories_pending,
     progress: state.progress,
     heartbeat_at: state.heartbeat_at,
     cancel_requested: state.cancel_requested,
@@ -1622,12 +1630,10 @@ export default function MediaManagementPage() {
           <MessageBar className="media-v4-message media-v4-inline-scan-status" intent="info">
             <MessageBarBody>
               <div className="media-v4-scan-progress">
-                <span><Spinner size="tiny" />{scanTask.stage_label || '正在扫描媒体来源'}</span>
-                <span>{scanTask.progress == null
-                  ? ((scanTask.discovered_count || scanTask.processed_count) ? `已发现 ${scanTask.discovered_count || scanTask.processed_count} 个媒体文件` : '正在建立来源清单…')
-                  : `已完成 ${scanTask.progress}%`}</span>
+                <span><Spinner size="tiny" />{presentScanProgress(scanTask).label}</span>
+                <span>{presentScanProgress(scanTask).detail}</span>
                 <ProgressBar
-                  value={scanTask.total_count ? Math.min(1, (scanTask.processed_count || 0) / scanTask.total_count) : undefined}
+                  value={presentScanProgress(scanTask).value}
                   max={1}
                   aria-label="来源扫描进度"
                 />

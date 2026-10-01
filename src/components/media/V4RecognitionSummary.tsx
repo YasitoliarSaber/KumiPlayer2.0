@@ -2,7 +2,7 @@
  * P-003 第二步：V4 识别结果的可审核紧凑摘要。
  *
  * 只消费 V4Preview；默认按作品卡展示，季度/电影/特别篇为次级层级，默认折叠；
- * 存在 issue 或集号跨度异常的作品置顶并展开。人工修正通过带原始证据上下文的
+ * 存在 issue 或集号跨度异常的作品置顶，按作品进入修正窗口。人工修正通过带原始证据上下文的
  * Dialog 完成，仍调用 V4 override API；本组件不自行改写任何身份。
  */
 
@@ -13,6 +13,7 @@ import type { V4Preview, V4ReviewIssue, V4SourceEvidence } from '../../api/media
 import { buildWorkSummaries, type RecognitionSummary, type WorkSummary } from '../../lib/mediaSummary'
 import { getKumiFluentTheme } from '../../design/fluentTheme'
 import { useUiStore } from '../../stores/ui'
+import './V4RecognitionSummary.css'
 
 const identityIssueCodes = new Set(['work_identity_conflict', 'historical_identity_conflict', 'provider_identity_conflict', 'work_identity_ambiguous', 'structural_identity_ambiguous'])
 
@@ -91,6 +92,14 @@ function WorkCard({
         </span>
         {expanded ? <ChevronDown24Regular aria-hidden="true" /> : <ChevronRight24Regular aria-hidden="true" />}
       </button>
+      {work.issues.length > 0 && (
+        <div className="media-v4-work-review-action">
+          <span>{work.issues.length} 项待核对</span>
+          <Button appearance="secondary" size="small" disabled={busy} onClick={() => setActiveIssue(work.issues[0])}>
+            {preview.status === 'confirmed' ? '查看处理方式' : identityIssueCodes.has(work.issues[0].code) ? '处理身份冲突' : '修正'}
+          </Button>
+        </div>
+      )}
       {expanded && (
         <div className="media-v4-work-card-body">
           <div className="media-v4-work-group-list">
@@ -115,17 +124,6 @@ function WorkCard({
               </div>
             ))}
           </div>
-          {work.issues.length > 0 && (
-            <div className="media-v4-work-issues-inline">
-              {work.issues.map((issue) => (
-                <div key={`${issue.code}-${issue.evidence_id}`} className="media-v4-issue-row">
-                  <strong>{identityIssueCodes.has(issue.code) ? '作品身份冲突' : '识别需要修正'}</strong>
-                  <span>{issue.message}</span>
-                  <Button appearance="secondary" size="small" disabled={busy} onClick={() => setActiveIssue(issue)}>{preview.status === 'confirmed' ? '查看处理方式' : identityIssueCodes.has(issue.code) ? '处理身份冲突' : '修正'}</Button>
-                </div>
-              ))}
-            </div>
-          )}
           {work.episodeCount > 20 && (
             <button type="button" className="media-v4-tech-details-toggle" aria-expanded={techOpen} onClick={() => setTechOpen((value) => !value)}>
               {techOpen ? '收起' : '查看'}技术详情（{work.episodeCount} 集）
@@ -149,6 +147,16 @@ function WorkCard({
                 {preview.status === 'confirmed' ? '更新识别结果' : identityIssue ? '处理作品身份冲突' : '修正识别结果'}
               </DialogTitle>
               <DialogContent>
+                <p className="media-v4-review-work-title">{work.title}</p>
+                {work.issues.length > 1 && (
+                  <div className="media-v4-review-file-list" role="group" aria-label="选择待核对条目">
+                    {work.issues.map((issue, index) => {
+                      const evidence = evidenceFor(issue.evidence_id)
+                      const filename = (evidence?.relative_path || evidence?.source_key || issue.evidence_id).split(/[\\/]/).pop()
+                      return <Button key={`${issue.code}-${issue.evidence_id}`} appearance="secondary" disabled={busy} aria-pressed={activeIssue === issue} onClick={() => setActiveIssue(issue)}>{index + 1}. {filename}</Button>
+                    })}
+                  </div>
+                )}
                 {preview.status === 'confirmed' ? (
                   <div className="media-v4-identity-help">
                     <p>这次导入已建立媒体库，识别事实不能直接改写。重新扫描此来源后，可在确认前核对修正结果。</p>
@@ -160,13 +168,11 @@ function WorkCard({
                     <p>如果错误作品仍在媒体库中，可打开媒体库维护，选择对应来源、核对清理预览后再重新导入。此处不会直接删除任何内容；清理会影响该来源的媒体记录与受控生成物，请先检查范围。</p>
                   </div>
                 ) : (<>
-                {activeEvidence && (
                   <div className="media-v4-issue-evidence" role="note">
                     <strong>待修正文件</strong>
-                    <code title={activeEvidence.relative_path || activeEvidence.source_key}>{(activeEvidence.relative_path || activeEvidence.source_key).split(/[\\/]/).pop()}</code>
+                    <code title={activeEvidence?.relative_path || activeEvidence?.source_key}>{(activeEvidence?.relative_path || activeEvidence?.source_key || activeIssue.evidence_id).split(/[\\/]/).pop()}</code>
                     <span>{activeIssue.message}</span>
                   </div>
-                )}
                 <div className="media-v4-override-row media-v4-override-dialog-row">
                   <Field label="作品标题">
                   <Input
@@ -250,12 +256,12 @@ export function V4RecognitionSummary({ preview, evidenceEntries, overrideDrafts,
           {'。可先建立媒体库，稍后核对。'}
         </p>
       )}
-      {summary.totalIssues > 0 && (
+      {summary.anomalyWorks.length > 0 && (
         <div className="media-v4-issues-block">
           <h3>需要处理</h3>
           <div className="media-v4-work-grid">
             {summary.anomalyWorks.map((work) => (
-              <WorkCard key={work.work_key} work={work} defaultExpanded {...cardProps} />
+              <WorkCard key={work.work_key} work={work} defaultExpanded={false} {...cardProps} />
             ))}
           </div>
         </div>

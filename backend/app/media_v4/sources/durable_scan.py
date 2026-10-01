@@ -128,6 +128,9 @@ def _update_scan_progress(
         else:
             next_processed = max(current_processed, int(processed_count or 0))
             next_total = max(current_total, int(total_count or 0), next_processed)
+        if incoming_stage == "reading_source":
+            # 递归枚举只知道已发现数量，不能把它当作整棵目录树的总量。
+            next_total = 0
         conn.execute(
             "UPDATE source_scans SET stage = ?, processed_count = ?, total_count = ?, "
             "heartbeat_at = ? WHERE scan_id = ?",
@@ -351,6 +354,16 @@ def get_durable_scan(
                 _evidence_dict(V4Repository._row_to_source_evidence(item))
                 for item in evidence_rows
             ]
+        directory_rows = conn.execute(
+            "SELECT status, COUNT(*) AS count FROM source_scan_directories "
+            "WHERE scan_id = ? GROUP BY status", (scan_id,),
+        ).fetchall()
+        directory_counts = {str(item["status"]): int(item["count"]) for item in directory_rows}
+        current_directory_row = conn.execute(
+            "SELECT remote_path FROM source_scan_directories "
+            "WHERE scan_id = ? AND status = 'scanning' ORDER BY depth, remote_path LIMIT 1",
+            (scan_id,),
+        ).fetchone()
 
     stored_stage = str(row["stage"] or "queued")
     stored_processed = int(row["processed_count"] or 0)
@@ -402,7 +415,9 @@ def get_durable_scan(
     if interrupted:
         stage_label = INTERRUPTED_STAGE_LABEL
     progress = None
-    if total_count > 0:
+    if stage == "reading_source":
+        total_count = 0
+    if total_count > 0 and stage in {"parsing", "recognizing", "ready"}:
         progress = min(1.0, max(0.0, processed_count / total_count))
     return {
         "scan_id": scan_id,
@@ -424,6 +439,10 @@ def get_durable_scan(
         "total_count": total_count,
         # 读取阶段的“已发现媒体文件数”，前端在总量未知时用它替代假百分比。
         "discovered_count": processed_count,
+        "directories_completed": directory_counts.get("completed", 0),
+        "directories_pending": directory_counts.get("queued", 0) + directory_counts.get("scanning", 0),
+        # 只展示当前目录名，不把远端完整定位符传入提示文字。
+        "current_directory": str(current_directory_row["remote_path"]).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] if current_directory_row else "",
         "progress": progress,
         "entries": entries,
     }

@@ -98,6 +98,7 @@ _AUXILIARY_DIR_TOKENS = frozenset(
         "pv", "pvs", "cm", "cms", "mv", "mvs", "mv合集", "menu", "menus",
         "trailer", "trailers", "eyecatch", "preview", "previews",
         "ncop", "nced", "预告", "花絮", "菜单",
+        "fandisc", "fandiscs", "musicvideos", "musicvideo", "音乐视频", "演唱会",
     }
 )
 
@@ -112,6 +113,7 @@ _ATTACHED_DIR_TOKENS = frozenset(
 
 #: 文件级"明确附属关系"标记。
 _ATTACHED_FILE_RES = (
+    re.compile(r"(?i)[\[【]\s*\d{1,3}\s*(?:\(\s*SP\s*\d*\s*\)|SP\s*\d*)\s*[\]】]"),
     re.compile(r"(?i)[\[\u3010]\s*(?:SP|LITE)\s*\d*\s*[\]\u3011]"),
     re.compile(r"(?i)(?<![A-Za-z])SP\d+(?:$|[^A-Za-z])"),
     re.compile(r"(?i)\bS00(?:E\d+)?\b"),
@@ -122,6 +124,7 @@ _ATTACHED_FILE_RES = (
 
 #: 发行形式（不构成排除依据）：单独出现时保留可播放身份。
 _RELEASE_FORM_RE = re.compile(r"(?i)(?<![A-Za-z])(?:OVA|OAD)(?![A-Za-z])")
+_ANNOTATED_RELEASE_RE = re.compile(r"(?i)[\[【]\s*\d{1,3}\s*\(\s*(?:OVA|OAD)\s*\d*\s*\)\s*[\]】]")
 
 #: 电影证据。
 _MOVIE_FILE_RES = (
@@ -144,6 +147,8 @@ _ABS_MARKER_RE = re.compile(r"(?i)(?<![A-Za-z])(?:ABS|ABSOLUTE)(\d{1,4})(?!\d)")
 _BARE_NUMBER_RES = (
     # 完整编号位置的 [13] / 【13】 / (13)
     re.compile(r"[\[【(]\s*(\d{1,3})\s*[\]】)]"),
+    # 单个缺失闭括号：第二个技术区开括号界定编号终点。
+    re.compile(r"[\[【]\s*(\d{1,3})\s*(?=[\[【](?:Ma10p|Hi10p|\d{3,4}p|x26[45]))", re.IGNORECASE),
     # `part-13` / `part13` / `ep13`
     re.compile(r"(?i)(?:^|[\s._-])(?:part|ep|episode)[\s._-]*(\d{1,3})(?!\d)"),
     # `- 13` / `~ 13` / 尾随 ` 13`；必须真的由分隔符引出，
@@ -564,7 +569,8 @@ def classify_content(
 
     auxiliary_hit = next((p.pattern for p in _AUXILIARY_FILE_RES if p.search(stem)), "")
     auxiliary_dir = next(
-        (token for token in directory if _segment_token(token.name) in _AUXILIARY_DIR_TOKENS),
+        (token for token in directory if _segment_token(token.name) in _AUXILIARY_DIR_TOKENS
+         or re.search(r"(?i)\balbum\b.*\b(?:collection|live)\b", token.name)),
         None,
     )
     attached_hit = next((p.pattern for p in _ATTACHED_FILE_RES if p.search(stem)), "")
@@ -583,6 +589,14 @@ def classify_content(
         None,
     )
     release_form = _RELEASE_FORM_RE.search(stem)
+    # [14(OVA)] 在明确的 TV 季度中声明附带发行编号；孤立 OVA、电影或
+    # 独立外传仍保留。发行形式本身不等于附属关系，不能无条件排除。
+    if (not attached_hit and _ANNOTATED_RELEASE_RE.search(stem)
+            and numbering.season is not None
+            and numbering.numbering.season_origin in {ORIGIN_EXPLICIT_FILENAME, ORIGIN_EXPLICIT_DIRECTORY}
+            and not (movie_hit or movie_dir or provisional_movie or standalone_hit or standalone_dir)
+            and not any(_RELEASE_FORM_RE.search(token.name) for token in directory)):
+        attached_hit = _ANNOTATED_RELEASE_RE.pattern
     # 单发 OVA/OAD 发行形式不构成附属声明；但若文件名里还带了别的附属标记
     # （已在上面的 attached_hit 里），仍然按附属内容处理。
     modified_before_attached = bool(attached_hit) or attached_dir is not None

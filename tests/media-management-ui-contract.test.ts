@@ -11,13 +11,13 @@ const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
 test('新导入入口始终从来源选择开始，历史执行只由来源卡打开', () => {
   assert.match(page, /onClick=\{startNewImport\}>导入媒体<\/Button>/)
   assert.doesNotMatch(page, /onClick=\{\(\) => setPageMode\('import'\)\}>导入媒体<\/Button>/)
-  assert.match(page, /onClick=\{\(\) => void resumeSourceCard\(card\)\}/)
+  assert.match(page, /void resumeSourceCard\(card\)/)
 })
 
 test('来源卡只携带来源摘要与标准操作按钮，不渲染作品预览', () => {
   assert.doesNotMatch(page, /card\.work_previews/)
-  assert.match(page, /media-v4-source-card-action \$\{card\.can_resume \? 'primary' : 'secondary'\}/)
-  assert.match(page, /media-v4-source-card-action \$\{card\.can_resume \? 'secondary' : 'primary'\}/)
+  assert.match(page, /media-v4-source-card-action \$\{card\.can_resume \|\| deletionRetry \? 'primary' : 'secondary'\}/)
+  assert.match(page, /className="media-v4-source-card-action secondary" appearance="secondary"[^\n]*>检查更新<\/Button>/)
 })
 
 test('来源卡通过来源根承载扫描与草稿恢复，不展示游离草稿入口', () => {
@@ -71,12 +71,14 @@ test('导入工作台使用全宽单列轨道，空媒体库有紧凑的引导�
 
 test('第三步总体摘要位于建立媒体库页头右侧，详情展开保留实际刮削结果', () => {
   assert.match(page, /media-v4-execution-header-summary/)
-  // 主指标是“已正确刮削的作品数”；镜像只是次要信息（用户 2026-09-24 要求：
-  // 镜像不会失败，完成量不反映质量，不能占据头号位置）。
-  assert.match(page, /executionWorkScraped/)
-  assert.match(page, /部已正确刮削/)
-  assert.match(page, /media-v4-execution-header-mirror/)
-  assert.match(styles, /\.media-v4-execution-header-mirror\s*\{[^}]*font-size:\s*12px/s)
+  // 完成作品数与资料完整数按同一投影统计，分别标明含义，镜像作为次级信息。
+  assert.match(page, /summarizeExecutionWorks/)
+  assert.match(page, /executionCounts\?\.completed/)
+  assert.match(page, /executionCounts\?\.metadataComplete/)
+  assert.match(page, /部作品已完成/)
+  assert.match(page, /部资料完整/)
+  assert.match(page, /media-v4-execution-header-secondary/)
+  assert.match(styles, /\.media-v4-execution-header-secondary\s*\{[^}]*font-size:\s*12px/s)
   assert.match(execution, /刮削结果/)
   assert.match(execution, /季度结构/)
   assert.match(execution, /episode\.scraped_plot/)
