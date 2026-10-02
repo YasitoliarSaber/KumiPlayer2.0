@@ -42,8 +42,7 @@ def archive_tree_input(root_id: str, tree_file: str | Path) -> dict:
     """
 
     source = Path(tree_file).expanduser()
-    if not source.is_file():
-        raise FileNotFoundError(str(source))
+    # 只打开选定的 TXT；虚拟卷可能支持读取却不支持 stat/is_file/resolve。
     safe_name = _safe_segment(source.name, "directory-tree.txt")
     digest = hashlib.sha256()
     size = 0

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import uuid
 from dataclasses import asdict
@@ -1434,7 +1435,7 @@ def _start_durable_local_scan(request: SourceScanRequest) -> dict:
 def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
     """目录树与 TXT+OpenList 基线共享后台读取/证据持久化路径。"""
 
-    from app.media_v4.sources.input_archive import archive_tree_input
+    from app.media_v4.sources.input_archive import InputArchiveError, archive_tree_input
     from app.media_v4.sources.source_scan_runner import (
         InputArchive,
         get_source_scan_runner,
@@ -1475,7 +1476,10 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
 
     # 身份与词法解析必须在创建 root/scan 之前完成：只读用户选定的 TXT，
     # 不触源盘。解析结果随 request 持久化，恢复路径复用同一结论。
-    tree_text = read_directory_tree_text(request.tree_file)
+    try:
+        tree_text = read_directory_tree_text(request.tree_file)
+    except DirectoryTreeReadError as exc:
+        raise HTTPException(status_code=400, detail=_directory_tree_error_message(exc)) from exc
     resolution = TreePlaybackRootResolver(
         request.tree_file,
         configured_roots=configured_roots,
@@ -1491,7 +1495,15 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
     database = get_database()
     identity_root = resolution.root or configured_roots[0]
     scan_id = "scan_" + uuid.uuid4().hex
-    fact = archive_tree_input(root_id, request.tree_file)
+    try:
+        fact = archive_tree_input(root_id, request.tree_file)
+    except InputArchiveError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="目录树 TXT 无法归档，请确认文件可读、本机数据目录可写后重试",
+        ) from exc
     archive = InputArchive(
         archive_path=str(fact["archive_path"]),
         sha256=str(fact["sha256"]),
@@ -1529,7 +1541,8 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
                 "resolution_ok": resolution.ok,
                 "resolution_reason": resolution.reason,
                 "resolution_candidates": list(resolution.candidates),
-                "tree_file_path": str(Path(request.tree_file).expanduser().resolve()),
+                # 展示原 TXT 位置只需词法绝对路径；resolve 会探测虚拟挂载卷。
+                "tree_file_path": os.path.abspath(os.path.expanduser(request.tree_file)),
                 "remote_root": remote_root,
                 "scan_mode": scan_mode,
             },
