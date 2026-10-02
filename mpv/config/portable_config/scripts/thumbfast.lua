@@ -29,6 +29,12 @@ local options = {
     -- Apply tone-mapping, no to disable
     tone_mapping = "auto",
 
+    -- HDR 预览渲染后端：zscale（上游默认）或 gpu（内置 MPV 无 zscale）。
+    tone_mapping_backend = "zscale",
+
+    -- 预览是辅助功能，失败时仅记录日志并关闭当前文件的预览。
+    quiet_failures = false,
+
     -- Overlay id
     overlay_id = 42,
 
@@ -143,6 +149,7 @@ local force_disabled = false
 local spawn_waiting = false
 local spawn_working = false
 local spawn_generation = 0
+local tone_mapping_disabled = false
 local script_written = false
 
 local dirty = false
@@ -348,7 +355,7 @@ local function vf_string(filters, full)
         end
     end
 
-    if (full and options.tone_mapping ~= "no") or options.tone_mapping == "auto" then
+    if not tone_mapping_disabled and ((full and options.tone_mapping ~= "no") or options.tone_mapping == "auto") then
         if properties["video-params"] and properties["video-params"]["primaries"] == "bt.2020" then
             local tone_mapping = options.tone_mapping
             if tone_mapping == "auto" then
@@ -361,7 +368,11 @@ local function vf_string(filters, full)
                 tone_mapping = "hable"
             end
             last_tone_mapping = tone_mapping
-            vf = vf .. "zscale=transfer=linear,format=gbrpf32le,tonemap="..tone_mapping..",zscale=transfer=bt709,"
+            if options.tone_mapping_backend == "gpu" then
+                vf = vf .. "gpu=w="..effective_w..":h="..effective_h..":api=vulkan,"
+            else
+                vf = vf .. "zscale=transfer=linear,format=gbrpf32le,tonemap="..tone_mapping..",zscale=transfer=bt709,"
+            end
         end
     end
 
@@ -473,6 +484,13 @@ local function spawn(time)
         "--ovc=rawvideo", "--of=image2", "--ofopts=update=1", "--o="..options.thumbnail
     }
 
+    if options.tone_mapping_backend == "gpu" then
+        -- 只约束预览子进程的输出色域，主播放器的 HDR 输出保持独立。
+        table.insert(args, "--target-prim=bt.709")
+        table.insert(args, "--target-trc=srgb")
+        table.insert(args, "--tone-mapping=hable")
+    end
+
     if not pre_0_30_0 then
         table.insert(args, "--sws-allow-zimg=no")
     end
@@ -520,8 +538,19 @@ local function spawn(time)
             if spawn_waiting and (success == false or (result.status ~= 0 and result.status ~= -2)) then
                 spawned = false
                 spawn_waiting = false
-                options.tone_mapping = "no"
-                mp.msg.error("mpv subprocess create failed")
+                mp.msg.warn("thumbnail subprocess failed (status="..tostring(result and result.status)..")")
+                if not tone_mapping_disabled and options.tone_mapping ~= "no" and
+                    properties["video-params"] and properties["video-params"]["primaries"] == "bt.2020" then
+                    -- 显卡/API 不可用时仅重试一次普通缩略图，不污染后续文件。
+                    tone_mapping_disabled = true
+                    spawn(last_seek_time or time)
+                    return
+                end
+                if options.quiet_failures then
+                    force_disabled = true
+                    info(real_w or effective_w, real_h or effective_h)
+                    return
+                end
                 if not spawn_working then -- notify users of required configuration
                     if options.mpv_path == "mpv" then
                         if properties["current-vo"] == "libmpv" then
@@ -898,6 +927,8 @@ end
 local function file_load()
     spawn_generation = spawn_generation + 1
     spawn_waiting = false
+    tone_mapping_disabled = false
+    if options.quiet_failures then force_disabled = false end
     clear()
     spawned = false
     real_w, real_h = nil, nil
