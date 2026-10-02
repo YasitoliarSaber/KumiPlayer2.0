@@ -9,6 +9,10 @@ import App from './App.tsx'
 import { initializeDesktopApiSession } from './api/desktopSession'
 import AppErrorBoundary from './components/errors/AppErrorBoundary'
 import RecoveryView from './components/errors/RecoveryView'
+import { installDesktopInteractions } from './platform/desktopInteractions'
+
+const uninstallDesktopInteractions = installDesktopInteractions()
+import.meta.hot?.dispose(uninstallDesktopInteractions)
 
 async function bootstrap(): Promise<void> {
   await initializeDesktopApiSession()

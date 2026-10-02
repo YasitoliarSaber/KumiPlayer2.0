@@ -20,8 +20,10 @@ export default function DecodedImage({
 }: DecodedImageProps) {
   const imageRef = useRef<HTMLImageElement | null>(null);
   const generationRef = useRef(0);
+  const sourceRef = useRef(src);
   const readyGenerationRef = useRef(0);
   const decodedGenerationRef = useRef(0);
+  const decodingGenerationRef = useRef(0);
   const [imageState, setImageState] = useState<ImageState>(src ? 'loading' : 'error');
 
   const revealImage = (image: HTMLImageElement, generation: number) => {
@@ -36,6 +38,9 @@ export default function DecodedImage({
   };
 
   const revealDecodedImage = async (image: HTMLImageElement, generation: number) => {
+    // 缓存命中的挂载检查和 load 可能同时到达；每个地址代次只解码一次。
+    if (decodingGenerationRef.current === generation) return;
+    decodingGenerationRef.current = generation;
     try {
       await image.decode();
     } catch {
@@ -53,9 +58,13 @@ export default function DecodedImage({
   };
 
   useLayoutEffect(() => {
-    const generation = generationRef.current + 1;
-    generationRef.current = generation;
-    setImageState(src ? 'loading' : 'error');
+    // 地址变化才开启新代次；StrictMode 重放效果不能重复解码或重置 ready。
+    if (generationRef.current === 0 || sourceRef.current !== src) {
+      sourceRef.current = src;
+      generationRef.current += 1;
+      setImageState(src ? 'loading' : 'error');
+    }
+    const generation = generationRef.current;
 
     const image = imageRef.current;
     if (src && image?.complete && image.naturalWidth > 0) {

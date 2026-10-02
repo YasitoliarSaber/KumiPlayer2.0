@@ -63,14 +63,9 @@ export function calculatePosterGridMetrics({
 export function hasVisibleWindowChanged(layout: VirtualScrollLayout, nextScrollTop: number) {
   if (layout.scrollTop === nextScrollTop) return false;
   const rowHeight = Math.max(1, layout.rowHeight);
-  const getWindowEdges = (scrollTop: number) => {
+  const getFirstRow = (scrollTop: number) => {
     const relativeTop = Math.max(0, scrollTop - layout.top);
-    return [
-      Math.floor(relativeTop / rowHeight),
-      Math.ceil((relativeTop + layout.viewportHeight) / rowHeight),
-    ];
+    return Math.floor(relativeTop / rowHeight);
   };
-  const [currentStart, currentEnd] = getWindowEdges(layout.scrollTop);
-  const [nextStart, nextEnd] = getWindowEdges(nextScrollTop);
-  return currentStart !== nextStart || currentEnd !== nextEnd;
+  return getFirstRow(layout.scrollTop) !== getFirstRow(nextScrollTop);
 }

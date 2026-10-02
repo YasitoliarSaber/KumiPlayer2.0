@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { expect, test, vi } from 'vitest';
+import { StrictMode } from 'react';
 import DecodedImage from '../../src/components/ui/DecodedImage';
 
 test('图片在浏览器解码完成前保持隐藏，完成后再一次性显示', async () => {
@@ -101,6 +102,7 @@ test('缓存命中也等待解码完成，每次状态变化只通知单卡一�
   expect(onStateChange.mock.calls.map(([state]) => state)).toEqual(['loading', 'ready']);
 
   await act(async () => { fireEvent.load(screen.getByRole('img')); });
+  expect(decode).toHaveBeenCalledTimes(1);
   expect(onStateChange.mock.calls.map(([state]) => state)).toEqual(['loading', 'ready']);
 });
 
@@ -123,4 +125,16 @@ test('地址切换后旧图片的异步解码不得覆盖新图片加载状态',
   await act(async () => { resolutions[1](); });
   expect(screen.getByRole('img')).toHaveAttribute('data-image-state', 'ready');
   expect(onStateChange.mock.calls.map(([state]) => state)).toEqual(['loading', 'ready']);
+});
+
+test('StrictMode 重放挂载效果时同一缓存地址仍只解码一次', async () => {
+  const decode = vi.fn().mockResolvedValue(undefined);
+  vi.spyOn(HTMLImageElement.prototype, 'complete', 'get').mockReturnValue(true);
+  vi.spyOn(HTMLImageElement.prototype, 'naturalWidth', 'get').mockReturnValue(384);
+  Object.defineProperty(HTMLImageElement.prototype, 'decode', { configurable: true, value: decode });
+  render(<StrictMode><DecodedImage src="http://127.0.0.1/cached.jpg" alt="缓存海报" revealOnLoad /></StrictMode>);
+  await waitFor(() => expect(screen.getByRole('img')).toHaveAttribute('data-image-state', 'ready'));
+  expect(decode).toHaveBeenCalledTimes(1);
+  fireEvent.load(screen.getByRole('img'));
+  expect(decode).toHaveBeenCalledTimes(1);
 });

@@ -46,7 +46,8 @@ def test_virtual_poster_grid_coalesces_scroll_updates_per_animation_frame():
     assert "let scrollFrame = 0;" in component
     assert "scrollFrame = window.requestAnimationFrame" in component
     assert "window.cancelAnimationFrame(scrollFrame)" in component
-    assert "if (!hasVisibleWindowChanged(current, scrollTop)) return current;" in component
+    assert "if (!hasVisibleWindowChanged(current, scrollTop)) return;" in component
+    assert component.index("if (!hasVisibleWindowChanged(current, scrollTop)) return;") < component.index("setLayout(next)")
 
 
 def test_virtual_poster_grid_clamps_the_start_row_when_results_shrink():

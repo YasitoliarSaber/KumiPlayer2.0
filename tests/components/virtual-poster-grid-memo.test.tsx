@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
+import { Profiler } from 'react';
 import { beforeEach, expect, test, vi } from 'vitest';
 import VirtualizedPosterGrid from '../../src/components/library/VirtualizedPosterGrid';
 import { calculatePosterGridMetrics } from '../../src/components/library/posterGridMetrics';
@@ -139,7 +140,7 @@ test('缓冲两行的挂载窗口提前加载图片且数量受窗口计算约�
   const gap = Math.max(22, Math.min(32, window.innerWidth * 0.0155));
   const { rowHeight } = calculatePosterGridMetrics({ width: 1000, gap, requestedColumns: 4, imageMode: 'poster', metaHeight: 62 });
   const firstRow = Math.floor(2500 / rowHeight) - 2;
-  const lastRow = Math.ceil((2500 + 900) / rowHeight) + 2;
+  const lastRow = Math.floor(2500 / rowHeight) + Math.ceil(900 / rowHeight) + 2;
   const images = screen.getAllByRole('img');
   expect(images).toHaveLength((lastRow - firstRow + 1) * 4);
   expect(images[0]).toHaveAttribute('alt', `作品${firstRow * 4}`);
@@ -147,4 +148,29 @@ test('缓冲两行的挂载窗口提前加载图片且数量受窗口计算约�
     expect(image).toHaveAttribute('loading', 'eager');
     expect(image).toHaveAttribute('fetchpriority', 'auto');
   }
+});
+
+test('快速滚动在同一行内不提交网格更新，跨行时只更新一次窗口', async () => {
+  const onRender = vi.fn();
+  const works = Array.from({ length: 200 }, (_, index) => work(`w${index}`, `作品${index}`));
+  render(<main className="app-main"><Profiler id="grid" onRender={onRender}>
+    <VirtualizedPosterGrid works={works} columns={4} />
+  </Profiler></main>);
+  await act(async () => {});
+  onRender.mockClear();
+  const main = document.querySelector<HTMLElement>('.app-main')!;
+  const gap = Math.max(22, Math.min(32, window.innerWidth * 0.0155));
+  const { rowHeight } = calculatePosterGridMetrics({ width: 1000, gap, requestedColumns: 4, imageMode: 'poster', metaHeight: 62 });
+  // 旧逻辑在视口底部跨行和顶部跨行时分别更新，同一行末端也会额外挂载图片。
+  for (const fraction of [0.4, 0.8, 0.99]) {
+    main.scrollTop = rowHeight * fraction;
+    fireEvent.scroll(main);
+    await act(async () => { await new Promise<void>((resolve) => requestAnimationFrame(() => resolve())); });
+  }
+  expect(onRender).not.toHaveBeenCalled();
+  main.scrollTop = rowHeight * 1.01;
+  fireEvent.scroll(main);
+  fireEvent.scroll(main);
+  await act(async () => { await new Promise<void>((resolve) => requestAnimationFrame(() => resolve())); });
+  expect(onRender).toHaveBeenCalledTimes(1);
 });

@@ -12872,16 +12872,8 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
   }
 }
 
-/* Global scroll progress and back-to-top control. */
+/* Range controls and detail command surfaces. */
 :root[data-theme='fluent'] {
-  --scroll-progress-surface: rgb(248 250 251 / .72);
-  --scroll-progress-surface-hover: rgb(250 252 253 / .88);
-  --scroll-progress-border: rgb(45 54 60 / .14);
-  --scroll-progress-ink: #313c42;
-  --scroll-progress-track: rgb(49 59 65 / .18);
-  --scroll-progress-ring: rgb(49 59 65 / .68);
-  --scroll-progress-ring-glow: rgb(248 250 251 / .44);
-  --scroll-progress-shadow: 0 4px 14px rgb(16 24 30 / .14), inset 0 1px 0 rgb(255 255 255 / .62);
   --range-track: rgb(0 0 0 / .14);
   --range-fill: rgb(82 125 156 / .85);
   --range-thumb: rgb(255 255 255 / .98);
@@ -12899,14 +12891,6 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 }
 
 :root[data-theme='cinema'] {
-  --scroll-progress-surface: rgb(24 24 24 / .68);
-  --scroll-progress-surface-hover: rgb(30 30 30 / .82);
-  --scroll-progress-border: rgb(255 255 255 / .14);
-  --scroll-progress-ink: rgb(255 255 255 / .84);
-  --scroll-progress-track: rgb(255 255 255 / .18);
-  --scroll-progress-ring: rgb(255 255 255 / .66);
-  --scroll-progress-ring-glow: rgb(0 0 0 / .36);
-  --scroll-progress-shadow: 0 4px 14px rgb(0 0 0 / .22), inset 0 1px 0 rgb(255 255 255 / .16);
   --range-track: rgb(255 255 255 / .18);
   --range-fill: rgb(98 171 245 / .90);
   --range-thumb: rgb(240 242 245 / .98);
@@ -12923,14 +12907,6 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
 }
 
 :root[data-theme='mica'] {
-  --scroll-progress-surface: rgb(255 255 255 / .78);
-  --scroll-progress-surface-hover: rgb(255 255 255 / .92);
-  --scroll-progress-border: rgb(43 48 53 / .14);
-  --scroll-progress-ink: #2b3035;
-  --scroll-progress-track: rgb(43 48 53 / .17);
-  --scroll-progress-ring: rgb(43 48 53 / .66);
-  --scroll-progress-ring-glow: rgb(255 255 255 / .60);
-  --scroll-progress-shadow: 0 4px 14px rgb(31 39 46 / .12), inset 0 1px 0 rgb(255 255 255 / .70);
   --range-track: rgb(43 48 53 / .14);
   --range-fill: rgb(88 101 112 / .82);
   --range-thumb: rgb(255 255 255 / .98);
@@ -12944,128 +12920,6 @@ body > .detail-tool-overlay .candidate-card:is(:hover, :focus-visible) {
   --detail-command-muted: rgb(231 236 240 / .84);
   --detail-command-border: rgb(255 255 255 / .18);
   --detail-command-shadow: 0 8px 22px rgb(0 0 0 / .16), inset 0 1px 0 rgb(255 255 255 / .10);
-}
-
-.scroll-progress-button {
-  position: fixed;
-  top: auto;
-  left: calc(var(--sidebar-width, 56px) + 18px);
-  right: auto;
-  bottom: 30px;
-  z-index: 34;
-  display: grid;
-  width: 52px;
-  height: 52px;
-  place-items: center;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--scroll-progress-ink);
-  cursor: pointer;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(8px) scale(.92);
-  transition: opacity 140ms var(--ease-out), transform 160ms var(--ease-out);
-}
-
-.scroll-progress-button::before {
-  content: '';
-  position: absolute;
-  inset: 6px;
-  z-index: 0;
-  border: 1px solid var(--scroll-progress-border);
-  border-radius: 50%;
-  background: var(--scroll-progress-surface);
-  box-shadow: var(--scroll-progress-shadow);
-  backdrop-filter: blur(16px) saturate(1.08);
-  -webkit-backdrop-filter: blur(16px) saturate(1.08);
-  transition: background-color 160ms var(--ease-out), border-color 160ms var(--ease-out), box-shadow 160ms var(--ease-out), transform 160ms var(--ease-out);
-}
-
-.scroll-progress-button.is-visible {
-  opacity: 1;
-  pointer-events: auto;
-  transform: none;
-}
-
-.scroll-progress-status {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  white-space: nowrap;
-  clip-path: inset(50%);
-}
-
-.scroll-progress-ring {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  width: 52px;
-  height: 52px;
-  overflow: visible;
-  transform: rotate(-90deg);
-}
-
-.scroll-progress-ring-track {
-  fill: none;
-  stroke: var(--scroll-progress-track);
-  stroke-width: 1;
-}
-
-.scroll-progress-ring-value {
-  fill: none;
-  stroke: var(--scroll-progress-ring);
-  stroke-width: 2.25;
-  stroke-linecap: round;
-  filter: drop-shadow(0 0 4px var(--scroll-progress-ring-glow));
-  transition: stroke-dashoffset 90ms linear;
-}
-
-.scroll-progress-button > svg + svg {
-  position: relative;
-  z-index: 2;
-}
-
-.scroll-progress-button:is(:hover, :focus-visible) {
-  transform: translateY(-2px);
-}
-
-.scroll-progress-button:is(:hover, :focus-visible)::before {
-  border-color: color-mix(in srgb, var(--scroll-progress-border) 64%, var(--scroll-progress-ink));
-  background: var(--scroll-progress-surface-hover);
-  box-shadow: 0 6px 18px rgb(0 0 0 / .18), inset 0 1px 0 rgb(255 255 255 / .32);
-}
-
-.scroll-progress-button:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--scroll-progress-ink) 58%, transparent);
-  outline-offset: 2px;
-}
-
-.scroll-progress-button:active { transform: none; }
-.scroll-progress-button:active::before { transform: scale(.96); }
-
-@media (max-width: 760px) {
-  .scroll-progress-button {
-    left: calc(var(--sidebar-width, 56px) + 12px);
-    right: auto;
-    bottom: 22px;
-  }
-}
-
-:root[data-motion='reduced'] .scroll-progress-button,
-:root[data-motion='reduced'] .scroll-progress-button::before,
-:root[data-motion='reduced'] .scroll-progress-ring-value {
-  transition: none !important;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .scroll-progress-button,
-  .scroll-progress-button::before,
-  .scroll-progress-ring-value {
-    transition: none !important;
-  }
 }
 
 /* Poster wall scroll performance */

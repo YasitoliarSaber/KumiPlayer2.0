@@ -1,7 +1,6 @@
-import { type CSSProperties, type ReactNode, useRef } from 'react';
+import { type CSSProperties, type ReactNode } from 'react';
 import Sidebar from './Sidebar';
 import DesktopTitleBar from './DesktopTitleBar';
-import ScrollProgressButton from './ScrollProgressButton';
 import { SIDEBAR_WIDTHS, useUiStore } from '../../stores/ui';
 
 interface AppShellProps {
@@ -9,8 +8,7 @@ interface AppShellProps {
 }
 
 export default function AppShell({ children }: AppShellProps) {
-  const { sidebarMode } = useUiStore();
-  const mainRef = useRef<HTMLElement>(null);
+  const sidebarMode = useUiStore((state) => state.sidebarMode);
 
   return (
     <div
@@ -22,9 +20,8 @@ export default function AppShell({ children }: AppShellProps) {
     >
       <DesktopTitleBar />
       <Sidebar />
-      <main ref={mainRef} className="app-main flex-1">
+      <main className="app-main flex-1">
         <div className="app-content px-4 pb-5 2xl:px-6">{children}</div>
-        <ScrollProgressButton scrollContainerRef={mainRef} />
       </main>
     </div>
   );

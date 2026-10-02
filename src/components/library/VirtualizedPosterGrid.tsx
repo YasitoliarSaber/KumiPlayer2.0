@@ -41,6 +41,7 @@ export default function VirtualizedPosterGrid({
     viewportHeight: typeof window === 'undefined' ? 900 : window.innerHeight,
     scrollTop: typeof window === 'undefined' ? 0 : window.scrollY,
   });
+  const layoutRef = useRef(layout);
 
   useLayoutEffect(() => {
     let measureFrame = 0;
@@ -70,7 +71,7 @@ export default function VirtualizedPosterGrid({
       const measuredColumns = metrics.effectiveColumns;
       onColumnCapacityChange?.(metrics.columnCapacity);
       setEffectiveColumns((current) => current === measuredColumns ? current : measuredColumns);
-      setLayout({
+      const measuredLayout = {
         top: scrollContainer && containerRect
           ? rect.top - containerRect.top + currentScrollTop()
           : rect.top + window.scrollY,
@@ -78,7 +79,9 @@ export default function VirtualizedPosterGrid({
         columnWidth: metrics.columnWidth,
         viewportHeight: currentViewportHeight(),
         scrollTop: currentScrollTop(),
-      });
+      };
+      layoutRef.current = measuredLayout;
+      setLayout(measuredLayout);
     };
 
     const requestMeasure = () => {
@@ -91,10 +94,12 @@ export default function VirtualizedPosterGrid({
       scrollFrame = window.requestAnimationFrame(() => {
         scrollFrame = 0;
         const scrollTop = currentScrollTop();
-        setLayout((current) => {
-          if (!hasVisibleWindowChanged(current, scrollTop)) return current;
-          return { ...current, scrollTop };
-        });
+        // 先比较行窗口再调用 setState，避免同一行内也进入 React 更新队列。
+        const current = layoutRef.current;
+        if (!hasVisibleWindowChanged(current, scrollTop)) return;
+        const next = { ...current, scrollTop };
+        layoutRef.current = next;
+        setLayout(next);
       });
     };
 
@@ -140,10 +145,12 @@ export default function VirtualizedPosterGrid({
   const totalRows = Math.ceil(works.length / effectiveColumns);
   const visible = useMemo(() => {
     const relativeTop = Math.max(0, layout.scrollTop - layout.top);
-    const rawStartRow = Math.max(0, Math.floor(relativeTop / layout.rowHeight) - OVERSCAN_ROWS);
+    const firstVisibleRow = Math.floor(relativeTop / layout.rowHeight);
+    const rawStartRow = Math.max(0, firstVisibleRow - OVERSCAN_ROWS);
     const maxStartRow = Math.max(0, totalRows - 1);
     const startRow = Math.min(maxStartRow, rawStartRow);
-    const rawEndRow = Math.ceil((relativeTop + layout.viewportHeight) / layout.rowHeight) + OVERSCAN_ROWS;
+    // 包含当前行内任意偏移所需的底部行，窗口只随顶部跨行移动。
+    const rawEndRow = firstVisibleRow + Math.ceil(layout.viewportHeight / layout.rowHeight) + OVERSCAN_ROWS;
     const endRow = totalRows === 0 ? -1 : Math.max(
       startRow,
       Math.min(totalRows - 1, rawEndRow),
