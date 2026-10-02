@@ -7,7 +7,7 @@
 import { useEffect, useState } from 'react';
 import { Button, Input, Radio, RadioGroup, Select, Spinner } from '@fluentui/react-components';
 import { ArrowLeft, CheckCircle2, FolderOpen, TriangleAlert } from 'lucide-react';
-import { configApi, type PublicConfig, type MpvValidationResult } from '../api/config';
+import { configApi, type PublicConfig, type MpvValidationResult, type MpvRuntimeStatus } from '../api/config';
 import { pickFile } from '../platform/folderPicker';
 import { useUiStore } from '../stores/ui';
 import '../styles/player-tuning.css';
@@ -38,7 +38,14 @@ const QUALITY_OPTIONS: Array<{ value: Anime4kQuality; label: string }> = [
   { value: 'high', label: '高质量' },
 ];
 
-export default function PlayerTuningPage() {
+export default function PlayerTuningPage({ embedded = false, initialConfig, runtimeStatus, externalBusy = false, onConfigSaved, onPlayerTested }: {
+  embedded?: boolean;
+  initialConfig?: PublicConfig;
+  runtimeStatus?: MpvRuntimeStatus | null;
+  externalBusy?: boolean;
+  onConfigSaved?: (config: PublicConfig) => void;
+  onPlayerTested?: () => Promise<void>;
+} = {}) {
   const goBack = useUiStore((state) => state.goBack);
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [mode, setMode] = useState<Anime4kMode>('off');
@@ -59,14 +66,22 @@ export default function PlayerTuningPage() {
     let cancelled = false;
     setLoading(true);
     setError('');
+    const applyConfig = (data: PublicConfig) => {
+      setConfig(data);
+      setMode(data.mpv_anime4k_mode || 'off');
+      setQuality(data.mpv_anime4k_quality || 'balanced');
+      setPlayerMode(data.player_mode === 'external' ? 'external' : 'internal');
+      setExternalPath(data.external_mpv_path || (data.player_mode === 'external' ? data.mpv_path : '') || '');
+    };
+    if (initialConfig) {
+      applyConfig(initialConfig);
+      setLoading(false);
+      return () => { cancelled = true; };
+    }
     configApi.getConfig()
       .then((data) => {
         if (cancelled) return;
-        setConfig(data);
-        setMode(data.mpv_anime4k_mode || 'off');
-        setQuality(data.mpv_anime4k_quality || 'balanced');
-        setPlayerMode(data.player_mode === 'external' ? 'external' : 'internal');
-        setExternalPath(data.external_mpv_path || (data.player_mode === 'external' ? data.mpv_path : '') || '');
+        applyConfig(data);
       })
       .catch((err: Error) => {
         if (!cancelled) setError(`读取配置失败：${err.message}`);
@@ -75,9 +90,10 @@ export default function PlayerTuningPage() {
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [loadAttempt]);
+    // 连续播放等无关设置保存时保留播放器草稿；仅同步播放器字段的外部变更。
+  }, [loadAttempt, initialConfig?.player_mode, initialConfig?.external_mpv_path, initialConfig?.mpv_path, initialConfig?.mpv_anime4k_mode, initialConfig?.mpv_anime4k_quality]);
 
-  const busy = loading || saving || testing || openingConfigDir;
+  const busy = loading || saving || testing || openingConfigDir || externalBusy;
   const selectionChanged = !!config && (
     playerMode !== (config.player_mode === 'external' ? 'external' : 'internal')
     || (playerMode === 'external' && externalPath.trim() !== (config.external_mpv_path || config.mpv_path || ''))
@@ -101,7 +117,9 @@ export default function PlayerTuningPage() {
         ...(playerMode === 'internal' ? { mpv_anime4k_mode: mode, mpv_anime4k_quality: quality } : {}),
       };
       const updated = await configApi.patchConfig(patch);
-      setConfig({ ...config, ...patch, ...updated });
+      const nextConfig = { ...config, ...patch, ...updated };
+      setConfig(nextConfig);
+      onConfigSaved?.(nextConfig);
       setSaved(true);
     } catch (err) {
       setError(`保存失败：${(err as Error).message}`);
@@ -146,7 +164,11 @@ export default function PlayerTuningPage() {
       const result = playerMode === 'external'
         ? await configApi.testMpv(externalPath.trim(), 'external')
         : await configApi.testMpv();
-      setValidation(result);
+      const checked = playerMode === 'internal' && (result.plugin_available === false || result.integration_available === false)
+        ? { ...result, ok: false, message: '内置播放脚本不完整，请检查 Anime4K、截图、快捷键和菜单联动脚本，或修复应用安装。' }
+        : result;
+      setValidation(checked);
+      if (playerMode === 'internal') await onPlayerTested?.();
       if (result.ok && result.executable_path && playerMode === 'external') setExternalPath(result.executable_path);
     } catch (err) {
       setError(`检测失败：${(err as Error).message}`);
@@ -156,21 +178,21 @@ export default function PlayerTuningPage() {
   };
 
   return (
-    <div className="player-tuning-page player-tuning-page--compact">
-      <div className="player-tuning-header">
+    <div className={`player-tuning-page player-tuning-page--compact${embedded ? ' player-tuning-page--embedded' : ''}`}>
+      {!embedded && <div className="player-tuning-header">
         <Button appearance="subtle" icon={<ArrowLeft size={16} />} onClick={() => goBack()}>返回</Button>
         <div>
           <span className="player-tuning-kicker">播放设置</span>
           <h2>播放器调节</h2>
         </div>
-      </div>
+      </div>}
 
       <p className="player-tuning-note">选择播放器，再调整它的默认效果。保存后对新开始播放的视频生效。</p>
       {loading && <div className="player-tuning-loading" role="status"><Spinner size="tiny" /> 正在读取配置…</div>}
       {!loading && !config && <Button onClick={() => setLoadAttempt((value) => value + 1)}>重新读取</Button>}
       {config && !loading && <>
       <section className="player-tuning-section">
-        <h3 id="player-mode-label">使用哪个播放器</h3>
+        <h3 id="player-mode-label">选择播放器</h3>
         <RadioGroup aria-labelledby="player-mode-label" value={playerMode} disabled={busy}
           onChange={(_, data) => { clearFeedback(); setPlayerMode(data.value as PlayerMode); }}>
           {PLAYER_MODE_OPTIONS.map((item) => <Radio key={item.value} value={item.value} label={item.label} />)}
@@ -202,6 +224,12 @@ export default function PlayerTuningPage() {
             {openingConfigDir ? '正在打开…' : '打开 MPV 配置文件夹'}
           </Button>
         </div>
+        <p className="player-tuning-note">{playerMode === 'internal'
+          ? '检测内置 MPV 的启动与版本、运行文件完整性，以及 KumiPlayer 的 Anime4K 画质脚本、截图脚本、快捷键及 uosc 菜单联动脚本是否齐全；文件检查不代表已验证所有插件的实际运行效果。'
+          : '检测所选 MPV 能否启动并读取版本；不会检查或改写外部整合包的插件和配置。'}</p>
+        {playerMode === 'internal' && runtimeStatus && !validation && <p className="player-tuning-note" role="status">{runtimeStatus.available && runtimeStatus.manifest_valid && runtimeStatus.files_valid && runtimeStatus.configuration_available && runtimeStatus.scripts_available
+          ? '内置播放器已就绪'
+          : '内置播放器文件或脚本需要检查，请点击「检测播放器」查看结果。'}</p>}
         {selectionChanged && <p className="player-tuning-note">播放器或路径已更改，请先保存再打开对应配置文件夹。</p>}
         {validation && <div className={validation.ok ? 'player-tuning-saved' : 'player-tuning-error'} role={validation.ok ? 'status' : 'alert'}>
           {validation.ok ? <CheckCircle2 size={15} /> : <TriangleAlert size={15} />}

@@ -35,3 +35,6 @@
     .player-tuning-page--compact .player-tuning-fields { grid-template-columns: 1fr; }
   }
 }
+
+.settings-focused .player-tuning-page--embedded { width: 100%; padding: 0; margin: 0; gap: 12px; }
+.settings-focused .player-tuning-page--embedded .player-tuning-section { background: var(--surface); border-radius: 8px; padding: 16px; gap: 12px; }

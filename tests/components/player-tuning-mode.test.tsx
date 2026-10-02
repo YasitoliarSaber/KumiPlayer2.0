@@ -67,6 +67,15 @@ test('检测内置播放器时使用内置运行时入口，不检查空白外�
   expect(await screen.findByText('内置播放器已就绪')).toBeVisible()
 })
 
+test('检测范围说明脚本用途，缺少脚本时不显示播放器完全就绪', async () => {
+  config.getConfig.mockResolvedValue(baseConfig())
+  config.testMpv.mockResolvedValue({ ok: true, message: '内置播放器已就绪', plugin_available: false })
+  render(<PlayerTuningPage />)
+  expect(await screen.findByText(/Anime4K 画质脚本、截图脚本、快捷键及 uosc 菜单联动脚本/)).toBeVisible()
+  fireEvent.click(screen.getByRole('button', { name: '检测播放器' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('内置播放脚本不完整')
+})
+
 test('外部整合包模式保存播放模式与路径，并承诺不修改整合包目录', async () => {
   config.getConfig.mockResolvedValue(baseConfig({
     player_mode: 'external',

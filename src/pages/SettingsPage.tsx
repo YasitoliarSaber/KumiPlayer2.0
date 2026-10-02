@@ -3,7 +3,6 @@ import { Button, Spinner } from '@fluentui/react-components';
 import {
   Database,
   ExternalLink,
-  FolderOpen,
   KeyRound,
   Network,
   Palette,
@@ -26,6 +25,7 @@ import DecodedImage from '../components/ui/DecodedImage';
 import OpenListSettingsPanel, { type OpenListDraft } from '../components/settings/OpenListSettingsPanel';
 import OpenListConnectionPicker from '../components/settings/OpenListConnectionPicker';
 import FolderPathInput from '../components/settings/FolderPathInput';
+import PlayerTuningPage from './PlayerTuningPage';
 import { openlistConnections, selectOpenlistConnection } from '../api/openlistConnections';
 import OpenListSourceRoutes from '../components/settings/OpenListSourceRoutes';
 import '../styles/settings-media-sources.css';
@@ -72,7 +72,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
     clearToken,
   } = useBangumiStore();
   const loadLibrary = useLibraryStore((state) => state.loadLibrary);
-  const { appearanceMode, setAppearanceMode, goPlayerTuning } = useUiStore();
+  const { appearanceMode, setAppearanceMode } = useUiStore();
   const [activeSection, setActiveSection] = useState<SettingsTab>('bangumi');
   const [baseConfig, setConfig] = useState<PublicConfig | null>(null);
   const [selectedConnectionId, setSelectedConnectionId] = useState('legacy');
@@ -245,16 +245,6 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
       setMpvRuntime(null);
     }
   };
-
-  const checkMpvRuntime = () => runAction('检测内置播放器', async () => {
-    await loadMpvRuntime();
-    report('内置播放器状态已刷新');
-  });
-
-  const openMpvConfigDir = () => runAction('打开 MPV 配置文件夹', async () => {
-    await configApi.openMpvConfigDir(config?.player_mode);
-    report('已打开 MPV 配置文件夹');
-  });
 
   const loadConfig = async () => {
     setConfigLoading(true);
@@ -601,43 +591,18 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
   const renderPlayer = () => (
     <PanelStack>
       <SectionIntro title="播放" />
-      {config && (
-        <SettingsSection title="当前播放器">
-          <div className="settings-player-choice">
-            <strong>{config.player_mode === 'external' ? '外部 MPV 整合包' : 'KumiPlayer 内置播放器'}</strong>
-            <p>{config.player_mode === 'external' ? '画质、Anime4K 和快捷键由整合包管理，播放进度记录在 KumiPlayer。' : '使用内置 MPV 和默认播放配置，可调整 Anime4K 画质。'}</p>
-          </div>
-          <div className="settings-actions">
-            <PrimaryButton onClick={() => goPlayerTuning()}>播放器与画质设置</PrimaryButton>
-            <GhostButton onClick={() => openMpvConfigDir()} busy={activeAction === '打开 MPV 配置文件夹'} disabled={activeAction !== null}><FolderOpen size={16} aria-hidden="true" />打开 MPV 配置文件夹</GhostButton>
-          </div>
-        </SettingsSection>
-      )}
+      {config && <PlayerTuningPage embedded initialConfig={config} runtimeStatus={mpvRuntime} externalBusy={Boolean(activeAction || configLoading)} onConfigSaved={setConfig} onPlayerTested={loadMpvRuntime} />}
       {config && <SettingsSection title="连续播放">
         <ToggleRow label="自动播放下一集" active={config.auto_play_next_episode} onChange={() => saveConfig({ auto_play_next_episode: !config.auto_play_next_episode })} />
       </SettingsSection>}
       {config && (
-        <SettingsSection title="高级与诊断" collapsible>
+        <SettingsSection title="界面连接监测">
           <div className="settings-field-list">
-            <div className="mpv-runtime-card">
-              <div className="mpv-runtime-head">
-                <strong>{mpvRuntime?.available && mpvRuntime.manifest_valid && mpvRuntime.files_valid && mpvRuntime.configuration_available ? '内置播放器已就绪' : '正在确认内置播放器'}</strong>
-                <span className={`mpv-runtime-badge ${mpvRuntime?.available && mpvRuntime.manifest_valid && mpvRuntime.files_valid && mpvRuntime.configuration_available ? 'ok' : 'error'}`}>
-                  {mpvRuntime?.available && mpvRuntime.manifest_valid && mpvRuntime.files_valid && mpvRuntime.configuration_available ? '可用' : '需检查'}
-                </span>
-              </div>
-              <div className="mpv-runtime-message">
-                {mpvRuntime?.available && mpvRuntime.manifest_valid && mpvRuntime.files_valid && mpvRuntime.configuration_available
-                  ? '内置播放器文件完整，可随时切换使用。'
-                  : '重新检测可确认内置播放器是否完整；如仍无法使用，请修复应用安装后重试。'}
-              </div>
-            </div>
-            <ToggleRow label="播放心跳" active={config.heartbeat_enabled} onChange={() => saveConfig({ heartbeat_enabled: !config.heartbeat_enabled })} />
-            <NumberRow label="心跳超时秒数" value={config.heartbeat_timeout} onSave={(value) => saveConfig({ heartbeat_timeout: value })} />
-            <ToggleRow label="心跳超时后自动结束" active={config.auto_shutdown_on_heartbeat_timeout} onChange={() => saveConfig({ auto_shutdown_on_heartbeat_timeout: !config.auto_shutdown_on_heartbeat_timeout })} />
-          </div>
-          <div className="settings-actions">
-            <GhostButton onClick={() => checkMpvRuntime()} disabled={activeAction !== null}>{activeAction === '检测内置播放器' ? '检测中…' : '重新检测内置播放器'}</GhostButton>
+            <p className="field-help">界面定期向后台服务发送连接信号（心跳），用于发现界面关闭或连接中断，不用于检测视频是否正在播放。</p>
+            <ToggleRow label="界面连接监测（心跳）" active={config.heartbeat_enabled} onChange={() => saveConfig({ heartbeat_enabled: !config.heartbeat_enabled })} />
+            <NumberRow label="连接超时等待（秒）" value={config.heartbeat_timeout} onSave={(value) => saveConfig({ heartbeat_timeout: value })} />
+            <ToggleRow label="连接超时后退出空闲后台" active={config.auto_shutdown_on_heartbeat_timeout} onChange={() => saveConfig({ auto_shutdown_on_heartbeat_timeout: !config.auto_shutdown_on_heartbeat_timeout })} />
+            <p className="field-help">启用自动退出后，仅在应用窗口已关闭、连接超过等待时间，并且没有播放、导入等后台任务时结束后台服务；窗口仍打开或任务仍在运行时不会退出。</p>
           </div>
         </SettingsSection>
       )}
@@ -897,7 +862,7 @@ function ToggleRow({ label, active, onChange }: { label: string; active: boolean
   return (
     <div className="settings-toggle-row">
       <span>{label}</span>
-      <button onClick={onChange} className={`settings-switch ${active ? 'on' : ''}`} aria-label={label}>
+      <button role="switch" aria-checked={Boolean(active)} onClick={onChange} className={`settings-switch ${active ? 'on' : ''}`} aria-label={label}>
         <span />
       </button>
     </div>

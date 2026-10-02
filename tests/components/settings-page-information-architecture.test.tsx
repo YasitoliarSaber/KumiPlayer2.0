@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import SettingsPage from '../../src/pages/SettingsPage';
 import { pickFolder } from '../../src/platform/folderPicker';
-vi.mock('../../src/platform/folderPicker', () => ({ pickFolder: vi.fn() }));
+vi.mock('../../src/platform/folderPicker', () => ({ pickFolder: vi.fn(), pickFile: vi.fn() }));
 
 const api = vi.hoisted(() => ({
   getConfig: vi.fn(),
@@ -67,6 +67,10 @@ vi.mock('../../src/components/settings/OpenListSourceRoutes', () => ({
 }));
 
 const config = {
+  player_mode: 'internal',
+  external_mpv_path: '',
+  mpv_anime4k_mode: 'off',
+  mpv_anime4k_quality: 'balanced',
   openlist_configured: true,
   openlist_server_url: 'https://openlist.example.test',
   openlist_remote_root: '/',
@@ -186,10 +190,39 @@ describe('SettingsPage 信息架构', () => {
     expect(screen.queryByText('支持与赞助')).not.toBeInTheDocument();
     expect(screen.queryByText('KumiPlayer 构建标识')).not.toBeInTheDocument();
     expect(screen.getByText('KumiPlayer 内置播放器')).toBeVisible();
-    fireEvent.click(screen.getByText('高级与诊断'));
     expect(screen.getByText('内置播放器已就绪')).toBeVisible();
     expect(screen.queryByText('x86_64-pc-windows-msvc')).not.toBeInTheDocument();
     expect(screen.queryByText(/清单：/)).not.toBeInTheDocument();
+  });
+
+  test('播放分类直接选择播放器与画质，保存外部模式不会覆盖内置画质', async () => {
+    api.patchConfig.mockImplementation(async patch => ({ ...config, ...patch }));
+    render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: '播放' }));
+    expect(screen.getByText('KumiPlayer 内置播放器')).toBeVisible();
+    expect(screen.getByRole('combobox', { name: '模式' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: '播放器与画质设置' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '返回' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('radio', { name: '外部 MPV 整合包' }));
+    fireEvent.change(screen.getByLabelText('整合包 MPV 可执行文件'), { target: { value: 'J:/Pack/mpv.exe' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存默认设置' }));
+    await waitFor(() => expect(api.patchConfig).toHaveBeenCalledWith({ player_mode: 'external', external_mpv_path: 'J:/Pack/mpv.exe' }));
+    expect(screen.getByRole('radio', { name: '外部 MPV 整合包' })).toBeChecked();
+    expect(screen.queryByRole('combobox', { name: '模式' })).not.toBeInTheDocument();
+  });
+
+  test('连接监测说明真实作用，修改连续播放不会清掉未保存的播放器选择', async () => {
+    api.patchConfig.mockImplementation(async patch => ({ ...config, ...patch }));
+    render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: '播放' }));
+    expect(screen.getByText(/界面定期向后台服务发送连接信号/)).toBeVisible();
+    expect(screen.getByText(/没有播放、导入等后台任务/)).toBeVisible();
+    expect(screen.queryByText('播放心跳')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('radio', { name: '外部 MPV 整合包' }));
+    fireEvent.change(screen.getByLabelText('整合包 MPV 可执行文件'), { target: { value: 'J:/Pack/mpv.exe' } });
+    fireEvent.click(screen.getByRole('switch', { name: '自动播放下一集' }));
+    await waitFor(() => expect(api.patchConfig).toHaveBeenCalledWith({ auto_play_next_episode: true }));
+    expect(screen.getByLabelText('整合包 MPV 可执行文件')).toHaveValue('J:/Pack/mpv.exe');
   });
 
   test('切换分类显示单个面板，并返回内容顶部', async () => {
