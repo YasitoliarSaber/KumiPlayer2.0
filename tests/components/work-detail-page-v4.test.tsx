@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, expect, test, vi } from 'vitest';
 import { playbackApi } from '../../src/api/playback';
 import { useLibraryStore } from '../../src/stores/library';
@@ -301,6 +301,97 @@ test('播放剧集时沿用 V4 Work、Episode 和首选 Asset 身份', async () 
     episode_id: 'episode-1',
     asset_id: 'asset-primary',
   }));
+});
+
+const activePlayback = {
+  status: 'playing',
+  session: {
+    session_id: 'detail-session', status: 'playing', work_id: 'work-v4',
+    episode_id: 'episode-1', asset_id: 'asset-primary', playback_locator: '',
+  },
+};
+const savedProgress = {
+  work_id: 'work-v4', episode_id: 'episode-1', asset_id: 'asset-primary',
+  position: 120, duration: 600, completed: false, updated_at: '',
+};
+
+test('详情主按钮按真实播放器会话显示正在播放并阻止重复启动', async () => {
+  vi.mocked(playbackApi.getStatus).mockResolvedValue(activePlayback);
+  const play = vi.spyOn(playbackApi, 'play');
+  render(<WorkDetailPage />);
+  const button = await screen.findByRole('button', { name: /正在播放.*S01E01/ });
+  expect(button).toBeDisabled();
+  fireEvent.click(button);
+  expect(play).not.toHaveBeenCalled();
+});
+
+test('有未看完进度显示继续播放，零进度和已完成仍显示开始播放', async () => {
+  vi.mocked(playbackApi.getProgress).mockResolvedValue({ items: [savedProgress] });
+  const { unmount } = render(<WorkDetailPage />);
+  expect(await screen.findByRole('button', { name: /继续播放.*S01E01/ })).toBeEnabled();
+  unmount();
+  vi.mocked(playbackApi.getProgress).mockResolvedValue({ items: [{ ...savedProgress, completed: true }] });
+  render(<WorkDetailPage />);
+  expect(await screen.findByRole('button', { name: /开始播放.*S01E01/ })).toBeEnabled();
+});
+
+test('播放成功立即显示正在播放，不等待历史刷新', async () => {
+  vi.spyOn(useLibraryStore.getState(), 'refreshHistory').mockImplementation(() => new Promise(() => {}));
+  vi.spyOn(playbackApi, 'play').mockResolvedValue(activePlayback.session);
+  render(<WorkDetailPage />);
+  fireEvent.click(await screen.findByRole('button', { name: /开始播放.*S01E01/ }));
+  expect(await screen.findByRole('button', { name: /正在播放.*S01E01/ })).toBeDisabled();
+});
+
+test('播放器退出后回到窗口立即按保存进度显示继续播放', async () => {
+  vi.mocked(playbackApi.getStatus).mockResolvedValue(activePlayback);
+  render(<WorkDetailPage />);
+  await screen.findByRole('button', { name: /正在播放.*S01E01/ });
+  vi.mocked(playbackApi.getStatus).mockResolvedValue({
+    status: 'exited', session: { ...activePlayback.session, status: 'exited' },
+  });
+  vi.mocked(playbackApi.getProgress).mockResolvedValue({ items: [savedProgress] });
+  fireEvent(window, new Event('focus'));
+  expect(await screen.findByRole('button', { name: /继续播放.*S01E01/ })).toBeEnabled();
+});
+
+test('播放请求失败不会显示正在播放，也不会锁住按钮', async () => {
+  vi.spyOn(window, 'alert').mockImplementation(() => {});
+  vi.spyOn(playbackApi, 'play').mockRejectedValue(new Error('无法启动播放器'));
+  render(<WorkDetailPage />);
+  const button = await screen.findByRole('button', { name: /开始播放.*S01E01/ });
+  fireEvent.click(button);
+  await waitFor(() => expect(window.alert).toHaveBeenCalledWith('无法启动播放器'));
+  expect(button).toBeEnabled();
+  expect(screen.queryByRole('button', { name: /正在播放.*S01E01/ })).not.toBeInTheDocument();
+});
+
+test('启动前的迟到状态查询不能覆盖已确认的正在播放状态', async () => {
+  let resolveOldStatus!: (status: Awaited<ReturnType<typeof playbackApi.getStatus>>) => void;
+  vi.mocked(playbackApi.getStatus).mockReturnValueOnce(new Promise((resolve) => { resolveOldStatus = resolve; }));
+  vi.spyOn(useLibraryStore.getState(), 'refreshHistory').mockImplementation(() => new Promise(() => {}));
+  vi.spyOn(playbackApi, 'play').mockResolvedValue(activePlayback.session);
+  render(<WorkDetailPage />);
+  fireEvent.click(await screen.findByRole('button', { name: /开始播放.*S01E01/ }));
+  await screen.findByRole('button', { name: /正在播放.*S01E01/ });
+  await act(async () => resolveOldStatus({ status: 'idle', session: null }));
+  expect(screen.getByRole('button', { name: /正在播放.*S01E01/ })).toBeDisabled();
+});
+
+test('播放器切到下一集后主按钮同步真实剧集身份', async () => {
+  const twoEpisodes = {
+    ...work,
+    episodes: [work.episodes[0], { ...work.episodes[0], episode_id: 'episode-2', episode_number: 2, title: '继续旅程' }],
+  };
+  useLibraryStore.setState({ works: [twoEpisodes as never], getWorkDetail: vi.fn().mockResolvedValue(twoEpisodes) });
+  vi.mocked(playbackApi.getStatus).mockResolvedValue(activePlayback);
+  render(<WorkDetailPage />);
+  await screen.findByRole('button', { name: /正在播放.*S01E01/ });
+  vi.mocked(playbackApi.getStatus).mockResolvedValue({
+    status: 'playing', session: { ...activePlayback.session, episode_id: 'episode-2' },
+  });
+  fireEvent(window, new Event('focus'));
+  expect(await screen.findByRole('button', { name: /正在播放.*S01E02.*继续旅程/ })).toBeDisabled();
 });
 
 test('恢复旧版 Bangumi 同步标签，并保持它绑定当前 V4 Work', async () => {

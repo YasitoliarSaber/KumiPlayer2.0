@@ -27,7 +27,9 @@ import DecodedImage from '../components/ui/DecodedImage';
 import DetailSeasonPicker from '../components/media/DetailSeasonPicker';
 import {
   mergeActiveSessionProgress,
+  resolvePlaybackActionLabel,
   type PlaybackProgressItem,
+  type PlaybackStatusSnapshot,
 } from '../utils/playbackProgress';
 
 const scrapeApi = workDetailV4Compatibility.scrape;
@@ -145,6 +147,8 @@ export default function WorkDetailPage() {
   const [completedEpisodeIds, setCompletedEpisodeIds] = useState<Set<string>>(new Set());
   const [manualUnwatchedEpisodeIds, setManualUnwatchedEpisodeIds] = useState<Set<string>>(new Set());
   const [continueEpisodeId, setContinueEpisodeId] = useState('');
+  const [playbackStatus, setPlaybackStatus] = useState<PlaybackStatusSnapshot | null>(null);
+  const [playbackStarting, setPlaybackStarting] = useState(false);
   const [episodeContextMenu, setEpisodeContextMenu] = useState<EpisodeContextMenu>(null);
   const [bangumiCollection, setBangumiCollectionState] = useState<any>(null);
   const [auxiliaryReady, setAuxiliaryReady] = useState(false);
@@ -180,6 +184,7 @@ export default function WorkDetailPage() {
   const [episodeStripScrollable, setEpisodeStripScrollable] = useState(false);
   const auxiliaryRequestRef = useRef(0);
   const pendingPlaybackIntentRef = useRef<PendingPlaybackIntent>(null);
+  const playbackStatusRequestRef = useRef(0);
   const episodeStripRef = useRef<HTMLDivElement>(null);
   const episodeStripSliderRef = useRef<HTMLInputElement>(null);
   const episodeContextMenuRef = useRef<HTMLDivElement>(null);
@@ -359,6 +364,7 @@ export default function WorkDetailPage() {
 
   const refreshPlaybackSnapshot = async () => {
     if (!work) return null;
+    const statusRequestId = ++playbackStatusRequestRef.current;
     const selectedSeason = findSelectedSeason(work, selectedSeasonKey, selectedSeasonNumber);
     const cacheKey = auxiliaryCacheKey(work.work_id, selectedSeasonNumber, selectedSeason?.group_type);
     const next = getCacheEntry(cacheKey) || {
@@ -379,6 +385,11 @@ export default function WorkDetailPage() {
       playbackApi.getProgress(work.work_id),
       playbackApi.getStatus(),
     ]);
+
+    if (useUiStore.getState().selectedWorkId !== work.work_id) return null;
+    if (statusResult.status === 'fulfilled' && statusRequestId === playbackStatusRequestRef.current) {
+      setPlaybackStatus(statusResult.value);
+    }
 
     if (historyResult.status === 'fulfilled') {
       const payload = historyResult.value;
@@ -434,6 +445,8 @@ export default function WorkDetailPage() {
       const cached = getCacheEntry(cacheKey);
       if (cached) {
         applyAuxiliarySnapshot(cached);
+        // 资料缓存可以复用，播放会话和观看进度必须重新确认。
+        void refreshPlaybackSnapshot();
         return;
       }
     }
@@ -536,9 +549,24 @@ export default function WorkDetailPage() {
   }, [bangumiSessionStatus, work?.work_id]);
 
   useEffect(() => {
+    const requestId = ++playbackStatusRequestRef.current;
+    let disposed = false;
+    setPlaybackStatus(null);
+    if (work?.work_id) {
+      void playbackApi.getStatus().then((status) => {
+        if (!disposed && requestId === playbackStatusRequestRef.current) setPlaybackStatus(status);
+      }).catch(() => {});
+    }
+    return () => { disposed = true; };
+  }, [work?.work_id]);
+
+  useEffect(() => {
     if (!work) return;
     let disposed = false;
     let timer = 0;
+    const refreshWhenVisible = () => {
+      if (!disposed && !document.hidden) void refreshPlaybackSnapshot();
+    };
     const scheduleNextRefresh = () => {
       timer = window.setTimeout(async () => {
         if (!document.hidden) await refreshPlaybackSnapshot();
@@ -546,9 +574,13 @@ export default function WorkDetailPage() {
       }, 3000);
     };
     scheduleNextRefresh();
+    window.addEventListener('focus', refreshWhenVisible);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
     return () => {
       disposed = true;
       window.clearTimeout(timer);
+      window.removeEventListener('focus', refreshWhenVisible);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
     };
   }, [work, selectedSeasonNumber, selectedSeasonKey]);
 
@@ -696,6 +728,10 @@ export default function WorkDetailPage() {
   }, [episodes, continueEpisodeId, watchedEpisodeIds]);
   const continueProgress = continueTarget ? progressByEpisodeId.get(continueTarget.episode_id) : null;
   const continuePercent = progressPercent(continueProgress);
+  const playbackActionLabel = resolvePlaybackActionLabel(
+    playbackStatus, work?.work_id || '', continueTarget?.episode_id || '', continueProgress,
+  );
+  const isCurrentTargetPlaying = playbackActionLabel === '正在播放';
 
   useEffect(() => {
     if (!work?.work_id || !continueTarget || !episodes.length || useSpecialList) return;
@@ -1087,24 +1123,33 @@ export default function WorkDetailPage() {
   };
 
   const handlePlay = async (episodeId?: string) => {
+    if (pendingPlaybackIntentRef.current) return;
     try {
       // 空目标或刷新空档时不得静默回退到全季第一集，保留已有上下文，无法解析时直接报错。
       const targetEpisodeId = episodeId || continueTarget?.episode_id || '';
       if (!targetEpisodeId) throw new Error('没有可播放的剧集');
+      if (resolvePlaybackActionLabel(playbackStatus, work.work_id, targetEpisodeId) === '正在播放') return;
       pendingPlaybackIntentRef.current = { workId: work.work_id, episodeId: targetEpisodeId };
+      setPlaybackStarting(true);
       setContinueEpisodeId(targetEpisodeId);
       const targetEpisode = (work.episodes || []).find((episode: any) => episode.episode_id === targetEpisodeId);
-      await playbackApi.play({
+      const session = await playbackApi.play({
         work_id: work.work_id,
         episode_id: targetEpisodeId,
         asset_id: targetEpisode?.asset_id || undefined,
       });
+      if (useUiStore.getState().selectedWorkId !== work.work_id) return;
+      // 启动成功立即显示真实会话，同时废弃启动之前发出的状态查询。
+      ++playbackStatusRequestRef.current;
+      setPlaybackStatus({ status: session.status, session });
       await refreshHistory();
+      if (useUiStore.getState().selectedWorkId !== work.work_id) return;
       await loadAuxiliary({ preferCache: false });
-      pendingPlaybackIntentRef.current = null;
     } catch (err) {
-      pendingPlaybackIntentRef.current = null;
       alert((err as Error).message);
+    } finally {
+      pendingPlaybackIntentRef.current = null;
+      setPlaybackStarting(false);
     }
   };
 
@@ -1406,6 +1451,8 @@ export default function WorkDetailPage() {
               className={`detail-action-btn primary detail-continue-btn ${continuePercent > 0 ? 'has-progress' : ''}`}
               style={{ '--continue-progress': `${continuePercent}%` } as CSSProperties}
               onClick={() => handlePlay()}
+              disabled={isCurrentTargetPlaying || playbackStarting || !continueTarget}
+              aria-busy={playbackStarting}
             >
               {continuePercent > 0 && (
                 <span
@@ -1419,7 +1466,7 @@ export default function WorkDetailPage() {
               )}
               <Play className="detail-continue-icon" size={18} fill="currentColor" />
               <span className="detail-continue-copy">
-                <strong>开始播放</strong>
+                <strong aria-live="polite">{playbackActionLabel}</strong>
                 {continueTarget && (
                   <small>{continueCompactLabel}</small>
                 )}

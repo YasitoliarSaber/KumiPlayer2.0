@@ -7,7 +7,7 @@ export type PlaybackProgressItem = PlaybackHistoryItem & {
   manually_unwatched?: boolean;
 };
 
-type PlaybackStatusSnapshot = {
+export type PlaybackStatusSnapshot = {
   status: string;
   session: (PlaybackSession & {
     position?: number;
@@ -15,6 +15,21 @@ type PlaybackStatusSnapshot = {
     started_at?: string;
   }) | null;
 };
+
+export function resolvePlaybackActionLabel(
+  playbackStatus: PlaybackStatusSnapshot | null,
+  workId: string,
+  episodeId: string,
+  progress?: PlaybackProgressItem | null,
+): '正在播放' | '继续播放' | '开始播放' {
+  const session = playbackStatus?.session;
+  if (playbackStatus?.status === 'playing' && session?.work_id === workId
+    && session.episode_id === episodeId) return '正在播放';
+  // 后端按保存的位置续播；时长尚未取得或进度不足 1% 时也不能当成首次播放。
+  if (progress && !progress.completed && Number.isFinite(progress.position)
+    && progress.position > 0) return '继续播放';
+  return '开始播放';
+}
 
 export function mergeActiveSessionProgress(
   persistedItems: PlaybackProgressItem[],
