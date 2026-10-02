@@ -1,4 +1,4 @@
-"""零集、小数集号、OVA/OAD 与编号 SP 准入；原名不是在线编号。"""
+"""零集、小数集号、OVA/OAD 与 SP 准入；原名不是在线编号。"""
 from pathlib import PurePosixPath
 
 import pytest
@@ -24,6 +24,9 @@ def pair(path):
     '作品甲/Season 1/作品甲 第8.5集.mkv', '作品甲/作品甲 第0集.mkv',
     '作品甲/Specials/作品甲 SP01.mkv', '作品甲/作品甲 SP02.mkv',
     '作品甲/Season 1/作品甲 [SP01].mkv',
+    '作品甲/作品甲 [SP].mkv', '作品甲/作品甲 SP.mkv',
+    '作品甲/Season 1/作品甲 【SP】.mkv', '作品甲/作品甲 (sp).mp4',
+    '作品甲/Season 1/作品甲 S01E01 [SP].mkv',
     '2.5次元的诱惑/Season 1/2.5次元的诱惑 [14.5].mkv',
 ])
 def test_selected_special_markers_need_no_explicit_regular_season(path):
@@ -44,6 +47,7 @@ def test_selected_special_markers_need_no_explicit_regular_season(path):
     '作品甲/Season 1/作品甲 [OVA][NCOP01].mkv',
     '作品甲/Season 1/作品甲 OAD [PV01].mkv',
     '作品甲/Season 1/作品甲 第0集 花絮.mkv',
+    '作品甲/作品甲 [SP][NCOP01].mkv', '作品甲/作品甲 SP PV01.mkv',
 ])
 def test_production_material_has_priority_over_selected_special_markers(path):
     assert not pair(path)[1].is_importable
@@ -58,6 +62,9 @@ def test_production_material_has_priority_over_selected_special_markers(path):
     '作品甲/Season 1/作品甲 S01E01 v1.5.mkv',
     '作品 [2.5]/Season 1/作品 [2.5] S01E01.mkv',
     'SPY x FAMILY/Season 1/SPY x FAMILY S01E01.mkv',
+    'Space Brothers/Season 1/Space Brothers S01E01.mkv',
+    'SPARK/Season 1/SPARK S01E01.mkv',
+    'ASP.NET/Season 1/ASP.NET S01E01.mkv',
 ])
 def test_title_and_technical_decimals_do_not_override_explicit_regular_episode(path):
     _, facts = pair(path)
@@ -79,18 +86,20 @@ def test_selected_specials_do_not_claim_regular_episode_one():
              '作品甲/Season 1/作品甲 OAD01.mkv',
              '作品甲/Season 1/作品甲 SP01.mkv',
              '作品甲/Season 1/作品甲 SP02.mkv',
+             '作品甲/Season 1/作品甲 [SP].mkv',
              '作品甲/Season 1/作品甲 第0集.mkv',
              '作品甲/Season 1/作品甲 第8.5集.mkv']
     graph = MediaResolver().resolve([pair(path) for path in paths])
     assert len(graph.works) == 1
-    assert len(graph.episodes) == 7
+    assert len(graph.episodes) == 8
     assert sum(episode.season_kind == 'regular' for episode in graph.episodes) == 1
     specials = [episode for episode in graph.episodes if episode.season_kind == 'special']
-    assert len({episode.special_number for episode in specials}) == 6
+    assert len({episode.special_number for episode in specials}) == 7
     assert all(episode.provider_episode_number is None for episode in specials)
 
 
-@pytest.mark.parametrize('name', ['作品甲 OVA.mkv', '作品甲 OAD01.mkv', '作品甲 SP01.mkv', '作品甲 第0集.mkv'])
+@pytest.mark.parametrize('name', ['作品甲 OVA.mkv', '作品甲 OAD01.mkv', '作品甲 SP01.mkv',
+                                '作品甲 [SP].mkv', '作品甲 SP.mkv', '作品甲 第0集.mkv'])
 def test_single_special_never_becomes_movie(name):
     graph = MediaResolver().resolve([pair('作品甲/' + name)])
     assert len(graph.works) == 1
@@ -128,7 +137,7 @@ def test_confirmed_specials_are_displayed_without_any_scrape_target(tmp_path, mo
     from app.media_v4.persistence.database import V4Database
     from app.media_v4.revisions.service import V4RevisionService
 
-    paths = ['作品甲/作品甲 SP01.mkv', '作品甲/作品甲 OVA01.mkv']
+    paths = ['作品甲/作品甲 SP01.mkv', '作品甲/作品甲 OVA01.mkv', '作品甲/作品甲 [SP].mkv']
     if with_regular:
         paths.append('作品甲/Season 1/作品甲 S01E01.mkv')
     database = V4Database(tmp_path / 'local-specials.db')
@@ -160,16 +169,17 @@ def test_confirmed_specials_are_displayed_without_any_scrape_target(tmp_path, mo
             assert not conn.execute("SELECT 1 FROM jobs WHERE job_type='recover_work_aliases'").fetchone()
     monkeypatch.setattr(library_v4, 'get_database', lambda: database)
     detail = library_v4.get_work_detail(work_id)
-    assert len([row for row in detail['episodes'] if row['kind'] == 'special']) == 2
+    assert len([row for row in detail['episodes'] if row['kind'] == 'special']) == 3
     if not with_regular:
         assert runner.projection.current().cards[0]['metadata']['metadata_state'] == 'not_required'
         assert len(library_v4.get_library()['works']) == 1
         assert service.get_execution_progress('local-specials')['overall_status'] == 'completed'
 
 
-def test_special_and_explicit_movie_keep_separate_work_identities():
+@pytest.mark.parametrize('name', ['作品甲 SP01.mkv', '作品甲 [SP].mkv'])
+def test_special_and_explicit_movie_keep_separate_work_identities(name):
     graph = MediaResolver().resolve([
-        pair('作品甲/作品甲 SP01.mkv'),
+        pair('作品甲/' + name),
         pair('作品甲/作品甲 Movie.mkv'),
     ])
     assert len(graph.works) == 2

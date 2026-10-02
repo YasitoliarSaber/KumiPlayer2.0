@@ -9,7 +9,7 @@
 - 特别篇/附属内容只按**整段类别 token**或**明确的文件级标记**排除；
   ``OV A`` 这类发行形式、``SPY×FAMILY``、``Happy Ending``、``H264.50fps``
   都不构成排除依据。
-- 明确 OVA/OAD 与编号 SP 归特别篇；电影、正片外传仍保持独立身份。
+- 明确 OVA/OAD 与有边界的 SP（可带编号）归特别篇；电影、正片外传仍保持独立身份。
 - 季/集/绝对编号各自记录来源；缺证据用 null + unknown，绝不用 0 兜底，
   也绝不取"当前最小集号"重排。
 """
@@ -128,6 +128,7 @@ _ATTACHED_FILE_RES = (
 #: 发行形式（不构成排除依据）：单独出现时保留可播放身份。
 _RELEASE_FORM_RE = re.compile(r"(?i)(?<![A-Za-z])(?:OVA|OAD)(?![A-Za-z])")
 _NUMBERED_SP_RE = re.compile(r"(?i)(?<![A-Za-z0-9])SP\s*\d+(?![A-Za-z0-9])")
+_SP_MARKER_RE = re.compile(r"(?i)(?<![A-Za-z0-9])SP(?:\s*\d+)?(?![A-Za-z0-9])")
 _ANNOTATED_RELEASE_RE = re.compile(r"(?i)[\[【]\s*\d{1,3}\s*\(\s*(?:OVA|OAD)\s*\d*\s*\)\s*[\]】]")
 
 def fractional_episode_token(tokens: FilenameTokens) -> str:
@@ -636,7 +637,7 @@ def classify_content(
             traces=tuple(traces),
         )
 
-    # 用户 2026-10-02 的有限准入：小数集、第零集、OVA/OAD、编号 SP。
+    # 用户 2026-10-02 的有限准入：小数集、第零集、OVA/OAD、SP（可带编号）。
     # 只认明确标记，不因泛称 Specials 目录或在线编号推断准入。
     fraction = fractional_episode_token(tokens)
     zero = numbering.episode == 0
@@ -646,14 +647,15 @@ def classify_content(
     )
     selected_release = bool(release_form) or release_dir is not None
     numbered_sp = _NUMBERED_SP_RE.search(stem)
-    if (fraction or zero or selected_release or numbered_sp) and not (
+    sp_marker = _SP_MARKER_RE.search(stem)
+    if (fraction or zero or selected_release or sp_marker) and not (
         movie_hit or movie_dir or provisional_movie or standalone_hit or standalone_dir
     ):
         reason = (
             "fractional_episode" if fraction else "zero_episode" if zero
-            else "numbered_sp" if numbered_sp else "release_special"
+            else "numbered_sp" if numbered_sp else "sp_marker" if sp_marker else "release_special"
         )
-        origin = ORIGIN_DIRECTORY if release_dir and not (fraction or zero or release_form or numbered_sp) else ORIGIN_FILENAME
+        origin = ORIGIN_DIRECTORY if release_dir and not (fraction or zero or release_form or sp_marker) else ORIGIN_FILENAME
         trace(CONTENT_CLASS_PLAYABLE_SPECIAL, origin, reason)
         return ContentClassification(
             content_class=CONTENT_CLASS_PLAYABLE_SPECIAL,

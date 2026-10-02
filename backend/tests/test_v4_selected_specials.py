@@ -19,7 +19,7 @@ def parse(path):
 @pytest.mark.parametrize("name", [
     "Show - 09.5.mkv", "Show.S01E14.5.mkv", "Show [14.5][1080p].mkv",
     "Show.S01E00.mkv", "Show - 00.mkv", "Show 第0集.mkv",
-    "Show OVA01.mkv", "Show OAD02.mkv", "Show [14(OVA)].mkv", "Show OVA.mkv", "Show SP01.mkv",
+    "Show OVA01.mkv", "Show OAD02.mkv", "Show [14(OVA)].mkv", "Show OVA.mkv", "Show SP01.mkv", "Show [SP].mkv",
 ])
 def test_explicit_selected_special_is_playable_with_original_name(name):
     _, facts = parse(f"Show/Season 1/{name}")
@@ -42,7 +42,7 @@ def test_technical_decimal_does_not_become_special(path):
 
 
 @pytest.mark.parametrize("path", [
-    "Show/Season 1/Show NCOP 09.5.mkv", "Show/Season 1/Show [SP].mkv",
+    "Show/Season 1/Show NCOP 09.5.mkv",
     "Show/Season 1/Show [14.5][PV].mkv", "Show/Specials/Show - 花絮.mkv",
 ])
 def test_other_excluded_material_stays_excluded(path):

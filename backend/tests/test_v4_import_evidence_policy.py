@@ -53,7 +53,6 @@ def test_specials_and_auxiliary_are_excluded_only_with_explicit_evidence():
         # 中文特别篇与 Specials 目录语义一致
         "动画/作品甲/特别篇/作品甲.S01E01.mkv",
         "动画/作品甲/Specials/作品甲.S01E01.mkv",
-        "动画/作品甲/作品甲 [SP].mkv",
         "动画/作品甲/作品甲.S00E03.mkv",
         # 明确附属视频
         "动画/作品甲/作品甲 [NCOP01].mkv",
