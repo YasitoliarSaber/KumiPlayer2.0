@@ -63,6 +63,7 @@ class AppConfig:
     # 来源挂载根目录
     pan115_root: str = ""
     baidu_root: str = ""
+    quark_root: str = ""
     local_root: str = ""
     directory_tree_dir: str = ""
 

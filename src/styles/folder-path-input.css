@@ -1,0 +1,5 @@
+.settings-folder-field { min-width: 0; }
+.settings-folder-input { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.settings-folder-input > input.settings-input { flex: 1; min-width: 0; width: 100%; }
+.settings-folder-input > button { flex-shrink: 0; white-space: nowrap; }
+.settings-folder-error { margin: 6px 0 0; color: var(--danger, #c42b1c); font-size: 12px; }

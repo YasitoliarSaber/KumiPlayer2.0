@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import SettingsPage from '../../src/pages/SettingsPage';
+import { pickFolder } from '../../src/platform/folderPicker';
+vi.mock('../../src/platform/folderPicker', () => ({ pickFolder: vi.fn() }));
 
 const api = vi.hoisted(() => ({
   getConfig: vi.fn(),
@@ -117,7 +119,7 @@ describe('SettingsPage 信息架构', () => {
   test('OpenList 设置导航定位到既有 OpenList 面板，媒体来源不再重复展示', async () => {
     render(<SettingsPage />);
 
-    const openListNavigation = await screen.findByRole('button', { name: /OpenList 设置/ });
+    const openListNavigation = await screen.findByRole('button', { name: /WebDAV 设置/ });
     const openListSection = document.getElementById('settings-panel-openlist');
     const sourceSection = document.getElementById('settings-panel-sources');
 
@@ -139,8 +141,9 @@ describe('SettingsPage 信息架构', () => {
       { ...config, connection_id: 'legacy', name: '连接甲', openlist_routes: [] }, b,
     ] });
     render(<SettingsPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'OpenList 设置' }));
-    fireEvent.change(await screen.findByRole('combobox', { name: 'OpenList 连接' }), { target: { value: 'ol-b' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'WebDAV 设置' }));
+    fireEvent.click(await screen.findByRole('combobox', { name: 'WebDAV 连接' }));
+    fireEvent.click(await screen.findByRole('option', { name: '连接乙' }));
     expect(await screen.findByText('https://second.example.test')).toBeVisible();
     expect(screen.queryByText('https://openlist.example.test')).not.toBeInTheDocument();
   });
@@ -176,7 +179,7 @@ describe('SettingsPage 信息架构', () => {
   test('隐藏构建与赞助信息，并将播放器状态收敛为用户可理解的结果', async () => {
     render(<SettingsPage />);
 
-    await screen.findByRole('button', { name: /OpenList 设置/ });
+    await screen.findByRole('button', { name: /WebDAV 设置/ });
     fireEvent.click(screen.getByRole('button', { name: /^播放$/ }));
 
     expect(screen.queryByText('构建来源')).not.toBeInTheDocument();
@@ -195,10 +198,38 @@ describe('SettingsPage 信息架构', () => {
     HTMLElement.prototype.scrollTo = scrollTo;
     render(<div className="app-main"><SettingsPage /></div>);
 
-    fireEvent.click(await screen.findByRole('button', { name: /OpenList 设置/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /WebDAV 设置/ }));
 
     expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'auto' });
     expect(document.getElementById('settings-panel-openlist')).toBeVisible();
     expect(document.getElementById('settings-panel-bangumi')).not.toBeVisible();
+  });
+
+  test('选择夸克挂载文件夹只更新草稿，保存时不改动其他来源', async () => {
+    vi.mocked(pickFolder).mockResolvedValueOnce('J:\\夸克');
+    render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: '媒体来源' }));
+    const input = screen.getByRole('textbox', { name: '夸克网盘挂载位置' });
+    api.patchConfig.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: '选择夸克网盘挂载位置' }));
+    await screen.findByDisplayValue('J:\\夸克');
+    expect(api.patchConfig).not.toHaveBeenCalled();
+    fireEvent.click(within(input.closest('.settings-config-row')!).getByRole('button', { name: '保存' }));
+    expect(api.patchConfig).toHaveBeenCalledWith({ quark_root: 'J:\\夸克' });
+  });
+
+  test('本地路径均可选择文件夹，取消选择保留手动草稿', async () => {
+    vi.mocked(pickFolder).mockResolvedValueOnce(null);
+    render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: '媒体来源' }));
+    for (const name of ['115 挂载根路径', '百度网盘挂载位置', '夸克网盘挂载位置', '本地媒体根路径', '目录树文件目录', '镜像目录']) {
+      expect(screen.getByRole('button', { name: `选择${name}` })).toBeVisible();
+    }
+    const input = screen.getByRole('textbox', { name: '115 挂载根路径' });
+    fireEvent.change(input, { target: { value: 'J:\\115' } });
+    fireEvent.click(screen.getByRole('button', { name: '选择115 挂载根路径' }));
+    await screen.findByRole('button', { name: '选择115 挂载根路径', disabled: false });
+    expect(input).toHaveValue('J:\\115');
+    expect(pickFolder).toHaveBeenLastCalledWith('J:\\115', '选择115 挂载根路径');
   });
 });

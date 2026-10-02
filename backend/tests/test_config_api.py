@@ -45,6 +45,22 @@ def temp_config(tmp_path, monkeypatch):
 class TestGetConfig:
     """测试获取配置"""
 
+    def test_quark_mount_round_trip_preserves_other_roots(self, client, temp_config):
+        save_config(AppConfig(pan115_root="K:/115", baidu_root="K:/Baidu"))
+        response = client.patch("/api/config", json={"quark_root": "J:/Quark"})
+        assert response.status_code == 200
+        invalidate_config_cache()
+        current = client.get("/api/config").json()
+        assert current["quark_root"] == "J:/Quark"
+        assert current["pan115_root"] == "K:/115"
+        assert current["baidu_root"] == "K:/Baidu"
+
+    def test_old_config_defaults_quark_root_without_rewriting(self, client, temp_config):
+        original = '{"setup_completed": true, "pan115_root": "K:/115"}'
+        temp_config.write_text(original, encoding="utf-8")
+        assert client.get("/api/config").json()["quark_root"] == ""
+        assert temp_config.read_text(encoding="utf-8") == original
+
     def test_returns_all_fields(self, client, temp_config):
         """应返回所有配置字段"""
         resp = client.get("/api/config")
@@ -498,7 +514,7 @@ def test_media_paths_endpoint_reports_saved_mount_roots(client, temp_config, tmp
     assert resp.status_code == 200
     data = resp.json()
     # OpenList 作为正式来源一并纳入检测；未配置时返回可读的未配置状态
-    assert {item["source"] for item in data["sources"]} == {"pan115", "baidu", "local", "openlist"}
+    assert {item["source"] for item in data["sources"]} == {"pan115", "baidu", "quark", "local", "openlist"}
     assert all("configured_root" in item for item in data["sources"])
     openlist_item = next(item for item in data["sources"] if item["source"] == "openlist")
     assert openlist_item["ok"] is False

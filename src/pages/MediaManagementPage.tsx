@@ -33,6 +33,7 @@ import { V4ExecutionProgress as V4ExecutionProgressView } from '../components/me
 import { V4RecognitionSummary, type OverrideDraft } from '../components/media/V4RecognitionSummary'
 import { LibraryMaintenancePanel } from '../components/media/LibraryMaintenancePanel'
 import { pickDirectoryTreeFile, pickFolder } from '../platform/folderPicker'
+import FolderPathInput from '../components/settings/FolderPathInput'
 import { useMediaWorkflowStore } from '../stores/mediaWorkflow'
 import { useUiStore } from '../stores/ui'
 import { getKumiFluentTheme } from '../design/fluentTheme'
@@ -294,6 +295,7 @@ export default function MediaManagementPage() {
   const appearanceMode = useUiStore((state) => state.appearanceMode)
   const [kind, setKind] = useState<ImportKind>('local')
   const [path, setPath] = useState('')
+  const [treeMountRoots, setTreeMountRoots] = useState<Record<string, string>>({})
   const [provider, setProvider] = useState<Exclude<ProviderId, 'local' | 'other'>>('pan115')
   const [remoteRoot, setRemoteRoot] = useState('')
   const [baseConfig, setConfig] = useState<PublicConfig | null>(null)
@@ -351,6 +353,8 @@ export default function MediaManagementPage() {
   const sourceCardsRefreshInFlight = useRef(false)
   // 每次开始、取消或切换来源都会递增；旧请求即使晚返回，也不得覆盖新流程。
   const scanRunRef = useRef(0)
+  const pathPickerRequest = useRef(0)
+  useEffect(() => () => { pathPickerRequest.current += 1 }, [])
 
   useEffect(() => {
     let alive = true
@@ -540,7 +544,7 @@ export default function MediaManagementPage() {
     : kind === 'hybrid'
       ? Boolean(remoteAvailable && path.trim() && config?.openlist_configured && remoteRoot && selectedRemoteRoute?.local_path)
       : kind === 'tree'
-        ? Boolean(path.trim() && providerRoot(provider))
+        ? Boolean(path.trim() && treePlaybackRoot().trim())
         : Boolean(path.trim())
   const showReset = workflowStage !== 'source' || kind !== 'local' || Boolean(error) || busy === 'scan' || Boolean(scanTask)
 
@@ -549,7 +553,11 @@ export default function MediaManagementPage() {
     if (matchedRoute?.provider_id === providerId) return playbackRootForRoute(matchedRoute, remotePath)
     if (providerId === 'pan115') return config?.pan115_root || ''
     if (providerId === 'baidu') return config?.baidu_root || ''
+    if (providerId === 'quark' && config?.quark_root) return config.quark_root
     return routes.find((route) => route.enabled && route.provider_id === providerId && route.local_path)?.local_path || ''
+  }
+  function treePlaybackRoot() {
+    return treeMountRoots[provider] ?? providerRoot(provider)
   }
   const providerOption = PROVIDER_OPTIONS.find((option) => option.value === provider) || PROVIDER_OPTIONS[0]
   const sourceCardMetadata = (
@@ -625,15 +633,24 @@ export default function MediaManagementPage() {
     setPath(nextKind === 'local' ? config?.local_root || '' : '')
     setRemoteRoot(config?.openlist_remote_root || '/')
     setProvider('pan115')
+    setTreeMountRoots({})
     clearResultState()
   }
 
   const choosePath = async () => {
     if (kind === 'openlist') return
-    const selected = kind === 'local'
-      ? await pickFolder(path, '选择本地媒体目录')
-      : await pickDirectoryTreeFile(path, '选择目录树 TXT')
-    if (selected) setPath(selected)
+    const request = ++pathPickerRequest.current
+    const run = scanRunRef.current
+    const isCurrent = () => request === pathPickerRequest.current && run === scanRunRef.current
+    setError('')
+    try {
+      const selected = kind === 'local'
+        ? await pickFolder(path, '选择本地媒体目录')
+        : await pickDirectoryTreeFile(path, '选择目录树 TXT')
+      if (isCurrent() && selected) setPath(selected)
+    } catch {
+      if (isCurrent()) setError('无法打开路径选择器，请重试或手动输入路径。')
+    }
   }
 
   const scanSource = async (action: 'primary' | 'incremental' | 'full' = 'primary') => {
@@ -671,8 +688,9 @@ export default function MediaManagementPage() {
         : requestSource === 'openlist' || kind === 'hybrid'
           ? routeForPath(routes, remoteRoot)?.provider_id || 'other'
           : provider
-      const selectedSourceRoot = requestSource === 'tree' || requestSource === 'hybrid'
-        ? providerRoot(selectedProvider, remoteRoot)
+      const selectedSourceRoot = requestSource === 'tree'
+        ? treePlaybackRoot().trim()
+        : requestSource === 'hybrid' ? providerRoot(selectedProvider, remoteRoot)
         : requestSource === 'local' ? path : routeForPath(routes, remoteRoot)?.local_path || ''
       const metadata = sourceCardMetadata(kind, selectedSourceRoot)
       let scanMode: 'auto' | 'full' | 'incremental' = 'auto'
@@ -693,7 +711,7 @@ export default function MediaManagementPage() {
         const task = await mediaV4Api.startDurableScan({
           ...(requiresOpenListConfig ? { connection_id: selectedConnectionId } : {}),
           source: requestSource,
-          root_path: requestSource === 'local' ? path : kind === 'hybrid' ? remoteRoot : requestSource === 'openlist' ? remoteRoot : providerRoot(selectedProvider, remoteRoot) || 'tree',
+          root_path: requestSource === 'local' ? path : kind === 'hybrid' ? remoteRoot : requestSource === 'openlist' ? remoteRoot : selectedSourceRoot || 'tree',
           tree_file: requestSource === 'tree' || kind === 'hybrid' ? path : '',
           provider: selectedProvider,
           source_root: selectedSourceRoot,
@@ -1505,7 +1523,7 @@ export default function MediaManagementPage() {
         </section>
       )}
 
-      {error && <MessageBar className="media-v4-message" intent="error"><MessageBarBody>{error}</MessageBarBody></MessageBar>}
+      {error && <MessageBar className="media-v4-message" intent="error" role="alert"><MessageBarBody>{error}</MessageBarBody></MessageBar>}
 
       {pageMode === 'import' && <>
       <nav className="media-v4-steps" aria-label="导入步骤">
@@ -1592,8 +1610,12 @@ export default function MediaManagementPage() {
               </div>
               <div className="media-v4-mapping-note">
                 <Database24Regular aria-hidden="true" />
-                <div><strong>播放路径由设置自动匹配</strong><span>{providerRoot(provider) ? <>播放路径将使用设置中的 <code title={providerRoot(provider)}>{providerRoot(provider)}</code></> : '当前来源尚未配置可用挂载路径。'}</span></div>
+                <div><strong>设置中的默认挂载目录</strong><span>{providerRoot(provider) ? <>默认播放路径来自设置中的 <code title={providerRoot(provider)}>{providerRoot(provider)}</code>，可在下方更改。</> : '当前来源尚未配置默认路径，可直接在下方选择挂载目录。'}</span></div>
                 {!providerRoot(provider) && <Button appearance="subtle" onClick={goSettings}>前往设置</Button>}
+              </div>
+              <div className="media-v4-field-block">
+                <div className="media-v4-field-copy"><strong>本次导入的挂载目录</strong><span>选择目录树对应的网盘文件夹，可使用其他盘符；只影响本次导入，不修改设置中的默认路径。</span></div>
+                <FolderPathInput key={provider} label="本次导入的挂载目录" value={treePlaybackRoot()} disabled={busy !== ''} onChange={value => setTreeMountRoots(current => ({ ...current, [provider]: value }))} />
               </div>
               <div className="media-v4-command-row">
                 <div><strong>{path.trim() ? '目录树已就绪' : '尚未选择 TXT 文件'}</strong><span>{path.trim() ? `将按${providerOption.label}来源生成识别结果。` : '选择目录树文件后即可扫描。'}</span></div>

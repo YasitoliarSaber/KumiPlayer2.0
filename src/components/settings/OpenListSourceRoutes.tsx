@@ -97,7 +97,7 @@ export default function OpenListSourceRoutes({
   return (
     <div className="sources-routes-panel sources-route-selection">
       <div className="sources-openlist-card-head">
-        <span className="sources-route-summary">勾选需要导入的目录，确认对应网盘后保存。未勾选的目录仍可浏览。</span>
+        <span className="sources-route-summary">这里列出当前连接远端根目录下的文件夹。勾选存放媒体的目录，并选择它所属的网盘，让导入时能够区分来源；保存后，前往「媒体管理」选择具体子目录并扫描。这一步只配置来源，不会立即导入或移动文件。未勾选的目录仍可浏览。</span>
       </div>
 
       {!configured ? (

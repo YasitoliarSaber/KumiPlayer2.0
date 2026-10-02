@@ -25,18 +25,19 @@ import { BANGUMI_ACCESS_TOKEN_URL, getTmdbCredentialError, TMDB_API_SETTINGS_URL
 import DecodedImage from '../components/ui/DecodedImage';
 import OpenListSettingsPanel, { type OpenListDraft } from '../components/settings/OpenListSettingsPanel';
 import OpenListConnectionPicker from '../components/settings/OpenListConnectionPicker';
+import FolderPathInput from '../components/settings/FolderPathInput';
 import { openlistConnections, selectOpenlistConnection } from '../api/openlistConnections';
 import OpenListSourceRoutes from '../components/settings/OpenListSourceRoutes';
 import '../styles/settings-media-sources.css';
 import '../styles/settings-navigation.css';
 type SettingsTab = 'appearance' | 'sources' | 'openlist' | 'scrape' | 'player' | 'bangumi';
-type SourceKey = 'pan115' | 'baidu' | 'local';
+type SourceKey = 'pan115' | 'baidu' | 'quark' | 'local';
 
 const sectionTabs: Array<{ key: SettingsTab; label: string; icon: LucideIcon }> = [
   { key: 'bangumi', label: '账户与同步', icon: UserRound },
   { key: 'appearance', label: '外观', icon: Palette },
   { key: 'sources', label: '媒体来源', icon: Database },
-  { key: 'openlist', label: 'OpenList 设置', icon: Network },
+  { key: 'openlist', label: 'WebDAV 设置', icon: Network },
   { key: 'scrape', label: '元数据与图片', icon: KeyRound },
   { key: 'player', label: '播放', icon: PlaySquare },
 ];
@@ -45,6 +46,7 @@ const sourceLabels: Record<SourceKey | 'all' | 'openlist', string> = {
   all: '全部来源',
   pan115: '115 网盘',
   baidu: '百度网盘',
+  quark: '夸克网盘',
   openlist: 'OpenList 连接',
   local: '本地',
 };
@@ -377,7 +379,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
         <SettingsSection title="网络访问">
           <div className="settings-field-list">
             <ConfigRow label="网络代理" value={config.proxy_url} onSave={(value) => saveConfig({ proxy_url: value })} />
-            <span className="field-help">代理只用于访问 TMDB、AniList 等外部服务；OpenList 的局域网连接在「OpenList 设置」中单独管理。</span>
+            <span className="field-help">代理只用于访问 TMDB、AniList 等外部服务；OpenList 的局域网连接在「WebDAV 设置」中单独管理。</span>
           </div>
         </SettingsSection>
       )}
@@ -434,8 +436,9 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
 
   const renderOpenList = () => (
     <PanelStack>
-      <SectionIntro title="OpenList 设置" />
-      {baseConfig && <div className="settings-field-list">
+      <SectionIntro title="WebDAV 设置" />
+      <p className="sources-root-note">目前仅针对 OpenList 做了适配与优化，目录浏览、来源识别及增量检查依赖其专用接口，尚不支持直接连接其他 WebDAV 服务。通过 CloudDrive2 等工具挂载的目录，可在「媒体来源」中配置并使用本地目录或目录树导入。</p>
+      {baseConfig && <div className="settings-connection-toolbar">
         <OpenListConnectionPicker connections={openlistConnections(baseConfig)} value={selectedConnectionId} disabled={Boolean(activeAction || connectionBusy)} onChange={(identity) => {
           setSelectedConnectionId(identity);
           setOpenlistNotice('');
@@ -544,12 +547,13 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
       {config && (
         <SettingsSection title="来源根目录">
           <div className="sources-root-panel">
-            <p className="sources-root-note">只需填写你使用的来源。导入媒体时还可以选择具体文件夹。</p>
+            <p className="sources-root-note">选择各网盘在资源管理器中的挂载文件夹，可分别位于 J、K 等不同盘符。目录树导入默认使用这里的路径，也可以为本次导入另选挂载目录。只需配置你使用的来源。</p>
             <div className="settings-field-list">
-              <ConfigRow label="115 挂载根路径" value={config.pan115_root} onSave={(value) => saveConfig({ pan115_root: value })} />
-              <ConfigRow label="百度网盘挂载位置" value={config.baidu_root} onSave={(value) => saveConfig({ baidu_root: value })} />
-              <ConfigRow label="本地媒体根路径" value={config.local_root} onSave={(value) => saveConfig({ local_root: value })} />
-              <ConfigRow label="目录树文件目录" value={config.directory_tree_dir} onSave={(value) => saveConfig({ directory_tree_dir: value })} />
+              <ConfigRow folder label="115 挂载根路径" value={config.pan115_root} onSave={(value) => saveConfig({ pan115_root: value })} />
+              <ConfigRow folder label="百度网盘挂载位置" value={config.baidu_root} onSave={(value) => saveConfig({ baidu_root: value })} />
+              <ConfigRow folder label="夸克网盘挂载位置" value={config.quark_root || ''} onSave={(value) => saveConfig({ quark_root: value })} />
+              <ConfigRow folder label="本地媒体根路径" value={config.local_root} onSave={(value) => saveConfig({ local_root: value })} />
+              <ConfigRow folder label="目录树文件目录" value={config.directory_tree_dir} onSave={(value) => saveConfig({ directory_tree_dir: value })} />
             </div>
           </div>
         </SettingsSection>
@@ -557,7 +561,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
       {config && (
         <SettingsSection title="镜像与路径">
           <div className="settings-field-list">
-            <ConfigRow label="镜像目录" value={config.mirror_dir} onSave={(value) => saveConfig({ mirror_dir: value })} />
+            <ConfigRow folder label="镜像目录" value={config.mirror_dir} onSave={(value) => saveConfig({ mirror_dir: value })} />
           </div>
           <div className="settings-actions">
             <GhostButton onClick={testMediaPaths} busy={activeAction === '验证媒体路径'}>验证媒体路径</GhostButton>
@@ -847,7 +851,7 @@ function SettingsSection({ title, action, children, collapsible = false, classNa
   );
 }
 
-function ConfigRow({ label, value, onSave, secret = false, placeholder = '' }: { label: string; value: string; onSave: (value: string) => void; secret?: boolean; placeholder?: string }) {
+function ConfigRow({ label, value, onSave, secret = false, placeholder = '', folder = false }: { label: string; value: string; onSave: (value: string) => void; secret?: boolean; placeholder?: string; folder?: boolean }) {
   const inputId = useId();
   const initialDraft = secret ? '' : value || '';
   const [draft, setDraft] = useState(initialDraft);
@@ -856,7 +860,7 @@ function ConfigRow({ label, value, onSave, secret = false, placeholder = '' }: {
   return (
     <div className="settings-config-row">
       <label htmlFor={inputId}>{label}</label>
-      <input id={inputId} type={secret ? 'password' : 'text'} value={draft} onChange={(event) => setDraft(event.target.value)} className="settings-input" placeholder={resolvedPlaceholder} autoComplete={secret ? 'off' : undefined} />
+      {folder ? <FolderPathInput inputId={inputId} label={label} value={draft} onChange={setDraft} placeholder={placeholder} /> : <input id={inputId} type={secret ? 'password' : 'text'} value={draft} onChange={(event) => setDraft(event.target.value)} className="settings-input" placeholder={resolvedPlaceholder} autoComplete={secret ? 'off' : undefined} />}
       <GhostButton onClick={() => { onSave(draft); if (secret) setDraft(''); }} disabled={secret && !draft.trim()}>保存</GhostButton>
     </div>
   );

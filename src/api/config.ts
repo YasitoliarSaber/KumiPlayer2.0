@@ -32,6 +32,7 @@ export interface PublicConfig {
   mirror_dir: string
   pan115_root: string
   baidu_root: string
+  quark_root?: string
   local_root: string
   directory_tree_dir: string
   openlist_server_url: string
@@ -117,7 +118,7 @@ export interface SetupCompletePayload {
 }
 
 export interface MediaPathValidationItem {
-  source: 'pan115' | 'baidu' | 'openlist'
+  source: 'pan115' | 'baidu' | 'quark' | 'local' | 'openlist'
   ok: boolean
   status: 'verified' | 'unavailable' | 'mismatch'
   configured_root: string

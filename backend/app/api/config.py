@@ -62,6 +62,7 @@ class ConfigPatch(BaseModel):
     mirror_dir: str | None = None
     pan115_root: str | None = None
     baidu_root: str | None = None
+    quark_root: str | None = None
     local_root: str | None = None
     directory_tree_dir: str | None = None
     openlist_server_url: str | None = None
@@ -562,6 +563,7 @@ def test_media_paths():
     roots = {
         "pan115": config.pan115_root,
         "baidu": config.baidu_root,
+        "quark": config.quark_root,
         "local": config.local_root,
         "openlist": config.openlist_mount_root,
     }

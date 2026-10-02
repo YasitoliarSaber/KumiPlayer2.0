@@ -3,6 +3,7 @@ import { Button } from '@fluentui/react-components';
 import { CheckCircle, Eye, EyeOff, Info, X, XCircle } from 'lucide-react';
 import { openlistApi, type OpenListConfigPayload, type OpenListTestConnectionPayload, type OpenListTestResult, type OpenListTelemetrySummary } from '../../api/openlist';
 import type { PublicConfig } from '../../api/config';
+import FolderPathInput from './FolderPathInput';
 
 /**
  * OpenList 连接设置面板（OL-4：Settings IA）。
@@ -359,11 +360,11 @@ export default function OpenListSettingsPanel({
             )}
           </div>
 
-          <label className="settings-config-row">
+          <div className="settings-config-row">
             <span>本地挂载位置</span>
-            <input type="text" value={draft.mount_root} onChange={(event) => handleDraftChange('mount_root', event.target.value)} className="settings-input" placeholder="例如 K:\\" />
-          </label>
-          <p className="sources-route-hint">填写此 OpenList 在资源管理器中的挂载根目录，用于播放视频。</p>
+            <FolderPathInput label="本地挂载位置" value={draft.mount_root} disabled={busy} onChange={value => handleDraftChange('mount_root', value)} placeholder="例如 K:\\" />
+          </div>
+          <p className="sources-route-hint">选择当前连接在资源管理器中的挂载根目录，与远端根目录对应。每个连接独立保存，可使用不同盘符；目录树导入使用「媒体来源」中的网盘挂载位置。</p>
           <details className="sources-advanced">
             <summary>远端目录与 WebDAV{draft.remote_root !== '/' ? ' · 自定义目录' : ''}</summary>
             <div className="sources-advanced-body">

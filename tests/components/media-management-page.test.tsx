@@ -1,7 +1,8 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, expect, test, vi } from 'vitest'
 import MediaManagementPage from '../../src/pages/MediaManagementPage'
 import { useUiStore } from '../../src/stores/ui'
+import { pickFolder } from '../../src/platform/folderPicker'
 
 const api = vi.hoisted(() => ({
   scan: vi.fn(),
@@ -113,8 +114,9 @@ test('首次导入选择另一个连接后使用其目录、路由、基线和�
   render(<MediaManagementPage />)
   await enterImport()
   fireEvent.click(screen.getByRole('button', { name: 'OpenList' }))
-  const selector = await screen.findByRole('combobox', { name: 'OpenList 连接' })
-  fireEvent.change(selector, { target: { value: 'ol-b' } })
+  const selector = await screen.findByRole('combobox', { name: 'WebDAV 连接' })
+  fireEvent.click(selector)
+  fireEvent.click(await screen.findByRole('option', { name: '连接乙' }))
   await waitFor(() => expect(openlist.browse).toHaveBeenLastCalledWith('/乙', 1, false, 100, 'ol-b'))
   await waitFor(() => expect(api.openlistStatus).toHaveBeenLastCalledWith('/乙', 'ol-b'))
   await waitFor(() => expect(screen.getByRole('button', { name: '完整扫描并建立基线' })).toBeEnabled())
@@ -150,7 +152,7 @@ test('目录树使用真实网盘提供商、官网入口和设置中的播放�
   expect(screen.getByRole('link', { name: /前往 115 官网/ })).toHaveAttribute('href', 'https://115.com/')
   expect(screen.getByRole('link', { name: /前往 115 官网/ })).toHaveClass('media-v4-provider-link')
   expect(screen.queryByText(/支持 115、百度、夸克和 OpenList 导出的清单/)).not.toBeInTheDocument()
-  expect(screen.getByText(/播放路径将使用设置中的/)).toBeVisible()
+  expect(screen.getByText(/默认播放路径来自设置中的/)).toBeVisible()
 
   fireEvent.click(screen.getByRole('button', { name: '夸克网盘' }))
   expect(screen.getByRole('link', { name: /前往夸克网盘官网/ })).toHaveAttribute('href', 'https://pan.quark.cn/')
@@ -168,6 +170,39 @@ test('目录树使用真实网盘提供商、官网入口和设置中的播放�
     source_root: 'K:\\夸克网盘\\动画',
     source_display_name: '动画',
   })))
+})
+
+test('夸克目录树采用独立默认挂载目录，也可为本次导入选择其他盘符', async () => {
+  config.getConfig.mockResolvedValue({ pan115_root: 'K:/115', quark_root: 'K:/Quark', openlist_configured: false, openlist_routes: [] })
+  vi.mocked(pickFolder).mockResolvedValueOnce('J:/Quark')
+  render(<MediaManagementPage />)
+  await enterImport()
+  fireEvent.click(screen.getByRole('button', { name: '目录树 TXT' }))
+  fireEvent.click(await screen.findByRole('button', { name: '夸克网盘' }))
+  expect(screen.getByRole('textbox', { name: '本次导入的挂载目录' })).toHaveValue('K:/Quark')
+  fireEvent.click(screen.getByRole('button', { name: '选择本次导入的挂载目录' }))
+  await screen.findByDisplayValue('J:/Quark')
+  fireEvent.click(screen.getByRole('button', { name: '115 网盘' }))
+  expect(screen.getByRole('textbox', { name: '本次导入的挂载目录' })).toHaveValue('K:/115')
+  fireEvent.click(screen.getByRole('button', { name: '夸克网盘' }))
+  expect(screen.getByRole('textbox', { name: '本次导入的挂载目录' })).toHaveValue('J:/Quark')
+  fireEvent.change(screen.getByRole('textbox', { name: '目录树 TXT 文件' }), { target: { value: 'D:/Trees/quark.txt' } })
+  fireEvent.click(screen.getByRole('button', { name: '扫描并识别' }))
+  await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({ source: 'tree', provider: 'quark', root_path: 'J:/Quark', source_root: 'J:/Quark' })))
+})
+
+test('文件夹选择失败可重试，切换来源后丢弃迟到选择', async () => {
+  vi.mocked(pickFolder).mockRejectedValueOnce(new Error('dialog unavailable'))
+  render(<MediaManagementPage />)
+  await enterImport()
+  fireEvent.click(screen.getByRole('button', { name: '选择文件夹' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('无法打开路径选择器')
+  let finish!: (value: string) => void
+  vi.mocked(pickFolder).mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+  fireEvent.click(screen.getByRole('button', { name: '选择文件夹' }))
+  fireEvent.click(screen.getByRole('button', { name: '目录树 TXT' }))
+  await act(async () => finish('J:/Late'))
+  expect(screen.getByRole('textbox', { name: '目录树 TXT 文件' })).toHaveValue('')
 })
 
 test('OpenList 首次完整扫描建立基线，确认前增量被禁用', async () => {

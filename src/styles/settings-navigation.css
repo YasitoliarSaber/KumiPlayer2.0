@@ -80,6 +80,9 @@
   .settings-focused .settings-openlist-notice.error { color: var(--text); background: color-mix(in srgb, var(--danger, #c42b1c) 10%, var(--surface)); }
   .settings-focused .settings-player-choice { display: grid; gap: 6px; }
   .settings-focused .settings-player-choice p { margin: 0; color: var(--text-muted); font-size: 13px; line-height: 1.6; }
+  .settings-focused .settings-connection-toolbar { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+  .settings-focused .settings-connection-field { flex: 0 1 360px; min-width: 220px; }
+  .settings-focused .settings-connection-toolbar > button { margin-bottom: 2px; }
   @media (max-width: 760px) {
     .settings-focused { grid-template-columns: minmax(0, 1fr) !important; padding: 16px 14px 40px !important; gap: 16px !important; }
     .settings-focused .settings-outline-popover-wrap { top: 0 !important; max-height: none; background: var(--app-bg); padding: 6px 0 !important; }

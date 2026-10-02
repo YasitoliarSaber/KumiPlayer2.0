@@ -116,7 +116,7 @@ export default function OpenListFolderBrowser({
         <div className="media-openlist-unconfigured">
           <Cloud24Regular />
           <div><strong>尚未配置 OpenList</strong><span>请先完成连接、挂载根和内容来源路由设置。</span></div>
-          <Button appearance="primary" onClick={onGoSettings}>前往 OpenList 设置</Button>
+          <Button appearance="primary" onClick={onGoSettings}>前往 WebDAV 设置</Button>
         </div>
       </section>
     )
