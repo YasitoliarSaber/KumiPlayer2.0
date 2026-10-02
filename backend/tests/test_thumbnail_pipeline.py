@@ -152,6 +152,27 @@ class TestThumbnailGeneration:
 class TestThumbnailEndpoint:
     """缩略图 API 端点"""
 
+    def test_cold_get_never_encodes_or_returns_original_in_category_mode(self, client, mirror_dir, monkeypatch):
+        source = mirror_dir / "poster.jpg"
+        _make_test_image(source)
+        def reject_encoding(*args):
+            raise AssertionError("GET must not encode")
+        monkeypatch.setattr(thumb, "_generate", reject_encoding)
+        response = client.get("/api/assets/thumbnail", params={"path": "poster.jpg", "width": 256, "cache_only": True})
+        assert response.status_code == 404
+        assert response.headers["content-type"].startswith("application/json")
+        compatible = client.get("/api/assets/thumbnail", params={"path": "poster.jpg", "width": 256})
+        assert compatible.content == source.read_bytes()
+
+    def test_prepare_batch_validates_size_and_path(self, client, mirror_dir):
+        response = client.post("/api/assets/thumbnails/prepare", json={"items": [{"path": "../outside.jpg", "width": 384}]})
+        assert response.status_code == 200
+        assert response.json() == {"states": ["unavailable"]}
+        too_many = client.post("/api/assets/thumbnails/prepare", json={"items": [{"path": "poster.jpg", "width": 384}] * 65})
+        assert too_many.status_code == 422
+        unsupported = client.post("/api/assets/thumbnails/prepare", json={"items": [{"path": "poster.jpg", "width": 999}]})
+        assert unsupported.status_code == 422
+
     def test_returns_thumbnail(self, client, mirror_dir, monkeypatch):
         cache_dir = mirror_dir.parent / "cache"
         monkeypatch.setattr("app.core.paths.get_cache_dir", lambda: cache_dir)
@@ -160,6 +181,7 @@ class TestThumbnailEndpoint:
         source = mirror_dir / "115" / "TestWork" / "poster.jpg"
         _make_test_image(source)
 
+        thumb.prepare_artwork(source)
         resp = client.get("/api/assets/thumbnail?path=115/TestWork/poster.jpg&width=384")
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "image/webp"

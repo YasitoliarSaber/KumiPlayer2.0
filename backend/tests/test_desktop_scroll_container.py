@@ -35,27 +35,23 @@ def test_virtual_poster_grid_tracks_the_app_main_scroll_container():
     component = (Path(__file__).resolve().parents[2] / "src" / "components" / "library" / "VirtualizedPosterGrid.tsx").read_text(encoding="utf-8")
 
     assert "closest<HTMLElement>('.app-main')" in component
-    assert "scrollContainer.scrollTop" in component
-    assert "if (scrollContainer)" in component
-    assert "scrollContainer.addEventListener('scroll', updateScrollPosition" in component
+    assert "imageLifecycle.configure(scrollContainer, currentViewportHeight())" in component
 
 
-def test_virtual_poster_grid_coalesces_scroll_updates_per_animation_frame():
+def test_poster_grid_does_not_update_react_state_on_scroll():
     component = (Path(__file__).resolve().parents[2] / "src" / "components" / "library" / "VirtualizedPosterGrid.tsx").read_text(encoding="utf-8")
 
-    assert "let scrollFrame = 0;" in component
-    assert "scrollFrame = window.requestAnimationFrame" in component
-    assert "window.cancelAnimationFrame(scrollFrame)" in component
-    assert "if (!hasVisibleWindowChanged(current, scrollTop)) return;" in component
-    assert component.index("if (!hasVisibleWindowChanged(current, scrollTop)) return;") < component.index("setLayout(next)")
+    assert "updateScrollPosition" not in component
+    assert "addEventListener('scroll'" not in component
+    assert "{works.map((work)" in component
 
 
-def test_virtual_poster_grid_clamps_the_start_row_when_results_shrink():
+def test_poster_grid_keeps_card_nodes_and_uses_managed_images():
     component = (Path(__file__).resolve().parents[2] / "src" / "components" / "library" / "VirtualizedPosterGrid.tsx").read_text(encoding="utf-8")
 
-    assert "const maxStartRow = Math.max(0, totalRows - 1);" in component
-    assert "const startRow = Math.min(maxStartRow, rawStartRow);" in component
-    assert "}, [onColumnCapacityChange, requestedColumns, seriesCardImageMode, works.length]);" in component
+    assert "managedImage" in component
+    assert "works.slice(" not in component
+    assert "PosterImageContext.Provider" in component
 
 
 def test_category_changes_reset_the_main_scroll_position():

@@ -12,7 +12,7 @@ export function isRemoteAssetPath(path: string | null | undefined): boolean {
 
 export function buildAssetUrl(
   path: string | null | undefined,
-  options: { kind?: AssetKind; thumbnailWidth?: number } = {},
+  options: { kind?: AssetKind; thumbnailWidth?: number; cacheOnly?: boolean } = {},
 ): string {
   if (!path) return ''
   if (/^\/[A-Za-z0-9_-]+\.(?:jpe?g|png|webp)$/i.test(path)) {
@@ -38,7 +38,8 @@ export function buildAssetUrl(
       : 0
   if (width > 0) {
     return withApiSessionToken(
-      API_BASE + '/api/assets/thumbnail?path=' + encodeURIComponent(path) + '&width=' + width,
+      API_BASE + '/api/assets/thumbnail?path=' + encodeURIComponent(path) + '&width=' + width
+        + (options.cacheOnly ? '&cache_only=true' : ''),
     )
   }
   return withApiSessionToken(API_BASE + '/api/assets?path=' + encodeURIComponent(path))

@@ -10,6 +10,7 @@ from pathlib import PurePosixPath
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from app.api.assets import queue_library_artwork
 from app.api.media_v4 import get_database
 from app.media_v4.parsing.episode_titles import (
     clean_special_episode_title,
@@ -182,6 +183,7 @@ def get_library(compact: bool = False, source: str | None = None, include_all: b
         works = [work for work in works if work.get("metadata_state") in {"ready", "not_required"}]
     if source and source != "all":
         works = [work for work in works if source in work["sources"]]
+    queue_library_artwork(works)
     return {
         "works": works,
         "summary": {

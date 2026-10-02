@@ -10,3 +10,11 @@
   line-height: 1.4;
   text-align: center;
 }
+
+.poster-card .poster-managed-image {
+  opacity: 0;
+}
+
+.poster-card .poster-managed-image[data-state="ready"] {
+  opacity: 1;
+}

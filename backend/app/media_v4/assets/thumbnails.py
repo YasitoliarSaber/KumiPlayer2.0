@@ -13,7 +13,7 @@ from PIL import Image
 from app.core.paths import get_cache_dir
 
 _THUMBNAIL_ENCODING_VERSION = 1
-THUMBNAIL_WIDTHS: tuple[int, ...] = (384, 512, 1280)
+THUMBNAIL_WIDTHS: tuple[int, ...] = (256, 384, 512, 768, 1280)
 DEFAULT_THUMBNAIL_WIDTH = 384
 _INFLIGHT: dict[str, threading.Event] = {}
 _INFLIGHT_GUARD = threading.Lock()
@@ -21,7 +21,6 @@ _INFLIGHT_GUARD = threading.Lock()
 
 def _thumbnail_cache_dir() -> Path:
     directory = get_cache_dir() / "artwork_thumbnails"
-    directory.mkdir(parents=True, exist_ok=True)
     return directory
 
 
@@ -36,6 +35,36 @@ def _cache_key(source: Path, width: int) -> str:
 
 def cache_path(source: Path, width: int) -> Path:
     return _thumbnail_cache_dir() / f"{_cache_key(source, width)}.webp"
+
+
+def find_thumbnail(source: Path, width: int) -> Path | None:
+    """浏览路径只查询已落盘的派生图，不建目录、不编码。"""
+    if width not in THUMBNAIL_WIDTHS or not is_supported_source(source):
+        return None
+    try:
+        target = cache_path(source, width)
+        return target if target.is_file() else None
+    except OSError:
+        return None
+
+
+def artwork_widths(source: Path) -> tuple[int, ...]:
+    if source.stem == "poster":
+        return (256, 384, 512)
+    if source.stem == "fanart":
+        return (512, 768, 1280)
+    return (384,)
+
+
+def prepare_artwork(source: Path) -> None:
+    """下载任务发布原图后提前准备常用尺寸；派生缓存失败不影响原始产物。"""
+    if not is_supported_source(source):
+        return
+    for width in artwork_widths(source):
+        try:
+            get_or_create_thumbnail(source, width)
+        except OSError:
+            continue
 
 
 def _acquire_inflight(key: str) -> threading.Event | None:
@@ -79,6 +108,7 @@ def get_or_create_thumbnail(source: Path, width: int) -> Path | None:
     try:
         if cache.exists():
             return cache
+        cache.parent.mkdir(parents=True, exist_ok=True)
         return cache if _generate(source, cache, width) else None
     finally:
         with _INFLIGHT_GUARD:

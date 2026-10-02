@@ -1769,6 +1769,11 @@ async def upload_work_artwork(work_id: str, request: ArtworkUploadRequest):
     suffix = ".png" if request.kind == "poster" else ".jpg"
     target = directory / f"{request.kind}{suffix}"
     target.write_bytes(raw)
+    from app.media_v4.assets.preparation import thumbnail_preparer
+    from app.media_v4.assets.thumbnails import artwork_widths
+
+    for width in artwork_widths(target):
+        thumbnail_preparer.enqueue(target, width)
     now = _now_iso()
     with get_database().connect() as conn:
         existing = conn.execute(

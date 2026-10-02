@@ -6,6 +6,7 @@ import { buildAssetUrl, isRemoteAssetPath } from '../../api/assets';
 import { isScrollRecentlyActive } from '../../utils/scrollGesture';
 import { preferredArtworkPath } from '../../utils/artwork';
 import DecodedImage, { type ImageState } from '../ui/DecodedImage';
+import PosterImage from './PosterImage';
 import './PosterCard.css';
 
 interface PosterCardProps {
@@ -16,6 +17,7 @@ interface PosterCardProps {
   localArtworkOnly?: boolean;
   deferImage?: boolean;
   preloadImage?: boolean;
+  managedImage?: boolean;
 }
 
 function PosterCard({
@@ -26,12 +28,10 @@ function PosterCard({
   localArtworkOnly = false,
   deferImage = false,
   preloadImage = false,
+  managedImage = false,
 }: PosterCardProps) {
   const [imageState, setImageState] = useState<ImageState>('loading');
   const seriesCardImageMode = useUiStore((state) => state.seriesCardImageMode);
-  // 该 prop 仍是调用方的公开 API（分类页会传），但第 6 步移除"失败回退原图"后
-  // 组件内不再需要它；显式标记为有意保留，避免 noUnusedLocals 报错。
-  void localArtworkOnly;
   const openWorkDetail = useLibraryStore((state) => state.openWorkDetail);
   const getWorkDetail = useLibraryStore((state) => state.getWorkDetail);
   const prewarmTimerRef = useRef<number | null>(null);
@@ -71,8 +71,9 @@ function PosterCard({
 
   const isHorizontal = showType === 'recent' || seriesCardImageMode === 'fanart';
   const artworkKind = showType === 'recent' || seriesCardImageMode === 'fanart' ? 'fanart' : 'poster';
-  // 已确认的本地镜像比远程 metadata URL 更快、更稳定；远程图仍是本地缺失时的兜底。
-  const selectedImagePath = preferredArtworkPath(work, artworkKind);
+  // 分类本地模式不隐式访问远程；其他页面仍可使用受限远程图片代理。
+  const preferredImagePath = preferredArtworkPath(work, artworkKind);
+  const selectedImagePath = localArtworkOnly && isRemoteAssetPath(preferredImagePath) ? '' : preferredImagePath;
   const originalImageUrl = buildAssetUrl(selectedImagePath, {
     kind: isHorizontal ? 'backdrop' : 'poster',
   });
@@ -84,6 +85,7 @@ function PosterCard({
     : buildAssetUrl(selectedImagePath, {
         kind: isHorizontal ? 'backdrop' : 'poster',
         ...(thumbnailWidth > 0 ? { thumbnailWidth } : {}),
+        cacheOnly: managedImage,
       });
   const imageUrl = thumbnailImageUrl;
 
@@ -104,20 +106,21 @@ function PosterCard({
         className={mediaClassName}
         style={{ background: 'var(--surface-soft)' }}
       >
-        {/* 第 6 步（规格 §4.5）：标题占位**常驻底层**，图片解码成功后自然覆盖它。
-            这样"有 URL 但未解码/加载失败"时不会再出现空白海报位（白卡）；
-            同时**不再**在缩略图失败后重复请求原图（后端生成失败时已返回原图）。 */}
+        {/* 标题常驻底层，加载失败时也可辨认作品。分类图片不回退到大原图。 */}
         <div className="poster-placeholder-title">
           <span title={displayTitle}>
             {displayTitle}
           </span>
-          {!deferImage && imageUrl && imageState !== 'ready' && (
+          {!managedImage && !deferImage && imageUrl && imageState !== 'ready' && (
             <small className="poster-placeholder-state">
               {imageState === 'loading' ? '图片加载中' : '图片暂不可用'}
             </small>
           )}
         </div>
-        {!deferImage && imageUrl && (
+        {!deferImage && imageUrl && (managedImage ? (
+          <PosterImage path={selectedImagePath} width={thumbnailWidth} src={imageUrl}
+            alt={displayTitle} local={!isRemoteAssetPath(selectedImagePath)} />
+        ) : (
           <DecodedImage
             src={imageUrl}
             alt={displayTitle}
@@ -126,7 +129,7 @@ function PosterCard({
             onStateChange={setImageState}
             className="poster-image"
           />
-        )}
+        ))}
 
         {work.rating > 0 && (
           <div className="rating-badge">

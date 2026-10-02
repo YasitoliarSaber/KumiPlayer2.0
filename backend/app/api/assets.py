@@ -25,14 +25,17 @@ from urllib.parse import urlparse
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
+from pydantic import BaseModel, Field
 
 from app.core.config import load_config
 from app.core.paths import get_cache_dir, get_data_dir, get_mirror_root
 from app.core.url_guard import validate_remote_asset_url
+from app.media_v4.assets.preparation import thumbnail_preparer
 from app.media_v4.assets.thumbnails import (
     DEFAULT_THUMBNAIL_WIDTH,
     THUMBNAIL_WIDTHS,
-    get_or_create_thumbnail,
+    artwork_widths,
+    find_thumbnail,
     is_supported_source,
 )
 
@@ -445,10 +448,11 @@ def get_thumbnail(
         DEFAULT_THUMBNAIL_WIDTH,
         description=f"缩略图宽度档（像素），允许值：{list(THUMBNAIL_WIDTHS)}",
     ),
+    cache_only: bool = False,
 ):
     """返回本地图片的派生缩略图。
 
-    生成失败时回退到原图，绝不留下灰占位。
+    分类页只返回已就绪的缓存；详情等兼容调用在缓存缺失时读取原图。
     远程图片不走此端点（远程 URL 已在前端归一到合适尺寸档）。
     """
     file_path = _resolve_local_asset_path(path)
@@ -459,9 +463,9 @@ def get_thumbnail(
     if ext not in _ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=403, detail=f"不允许的文件类型: {ext}")
 
-    # 尝试生成缩略图；不支持或失败时回退原图
+    # GET 只读取缓存。旧缓存由独立队列补齐，编码不占用图片请求线程。
     if is_supported_source(file_path) and width in THUMBNAIL_WIDTHS:
-        thumbnail = get_or_create_thumbnail(file_path, width)
+        thumbnail = find_thumbnail(file_path, width)
         if thumbnail is not None and thumbnail.exists():
             return _local_file_response(
                 thumbnail,
@@ -469,6 +473,9 @@ def get_thumbnail(
                 max_age=86400,
                 request_headers=request.headers,
             )
+
+    if cache_only:
+        raise HTTPException(status_code=404, detail="缩略图尚未就绪")
 
     # 回退：返回原图
     content_type = _CONTENT_TYPES.get(ext, "application/octet-stream")
@@ -478,3 +485,43 @@ def get_thumbnail(
         max_age=3600,
         request_headers=request.headers,
     )
+
+
+class ThumbnailItem(BaseModel):
+    path: str = Field(min_length=1, max_length=4096)
+    width: int
+
+
+class ThumbnailBatch(BaseModel):
+    items: list[ThumbnailItem] = Field(min_length=1, max_length=64)
+
+
+@router.post("/thumbnails/prepare")
+def prepare_thumbnails(batch: ThumbnailBatch):
+    """验证后批量排队并查询状态；不在请求中编码，也不泄露目标路径。"""
+    states = []
+    for item in batch.items:
+        if item.width not in THUMBNAIL_WIDTHS:
+            raise HTTPException(status_code=422, detail="不支持的缩略图尺寸")
+        source = _resolve_local_asset_path(item.path)
+        states.append(
+            thumbnail_preparer.status(source, item.width)
+            if source is not None and is_supported_source(source)
+            else "unavailable"
+        )
+    return {"states": states}
+
+
+def queue_library_artwork(works: list[dict]) -> None:
+    """仅消费投影的本地图片引用，不扫描源盘、不改变媒体事实。"""
+    for work in works:
+        for kind in ("poster", "fanart"):
+            path = work.get(f"local_{kind}_path")
+            if not path:
+                continue
+            source = _resolve_local_asset_path(str(path))
+            if source is None or not is_supported_source(source):
+                continue
+            widths = artwork_widths(Path(f"{kind}.jpg"))
+            for width in widths:
+                thumbnail_preparer.status(source, width, priority=10)

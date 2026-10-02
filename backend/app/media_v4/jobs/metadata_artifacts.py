@@ -213,6 +213,9 @@ def _download_artwork(url: str, path: Path, *, client: httpx.Client) -> str:
             if not _valid_artwork(temporary.read_bytes(), content_type):
                 return ""
             os.replace(temporary, path)
+            from app.media_v4.assets.thumbnails import prepare_artwork
+
+            prepare_artwork(path)
             return digest.hexdigest()
     finally:
         temporary.unlink(missing_ok=True)
@@ -306,6 +309,9 @@ def _materialize_local_artwork(
         if not _is_current(path, published, artifact_type):
             return False
         artifacts.append((artifact_type, path, published[(artifact_type, str(path))]))
+        from app.media_v4.assets.thumbnails import prepare_artwork
+
+        prepare_artwork(path)
         return True
 
     with _artwork_client(config) as client:

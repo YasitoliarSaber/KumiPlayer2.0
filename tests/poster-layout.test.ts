@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { hasVisibleWindowChanged } from '../src/components/library/posterGridMetrics.ts';
 
 test('竖版封面在窗口缩放与跨屏切换后仍由固定比例容器统一裁切', () => {
   const styles = readFileSync(new URL('../src/index.css', import.meta.url), 'utf8');
@@ -26,17 +25,13 @@ test('封面网格在滑块、窗口与跨屏尺寸变化后重新测量可用�
   assert.match(grid, /onColumnCapacityChange\?\.\(metrics\.columnCapacity\)/);
 });
 
-test('逐像素滚动只在虚拟可见行窗口变化时触发 React 更新', () => {
-  const layout = { top: 0, rowHeight: 320, viewportHeight: 900, scrollTop: 0 };
-  let updates = 0;
-  for (let scrollTop = 1; scrollTop <= 2000; scrollTop += 1) {
-    if (!hasVisibleWindowChanged(layout, scrollTop)) continue;
-    layout.scrollTop = scrollTop;
-    updates += 1;
-  }
-
-  assert.ok(updates > 0);
-  assert.ok(updates < 20, `预期少于 20 次窗口更新，实际为 ${updates}`);
+test('海报墙的图片观察器预加载附近视口，网格不监听逐像素滚动', () => {
+  const grid = readFileSync(new URL('../src/components/library/VirtualizedPosterGrid.tsx', import.meta.url), 'utf8');
+  const lifecycle = readFileSync(new URL('../src/components/library/posterImageLifecycle.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(grid, /addEventListener\('scroll'/);
+  assert.match(lifecycle, /new IntersectionObserver/);
+  assert.match(lifecycle, /height \* 1\.25/);
+  assert.match(lifecycle, /image\.removeAttribute\('src'\)/);
 });
 
 test('虚拟海报墙不为每张卡片叠加实时背景模糊', () => {

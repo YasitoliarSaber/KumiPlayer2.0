@@ -25,6 +25,7 @@ from app.api.system import router as system_router
 from app.api.tasks_v4 import router as tasks_router
 from app.api.tracking_v4 import router as tracking_router
 from app.core.api_security import ApiSessionMiddleware
+from app.media_v4.assets.preparation import thumbnail_preparer
 from app.media_v4.jobs.runner import V4JobRunner
 from app.media_v4.runtime import initialize_runtime
 
@@ -36,6 +37,7 @@ async def lifespan(app: FastAPI):
     from app.system.heartbeat import get_heartbeat_manager
 
     database = initialize_runtime()
+    thumbnail_preparer.start()
     stop_jobs = asyncio.Event()
 
     async def run_v4_jobs() -> None:
@@ -63,6 +65,7 @@ async def lifespan(app: FastAPI):
     finally:
         stop_jobs.set()
         await job_worker
+        await asyncio.to_thread(thumbnail_preparer.stop)
         source_scan_worker.stop()
         await close_remote_asset_client(app)
         from app.media_v4.playback.session import get_v4_playback_manager

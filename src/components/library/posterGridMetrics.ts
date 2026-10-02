@@ -15,13 +15,6 @@ export interface PosterGridMetrics {
   rowHeight: number;
 }
 
-interface VirtualScrollLayout {
-  top: number;
-  rowHeight: number;
-  viewportHeight: number;
-  scrollTop: number;
-}
-
 const MIN_CARD_WIDTH: Record<PosterGridImageMode, number> = {
   poster: 140,
   fanart: 190,
@@ -58,14 +51,4 @@ export function calculatePosterGridMetrics({
     columnWidth,
     rowHeight: mediaHeight + safeMetaHeight + safeGap,
   };
-}
-
-export function hasVisibleWindowChanged(layout: VirtualScrollLayout, nextScrollTop: number) {
-  if (layout.scrollTop === nextScrollTop) return false;
-  const rowHeight = Math.max(1, layout.rowHeight);
-  const getFirstRow = (scrollTop: number) => {
-    const relativeTop = Math.max(0, scrollTop - layout.top);
-    return Math.floor(relativeTop / rowHeight);
-  };
-  return getFirstRow(layout.scrollTop) !== getFirstRow(nextScrollTop);
 }

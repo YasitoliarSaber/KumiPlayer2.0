@@ -132,7 +132,7 @@ test('分类页在索引保留远程引用时仍优先使用本地镜像海报',
   expect(image.getAttribute('src')).not.toContain('/api/assets/remote');
 });
 
-test('本地海报缺失时分类卡片回退渲染远程海报', () => {
+test('本地海报缺失时本地模式分类卡片保留标题且不请求远程图', () => {
   const remoteOnlyWork = {
     ...work('w1'),
     poster_path: 'https://image.tmdb.org/t/p/w342/remote-only.jpg',
@@ -140,11 +140,8 @@ test('本地海报缺失时分类卡片回退渲染远程海报', () => {
   };
 
   render(<PosterCard work={remoteOnlyWork} thumbnailWidth={384} localArtworkOnly />);
-  const image = screen.getByRole('img', { name: '作品w1' });
-
-  expect(image.getAttribute('src')).toContain('/api/assets/remote?url=');
-  expect(image.getAttribute('src')).toContain('remote-only');
-  expect(image.getAttribute('src')).not.toContain('/api/assets/thumbnail');
+  expect(screen.queryByRole('img', { name: '作品w1' })).toBeNull();
+  expect(screen.getAllByText('作品w1').length).toBeGreaterThan(0);
 });
 
 test('本地与远程图都缺失时分类卡片显示文字占位', () => {
@@ -169,7 +166,7 @@ test('recent 卡片本地背景缺失时回退远程 fanart', () => {
     poster_path: '',
   };
 
-  render(<PosterCard work={recentWork} showType="recent" localArtworkOnly />);
+  render(<PosterCard work={recentWork} showType="recent" />);
   const image = screen.getByRole('img', { name: '作品w1' });
 
   expect(image.getAttribute('src')).toContain('/api/assets/remote?url=');

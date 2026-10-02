@@ -1,7 +1,8 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import PosterCard from './PosterCard';
 import { useUiStore } from '../../stores/ui';
-import { calculatePosterGridMetrics, hasVisibleWindowChanged } from './posterGridMetrics';
+import { calculatePosterGridMetrics } from './posterGridMetrics';
+import { PosterImageContext, PosterImageLifecycle } from './posterImageLifecycle';
 
 interface VirtualizedPosterGridProps {
   works: any[];
@@ -11,13 +12,12 @@ interface VirtualizedPosterGridProps {
   localArtworkOnly?: boolean;
 }
 
-const OVERSCAN_ROWS = 2;
-
-// 缩略图档选择：按卡片 CSS 宽度 × DPR 向上取最近档，不超过 512。
-// 384 覆盖单列 140-256px @ DPR2，512 覆盖更大列宽或高 DPR。
-function pickThumbnailWidth(cssWidth: number): number {
+// 卡片宽度与屏幕缩放共同决定固定档位。
+function pickThumbnailWidth(cssWidth: number, horizontal: boolean): number {
   const dpr = typeof window !== 'undefined' ? Math.min(window.devicePixelRatio || 1, 2) : 1
   const deviceWidth = Math.ceil(cssWidth * dpr)
+  if (horizontal) return deviceWidth <= 512 ? 512 : 768
+  if (deviceWidth <= 256) return 256
   if (deviceWidth <= 384) return 384
   return 512
 }
@@ -30,24 +30,16 @@ export default function VirtualizedPosterGrid({
   localArtworkOnly = false,
 }: VirtualizedPosterGridProps) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
+  const imageLifecycle = useMemo(() => new PosterImageLifecycle(), []);
   // P0-5：字段选择器订阅（避免 UI store 其他字段变化触发网格重渲染）
   const seriesCardImageMode = useUiStore((state) => state.seriesCardImageMode);
   const requestedColumns = Math.max(1, Math.round(columns || 1));
   const [effectiveColumns, setEffectiveColumns] = useState(requestedColumns);
-  const [layout, setLayout] = useState({
-    top: 0,
-    rowHeight: 320,
-    columnWidth: 0,
-    viewportHeight: typeof window === 'undefined' ? 900 : window.innerHeight,
-    scrollTop: typeof window === 'undefined' ? 0 : window.scrollY,
-  });
-  const layoutRef = useRef(layout);
+  const [columnWidth, setColumnWidth] = useState(0);
 
   useLayoutEffect(() => {
     let measureFrame = 0;
-    let scrollFrame = 0;
     const scrollContainer = wrapRef.current?.closest<HTMLElement>('.app-main') || null;
-    const currentScrollTop = () => scrollContainer ? scrollContainer.scrollTop : window.scrollY;
     const currentViewportHeight = () => scrollContainer ? scrollContainer.clientHeight : window.innerHeight;
 
     const measure = () => {
@@ -55,7 +47,6 @@ export default function VirtualizedPosterGrid({
       const element = wrapRef.current;
       if (!element) return;
       const rect = element.getBoundingClientRect();
-      const containerRect = scrollContainer?.getBoundingClientRect();
       const width = element.clientWidth || rect.width;
       // 隐藏窗口尚无有效尺寸时保留卡片壳，不能按假宽度请求图片。
       if (width <= 0) return;
@@ -71,17 +62,8 @@ export default function VirtualizedPosterGrid({
       const measuredColumns = metrics.effectiveColumns;
       onColumnCapacityChange?.(metrics.columnCapacity);
       setEffectiveColumns((current) => current === measuredColumns ? current : measuredColumns);
-      const measuredLayout = {
-        top: scrollContainer && containerRect
-          ? rect.top - containerRect.top + currentScrollTop()
-          : rect.top + window.scrollY,
-        rowHeight: metrics.rowHeight,
-        columnWidth: metrics.columnWidth,
-        viewportHeight: currentViewportHeight(),
-        scrollTop: currentScrollTop(),
-      };
-      layoutRef.current = measuredLayout;
-      setLayout(measuredLayout);
+      setColumnWidth(metrics.columnWidth);
+      imageLifecycle.configure(scrollContainer, currentViewportHeight());
     };
 
     const requestMeasure = () => {
@@ -89,26 +71,7 @@ export default function VirtualizedPosterGrid({
       measureFrame = window.requestAnimationFrame(measure);
     };
 
-    const updateScrollPosition = () => {
-      if (scrollFrame) return;
-      scrollFrame = window.requestAnimationFrame(() => {
-        scrollFrame = 0;
-        const scrollTop = currentScrollTop();
-        // 先比较行窗口再调用 setState，避免同一行内也进入 React 更新队列。
-        const current = layoutRef.current;
-        if (!hasVisibleWindowChanged(current, scrollTop)) return;
-        const next = { ...current, scrollTop };
-        layoutRef.current = next;
-        setLayout(next);
-      });
-    };
-
     measure();
-    if (scrollContainer) {
-      scrollContainer.addEventListener('scroll', updateScrollPosition, { passive: true });
-    } else {
-      window.addEventListener('scroll', updateScrollPosition, { passive: true });
-    }
     window.addEventListener('resize', requestMeasure);
     window.visualViewport?.addEventListener('resize', requestMeasure);
 
@@ -129,48 +92,18 @@ export default function VirtualizedPosterGrid({
 
     return () => {
       if (measureFrame) window.cancelAnimationFrame(measureFrame);
-      if (scrollFrame) window.cancelAnimationFrame(scrollFrame);
       observer?.disconnect();
-      if (scrollContainer) {
-        scrollContainer.removeEventListener('scroll', updateScrollPosition);
-      } else {
-        window.removeEventListener('scroll', updateScrollPosition);
-      }
+      imageLifecycle.dispose();
       window.removeEventListener('resize', requestMeasure);
       window.visualViewport?.removeEventListener('resize', requestMeasure);
       resolutionQuery?.removeEventListener('change', handleResolutionChange);
     };
-  }, [onColumnCapacityChange, requestedColumns, seriesCardImageMode, works.length]);
-
-  const totalRows = Math.ceil(works.length / effectiveColumns);
-  const visible = useMemo(() => {
-    const relativeTop = Math.max(0, layout.scrollTop - layout.top);
-    const firstVisibleRow = Math.floor(relativeTop / layout.rowHeight);
-    const rawStartRow = Math.max(0, firstVisibleRow - OVERSCAN_ROWS);
-    const maxStartRow = Math.max(0, totalRows - 1);
-    const startRow = Math.min(maxStartRow, rawStartRow);
-    // 包含当前行内任意偏移所需的底部行，窗口只随顶部跨行移动。
-    const rawEndRow = firstVisibleRow + Math.ceil(layout.viewportHeight / layout.rowHeight) + OVERSCAN_ROWS;
-    const endRow = totalRows === 0 ? -1 : Math.max(
-      startRow,
-      Math.min(totalRows - 1, rawEndRow),
-    );
-    const startIndex = startRow * effectiveColumns;
-    const endIndex = Math.min(works.length, (endRow + 1) * effectiveColumns);
-    return {
-      startRow,
-      endRow,
-      items: works.slice(startIndex, endIndex),
-    };
-  }, [effectiveColumns, layout, totalRows, works]);
-
-  const topSpacer = visible.startRow * layout.rowHeight;
-  const renderedRows = Math.max(0, visible.endRow - visible.startRow + 1);
-  const bottomSpacer = Math.max(0, (totalRows - visible.startRow - renderedRows) * layout.rowHeight);
+  }, [imageLifecycle, onColumnCapacityChange, requestedColumns, seriesCardImageMode, works.length]);
   // 分类页卡片走派生缩略图，降低本地 w780 原图的解码与内存开销
-  const thumbnailWidth = layout.columnWidth > 0 ? pickThumbnailWidth(layout.columnWidth) : 0;
+  const thumbnailWidth = columnWidth > 0 ? pickThumbnailWidth(columnWidth, seriesCardImageMode === 'fanart') : 0;
 
   return (
+    <PosterImageContext.Provider value={imageLifecycle}>
     <div
       ref={wrapRef}
       className="virtual-poster-grid"
@@ -178,22 +111,21 @@ export default function VirtualizedPosterGrid({
         ['--category-columns' as string]: effectiveColumns,
       }}
     >
-      {topSpacer > 0 && <div style={{ height: topSpacer }} aria-hidden="true" />}
       <div className="category-grid">
-        {visible.items.map((work) => (
+        {works.map((work) => (
           <PosterCard
             key={`${work.source}:${work.work_id}`}
             work={work}
             recentLabel={recentLabel}
             thumbnailWidth={thumbnailWidth}
             deferImage={thumbnailWidth === 0}
-            preloadImage
+            managedImage
             localArtworkOnly={localArtworkOnly}
           />
         ))}
       </div>
-      {bottomSpacer > 0 && <div style={{ height: bottomSpacer }} aria-hidden="true" />}
     </div>
+    </PosterImageContext.Provider>
   );
 }
 

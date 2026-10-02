@@ -60,5 +60,5 @@ test('海报卡季度数来自后端 season_count，不再用空数组伪造一�
   assert.doesNotMatch(poster, /\.length \|\| 1/);
   assert.match(types, /season_count\?: number/);
   assert.match(types, /special_season_count\?: number/);
-  assert.match(types, /metadata_state\?: 'ready' \| 'waiting_metadata' \| 'waiting_review' \| 'source_unavailable' \| 'failed'/);
+  assert.match(types, /metadata_state\?: 'ready' \| 'not_required' \| 'waiting_metadata' \| 'waiting_review' \| 'source_unavailable' \| 'failed'/);
 });
