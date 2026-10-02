@@ -434,19 +434,24 @@ def test_txt_offline_scan_preview_confirm_mirror(tmp_path, monkeypatch):
         assert result.status == "succeeded", result
 
     strm_files = sorted((mirror_root).rglob("*.strm"))
-    # OP/ED 等辅助视频保留证据但不得生成普通剧集镜像：正片 2 + 电影 1。
-    # 用户规则（2026-09-24）：特别篇 / OVA / 番外 同样不入库、不生成镜像。
-    assert len(strm_files) == 3
+    # OP 只保留证据；正片 2、编号 SP 特别篇 1、明确电影 1 分别生成本地镜像。
+    assert len(strm_files) == 4
     contents = {path.read_text(encoding="utf-8") for path in strm_files}
     assert contents == {
         rf"{source_root}\01动画\Show\Season 1\Show.S01E01.mkv",
         rf"{source_root}\01动画\Show\Season 1\Show.S01E02.mkv",
+        rf"{source_root}\01动画\Show\Specials\Show.SP01.mkv",
         rf"{source_root}\01动画\Movie\Movie.mkv",
     }
-    # 反向断言：特别篇路径不得出现在任何镜像内容里。
-    assert not any("Specials" in content for content in contents)
+    assert not any("OP1.mkv" in content for content in contents)
     with database.connect() as conn:
         artifacts = conn.execute(
             "SELECT COUNT(*) FROM artifacts WHERE revision_id = 'rev-txt-e2e' AND artifact_type = 'mirror'"
         ).fetchone()[0]
-    assert artifacts == 3
+        special = conn.execute(
+            "SELECT e.episode_kind, s.season_kind FROM episodes e "
+            "JOIN seasons s ON s.season_id=e.season_id WHERE e.episode_kind='special'"
+        ).fetchall()
+    assert artifacts == 4
+    assert len(special) == 1
+    assert special[0]["episode_kind"] == special[0]["season_kind"] == "special"
