@@ -6,8 +6,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.media_v4.domain.models import SourceEvidence
 from app.media_v4.parsing.evidence_policy import (
+    arbitrate_hint,
     collect_nearest_semantic_directory_tokens,
     parse_numbering,
     tokenize_filename,
@@ -257,6 +260,34 @@ def test_invalid_structured_hint_keeps_the_video():
     assert facts.is_importable is True
     assert facts.tmdb_hint_id is None
     assert "provider_hint_invalid" in facts.reasons
+
+
+@pytest.mark.parametrize("missing", [None, "", "  \t"])
+@pytest.mark.parametrize("source", ["filename_hint", "structured_hint", "evidence_hint"])
+def test_absent_hint_is_not_an_invalid_identity(missing, source):
+    hints = {"filename_hint": (None, ""), "structured_hint": ("", ""), "evidence_hint": ("", "")}
+    hints[source] = (missing, "tv")
+    decision = arbitrate_hint(**hints)
+    assert decision.tmdb_id is None
+    assert decision.reasons == ()
+    assert decision.traces == ()
+
+
+@pytest.mark.parametrize("invalid", ["not-a-number", "0", "-1"])
+def test_invalid_observation_hint_is_diagnostic_and_does_not_abort_import(invalid):
+    decision = arbitrate_hint(filename_hint=(123, "tv"), structured_hint=("", ""),
+                              evidence_hint=(invalid, "tv"))
+    assert decision.tmdb_id == 123
+    assert decision.reasons == ("provider_hint_invalid",)
+    assert not decision.conflict
+
+
+def test_filename_identity_without_structured_hint_has_no_false_error():
+    _evidence, facts = _facts("作品甲/作品甲 [tmdb-123].S01E01.mkv")
+    assert facts.tmdb_hint_id == 123
+    assert "provider_hint_invalid" not in facts.reasons
+    assert facts.is_importable
+    assert facts.episode_candidate == 1
 
 
 def test_show_type_is_driven_by_import_family_and_resolved_media_type():

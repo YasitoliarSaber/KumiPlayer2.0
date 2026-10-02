@@ -393,7 +393,7 @@ def _parse_sidecar_nfo(evidence: SourceEvidence) -> tuple[int | None, str, str, 
 class V4Parser:
     """从一个 SourceEvidence 生成一个不可变 ParsedFacts。"""
 
-    VERSION = "v4-parser-8"
+    VERSION = "v4-parser-9"
 
     @classmethod
     def _parsed_fact_id(cls, evidence: SourceEvidence) -> str:

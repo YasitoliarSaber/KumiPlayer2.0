@@ -922,7 +922,8 @@ def arbitrate_hint(
 
     def normalize(pair: tuple[str | int | None, str]) -> tuple[int | None, str]:
         raw_id, raw_type = pair if pair else (None, "")
-        if raw_id is None:
+        # 空缺 ID 是“未提供”，不能污染每个普通导入条目的错误诊断。
+        if raw_id is None or (isinstance(raw_id, str) and not raw_id.strip()):
             return None, ""
         try:
             value = int(raw_id)
@@ -939,9 +940,7 @@ def arbitrate_hint(
 
     filename_id, filename_type = normalize(filename_hint)
     structured_id, structured_type = normalize(structured_hint)
-    observation_id, observation_type = normalize(
-        (int(evidence_hint[0]), evidence_hint[1]) if evidence_hint[0] else (None, "")
-    )
+    observation_id, observation_type = normalize(evidence_hint)
 
     candidates = [
         item
