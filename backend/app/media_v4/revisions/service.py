@@ -531,7 +531,7 @@ def _derive_work_status(mirror: dict | None, metadata: dict | None, scrape_statu
             if metadata_job["status"] == "queued":
                 return "waiting_metadata"
             # metadata succeeded
-            if scrape_status and scrape_status not in {"ready", "confirmed"}:
+            if scrape_status and scrape_status not in {"ready", "confirmed", "not_required"}:
                 return "needs_attention"
             return "completed"
         return "waiting_metadata"
@@ -545,7 +545,7 @@ def _derive_work_status(mirror: dict | None, metadata: dict | None, scrape_statu
             return "cancelled"
         if metadata_job["status"] == "queued":
             return "waiting_metadata"
-        if scrape_status and scrape_status not in {"ready", "confirmed"}:
+        if scrape_status and scrape_status not in {"ready", "confirmed", "not_required"}:
             return "needs_attention"
         return "completed"
     return "waiting_mirror"
@@ -590,7 +590,7 @@ def _metadata_stage_summary(jobs: list[dict], scrape_rows: dict[str, dict]) -> d
         for job in jobs
         if str(job.get("status") or "") == "succeeded"
         and str(scrape_rows.get(str(job.get("work_id") or ""), {}).get("metadata_state") or "")
-        not in {"", "ready", "confirmed"}
+        not in {"", "ready", "confirmed", "not_required"}
     )
     summary["needs_attention"] = attention
     summary["succeeded"] = max(0, int(summary["succeeded"]) - attention)

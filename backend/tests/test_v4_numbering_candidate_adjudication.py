@@ -67,7 +67,7 @@ def test_lexical_candidates_are_recorded_without_becoming_strong_facts():
     assert _candidates(facts[3])[0]["number"] == 12
 
     for item, trace in zip(facts, [trace for fact in facts for trace in fact.decision_trace
-                                   if str(getattr(trace, "field", "") or "") == "episode_number_candidate"]):
+                                   if str(getattr(trace, "field", "") or "") == "episode_number_candidate"], strict=True):
         assert item.episode_candidate is None, "词法候选不得直接写成强集号事实"
         assert trace.origin == "local_unscoped"
 
@@ -97,8 +97,10 @@ def test_explicit_numbering_and_specials_keep_existing_semantics():
     assert by_name  # 至少解析出三种 token 形态，保证上面的查找有效
 
     special = _parse_entries(["Show/特别篇/Show.SP01.mkv"])[0][1]
-    assert special.content_class == "attached_special"
-    assert special.is_importable is False
+    assert special.content_class == "playable_special"
+    assert special.is_importable is True
+    assert special.episode_candidate is None
+    assert special.special_number is None
 
 
 def test_decision_trace_survives_persistence_roundtrip(tmp_path):
@@ -248,7 +250,7 @@ def test_movie_and_standalone_are_not_swallowed_by_numbering_candidates():
 def test_expected_tv_regular_without_number_reports_specific_issue():
     """标题与类型都确定、只有集号缺失时必须给出具体原因（F-005）。"""
 
-    from app.media_v4.domain.models import ParsedFacts, SourceEvidence
+    from app.media_v4.domain.models import ParsedFacts
     from app.media_v4.resolution.resolver import MediaResolver
 
     evidence = _evidence(0, "Show.S01.mkv", "Show/Show.S01.mkv")

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from difflib import SequenceMatcher
 from typing import Any
 
 from app.core.config import load_config
@@ -21,7 +20,7 @@ from app.scrape.tmdb_client import (
     TMDBRateLimitError,
 )
 
-_METADATA_STATES = frozenset({"ready", "waiting_metadata", "waiting_review", "source_unavailable", "failed"})
+_METADATA_STATES = frozenset({"ready", "not_required", "waiting_metadata", "waiting_review", "source_unavailable", "failed"})
 
 # --- C-005：Provider 编号映射与诚实状态 -------------------------------------
 #
@@ -201,107 +200,6 @@ def _tmdb_retryable(error: TMDBClientError, default: bool = True) -> bool:
 def _normalize_title(value: object) -> str:
     normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
     return re.sub(r"[^\w\u3400-\u9fff]+", "", normalized)
-
-
-def _title_tokens(value: object) -> set[str]:
-    """提取用于特别篇语义比对的最小词集合。
-
-    特别篇名称常见中英文混排；先保留拉丁词，再把 CJK 字符作为单字词，
-    既能处理 ``Mystery Camp`` 这类名称，也不会把两个仅共享“Camp”的
-    不同标题误认为同一集。
-    """
-
-    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
-    return {
-        token
-        for token in re.findall(r"[a-z0-9]+|[\u3400-\u9fff]", normalized)
-        if token
-    }
-
-
-def _special_display_title(episode: dict) -> str:
-    """返回特别篇自身语义标题；纯 SP 编号和通用“特别篇”不是证据。"""
-
-    from app.media_v4.parsing.episode_titles import is_generic_special_title, is_special_marker_only
-
-    for raw in (episode.get("display_title"), episode.get("episode_title"), episode.get("title")):
-        value = str(raw or "").strip()
-        if value and not is_generic_special_title(value) and not is_special_marker_only(value):
-            return value
-    return ""
-
-
-def _special_title_score(local_title: str, remote: dict) -> int:
-    """计算本地特别篇标题与在线条目的保守语义分数。"""
-
-    local_normalized = _normalize_title(local_title)
-    if not local_normalized:
-        return 0
-    remote_titles = [
-        str(remote.get("name") or "").strip(),
-        str(remote.get("original_name") or "").strip(),
-        str(remote.get("title") or "").strip(),
-        str(remote.get("original_title") or "").strip(),
-    ]
-    best = 0
-    local_tokens = _title_tokens(local_title)
-    for remote_title in remote_titles:
-        remote_normalized = _normalize_title(remote_title)
-        if not remote_normalized:
-            continue
-        if local_normalized == remote_normalized:
-            best = max(best, 100)
-            continue
-        remote_tokens = _title_tokens(remote_title)
-        overlap = local_tokens & remote_tokens
-        if len(overlap) >= 2:
-            # 两个以上完整词重合时允许标题带副标题或标点差异；单词
-            # 重合不足的标题必须经过更高的整体相似度门槛。
-            ratio = SequenceMatcher(None, local_normalized, remote_normalized).ratio()
-            if ratio >= 0.72:
-                best = max(best, 82)
-        elif len(local_normalized) >= 6 and len(remote_normalized) >= 6:
-            ratio = SequenceMatcher(None, local_normalized, remote_normalized).ratio()
-            if ratio >= 0.86:
-                best = max(best, 72)
-    return best
-
-
-def _match_special_episode(
-    episode: dict,
-    remote_by_number: dict[int, dict],
-    *,
-    used_remote_numbers: set[int] | None = None,
-) -> tuple[int, dict] | None:
-    """按特别篇自身名称匹配在线条目，绝不按本地展示序号盲配。"""
-
-    used = used_remote_numbers if used_remote_numbers is not None else set()
-    local_title = _special_display_title(episode)
-    if local_title:
-        scored = sorted(
-            (
-                (_special_title_score(local_title, remote), number, remote)
-                for number, remote in remote_by_number.items()
-                if number not in used
-            ),
-            key=lambda item: (item[0], -item[1]),
-            reverse=True,
-        )
-        if scored and scored[0][0] >= 82:
-            best = scored[0]
-            second_score = scored[1][0] if len(scored) > 1 else 0
-            # 相同或近似标题不能静默选第一个，避免再次制造错误绑定。
-            exact_matches = [item for item in scored if item[0] == 100]
-            if len(exact_matches) == 1 or (
-                not exact_matches and best[0] - second_score >= 10
-            ):
-                return best[1], best[2]
-        return None
-
-    # 本地只有 SP01/SP02 或“特别篇”时没有足够语义证据；旧的
-    # provider_episode_number 可能正是历史错误的顺序映射，不能把它当成
-    # 显式确认再次复用。成功读取 Season 0 后，这类旧映射会由诊断清理。
-    return None
 
 
 def _candidate_summary(item: dict) -> dict[str, Any]:
@@ -537,10 +435,11 @@ def _episode_key(episode: dict) -> str:
 
 
 def _is_mappable_episode(episode: object) -> bool:
-    """可进入 Provider 编号映射的本地剧集：有 ID，且不是辅助内容。"""
+    """特别篇仅供本地展示，绝不进入 Provider 编号或图片请求。"""
 
     return isinstance(episode, dict) and bool(_episode_key(episode)) and (
         str(episode.get("episode_kind") or "regular").strip().casefold() != "auxiliary"
+        and not _is_special_episode(episode)
     )
 
 
@@ -879,12 +778,23 @@ def _is_special_episode(episode: dict) -> bool:
 
     if str(episode.get("content_class") or "").strip().casefold() in {
         "attached_special",
+        "playable_special",
         "auxiliary",
     }:
         return True
     if str(episode.get("episode_kind") or "").strip().casefold() == "special":
         return True
     return str(episode.get("season_kind") or "").strip().casefold() == "special"
+
+
+def local_special_metadata() -> dict:
+    """不需要在线资料的本地特别篇，不标成刮削失败或等待搜索。"""
+    return {
+        "provider": "local", "metadata_state": "not_required", "metadata_source": "local",
+        "work_metadata_status": "not_requested", "episode_mapping_status": "not_applicable",
+        "episode_mappings": [], "season_mappings": [], "artifact_state": "not_required",
+        "reason_code": "", "reason": "", "retryable": False,
+    }
 
 
 def _season_result_is_optional_special(item: dict, target: dict) -> bool:
@@ -1115,6 +1025,9 @@ def default_metadata_provider(target: dict) -> dict:
 def _fetch_provider_metadata(target: dict) -> dict:
     """执行一次 Provider 资料获取；只返回本轮真实得到的事实。"""
 
+    episodes = target.get("episodes") or []
+    if target.get("local_specials_only") or (episodes and all(_is_special_episode(e) for e in episodes)):
+        return local_special_metadata()
     config = load_config()
     bindings = target.get("provider_bindings") or []
     tmdb_binding = next((item for item in bindings if item.get("provider") == "tmdb"), None)
@@ -1674,11 +1587,6 @@ def _build_tv_episode_mappings(
                 str(episode.get("unmapped_reason") or UNMAPPED_INSUFFICIENT_EVIDENCE),
             )
             continue
-        if _is_special_episode(episode):
-            # TMDB 的特别篇身份固定在 Season 0。本地旧映射可能把 SP 的 provider
-            # season 写成正片季号，但它不能继续决定本次请求的季度。
-            by_provider_season.setdefault(0, []).append(episode)
-            continue
         provider_season = _positive_int(episode.get("provider_season_number"))
         if provider_season is None or provider_season < 1:
             provider_season = _positive_int(episode.get("local_season_number"))
@@ -1697,7 +1605,6 @@ def _build_tv_episode_mappings(
     result: list[dict] = []
     for provider_season, episodes in sorted(by_provider_season.items()):
         season_mapping_verified = False
-        used_remote_numbers: set[int] = set()
         remote_by_number: dict[int, dict] = {}
         failure_reason: str | None = None
         season = fetch(provider_season)
@@ -1728,42 +1635,18 @@ def _build_tv_episode_mappings(
 
         for episode in episodes:
             provider_episode: int | None
-            if _is_special_episode(episode):
-                matched = _match_special_episode(
-                    episode,
-                    remote_by_number,
-                    used_remote_numbers=used_remote_numbers,
-                )
-                if matched is None:
-                    if season_mapping_verified and diagnostics is not None:
-                        diagnostics.setdefault("unmatched_special_episode_ids", []).append(
-                            str(episode["episode_id"])
-                        )
-                    _record_unmapped(
-                        diagnostics,
-                        episode,
-                        failure_reason or UNMAPPED_PROVIDER_RESOURCE_MISSING,
-                    )
-                    continue
-                provider_episode, remote = matched
-                used_remote_numbers.add(provider_episode)
-            else:
-                provider_episode = _positive_int(episode.get("provider_episode_number"))
-                if provider_episode is None:
-                    # 明确季号下"本地集号即 Provider 集号"是既有约定（C-004：Provider
-                    # 在自己命名空间映射本地编号）；这里不改变本地值，只做命名空间查找。
-                    provider_episode = _positive_int(episode.get("local_episode_number"))
-                if provider_episode is None:
-                    _record_unmapped(diagnostics, episode, UNMAPPED_MISSING_LOCAL_NUMBER)
-                    continue
-                remote = remote_by_number.get(provider_episode) or {}
+            provider_episode = _positive_int(episode.get("provider_episode_number"))
+            if provider_episode is None:
+                # 明确季号下"本地集号即 Provider 集号"是既有约定（C-004：Provider
+                # 在自己命名空间映射本地编号）；这里不改变本地值，只做命名空间查找。
+                provider_episode = _positive_int(episode.get("local_episode_number"))
+            if provider_episode is None:
+                _record_unmapped(diagnostics, episode, UNMAPPED_MISSING_LOCAL_NUMBER)
+                continue
+            remote = remote_by_number.get(provider_episode) or {}
             if not str(remote.get("id") or "").strip():
                 # 没有远端 Episode ID 时不能把空映射写成"已映射"；保留本地剧集，
                 # 并记录真实原因（服务故障/该条目不存在），不伪装成完整刮削。
-                if _is_special_episode(episode) and season_mapping_verified and diagnostics is not None:
-                    diagnostics.setdefault("unmatched_special_episode_ids", []).append(
-                        str(episode["episode_id"])
-                    )
                 _record_unmapped(
                     diagnostics,
                     episode,

@@ -35,7 +35,7 @@ def _parse_facts(relative_path: str, *, root_container: str = ""):
 
 
 def test_explicit_series_container_groups_seasons_and_specials_into_one_work():
-    """显式系列容器内的正片季节合并为一个 Work；SP 目录文件不入库。"""
+    """显式系列容器内正片和编号 SP 同属一个 Work，季集身份分别保存。"""
 
     special_path = "动画/CLANNAD.S1-S2+SP+OVA/SP/CLANNAD [SP01].mkv"
     graph = _resolve(
@@ -48,11 +48,9 @@ def test_explicit_series_container_groups_seasons_and_specials_into_one_work():
 
     assert len(graph.works) == 1
     assert graph.works[0].preferred_title == "CLANNAD"
-    assert {episode.local_season_number for episode in graph.episodes} == {1, 2}
-    # 用户规则（2026-09-24）：特别篇不进入媒体库。解析仍如实记录 group_type=special，
-    # 但 is_importable=False，因此既不会成为 Episode，也不会生成镜像。
-    assert _parse_facts(special_path).is_importable is False
-    assert all(episode.episode_kind != "special" for episode in graph.episodes)
+    assert {episode.local_season_number for episode in graph.episodes} == {0, 1, 2}
+    assert _parse_facts(special_path).is_importable is True
+    assert sum(episode.episode_kind == "special" for episode in graph.episodes) == 1
 
 
 def test_standalone_movie_inside_series_container_remains_independent_work():
@@ -223,12 +221,12 @@ def test_category_prefix_preserves_work_container_year_and_special_membership():
     assert len(graph.works) == 1
     assert graph.works[0].preferred_title == "86-不存在的战区"
     assert graph.works[0].year == 2021
-    assert {episode.local_season_number for episode in graph.episodes} == {1}
-    # 用户规则（2026-09-24）：小写 special/ 目录里的 11.5 特别篇不入库。
+    assert {episode.local_season_number for episode in graph.episodes} == {0, 1}
+    # 小数集号归特别篇，季度正片不变。
     assert _parse_facts(
         "动画/B 86-不存在的战区.2021/special/[MAI] EIGHTY SIX [11.5].mkv"
-    ).is_importable is False
-    assert all(episode.episode_kind != "special" for episode in graph.episodes)
+    ).is_importable is True
+    assert sum(episode.episode_kind == "special" for episode in graph.episodes) == 1
 
 
 def test_series_named_collection_is_a_shared_work_boundary():

@@ -14,6 +14,7 @@ from collections import defaultdict
 from dataclasses import replace
 
 import pytest
+
 from app.media_v4.domain.models import ParsedFacts, SourceEvidence
 from app.media_v4.parsing.parser import V4Parser, normalize_batch_parsed_facts
 from app.media_v4.persistence.database import V4Database
@@ -308,7 +309,7 @@ def test_explicit_special_creates_no_binding(tmp_path):
     database = _database(tmp_path, "roundtrip-special.db")
     service = V4RevisionService(database)
     entries = _tree_entries(
-        "\n".join(["Show/Season 1/Show.S01E01.mkv", "Show/Specials/Show.SP01.mkv"]),
+        "\n".join(["Show/Season 1/Show.S01E01.mkv", "Show/Specials/Show.S00E03.mkv"]),
         root_id="root-s",
         scan_id="scan-s",
     )

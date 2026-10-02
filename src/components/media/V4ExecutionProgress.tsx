@@ -155,6 +155,7 @@ function WorkUnit({ unit, getWorkDetail, requestWorkDetail, retryWorkDetail, loa
   const metadataStateLabels: Record<string, string> = {
     ready: '媒体信息已就绪', waiting_review: '使用本地信息，可补齐在线资料', waiting_metadata: '缺少在线资料配置',
     source_unavailable: '在线资料服务暂不可用', failed: '获取媒体信息失败',
+    not_required: '本地特别篇，无需刮削',
   }
   // 「部分剧集未匹配」不是“服务不可用”：说清楚真实原因，用户才不会去重试一个
   // 本来就不会变的网络问题（旧行为把这 20 部作品全写成“在线资料服务暂不可用”）。

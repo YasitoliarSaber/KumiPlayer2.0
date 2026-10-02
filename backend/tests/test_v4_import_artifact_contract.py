@@ -11,6 +11,7 @@ import hashlib
 from dataclasses import replace
 
 import pytest
+
 from app.media_v4.jobs.artifact_paths import asset_label, mirror_relative_path
 from app.media_v4.jobs.runner import V4JobRunner
 from app.media_v4.parsing.parser import V4Parser, normalize_batch_parsed_facts
@@ -229,8 +230,8 @@ def test_unknown_and_absolute_targets_avoid_specials_and_s00e00(tmp_path):
     assert any("/Unassigned/ABS0013-" in path for path in strm), strm
     assert any("/Unassigned/E01-" in path for path in strm), strm
     assert any("/Season 01/S01E01-" in path for path in strm), strm
-    # C-006：成功资料按代次命名；stub没有逐集映射，不能伪造剧集NFO。
-    assert {path.rsplit("/", 1)[-1] for path in nfo} == {'work.nfo'}, nfo
+    # stub 没有逐集映射，完整性门控拒绝发布本次 NFO；镜像仍保留可播放结构。
+    assert not nfo, nfo
 
 
 def test_explicit_special_episode_has_no_artifact(tmp_path):
@@ -239,7 +240,7 @@ def test_explicit_special_episode_has_no_artifact(tmp_path):
     database = _database(tmp_path, "artifact-special.db")
     mirror_root = tmp_path / "mirror"
     entries = _tree_entries(
-        "\n".join(["Show/Season 1/Show.S01E01.mkv", "Show/Specials/Show.SP01.mkv"]),
+        "\n".join(["Show/Season 1/Show.S01E01.mkv", "Show/Specials/Show.S00E03.mkv"]),
         root_id="root-sp",
         scan_id="scan-sp",
     )

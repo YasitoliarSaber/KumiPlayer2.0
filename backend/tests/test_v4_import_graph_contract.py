@@ -181,7 +181,7 @@ def test_excluded_special_does_not_change_admitted_semantics():
         [
             "Show/Season 1/Show.S01E01.mkv",
             "Show/Season 1/Show.S01E02.mkv",
-            "Show/Specials/Show.SP01.mkv",
+            "Show/Specials/Show.S00E03.mkv",
             "Show/Show [NCOP01].mkv",
         ]
     )

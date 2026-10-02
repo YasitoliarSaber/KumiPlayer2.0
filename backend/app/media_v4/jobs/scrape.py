@@ -23,6 +23,7 @@ from app.media_v4.jobs.metadata import (
     METADATA_SOURCE_LOCAL,
     REFRESH_STATUS_NOT_REQUESTED,
     finalize_metadata_statuses,
+    local_special_metadata,
 )
 from app.media_v4.jobs.metadata_artifacts import publish_metadata_artifacts
 from app.media_v4.parsing.parser import show_type_from_import_family
@@ -33,8 +34,10 @@ from app.media_v4.resolution.candidates import work_identity_title_inputs
 logger = logging.getLogger(__name__)
 
 
-#: 镜像层同样不物化的类别：这些条目不得进入刮削 target（"排除视频不在 target"）。
+#: 特别篇仍物化本地播放结构，但不进入刮削 target。
 def _is_excluded_episode(episode: dict) -> bool:
+    if episode.get("episode_kind") == "special" or episode.get("season_kind") == "special":
+        return True
     if str(episode.get("content_class") or "") in NON_IMPORTABLE_CONTENT_CLASSES:
         return True
     return episode.get("is_importable") is False
@@ -609,6 +612,10 @@ class V4ScrapeService:
                 ).fetchall()
             ]
             provenance = _episode_provenance(conn, str(job["revision_id"]), str(job["work_id"]))
+            target["local_specials_only"] = bool(episode_rows) and all(
+                e.get("episode_kind") == "special" or e.get("season_kind") == "special"
+                for e in episode_rows
+            )
             target["episodes"] = [
                 {**episode, **provenance.get(str(episode.get("episode_id") or ""), {})}
                 for episode in episode_rows
@@ -638,7 +645,7 @@ class V4ScrapeService:
         refresh_request = json.loads(job['result_json'] or '{}')
         explicit_refresh = bool(refresh_request.get('explicit_refresh'))
         refresh_season = refresh_request.get('season_number') if refresh_request.get('scope') == 'season' else None
-        if retained and retained['covers_members'] and not explicit_refresh:
+        if retained and retained['covers_members'] and not explicit_refresh and not target['local_specials_only']:
             with self.database.connect() as conn:
                 conn.execute('BEGIN IMMEDIATE')
                 live = conn.execute(
@@ -672,7 +679,7 @@ class V4ScrapeService:
                 covered = {str(m['episode_id']) for m in retained['metadata'].get('episode_mappings', [])}
                 request_target = {**target, 'episodes': [e for e in target['episodes'] if str(e['episode_id']) not in covered],
                                   'retained_work_metadata': retained['metadata']}
-            result = provider(request_target)
+            result = local_special_metadata() if target['local_specials_only'] else provider(request_target)
             if refresh_season is not None and retained and result.get('metadata_state') == 'ready':
                 old = retained['metadata']
                 if (result.get('provider'), str(result.get('provider_id'))) != (old.get('provider'), str(old.get('provider_id'))):

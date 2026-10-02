@@ -1,11 +1,4 @@
-"""V4 特别篇本地标题与编号的解析回归，以及「特别篇不入库」契约回归。
-
-用户规则（2026-09-24）：特别篇 / OVA / OAD / 番外 / SP / OP / ED 一律不进入媒体库，
-也不生成镜像。parser 仍如实记录 special_number / episode_title（诊断与兼容需要），
-但这些事实的 is_importable 为 False，不再产生 Work / Season / Episode / Asset。
-这里的 API 级断言只验证「不入库」结果；旧版「特典确认后产生 Episode 并展示本地标题」
-的用例已随规则取消而删除。
-"""
+"""特别篇按最新有限标记准入并保留原名；未覆盖的 S00 仍不入库。"""
 
 from __future__ import annotations
 
@@ -24,7 +17,7 @@ def _special_entry(revision_id: str = "rev-special-titles") -> dict:
                 "provider": "local",
                 "ingest_method": "local_scan",
                 "relative_path": (
-                    "Show/Specials/[VCB-Studio] Show - SP01 - 露营小剧场 "
+                    "Show/Specials/[VCB-Studio] Show - S00E01 - 露营小剧场 "
                     "[1080p][HEVC].mkv"
                 ),
                 "source_locator": "local://show/special-01.mkv",
@@ -34,7 +27,7 @@ def _special_entry(revision_id: str = "rev-special-titles") -> dict:
                 "provider": "local",
                 "ingest_method": "local_scan",
                 "relative_path": (
-                    "Show/Specials/[VCB-Studio] Show - SP02 - 温泉小剧场 "
+                    "Show/Specials/[VCB-Studio] Show - S00E02 - 温泉小剧场 "
                     "[1080p][HEVC].mkv"
                 ),
                 "source_locator": "local://show/special-02.mkv",
@@ -76,8 +69,9 @@ def test_parser_keeps_lightly_cleaned_special_title_as_immutable_fact():
 
     facts = V4Parser().parse(evidence)
 
-    assert facts.special_number == 1
-    assert facts.episode_title == "露营小剧场"
+    assert facts.special_number is None
+    assert facts.episode_title == "[VCB-Studio] Show - SP01 - 露营小剧场 [1080p][HEVC]"
+    assert facts.is_importable
 
 
 @pytest.mark.parametrize(
@@ -86,8 +80,8 @@ def test_parser_keeps_lightly_cleaned_special_title_as_immutable_fact():
         (
             "Angel Beats!",
             "Angel Beats! - S00E02 - OVA1：通向天堂的阶梯（Stairway to Heaven）.mkv",
-            2,
-            "OVA1：通向天堂的阶梯（Stairway to Heaven）",
+            None,
+            "Angel Beats! - S00E02 - OVA1：通向天堂的阶梯（Stairway to Heaven）",
         ),
         (
             "Re：从零开始的异世界生活",

@@ -144,16 +144,13 @@ def _assigned_evidence_ids(graph) -> set[str]:
 
 
 def _assert_specials_excluded(parsed, graph, *, marker: str = "") -> int:
-    """反向断言：特别篇必须 is_importable=False，且不出现在图的任何结构中。
-
-    用户规则（2026-09-24）：特别篇 / OVA / OAD / 番外 / SP / OP / ED 一律不进入
-    媒体库，也不生成镜像。marker 用于把断言限定到具体子集。
-    """
+    """未被最新四类标记准入的特别篇仍排除，不混入正片。"""
 
     matched = [
         (evidence, facts)
         for evidence, facts in parsed
-        if facts.group_type == "special" and marker in evidence.relative_path
+        if facts.group_type == "special" and facts.content_class != "playable_special"
+        and marker in evidence.relative_path
     ]
     assert matched, f"样本中应存在可识别的特别篇（marker={marker!r}）"
     assert all(facts.is_importable is False for _evidence, facts in matched)
@@ -218,8 +215,11 @@ def test_sample_corpus_keeps_main_series_spinoff_and_movie_identities_apart():
         assert movie.media_type == "movie"
         assert not [e for e in graph.episodes if e.work_key == movie.work_key]
     assert any(work.card_type == "standalone" and work.media_type == "movie" for work in graph.works)
-    # 反向断言：该样本 85 个特别篇（S00 特典 / OVA / OP / ED）全部不入库。
-    assert _assert_specials_excluded(parsed, graph) == 85
+    # 有明确 OVA 标记的两条和一条小数集号准入；其余 82 条仍排除。
+    assert _assert_specials_excluded(parsed, graph) == 82
+    selected = {e.evidence_id for e, f in parsed if f.content_class == "playable_special"}
+    assert len(selected) == 3
+    assert selected <= _assigned_evidence_ids(graph)
 
 
 # 已删除 test_sample_corpus_special_titles_stay_distinguishable_from_each_other：
@@ -233,9 +233,11 @@ def test_root_sample_excludes_production_extras_and_hyouka_ova_special():
     episodes = [episode for episode in graph.episodes if episode.work_key == hyouka.work_key]
 
     assert sum(episode.local_season_number == 1 for episode in episodes) == 22
-    # 用户规则（2026-09-24）：Hyouka 的 11.5 OVA 与制作特典同样不入库，Hyouka 不再有 S00。
-    assert sum(episode.local_season_number == 0 for episode in episodes) == 0
-    assert _assert_specials_excluded(parsed, graph, marker="Hyouka [11.5]") == 1
+    # 11.5 是明确小数集，制作素材仍排除。
+    assert sum(episode.season_kind == "special" for episode in episodes) == 1
+    selected = {e.evidence_id for e, f in parsed if "Hyouka [11.5]" in e.relative_path}
+    assert len(selected) == 1
+    assert selected <= _assigned_evidence_ids(graph)
     assert not any(
         marker in episode.display_title.casefold()
         for episode in episodes
@@ -277,7 +279,8 @@ def test_root_sample_provider_identity_merge_has_no_phantom_200_episode_work():
     graph = _resolve_sample_with_verified_identities("根目录20260703203700_目录树.txt")
     episode_counts = {
         work.preferred_title: sum(
-            episode.work_key == work.work_key for episode in graph.episodes
+            episode.work_key == work.work_key and episode.season_kind == "regular"
+            for episode in graph.episodes
         )
         for work in graph.works
     }
@@ -301,7 +304,8 @@ def test_root_sample_kaguya_keeps_fourth_season_assets_without_special_episodes(
     assert {
         season: sum(episode.local_season_number == season for episode in episodes)
         for season in (1, 2, 3, 4)
-    } == {1: 12, 2: 13, 3: 13, 4: 2}
+    } == {1: 12, 2: 12, 3: 13, 4: 2}
+    assert sum(episode.season_kind == "special" for episode in episodes) == 1
     season_four = [episode for episode in episodes if episode.local_season_number == 4]
     assert len(season_four) == 2
     # C-004：仅文件明确的 S04E01/E02 属于本地第四季；Provider 映射不能重写本地季号。
@@ -322,8 +326,9 @@ def test_root_sample_kaguya_keeps_fourth_season_assets_without_special_episodes(
         facts.is_importable is True and facts.is_auxiliary is False
         for _evidence, facts in ova_entries
     )
-    # 制作特典与明确 S00 附属内容仍然不入库。
-    assert _assert_specials_excluded(parsed, plain_graph, marker="Hyouka [11.5]") == 1
+    # 小数特别篇准入，不改变第四季正片集号。
+    selected = {e.evidence_id for e, f in parsed if "Hyouka [11.5]" in e.relative_path}
+    assert selected <= _assigned_evidence_ids(plain_graph)
 
 
 def test_root_sample_lycoris_short_movies_do_not_create_extra_work_cards():

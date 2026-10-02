@@ -101,7 +101,7 @@ export interface WorkIndex {
   cast?: Array<{ name: string; role: string; profile_path: string }>
   tags: string[]
   last_played: string | null
-  metadata_state?: 'ready' | 'waiting_metadata' | 'waiting_review' | 'source_unavailable' | 'failed'
+  metadata_state?: 'ready' | 'not_required' | 'waiting_metadata' | 'waiting_review' | 'source_unavailable' | 'failed'
   episode_count?: number
   asset_count?: number
   source_locations?: Record<string, string[]>

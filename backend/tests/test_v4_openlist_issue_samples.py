@@ -18,8 +18,13 @@ def parse(path):
 ])
 def test_explicit_attached_bonus_is_not_regular_episode(path):
     facts = parse(path)
-    assert not facts.is_importable
-    assert facts.content_class in {"auxiliary", "attached_special"}
+    if "OVA" in path:
+        assert facts.is_importable
+        assert facts.content_class == "playable_special"
+        assert facts.episode_candidate is None
+    else:
+        assert not facts.is_importable
+        assert facts.content_class in {"auxiliary", "attached_special"}
 
 
 def test_malformed_episode_bracket_does_not_drop_clear_episode_number():

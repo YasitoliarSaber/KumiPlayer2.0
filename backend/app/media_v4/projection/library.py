@@ -279,6 +279,8 @@ class V4LibraryProjection:
                             state = binding_status
                         else:
                             state, metadata = recovered
+                    elif binding_status == "not_required":
+                        state = "not_required"
                     elif binding_status == "confirmed":
                         state = meta_state or "waiting_metadata"
                     else:

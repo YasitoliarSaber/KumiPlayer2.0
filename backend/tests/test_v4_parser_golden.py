@@ -136,7 +136,7 @@ def test_parser_preserves_full_compound_special_token():
     )
 
     assert facts.group_type == "special"
-    assert facts.special_number == 1
+    assert facts.special_number is None
     assert facts.episode_token_raw == "SP01_13"
 
 

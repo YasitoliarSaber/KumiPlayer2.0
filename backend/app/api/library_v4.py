@@ -178,8 +178,8 @@ def get_library(compact: bool = False, source: str | None = None, include_all: b
         })
         works.append(payload)
     if not include_all:
-        # 正式媒体墙只返回 ready 作品；waiting/review/failed 走异常区恢复。
-        works = [work for work in works if work.get("metadata_state") == "ready"]
+        # 本地特别篇无需在线资料也可显示；waiting/review/failed 仍走异常区恢复。
+        works = [work for work in works if work.get("metadata_state") in {"ready", "not_required"}]
     if source and source != "all":
         works = [work for work in works if source in work["sources"]]
     return {

@@ -50,7 +50,7 @@ def test_specials_and_auxiliary_are_excluded_only_with_explicit_evidence():
         # 中文特别篇与 Specials 目录语义一致
         "动画/作品甲/特别篇/作品甲.S01E01.mkv",
         "动画/作品甲/Specials/作品甲.S01E01.mkv",
-        "动画/作品甲/作品甲 [SP01].mkv",
+        "动画/作品甲/作品甲 [SP].mkv",
         "动画/作品甲/作品甲.S00E03.mkv",
         # 明确附属视频
         "动画/作品甲/作品甲 [NCOP01].mkv",
@@ -82,12 +82,12 @@ def test_specials_and_auxiliary_are_excluded_only_with_explicit_evidence():
         assert facts.content_class != "attached_special", path
 
 
-def test_ova_without_attachment_or_numbering_stays_unknown_and_playable():
-    """CHECK-003A: 只有 OVA/OAD 发行形式、无附属证据也无季集证据 → unknown 保留。"""
+def test_ova_without_regular_season_is_playable_special():
+    """明确 OVA 按最新边界归特别篇，不要求先有正片季号。"""
 
     _evidence, facts = _facts("动画/某作品/某作品 [OVA].mkv", 7)
-    assert facts.content_class == "unknown"
-    assert facts.media_type == "unknown"
+    assert facts.content_class == "playable_special"
+    assert facts.media_type == "tv"
     assert facts.is_importable is True
     assert facts.is_auxiliary is False
     assert facts.episode_candidate is None

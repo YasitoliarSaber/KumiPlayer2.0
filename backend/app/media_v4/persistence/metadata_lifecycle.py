@@ -32,10 +32,12 @@ def episode_signature(episode: dict) -> str:
 
 def current_episode_signatures(conn, revision_id: str | None, work_id: str) -> dict[str, str]:
     return {str(r['episode_id']): episode_signature(dict(r)) for r in conn.execute(
-        'SELECT DISTINCT e.* FROM episodes e JOIN revision_bindings rb ON rb.episode_id=e.episode_id '
+        'SELECT DISTINCT e.* FROM episodes e JOIN seasons s ON s.season_id=e.season_id '
+        'JOIN revision_bindings rb ON rb.episode_id=e.episode_id '
         'JOIN import_revisions ir ON ir.revision_id=rb.revision_id '
         'JOIN source_roots sr ON sr.root_id=ir.root_id '
-        "WHERE (? IS NULL OR rb.revision_id=?) AND rb.work_id=? AND (? IS NOT NULL OR (ir.status='confirmed' AND sr.retired_at=''))",
+        "WHERE e.episode_kind != 'special' AND s.season_kind != 'special' "
+        "AND (? IS NULL OR rb.revision_id=?) AND rb.work_id=? AND (? IS NOT NULL OR (ir.status='confirmed' AND sr.retired_at=''))",
         (revision_id, revision_id, work_id, revision_id),
     )}
 
