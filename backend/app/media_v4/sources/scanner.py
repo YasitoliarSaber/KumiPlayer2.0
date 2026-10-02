@@ -643,7 +643,10 @@ def tree_root_id(
 def openlist_root_id(server_url: str, username: str, remote_root: str, *, connection_id: str = "") -> str:
     identity = "\x1f".join((server_url.strip().casefold(), username.strip().casefold(), normalize_remote_path(remote_root)))
     if connection_id and connection_id != "legacy":
-        identity = "\x1f".join((connection_id, normalize_remote_path(remote_root)))
+        from app.media_v4.sources.connection_identity import openlist_account_namespace
+
+        identity = "\x1f".join((connection_id, openlist_account_namespace(server_url, username),
+                               normalize_remote_path(remote_root)))
     return "root_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
 
 

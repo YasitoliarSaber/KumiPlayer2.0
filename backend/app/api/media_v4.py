@@ -670,7 +670,7 @@ def scan_source(request: SourceScanRequest):
             if not route_id:
                 raise HTTPException(status_code=409, detail="当前 OpenList 目录未匹配已保存的内容来源路由")
             content_provider = routed_provider
-            root_id = openlist_root_id(config.openlist_server_url, username, remote_root, connection_id=request.connection_id)
+            root_id = _source_openlist_root_id(config, username, remote_root, connection_id=request.connection_id)
             if not config.openlist_mount_root:
                 raise HTTPException(status_code=409, detail="当前内容来源尚未配置本地挂载路径，请先在设置页完成来源映射")
             local_root = derive_local_path(config.openlist_mount_root, _remote_root(config), remote_root)
@@ -761,7 +761,7 @@ def scan_source(request: SourceScanRequest):
             if not route_id:
                 raise HTTPException(status_code=409, detail="当前 OpenList 目录未匹配已保存的内容来源路由")
             content_provider = routed_provider
-            root_id = openlist_root_id(config.openlist_server_url, username, remote_root, connection_id=request.connection_id)
+            root_id = _source_openlist_root_id(config, username, remote_root, connection_id=request.connection_id)
             openlist_playback_root = derive_local_path(
                 config.openlist_mount_root,
                 _remote_root(config),
@@ -1369,13 +1369,37 @@ def _durable_draft_finalizer(
     )
 
 
-def _connection_request_guard(config) -> dict:
+def _connection_request_guard(config, *, username: str | None = None) -> dict:
     from app.core.openlist_connections import connection_fingerprint, connection_id
+    from app.media_v4.sources.connection_identity import openlist_account_namespace
 
-    return {"connection_fingerprint": connection_fingerprint(config)} if connection_id(config) != "legacy" else {}
+    identity = connection_id(config)
+    if identity == "legacy":
+        return {}
+    actual_username, _password, _state = _openlist_credentials(identity)
+    if username is not None and actual_username != username:
+        raise HTTPException(status_code=409, detail="OpenList 登录账号已改变，请重新选择此来源")
+    return {
+        "connection_fingerprint": connection_fingerprint(config),
+        "account_namespace": openlist_account_namespace(config.openlist_server_url, actual_username),
+    }
 
 
-def _openlist_scan_request(request: SourceScanRequest, provider: str, remote_root: str, config, routes) -> dict:
+def _source_openlist_root_id(config, username: str, remote_root: str, *, connection_id: str = "") -> str:
+    from app.media_v4.sources.connection_identity import resolve_openlist_root_id
+
+    if not connection_id or connection_id == "legacy":
+        return openlist_root_id(config.openlist_server_url, username, remote_root, connection_id=connection_id)
+    return resolve_openlist_root_id(
+        get_database(), config.openlist_server_url, username, remote_root,
+        connection_id=connection_id,
+        current_fingerprint=_connection_request_guard(config, username=username)["connection_fingerprint"],
+    )
+
+
+def _openlist_scan_request(
+    request: SourceScanRequest, provider: str, remote_root: str, config, routes, *, username: str,
+) -> dict:
     """序列化 OpenList 扫描参数；只含非敏感路由与根信息，凭据执行期解析。"""
 
     from app.api.openlist_v4 import _remote_root
@@ -1383,7 +1407,7 @@ def _openlist_scan_request(request: SourceScanRequest, provider: str, remote_roo
     return {
         "remote_root": remote_root,
         "connection_id": request.connection_id or "legacy",
-        **_connection_request_guard(config),
+        **_connection_request_guard(config, username=username),
         "mapping_root": _remote_root(config),
         "mount_root": config.openlist_mount_root,
         "provider": provider,
@@ -1480,7 +1504,7 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
         if not config.openlist_mount_root:
             raise HTTPException(status_code=409, detail="当前内容来源尚未配置本地挂载路径，请先在设置页完成来源映射")
         configured_roots = [derive_local_path(config.openlist_mount_root, _remote_root(config), remote_root)]
-        root_id = openlist_root_id(config.openlist_server_url, username, remote_root, connection_id=request.connection_id)
+        root_id = _source_openlist_root_id(config, username, remote_root, connection_id=request.connection_id)
     else:
         if not configured_roots:
             raise HTTPException(status_code=409, detail="当前内容来源尚未配置本地挂载路径，请先在设置页完成来源映射")
@@ -1542,7 +1566,7 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
             "request": {
                 "provider": content_provider,
                 "connection_id": request.connection_id or "legacy",
-                **(_connection_request_guard(config) if request.source == "hybrid" else {}),
+                **(_connection_request_guard(config, username=username) if request.source == "hybrid" else {}),
                 "route_id": route_id,
                 "revision_id": request.revision_id.strip(),
                 "source_display_name": request.source_display_name or "",
@@ -1601,7 +1625,7 @@ def start_durable_scan(request: SourceScanRequest):
     route_id, routed_provider = provider_for_remote(routes, remote_root)
     if not route_id:
         raise HTTPException(status_code=409, detail="当前 OpenList 目录未匹配已保存的内容来源路由")
-    root_id = openlist_root_id(config.openlist_server_url, username, remote_root, connection_id=request.connection_id)
+    root_id = _source_openlist_root_id(config, username, remote_root, connection_id=request.connection_id)
     database = get_database()
     scan_mode = request.scan_mode or "full"
     playback_root = derive_local_path(
@@ -1636,7 +1660,7 @@ def start_durable_scan(request: SourceScanRequest):
                 "root_id": root_id,
                 "scan_kind": "openlist_incremental",
                 "source_mode": source_mode,
-                "request": _openlist_scan_request(request, routed_provider, remote_root, config, routes),
+                "request": _openlist_scan_request(request, routed_provider, remote_root, config, routes, username=username),
             },
         )
         get_source_scan_runner(database).wake()
@@ -1686,7 +1710,7 @@ def start_durable_scan(request: SourceScanRequest):
             "root_id": root_id,
             "scan_kind": "openlist_full",
             "source_mode": "openlist_full",
-            "request": _openlist_scan_request(request, routed_provider, remote_root, config, routes),
+            "request": _openlist_scan_request(request, routed_provider, remote_root, config, routes, username=username),
         },
     )
     get_source_scan_runner(database).wake()
@@ -1946,7 +1970,7 @@ def openlist_status(remote_root: str = "", connection_id: str = ""):
     if not config.openlist_server_url or not username:
         raise HTTPException(status_code=400, detail="请先在设置页完成 OpenList 连接配置")
     remote_root = normalize_remote_path(remote_root.strip() or _remote_root(config))
-    root_id = openlist_root_id(config.openlist_server_url, username, remote_root, connection_id=connection_id)
+    root_id = _source_openlist_root_id(config, username, remote_root, connection_id=connection_id)
     source_mode = ""
     last_scan_mode = ""
     with get_database().connect() as conn:

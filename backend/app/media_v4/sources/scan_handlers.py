@@ -32,8 +32,15 @@ def _callbacks(runtime) -> dict:
 
 
 def _assert_connection_unchanged(config, request):
-    from app.core.openlist_connections import connection_fingerprint
+    from app.core.config import resolve_openlist_credentials
+    from app.core.openlist_connections import connection_fingerprint, connection_id
+    from app.media_v4.sources.connection_identity import openlist_account_namespace
 
+    namespace = request.get("account_namespace")
+    if namespace:
+        username, _password, _state = resolve_openlist_credentials(connection_id(config))
+        if namespace != openlist_account_namespace(config.openlist_server_url, username):
+            raise ValueError("OpenList 地址、账号或映射已改变，请重新核对此来源后发起扫描")
     expected = request.get("connection_fingerprint")
     if expected and expected != connection_fingerprint(config):
         raise ValueError("OpenList 地址、账号或映射已改变，请重新核对此来源后发起扫描")
@@ -49,6 +56,16 @@ def _assert_scan_identity(task, returned_scan_id, evidence) -> None:
         raise ValueError(
             "扫描适配器返回的证据未使用登记的 scan_id/root_id，拒绝写入"
         )
+
+
+def _guarded_openlist_client(config, request):
+    """每轮取客户端前原子核对账户，脱敏用户名不能作为身份凭据。"""
+    from app.api.openlist_v4 import _client
+    from app.core.data_lock import DATA_WRITE_LOCK
+
+    with DATA_WRITE_LOCK:
+        _assert_connection_unchanged(config, request)
+        return _client(config)
 
 
 #: 请求预算耗尽后的自动缓冲：时长与最大自动轮数。
@@ -197,7 +214,7 @@ def scan_openlist_full_source(database, task, runtime):
     """OpenList 完整扫描：凭据执行期解析，目录观察落为增量状态。"""
 
     from app.api.media_v4 import scan_openlist_directory
-    from app.api.openlist_v4 import _client, _connection_config, _remote_root
+    from app.api.openlist_v4 import _connection_config, _remote_root
     from app.media_v4.sources import scan_frontier
     from app.media_v4.sources.incremental import build_full_scan_state, stage_scan_state
     from app.media_v4.sources.scanner import (
@@ -223,7 +240,7 @@ def scan_openlist_full_source(database, task, runtime):
     while True:
         scan_stats.clear()
         _scan_id, evidence = scan_openlist_directory(
-            _client(config),
+            _guarded_openlist_client(config, request),
             remote_root=str(request.get("remote_root") or ""),
             mapping_root=str(request.get("mapping_root") or _remote_root(config)),
             mount_root=str(request.get("mount_root") or ""),
@@ -278,7 +295,7 @@ def scan_openlist_incremental_source(database, task, runtime):
     """OpenList 增量扫描：基线与状态从数据库重建，不依赖注册期进程内对象。"""
 
     from app.api.media_v4 import scan_openlist_incremental
-    from app.api.openlist_v4 import _client, _connection_config, _remote_root
+    from app.api.openlist_v4 import _connection_config, _remote_root
     from app.media_v4.persistence.repositories import V4Repository
     from app.media_v4.sources.incremental import (
         build_tree_baseline_state,
@@ -298,7 +315,7 @@ def scan_openlist_incremental_source(database, task, runtime):
     if not state or state.get("remote_root") != remote_root:
         state = build_tree_baseline_state(task.root_id, remote_root, baseline)
     _scan_id, evidence, next_state, _stats = scan_openlist_incremental(
-        _client(config),
+        _guarded_openlist_client(config, request),
         baseline=baseline,
         state=state,
         mapping_root=mapping_root,

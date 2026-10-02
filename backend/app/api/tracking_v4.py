@@ -98,6 +98,7 @@ def _enqueue_root_incremental(database, config, *, root_id: str, remote_root: st
         _confirmed_source_evidence,
         _connection_request_guard,
         _register_durable_source_scan,
+        _source_openlist_root_id,
         _source_root_mode,
     )
     from app.api.openlist_v4 import _configured_routes, _remote_root
@@ -116,6 +117,10 @@ def _enqueue_root_incremental(database, config, *, root_id: str, remote_root: st
         raise HTTPException(status_code=503, detail="本机凭据管理器暂时不可用，请稍后重试")
     if not config.openlist_server_url or not username:
         raise HTTPException(status_code=400, detail="请先在设置页完成此来源的 OpenList 连接配置")
+    if identity != "legacy" and root_id != _source_openlist_root_id(
+        config, username, remote_root, connection_id=identity,
+    ):
+        raise HTTPException(status_code=409, detail="此来源的 OpenList 服务器或账号已改变，请先重新建立对应基线")
 
     routes = _configured_routes(config)
     from app.integrations.openlist.providers import provider_for_remote
@@ -139,7 +144,7 @@ def _enqueue_root_incremental(database, config, *, root_id: str, remote_root: st
         "scan_id": scan_id, "root_id": root_id, "scan_kind": "openlist_incremental", "source_mode": source_mode,
         "request": {
             "connection_id": connection_id(config), "remote_root": remote_root,
-            **_connection_request_guard(config),
+            **_connection_request_guard(config, username=username),
             "mapping_root": _remote_root(config), "mount_root": config.openlist_mount_root,
             "provider": routed_provider,
             "routes": [{"route_id": r.route_id, "remote_prefix": r.remote_prefix,
