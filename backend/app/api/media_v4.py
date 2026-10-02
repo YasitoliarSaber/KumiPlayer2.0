@@ -618,6 +618,13 @@ def _tree_sample_paths(evidence: list) -> list[str]:
     return [paths[index] for index in indexes]
 
 
+def _read_local_tree_text(tree_file: str) -> str:
+    from app.media_v4.sources.input_archive import copy_tree_input_to_local
+
+    with copy_tree_input_to_local(tree_file) as local_copy:
+        return read_directory_tree_text(local_copy)
+
+
 def _directory_tree_error_message(exc: DirectoryTreeReadError) -> str:
     if exc.kind == "unreadable":
         return "目录树文件无法打开，请确认文件未被占用或损坏后重新选择"
@@ -668,7 +675,7 @@ def scan_source(request: SourceScanRequest):
                 raise HTTPException(status_code=409, detail="当前内容来源尚未配置本地挂载路径，请先在设置页完成来源映射")
             local_root = derive_local_path(config.openlist_mount_root, _remote_root(config), remote_root)
             # 同一份已解码文本同时交给根解析与 evidence 构建，只读取一次。
-            tree_text = read_directory_tree_text(request.tree_file)
+            tree_text = _read_local_tree_text(request.tree_file)
             resolution = TreePlaybackRootResolver(
                 request.tree_file,
                 configured_roots=[local_root],
@@ -707,7 +714,7 @@ def scan_source(request: SourceScanRequest):
             configured_roots = _configured_tree_roots(config, content_provider)
             if not configured_roots:
                 raise HTTPException(status_code=409, detail="当前内容来源尚未配置本地挂载路径，请先在设置页完成来源映射")
-            tree_text = read_directory_tree_text(request.tree_file)
+            tree_text = _read_local_tree_text(request.tree_file)
             resolution = TreePlaybackRootResolver(
                 request.tree_file,
                 configured_roots=configured_roots,
@@ -1435,7 +1442,11 @@ def _start_durable_local_scan(request: SourceScanRequest) -> dict:
 def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
     """目录树与 TXT+OpenList 基线共享后台读取/证据持久化路径。"""
 
-    from app.media_v4.sources.input_archive import InputArchiveError, archive_tree_input
+    from app.media_v4.sources.input_archive import (
+        InputArchiveError,
+        archive_tree_input,
+        copy_tree_input_to_local,
+    )
     from app.media_v4.sources.source_scan_runner import (
         InputArchive,
         get_source_scan_runner,
@@ -1474,29 +1485,26 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
         if not configured_roots:
             raise HTTPException(status_code=409, detail="当前内容来源尚未配置本地挂载路径，请先在设置页完成来源映射")
 
-    # 身份与词法解析必须在创建 root/scan 之前完成：只读用户选定的 TXT，
-    # 不触源盘。解析结果随 request 持久化，恢复路径复用同一结论。
+    # 原位置只用于复制与词法映射；任何 TXT 解析及正式归档都在本地进行。
+    # 身份仍由原路径和正文确定，不能因为缓存副本换位置而改变来源归属。
     try:
-        tree_text = read_directory_tree_text(request.tree_file)
+        with copy_tree_input_to_local(request.tree_file) as local_copy:
+            tree_text = read_directory_tree_text(local_copy)
+            resolution = TreePlaybackRootResolver(
+                request.tree_file,
+                configured_roots=configured_roots,
+            ).resolve(tree_text)
+            if request.source != "hybrid":
+                root_id = tree_scan_root_id(
+                    provider=content_provider,
+                    configured_roots=configured_roots,
+                    resolution=resolution,
+                    tree_file=request.tree_file,
+                )
+            fact = archive_tree_input(root_id, local_copy)
+            fact["original_filename"] = Path(request.tree_file).name
     except DirectoryTreeReadError as exc:
         raise HTTPException(status_code=400, detail=_directory_tree_error_message(exc)) from exc
-    resolution = TreePlaybackRootResolver(
-        request.tree_file,
-        configured_roots=configured_roots,
-    ).resolve(tree_text)
-    if request.source != "hybrid":
-        root_id = tree_scan_root_id(
-            provider=content_provider,
-            configured_roots=configured_roots,
-            resolution=resolution,
-            tree_file=request.tree_file,
-        )
-
-    database = get_database()
-    identity_root = resolution.root or configured_roots[0]
-    scan_id = "scan_" + uuid.uuid4().hex
-    try:
-        fact = archive_tree_input(root_id, request.tree_file)
     except InputArchiveError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OSError as exc:
@@ -1504,6 +1512,9 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
             status_code=400,
             detail="目录树 TXT 无法归档，请确认文件可读、本机数据目录可写后重试",
         ) from exc
+    database = get_database()
+    identity_root = resolution.root or configured_roots[0]
+    scan_id = "scan_" + uuid.uuid4().hex
     archive = InputArchive(
         archive_path=str(fact["archive_path"]),
         sha256=str(fact["sha256"]),

@@ -13,10 +13,13 @@ import hashlib
 import os
 import re
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from app.core.paths import get_data_dir
-from app.media_v4.sources.scanner import MAX_TREE_FILE_BYTES
+from app.media_v4.sources.scanner import MAX_TREE_FILE_BYTES, DirectoryTreeReadError
 
 _SAFE_SEGMENT_RE = re.compile(r"^[^<>:\"/\\|?*\x00-\x1f]{1,120}$")
 
@@ -32,6 +35,38 @@ def _safe_segment(value: str, fallback: str) -> str:
 
 def archive_root() -> Path:
     return get_data_dir() / "source_inputs"
+
+
+@contextmanager
+def copy_tree_input_to_local(tree_file: str | Path) -> Iterator[Path]:
+    """原位置只为复制打开一次，后续解析/归档均消费本地副本。
+
+    临时目录只属于本次复制；退出只移除本次创建的副本，正式归档保留。
+    原挂载路径由调用方保留用于词法映射，不能被副本位置替代。
+    """
+    source = Path(tree_file).expanduser()
+    local_root = archive_root() / ".staging"
+    local_root.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(prefix="tree-copy-", dir=local_root) as temporary:
+        local_copy = Path(temporary) / _safe_segment(source.name, "directory-tree.txt")
+        try:
+            handle = open(source, "rb")
+        except OSError as exc:
+            raise DirectoryTreeReadError("unreadable") from exc
+        with handle, local_copy.open("wb") as destination:
+            size = 0
+            while True:
+                try:
+                    chunk = handle.read(1024 * 1024)
+                except OSError as exc:
+                    raise DirectoryTreeReadError("unreadable") from exc
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_TREE_FILE_BYTES:
+                    raise InputArchiveError("目录树文件过大，请拆分后重新导出")
+                destination.write(chunk)
+        yield local_copy
 
 
 def archive_tree_input(root_id: str, tree_file: str | Path) -> dict:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import json
 import os
 from pathlib import Path
@@ -132,3 +133,63 @@ def test_durable_tree_archive_failure_creates_no_scan(tree_api, monkeypatch, err
 def test_application_lifespan_starts_and_stops_on_an_isolated_empty_database():
     with TestClient(app) as client:
         assert client.get("/api/health").json()["status"] == "ok"
+
+
+@pytest.mark.parametrize("source", ["tree", "hybrid"])
+@pytest.mark.parametrize("endpoint", ["/api/v4/sources/scans", "/api/v4/sources/scan"])
+def test_selected_txt_is_copied_once_before_parsing_and_original_location_is_preserved(
+    tree_api, monkeypatch, source, endpoint,
+):
+    tree, database, runner, client = tree_api
+    # 模拟 TXT 就在导出目录；选择原位置仍应推导该目录，而非本地缓存目录。
+    original_root = tree.parent / "offline-mount"
+    original = original_root / "我的动画" / tree.name
+    original.parent.mkdir(parents=True)
+    original.write_bytes(tree.read_bytes())
+    original_contents = original.read_bytes()
+    monkeypatch.setattr(media_v4, "_configured_tree_roots", lambda *_: [str(original_root)])
+    real_open = builtins.open
+    real_reader = media_v4.read_directory_tree_text
+    reads = []
+    parses = []
+
+    def copy_only_open(path, mode="r", *args, **kwargs):
+        if Path(path) == original:
+            reads.append(mode)
+            assert reads == ["rb"], "挂载位置的 TXT 只能为复制打开一次"
+        return real_open(path, mode, *args, **kwargs)
+
+    def local_only_reader(path):
+        assert Path(path) != original, "必须先复制到本地再解析 TXT"
+        assert Path(path).is_relative_to(Path(os.environ["KUMIPLAYER_DATA_DIR"]))
+        assert Path(path).is_file()
+        assert Path(path).read_bytes() == original_contents
+        assert reads == ["rb"]
+        parses.append(str(path))
+        return real_reader(path)
+
+    monkeypatch.setattr(builtins, "open", copy_only_open)
+    monkeypatch.setattr(media_v4, "read_directory_tree_text", local_only_reader)
+    request = _request(original, source)
+    # 混合入口仍由 OpenList 词法映射；树入口用原 TXT 所在文件夹推导。
+    response = client.post(endpoint, json=request)
+
+    assert response.status_code == 200, response.text
+    assert reads == ["rb"] and len(parses) == 1
+    if source == "tree":
+        assert response.json()["effective_playback_root"].replace("/", "\\") == str(original.parent).replace("/", "\\")
+    if endpoint.endswith("/scans"):
+        scan_id = response.json()["scan_id"]
+        with database.connect() as conn:
+            row = conn.execute("SELECT * FROM source_scan_requests WHERE scan_id=?", (scan_id,)).fetchone()
+        assert json.loads(row["request_json"])["tree_file_path"] == os.path.abspath(original)
+        assert row["original_filename"] == original.name
+        # 已复制后原文件被移走，后台执行也不得再次依赖原挂载位置。
+        original.unlink()
+        task = runner.claim_next_scan()
+        assert task is not None
+        runner.run_scan(task)
+        with database.connect() as conn:
+            state = conn.execute("SELECT status, error FROM source_scans WHERE scan_id=?", (scan_id,)).fetchone()
+        assert state["status"] == "completed", dict(state)
+        assert reads == ["rb"]
