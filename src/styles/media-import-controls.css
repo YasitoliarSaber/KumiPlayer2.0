@@ -1,0 +1,25 @@
+/* 旧工作台样式未分层，适配保持同层并限定页面；控件样式由带 nonce 的 renderer 提供。 */
+.media-v4-content-scope {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  align-items: center;
+  gap: 4px 16px;
+  min-width: 0;
+}
+.media-v4-content-scope > .fui-Field__label { margin: 0; font-size: 14px; line-height: 20px; }
+.media-v4-content-scope .fui-RadioGroup { display: flex; flex-wrap: wrap; gap: 8px; }
+.media-v4-content-scope > .fui-Field__hint { grid-column: 2; margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 18px; }
+.media-v4-workspace-body > .settings-connection-field { margin: 16px 18px 0; }
+.media-v4-workspace .settings-connection-field { display: grid; gap: 6px; min-width: 0; }
+.media-v4-workspace .settings-connection-field > .fui-Field__label { font-size: 13px; line-height: 20px; }
+.media-v4-workspace .settings-connection-dropdown { width: 100%; max-width: 480px; }
+.media-v4-hybrid-grid .media-v4-field-copy { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 4px 10px; }
+.media-v4-hybrid-grid .media-v4-field-copy > span:last-child { grid-column: 2; }
+.media-v4-hybrid-grid .media-v4-openlist-browser { margin: 0; }
+@media (max-width: 640px) {
+  .media-v4-content-scope { grid-template-columns: minmax(0, 1fr); }
+  .media-v4-content-scope > .fui-Field__hint { grid-column: 1; }
+}
+
+/* 单色官方标识保留原图，用浅色小底片保证深浅主题都有对比。 */
+.media-v4-page .media-provider-brand.provider-quark { padding: 3px; border-radius: 4px; background: #f5f5f5; }

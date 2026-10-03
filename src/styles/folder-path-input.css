@@ -2,4 +2,8 @@
 .settings-folder-input { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .settings-folder-input > input.settings-input { flex: 1; min-width: 0; width: 100%; }
 .settings-folder-input > button { flex-shrink: 0; white-space: nowrap; }
+.settings-folder-input > .fui-Button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--control-bg, var(--surface)); color: var(--text); font: inherit; font-size: 14px; line-height: 22px; }
+.settings-folder-input > .fui-Button:hover:not(:disabled) { background: var(--control-hover, var(--surface-soft)); }
+.settings-folder-input > .fui-Button:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+.settings-folder-input > .fui-Button:disabled { opacity: .5; cursor: default; }
 .settings-folder-error { margin: 6px 0 0; color: var(--danger, #c42b1c); font-size: 12px; }

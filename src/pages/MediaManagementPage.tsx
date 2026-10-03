@@ -38,6 +38,7 @@ import FolderPathInput from '../components/settings/FolderPathInput'
 import { useMediaWorkflowStore } from '../stores/mediaWorkflow'
 import { useUiStore } from '../stores/ui'
 import { getKumiFluentTheme } from '../design/fluentTheme'
+import '../styles/media-import-controls.css'
 import { summarizeExecutionWorks } from '../lib/mediaSummary'
 import { presentScanProgress } from '../lib/scanProgress'
 
@@ -1588,7 +1589,7 @@ export default function MediaManagementPage() {
           </div>
         </div>
 
-        <Field label="内容范围" hint={contentScope === 'ongoing' ? '请选择独立的新番专用目录；本次导入按正在更新的正片剧集处理。' : undefined}>
+        <Field className="media-v4-content-scope" label="内容范围" hint={contentScope === 'ongoing' ? '请选择独立的新番专用目录；本次导入按正在更新的正片剧集处理。' : undefined}>
           <RadioGroup layout="horizontal" value={contentScope} onChange={(_, data) => setContentScope(data.value as V4ContentScope)} disabled={busy === 'scan' || Boolean(targetRootId)}>
             <Radio value="completed" label="已完结" />
             <Radio value="ongoing" label="新番" />

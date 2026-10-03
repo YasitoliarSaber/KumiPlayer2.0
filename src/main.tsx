@@ -1,5 +1,7 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+import { RendererProvider } from '@fluentui/react-components'
+import { createKumiFluentRenderer } from './design/fluentTheme'
 import './styles/layers.css'
 import './styles/foundation.css'
 import './index.css'
@@ -13,14 +15,17 @@ import { installDesktopInteractions } from './platform/desktopInteractions'
 
 const uninstallDesktopInteractions = installDesktopInteractions()
 import.meta.hot?.dispose(uninstallDesktopInteractions)
+const fluentRenderer = createKumiFluentRenderer(document)
 
 async function bootstrap(): Promise<void> {
   await initializeDesktopApiSession()
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
-      <AppErrorBoundary>
-        <App />
-      </AppErrorBoundary>
+      <RendererProvider renderer={fluentRenderer}>
+        <AppErrorBoundary>
+          <App />
+        </AppErrorBoundary>
+      </RendererProvider>
     </StrictMode>,
   )
 }

@@ -1,4 +1,10 @@
-import { webDarkTheme, webLightTheme, type Theme } from '@fluentui/react-components';
+import { createDOMRenderer, webDarkTheme, webLightTheme, type Theme } from '@fluentui/react-components';
+
+/** Tauri 为静态样式注入 nonce；动态控件与主题必须使用同一个标记。 */
+export function createKumiFluentRenderer(targetDocument: Document) {
+  const nonce = targetDocument.querySelector<HTMLStyleElement>('style[data-kumi-boot-styles]')?.nonce;
+  return createDOMRenderer(targetDocument, nonce ? { styleElementAttributes: { nonce } } : undefined);
+}
 
 export type KumiAppearanceMode = 'fluent' | 'cinema' | 'mica' | string;
 

@@ -428,7 +428,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
   const renderOpenList = () => (
     <PanelStack>
       <SectionIntro title="WebDAV 设置" />
-      <p className="sources-root-note">目前仅针对 OpenList 做了适配与优化，目录浏览、来源识别及增量检查依赖其专用接口，尚不支持直接连接其他 WebDAV 服务。通过 CloudDrive2 等工具挂载的目录，可在「媒体来源」中配置并使用本地目录或目录树导入。</p>
+      <p className="sources-root-note">使用 OpenList 浏览目录并检查更新。其他 WebDAV 服务暂不支持；挂载网盘请通过目录树 TXT 导入。</p>
       {baseConfig && <div className="settings-connection-toolbar">
         <OpenListConnectionPicker connections={openlistConnections(baseConfig)} value={selectedConnectionId} disabled={Boolean(activeAction || connectionBusy)} onChange={(identity) => {
           setSelectedConnectionId(identity);
