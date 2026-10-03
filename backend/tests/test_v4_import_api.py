@@ -737,8 +737,9 @@ def test_tree_scan_resolves_the_precise_sub_library_root_from_the_tree_location(
 
 
 def test_remote_tree_scan_requires_a_playback_mapping(tmp_path, monkeypatch):
-    from app.api import media_v4
     from fastapi import HTTPException
+
+    from app.api import media_v4
 
     tree = tmp_path / "tree.txt"
     tree.write_text("Show/Show.S01E01.mkv\n", encoding="utf-8")
@@ -793,9 +794,10 @@ def test_local_scan_receives_all_configured_cloud_mount_roots(monkeypatch):
 
 
 def test_explicit_openlist_incremental_without_baseline_returns_actionable_409(monkeypatch):
+    from fastapi import HTTPException
+
     from app.api import media_v4
     from app.integrations.openlist.providers import OpenListRouteConfig
-    from fastapi import HTTPException
 
     config = SimpleNamespace(
         openlist_server_url="https://openlist.example.test",
@@ -881,10 +883,11 @@ def test_openlist_auto_scan_rebuilds_missing_checkpoint_from_confirmed_revision(
 def test_plain_openlist_full_scan_confirm_enables_incremental_and_keeps_mode(tmp_path, monkeypatch):
     """普通 OpenList 完整扫描确认后即可增量；来源卡模式保持 openlist_full。"""
 
+    from fastapi import HTTPException
+
     from app.api import media_v4, openlist_v4
     from app.integrations.openlist.providers import OpenListRouteConfig
     from app.media_v4.sources.adapters import SourceEntry, to_source_evidence
-    from fastapi import HTTPException
 
     config = SimpleNamespace(
         openlist_server_url="https://openlist.example.test",
@@ -1092,8 +1095,9 @@ def test_openlist_status_endpoint_reports_no_baseline_for_unconfirmed_root(tmp_p
 
 
 def test_openlist_scan_rejects_an_unmapped_remote_root_before_network(monkeypatch):
-    from app.api import media_v4, openlist_v4
     from fastapi import HTTPException
+
+    from app.api import media_v4, openlist_v4
 
     config = SimpleNamespace(
         openlist_server_url="https://openlist.example.test",
@@ -1195,6 +1199,7 @@ def _tree_scan_fixture(tmp_path, monkeypatch):
 
 def test_tree_scan_opens_the_txt_exactly_once_end_to_end(tmp_path, monkeypatch):
     import builtins
+    from pathlib import Path
 
     from app.media_v4.sources import scanner
 
@@ -1216,22 +1221,41 @@ def test_tree_scan_opens_the_txt_exactly_once_end_to_end(tmp_path, monkeypatch):
         openlist_remote_root="/",
         openlist_routes=[],
     ))
-    counter = {"opens": 0}
+    source_handles = []
+    parsed_copies = []
+    original_bytes = tree.read_bytes()
     real_open = builtins.open
+    real_read = media_v4.read_directory_tree_text
 
     def counting_open(*args, **kwargs):
-        counter["opens"] += 1
-        return real_open(*args, **kwargs)
+        handle = real_open(*args, **kwargs)
+        if Path(args[0]) == tree:
+            assert args[1] == "rb"
+            source_handles.append(handle)
+        return handle
+
+    def read_local_copy(path):
+        local_copy = Path(path)
+        assert local_copy != tree
+        assert len(source_handles) == 1
+        assert source_handles[0].closed
+        assert local_copy.read_bytes() == original_bytes
+        parsed_copies.append(local_copy)
+        return real_read(local_copy)
 
     monkeypatch.setattr(scanner.builtins, "open", counting_open)
+    monkeypatch.setattr(media_v4, "read_directory_tree_text", read_local_copy)
 
-    media_v4.scan_source(media_v4.SourceScanRequest(
+    scan = media_v4.scan_source(media_v4.SourceScanRequest(
         source="tree",
         tree_file=str(tree),
         provider="baidu",
     ))
 
-    assert counter["opens"] == 1
+    assert len(source_handles) == 1
+    assert len(parsed_copies) == 1
+    assert scan["effective_playback_root"] == str(library)
+    assert scan["entries"][0]["playback_locator"] == str(media_file)
 
 
 def test_preview_ignores_tampered_entry_locators_for_tree_scan(tmp_path, monkeypatch):
@@ -1498,6 +1522,14 @@ def test_metadata_manual_confirm_requeues_scrape_and_refreshes_projection(tmp_pa
             "metadata_state": "ready",
             "poster_url": "https://image.tmdb.org/t/p/w780/p.jpg",
             "fanart_url": "https://image.tmdb.org/t/p/original/f.jpg",
+            "episode_mappings": [{
+                "episode_id": episode["episode_id"],
+                "provider_episode_id": "9001",
+                "provider_season_number": episode["local_season_number"],
+                "provider_episode_number": episode["local_episode_number"],
+                "title": "Online Episode",
+                "still_url": "https://image.tmdb.org/t/p/w500/still.jpg",
+            } for episode in target["episodes"]],
         }
 
     monkeypatch.setattr("app.media_v4.jobs.metadata.default_metadata_provider", fake_provider)
@@ -1551,7 +1583,7 @@ def test_metadata_manual_confirm_requeues_scrape_and_refreshes_projection(tmp_pa
 
     with media_v4._database.connect() as conn:
         binding = conn.execute(
-            "SELECT provider, provider_id, status FROM scrape_bindings WHERE work_id = ? AND provider = 'tmdb'",
+            "SELECT provider, provider_id, status, metadata_json FROM scrape_bindings WHERE work_id = ? AND provider = 'tmdb'",
             (work_id,),
         ).fetchone()
         candidates = conn.execute(
@@ -1573,6 +1605,15 @@ def test_metadata_manual_confirm_requeues_scrape_and_refreshes_projection(tmp_pa
     assert len(jobs) == 1
     assert jobs[0]["status"] == "succeeded"
     assert jobs[0]["attempts"] == 2
+    metadata = json.loads(binding["metadata_json"])
+    assert metadata["metadata_state"] == "ready"
+    assert metadata["episode_mapping_status"] == "complete"
+    assert metadata["mapped_count"] == metadata["total_count"] == 1
+    from app.media_v4.projection.library import V4LibraryProjection
+
+    card = V4LibraryProjection(media_v4._database).ensure_current().cards[0]
+    assert card["metadata"]["metadata_state"] == "ready"
+    assert card["metadata"]["episode_mappings"][0]["title"] == "Online Episode"
 
 
 def test_metadata_retry_requeues_recoverable_failure_but_blocks_identity_conflict(tmp_path, monkeypatch):
@@ -1684,10 +1725,11 @@ def test_sync_and_durable_tree_entries_share_one_root_identity(tmp_path, monkeyp
     """
 
     _patch_database(tmp_path, monkeypatch)
-    from app.api import media_v4
-    from app.media_v4.sources.durable_scan import get_durable_scan
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
+
+    from app.api import media_v4
+    from app.media_v4.sources.durable_scan import get_durable_scan
 
     database = media_v4.get_database()
     mount = tmp_path / "百度网盘"

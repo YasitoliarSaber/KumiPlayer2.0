@@ -152,11 +152,38 @@ def test_title_change_on_same_source_lineage_keeps_work_identity(tmp_path):
     assert works[0]["preferred_title"] == "New Title"
 
 
-def test_projection_uses_latest_scrape_metadata_and_real_sources(tmp_path):
+def test_projection_uses_latest_scrape_metadata_and_real_sources(tmp_path, monkeypatch):
+    import base64
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    import httpx
+
+    from app.media_v4.jobs import completeness, metadata_artifacts
     from app.media_v4.jobs.scrape import V4ScrapeService
     from app.media_v4.persistence.database import V4Database
     from app.media_v4.projection.library import V4LibraryProjection
     from app.media_v4.revisions.service import V4RevisionService
+
+    config = SimpleNamespace(artwork_storage_mode="local", tmdb_timeout=5, proxy_url=None)
+    monkeypatch.setattr(metadata_artifacts, "load_config", lambda: config)
+    monkeypatch.setattr(completeness, "load_config", lambda: config)
+    image = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII="
+    )
+    requested_images = []
+
+    def artwork_response(request):
+        assert request.url.host == "image.tmdb.org"
+        requested_images.append(str(request.url))
+        return httpx.Response(200, content=image, headers={"content-type": "image/png"})
+
+    monkeypatch.setattr(metadata_artifacts, "_artwork_client", lambda _config: httpx.Client(
+        transport=httpx.MockTransport(artwork_response),
+    ))
+    monkeypatch.setattr("app.core.url_guard.socket.getaddrinfo", lambda *_a, **_k: [
+        (None, None, None, None, ("93.184.216.34", 443)),
+    ])
 
     database = V4Database(tmp_path / "projection-metadata.db")
     database.initialize()
@@ -166,8 +193,9 @@ def test_projection_uses_latest_scrape_metadata_and_real_sources(tmp_path):
     scrape_job = next(job for job in service.list_jobs("rev-metadata") if job["job_type"] == "scrape_work")
     V4ScrapeService(database).process(
         scrape_job["job_id"],
-        lambda _target: {
+        lambda target: {
             "provider": "tmdb",
+            "metadata_state": "ready",
             "provider_id": "42",
             "title": "Online Title",
             "original_title": "Original",
@@ -175,13 +203,37 @@ def test_projection_uses_latest_scrape_metadata_and_real_sources(tmp_path):
             "rating": 8.4,
             "genres": ["Animation"],
             "poster_url": "https://image.tmdb.org/t/p/w780/poster.jpg",
+            "fanart_url": "https://image.tmdb.org/t/p/original/fanart.jpg",
+            "episode_mappings": [{
+                "episode_id": episode["episode_id"],
+                "provider_episode_id": "9001",
+                "provider_season_number": episode["local_season_number"],
+                "provider_episode_number": episode["local_episode_number"],
+                "title": "Online Episode",
+                "still_url": "https://image.tmdb.org/t/p/w500/still.jpg",
+            } for episode in target["episodes"]],
         },
+        mirror_root=tmp_path / "mirror",
     )
 
     card = V4LibraryProjection(database).rebuild().cards[0]
     assert card["title"] == "Online Title"
     assert card["metadata"]["original_title"] == "Original"
     assert card["metadata"]["sources"] == ["local"]
+    assert card["metadata"]["metadata_state"] == "ready"
+    assert card["metadata"]["episode_mapping_status"] == "complete"
+    assert card["metadata"]["episode_mappings"][0]["title"] == "Online Episode"
+    assert set(requested_images) == {
+        "https://image.tmdb.org/t/p/w780/poster.jpg",
+        "https://image.tmdb.org/t/p/original/fanart.jpg",
+        "https://image.tmdb.org/t/p/w500/still.jpg",
+    }
+    with database.connect() as conn:
+        artifacts = conn.execute(
+            "SELECT artifact_type, target_path FROM artifacts WHERE status = 'published'",
+        ).fetchall()
+    assert {row["artifact_type"] for row in artifacts} >= {"nfo", "episode_nfo", "poster", "fanart", "episode_thumb"}
+    assert all(Path(row["target_path"]).is_file() for row in artifacts)
 
 
 def test_projection_checks_completeness_against_selected_scrape_revision(tmp_path, monkeypatch):

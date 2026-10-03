@@ -29,7 +29,7 @@ def tree_api(tmp_path, monkeypatch):
     monkeypatch.setattr(media_v4, "load_config", lambda: config)
     monkeypatch.setattr(media_v4, "_select_openlist_config", lambda _: config)
     monkeypatch.setattr(media_v4, "_openlist_credentials", lambda _: ("fixture-account", "", "available"))
-    monkeypatch.setattr(media_v4, "_connection_request_guard", lambda _: {})
+    monkeypatch.setattr(media_v4, "_connection_request_guard", lambda _, **_kwargs: {})
     from app.api import openlist_v4
 
     monkeypatch.setattr(openlist_v4, "_configured_routes", lambda _: [])
