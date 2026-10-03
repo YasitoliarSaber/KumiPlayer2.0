@@ -239,7 +239,8 @@ def test_tracking_scan_all_enqueues_incremental_for_openlist_roots(tmp_path, mon
         )
         # 该作品来源根改为 OpenList 路径
         conn.execute(
-            "UPDATE source_roots SET source_locator = '/Anime', provider = 'pan115' WHERE root_id = 'root-p'"
+            "UPDATE source_roots SET source_locator = '/Anime', provider = 'pan115', "
+            "content_scope = 'ongoing', source_mode = 'openlist_full' WHERE root_id = 'root-p'"
         )
     from types import SimpleNamespace
 

@@ -13,7 +13,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.api.media_v4 import get_database, resolve_openlist_credentials
-from app.core.config import load_config
+from app.core.config import load_config as load_config
+from app.media_v4.tracking.refresh import list_refresh_sources, refresh_all_sources
 
 router = APIRouter(prefix="/api/v4/tracking", tags=["tracking-v4"])
 
@@ -74,26 +75,13 @@ def list_tracking_works():
     return {"works": items}
 
 
-def _active_openlist_roots_for_tracking(database) -> list[dict]:
-    """返回拥有 watching/on_hold 作品的 openlist 活动来源根（供增量扫描）。"""
-
-    with database.connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT DISTINCT sr.root_id, sr.source_locator
-            FROM tracking_states t
-            JOIN works w ON w.work_id = t.work_id
-            JOIN revision_bindings rb ON rb.work_id = w.work_id
-            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
-            JOIN source_roots sr ON sr.root_id = ir.root_id
-            WHERE ir.status = 'confirmed' AND sr.retired_at = ''
-              AND sr.source_locator LIKE '/%'
-            """
-        ).fetchall()
-    return [dict(row) for row in rows]
+@router.get("/sources")
+def list_tracking_sources():
+    return {"sources": list_refresh_sources(get_database())}
 
 
-def _enqueue_root_incremental(database, config, *, root_id: str, remote_root: str) -> dict:
+def _enqueue_root_incremental(database, config, *, root_id: str, remote_root: str,
+                              include_scrape: bool = True, revision_id: str = "") -> dict:
     from app.api.media_v4 import (
         _confirmed_source_evidence,
         _connection_request_guard,
@@ -135,7 +123,10 @@ def _enqueue_root_incremental(database, config, *, root_id: str, remote_root: st
     source_mode = _source_root_mode(root_id) or "openlist_full"
     from app.integrations.openlist.providers import derive_local_path
 
-    _register_durable_source_scan(database, root={
+    with database.connect() as conn:
+        root_row = conn.execute("SELECT content_scope FROM source_roots WHERE root_id = ?", (root_id,)).fetchone()
+    content_scope = root_row["content_scope"] if root_row else "completed"
+    actual_id = _register_durable_source_scan(database, root={
         "root_id": root_id, "provider": routed_provider, "ingest_method": "openlist_scan",
         "source_locator": remote_root, "route_id": _route_id,
         "playback_locator": derive_local_path(config.openlist_mount_root, _remote_root(config), remote_root),
@@ -143,6 +134,8 @@ def _enqueue_root_incremental(database, config, *, root_id: str, remote_root: st
     }, scan={
         "scan_id": scan_id, "root_id": root_id, "scan_kind": "openlist_incremental", "source_mode": source_mode,
         "request": {
+            "revision_id": revision_id or "rev_" + uuid.uuid4().hex,
+            "content_scope": content_scope, "auto_update": content_scope == "ongoing" and include_scrape,
             "connection_id": connection_id(config), "remote_root": remote_root,
             **_connection_request_guard(config, username=username),
             "mapping_root": _remote_root(config), "mount_root": config.openlist_mount_root,
@@ -152,48 +145,22 @@ def _enqueue_root_incremental(database, config, *, root_id: str, remote_root: st
         },
     })
     get_source_scan_runner(database).wake()
-    return {"task_id": scan_id, "root_id": root_id, "remote_root": remote_root, "status": "queued"}
+    return {"task_id": actual_id, "root_id": root_id, "remote_root": remote_root, "status": "queued"}
 
 
 @router.post("/scan-all")
 def tracking_scan_all(request: TrackingScanRequest):
-    """对所有包含追更作品的 OpenList 活动来源发起增量扫描（进入同一 V4 链）。"""
-
-    del request.include_scrape
-    config = load_config()
-    database = get_database()
-    tasks = []
-    for root in _active_openlist_roots_for_tracking(database):
-        try:
-            tasks.append(_enqueue_root_incremental(database, config, root_id=root["root_id"], remote_root=root["source_locator"]))
-        except HTTPException as exc:
-            tasks.append({"root_id": root["root_id"], "remote_root": root["source_locator"], "status": "blocked", "reason": exc.detail})
-    return {"tasks": tasks}
+    """更新明确标记为新番且已有确认基线的活动来源。"""
+    return {"tasks": refresh_all_sources(get_database(), include_scrape=request.include_scrape)}
 
 
 @router.post("/{work_id}/scan")
 def tracking_scan_work(work_id: str, request: TrackingScanRequest):
-    """对指定追更作品所属的活动 OpenList 来源发起增量扫描。"""
-
-    del request.include_scrape
-    config = load_config()
-    database = get_database()
-    with database.connect() as conn:
-        row = conn.execute(
-            """
-            SELECT DISTINCT sr.root_id, sr.source_locator
-            FROM revision_bindings rb
-            JOIN import_revisions ir ON ir.revision_id = rb.revision_id
-            JOIN source_roots sr ON sr.root_id = ir.root_id
-            WHERE rb.work_id = ? AND ir.status = 'confirmed' AND sr.retired_at = ''
-              AND sr.source_locator LIKE '/%'
-            LIMIT 1
-            """,
-            (work_id,),
-        ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=409, detail="该作品不在任何 OpenList 活动来源中，本地来源请到媒体管理执行扫描")
-    return _enqueue_root_incremental(database, config, root_id=str(row["root_id"]), remote_root=str(row["source_locator"]))
+    """更新指定作品所属的新番来源，并保留多来源结果。"""
+    tasks = refresh_all_sources(get_database(), include_scrape=request.include_scrape, work_id=work_id)
+    if not tasks:
+        raise HTTPException(status_code=409, detail="该作品没有已确认的新番来源，请在媒体管理检查来源用途")
+    return {**tasks[0], "tasks": tasks}
 
 
 @router.post("/scans/{scan_id}/cancel")
