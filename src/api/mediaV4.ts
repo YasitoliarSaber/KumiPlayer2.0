@@ -1,5 +1,7 @@
 import { api } from './client'
 
+export type V4ContentScope = 'completed' | 'ongoing'
+
 export interface V4SourceEvidence {
   evidence_id: string
   scan_id: string
@@ -103,6 +105,7 @@ export interface V4LibraryCard {
 }
 
 export interface V4SourceLibraryCard {
+  content_scope?: V4ContentScope
   connection_id?: string
   root_id: string
   provider: string
@@ -480,16 +483,28 @@ export interface V4TrackingWork {
   updated_at: string
 }
 
-export interface V4TrackingScanTask {
-  task_id: string
+export interface V4TrackingSource {
   root_id: string
-  remote_root: string
+  display_name?: string
+  provider?: string
+  ingest_method?: string
+  source_mode?: string
+  content_scope?: V4ContentScope
+  task_id?: string
+  remote_root?: string
   status: string
   reason?: string
+  latest_revision_id?: string
+  draft_revision_id?: string
+}
+
+export interface V4TrackingScanTask extends V4TrackingSource {
+  task_id: string
 }
 
 export const mediaV4Api = {
   scan: (request: {
+    content_scope?: V4ContentScope
     source?: string
     root_path?: string
     tree_file?: string
@@ -618,6 +633,8 @@ export const mediaV4Api = {
 
   trackingWorks: () => api.get<{ works: V4TrackingWork[] }>('/api/v4/tracking/works'),
 
+  trackingSources: () => api.get<{ sources: V4TrackingSource[] }>('/api/v4/tracking/sources'),
+
   trackingScanAll: () => api.post<{ tasks: V4TrackingScanTask[] }>('/api/v4/tracking/scan-all', {}),
 
   trackingScanWork: (workId: string) =>
@@ -651,6 +668,9 @@ export const mediaV4Api = {
     api.get<V4OpenlistBaselineStatus>(`/api/v4/sources/openlist/status?remote_root=${encodeURIComponent(remoteRoot)}${connectionId ? `&connection_id=${encodeURIComponent(connectionId)}` : ''}`),
 
   startDurableScan: (request: {
+    content_scope?: V4ContentScope
+    /** 新导出 TXT 更新既有来源，服务端必须核验来源范围一致。 */
+    target_root_id?: string
     connection_id?: string
     source?: string
     root_path?: string

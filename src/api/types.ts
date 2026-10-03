@@ -64,6 +64,8 @@ export interface SourceSummary {
 }
 
 export interface WorkIndex {
+  /** 来源明确选择的导入范围，与用户的观看状态分开。 */
+  content_scope?: 'completed' | 'ongoing'
   work_id: string
   title: string
   original_title: string

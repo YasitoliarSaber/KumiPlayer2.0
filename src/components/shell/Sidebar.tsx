@@ -50,6 +50,7 @@ export default function Sidebar() {
     setQuery,
     source,
     toggleSidebar,
+    ongoingCategoryName = '新番',
   } = useUiStore();
   const works = useLibraryStore((state) => state.works);
   const { user, hasStoredCredential } = useBangumiStore();
@@ -114,7 +115,7 @@ export default function Sidebar() {
           {libraryNavItems.map((item) => (
             <NavItem
               key={item.key}
-              item={item}
+              item={item.key === 'seasonal' ? { ...item, label: ongoingCategoryName } : item}
               active={isActive(item)}
               expanded={sidebarExpanded}
               count={item.category ? categoryCounts[item.category] : undefined}

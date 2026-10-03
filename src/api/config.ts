@@ -35,6 +35,8 @@ export interface PublicConfig {
   quark_root?: string
   local_root: string
   directory_tree_dir: string
+  ongoing_update_on_startup?: boolean
+  ongoing_update_interval_minutes?: number
   openlist_server_url: string
   openlist_remote_root: string
   openlist_mount_root: string

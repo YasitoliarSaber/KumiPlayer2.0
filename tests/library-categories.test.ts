@@ -45,3 +45,13 @@ test('混合来源卡片计入每个实际来源', () => {
   assert.equal(categoryWorkCounts(works, 'local').anime_series, 1);
   assert.equal(categoryWorkCounts(works, 'baidu').seasonal, 0);
 });
+
+test('显式新番范围独立于观看状态，显式已完结不会因观看中进入新番', () => {
+  assert.equal(isWorkInLibraryView(work({ content_scope: 'ongoing' }), 'seasonal'), true);
+  assert.equal(isWorkInLibraryView(work({ content_scope: 'ongoing', show_type: 'live_series' }), 'seasonal'), true);
+  const completed = work({ content_scope: 'completed', watch_status: {
+    work_id: 'work', status: 'watching', note: '', favorite: false, updated_at: '',
+  } });
+  assert.equal(isWorkInLibraryView(completed, 'seasonal'), false);
+  assert.equal(isWorkInLibraryView(completed, 'anime_series'), true);
+});

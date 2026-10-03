@@ -28,6 +28,7 @@ import FolderPathInput from '../components/settings/FolderPathInput';
 import PlayerTuningPage from './PlayerTuningPage';
 import { openlistConnections, selectOpenlistConnection } from '../api/openlistConnections';
 import OpenListSourceRoutes from '../components/settings/OpenListSourceRoutes';
+import OngoingUpdateSettingsPanel from '../components/settings/OngoingUpdateSettingsPanel';
 import '../styles/settings-media-sources.css';
 import '../styles/settings-navigation.css';
 type SettingsTab = 'appearance' | 'sources' | 'openlist' | 'scrape' | 'player' | 'bangumi';
@@ -72,7 +73,7 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
     clearToken,
   } = useBangumiStore();
   const loadLibrary = useLibraryStore((state) => state.loadLibrary);
-  const { appearanceMode, setAppearanceMode } = useUiStore();
+  const { appearanceMode, setAppearanceMode, ongoingCategoryName = '新番', setOngoingCategoryName } = useUiStore();
   const [activeSection, setActiveSection] = useState<SettingsTab>('bangumi');
   const [baseConfig, setConfig] = useState<PublicConfig | null>(null);
   const [selectedConnectionId, setSelectedConnectionId] = useState('legacy');
@@ -534,6 +535,12 @@ export default function SettingsPage({ onOpenSetup }: { onOpenSetup?: () => void
   const renderSources = () => (
     <PanelStack>
       <SectionIntro title="媒体来源" />
+      {config && <SettingsSection title="新番自动更新">
+        <OngoingUpdateSettingsPanel config={config} categoryName={ongoingCategoryName} onSaveCategoryName={setOngoingCategoryName} externalBusy={Boolean(configLoading || activeAction)} onSave={async patch => {
+          const updated = await configApi.patchConfig(patch);
+          setConfig(updated);
+        }} />
+      </SettingsSection>}
       {config && (
         <SettingsSection title="来源根目录">
           <div className="sources-root-panel">

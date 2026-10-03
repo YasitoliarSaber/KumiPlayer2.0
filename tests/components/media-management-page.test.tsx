@@ -45,6 +45,7 @@ const routes = [
 
 beforeEach(() => {
   localStorage.clear()
+  sessionStorage.clear()
   vi.clearAllMocks()
   api.workExecutionDetail.mockResolvedValue({ has_detail: false })
   useUiStore.setState({ page: 'manage', manageView: 'overview', navigationHistory: [], forwardHistory: [], canGoBack: false, canGoForward: false, query: '' })
@@ -137,6 +138,96 @@ test('本地目录读取设置中的默认路径，并以简洁文案表达扫�
   expect(await screen.findByRole('textbox', { name: '本机媒体文件夹' })).toHaveValue('D:\\Media')
   expect(screen.queryByText('还需要选择媒体目录')).not.toBeInTheDocument()
   expect(screen.queryByText(/已挂载网盘中的媒体文件/)).not.toBeInTheDocument()
+})
+
+test('导入默认为已完结，选择新番后所有来源使用同一内容范围', async () => {
+  render(<MediaManagementPage />)
+  await enterImport()
+  expect(screen.getByRole('radio', { name: '已完结' })).toBeChecked()
+  fireEvent.click(screen.getByRole('radio', { name: '新番' }))
+  fireEvent.click(screen.getByRole('button', { name: '目录树 TXT' }))
+  expect(screen.getByRole('radio', { name: '新番' })).toBeChecked()
+  fireEvent.change(screen.getByRole('textbox', { name: '目录树 TXT 文件' }), { target: { value: 'D:/Trees/new-export.txt' } })
+  fireEvent.click(screen.getByRole('button', { name: '扫描并识别' }))
+  await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({
+    source: 'tree', content_scope: 'ongoing',
+  })))
+  expect(screen.queryByRole('button', { name: '刷新新番' })).not.toBeInTheDocument()
+  expect(screen.queryByLabelText(/定时|启动时更新/)).not.toBeInTheDocument()
+})
+
+test('本地新番导入明确传递新番范围，重新开始恢复已完结默认值', async () => {
+  render(<MediaManagementPage />)
+  await enterImport()
+  fireEvent.click(screen.getByRole('radio', { name: '新番' }))
+  fireEvent.click(screen.getByRole('button', { name: '扫描并识别' }))
+  await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({
+    source: 'local', content_scope: 'ongoing',
+  })))
+  await screen.findByRole('heading', { name: '检查识别结果' })
+  fireEvent.click(screen.getByRole('button', { name: '重新开始' }))
+  expect(screen.getByRole('radio', { name: '已完结' })).toBeChecked()
+})
+
+test('OpenList新番与普通导入使用现有扫描入口', async () => {
+  render(<MediaManagementPage />)
+  await enterImport()
+  fireEvent.click(screen.getByRole('radio', { name: '新番' }))
+  fireEvent.click(screen.getByRole('button', { name: 'OpenList' }))
+  fireEvent.click(await screen.findByRole('button', { name: '打开文件夹 Anime' }))
+  await waitFor(() => expect(screen.getByRole('button', { name: '完整扫描并建立基线' })).toBeEnabled())
+  fireEvent.click(screen.getByRole('button', { name: '完整扫描并建立基线' }))
+  await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({
+    source: 'openlist', content_scope: 'ongoing',
+  })))
+})
+
+test('默认已完结扫描不会携带既有TXT更新目标', async () => {
+  render(<MediaManagementPage />)
+  await enterImport()
+  await screen.findByDisplayValue('D:\\Media')
+  fireEvent.click(screen.getByRole('button', { name: '扫描并识别' }))
+  await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({ content_scope: 'completed' })))
+  expect(api.startDurableScan.mock.calls[0][0]).not.toHaveProperty('target_root_id')
+})
+
+test('新番TXT更新清空旧归档，选择新版后复用目标来源、播放根和显示名', async () => {
+  sessionStorage.setItem('kumiplayer.media-v4.ongoing-source-action', JSON.stringify({ root_id: 'ongoing-tree', action: 'new_txt' }))
+  api.sourceLibraries.mockResolvedValue({ cards: [{
+    root_id: 'ongoing-tree', provider: 'baidu', ingest_method: 'directory_tree', content_scope: 'ongoing',
+    source_mode: 'tree_snapshot', source_locator: 'D:/Archive/old.txt', playback_locator: 'J:/新番',
+    display_name: '连载专用目录', route_id: '', revision_id: 'old-revision', phase: 'execute',
+    work_count: 1, evidence_count: 1, asset_count: 1, can_resume: false, attention_count: 0,
+    job_summary: { total: 0, queued: 0, running: 0, succeeded: 0, failed: 0, cancelled: 0 },
+  }] })
+  render(<MediaManagementPage />)
+  const tree = await screen.findByRole('textbox', { name: '目录树 TXT 文件' })
+  expect(tree).toHaveValue('')
+  expect(screen.getByRole('radio', { name: '新番' })).toBeChecked()
+  expect(api.startDurableScan).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: '目录树 TXT' }))
+  fireEvent.change(tree, { target: { value: 'D:/Trees/new-export.txt' } })
+  fireEvent.click(screen.getByRole('button', { name: '扫描并识别' }))
+  await waitFor(() => expect(api.startDurableScan).toHaveBeenCalledWith(expect.objectContaining({
+    source: 'tree', content_scope: 'ongoing', target_root_id: 'ongoing-tree',
+    tree_file: 'D:/Trees/new-export.txt', source_root: 'J:/新番', source_display_name: '连载专用目录',
+  })))
+})
+
+test('新番待确认跳转复用既有草稿，避免创建第二次扫描', async () => {
+  sessionStorage.setItem('kumiplayer.media-v4.ongoing-source-action', JSON.stringify({ root_id: 'ongoing-tree', action: 'review', revision_id: 'new-draft' }))
+  api.sourceLibraries.mockResolvedValue({ cards: [{
+    root_id: 'ongoing-tree', provider: 'baidu', ingest_method: 'directory_tree', content_scope: 'ongoing',
+    source_mode: 'tree_snapshot', source_locator: 'D:/Archive/tree.txt', playback_locator: 'J:/新番',
+    display_name: '连载专用目录', route_id: '', revision_id: 'old-revision', phase: 'execute',
+    work_count: 1, evidence_count: 1, asset_count: 1, can_resume: false, attention_count: 0,
+    job_summary: { total: 0, queued: 0, running: 0, succeeded: 0, failed: 0, cancelled: 0 },
+  }] })
+  render(<MediaManagementPage />)
+  await screen.findByRole('heading', { name: '检查识别结果' })
+  expect(api.revisionEvidence).toHaveBeenCalledWith('new-draft')
+  expect(api.preview).toHaveBeenCalledWith(expect.objectContaining({ revision_id: 'new-draft', root_id: 'ongoing-tree' }))
+  expect(api.startDurableScan).not.toHaveBeenCalled()
 })
 
 test('目录树使用真实网盘提供商、官网入口和设置中的播放映射', async () => {

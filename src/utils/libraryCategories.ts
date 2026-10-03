@@ -4,8 +4,8 @@ import type { LibraryView, SourceId } from '../stores/ui';
 export type CategoryWorkCounts = Record<LibraryView, number>;
 
 export function isSeasonalWork(work: WorkIndex): boolean {
-  // P-006：追更分类基于后端 watch_status（tracking_states 权威），不再常量 false；
-  // 前端不做标题/路径正则推导。
+  // 显式来源范围优先；未声明范围的历史作品兼容既有观看分类。
+  if (work.content_scope) return work.content_scope === 'ongoing';
   return work.watch_status?.status === 'watching' || work.watch_status?.status === 'on_hold';
 }
 

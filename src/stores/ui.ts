@@ -41,6 +41,12 @@ interface NavigationLocation {
 
 const MAX_NAVIGATION_HISTORY = 50;
 
+function normalizeOngoingCategoryName(value: unknown): string {
+  const name = typeof value === 'string'
+    ? value.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f]/g, '').trim() : '';
+  return Array.from(name).slice(0, 24).join('') || '新番';
+}
+
 interface UiState {
   page: AppPage;
   activeCategory: LibraryView | null;
@@ -59,6 +65,7 @@ interface UiState {
   styleMode: StyleMode;
   motionMode: MotionMode;
   appearanceMode: AppearanceMode;
+  ongoingCategoryName: string;
   seriesCardImageMode: SeriesCardImageMode;
   selectedSeasonNumber: number | null;
   selectedSeasonByWork: Record<string, WorkSeasonSelection>;
@@ -83,6 +90,7 @@ interface UiState {
   setPosterSize: (size: number) => void;
   setSeriesCardImageMode: (mode: SeriesCardImageMode) => void;
   setAppearanceMode: (mode: AppearanceMode) => void;
+  setOngoingCategoryName: (name: string) => string;
   setActiveCategory: (category: LibraryView | null) => void;
   toggleSidebar: () => void;
   toggleSidebarVisibility: () => void;
@@ -142,6 +150,7 @@ export const useUiStore = create<UiState>()(
       styleMode: 'gallery',
       motionMode: 'standard',
       appearanceMode: 'fluent',
+      ongoingCategoryName: '新番',
       seriesCardImageMode: 'poster',
       selectedSeasonNumber: null,
       selectedSeasonByWork: {},
@@ -219,6 +228,11 @@ export const useUiStore = create<UiState>()(
       setPosterSize: (size) => set({ posterSize: size }),
       setSeriesCardImageMode: (mode) => set({ seriesCardImageMode: mode }),
       setAppearanceMode: (mode) => set({ appearanceMode: mode }),
+      setOngoingCategoryName: (value) => {
+        const ongoingCategoryName = normalizeOngoingCategoryName(value);
+        set({ ongoingCategoryName });
+        return ongoingCategoryName;
+      },
       setActiveCategory: (category) => set({ activeCategory: category }),
       toggleSidebar: () => set((state) => {
         const visibleMode = state.sidebarMode === 'hidden'
@@ -267,10 +281,15 @@ export const useUiStore = create<UiState>()(
         styleMode: state.styleMode,
         motionMode: state.motionMode,
         appearanceMode: state.appearanceMode,
+        ongoingCategoryName: state.ongoingCategoryName,
         sort: state.sort,
         seriesCardImageMode: state.seriesCardImageMode,
         selectedSeasonByWork: state.selectedSeasonByWork,
       }),
+      merge: (persistedState, currentState) => {
+        const saved = persistedState as Partial<UiState> | undefined;
+        return { ...currentState, ...saved, ongoingCategoryName: normalizeOngoingCategoryName(saved?.ongoingCategoryName) };
+      },
     }
   )
 );

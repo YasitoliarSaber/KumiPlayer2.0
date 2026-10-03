@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   testMpv: vi.fn(),
   testTmdb: vi.fn(),
   openMpvConfigDir: vi.fn(),
+  setOngoingCategoryName: vi.fn((name: string) => name.trim() || '新番'),
 }));
 
 vi.mock('../../src/api/config', () => ({ configApi: api }));
@@ -53,6 +54,8 @@ vi.mock('../../src/stores/ui', () => ({
   useUiStore: (selector?: (state: unknown) => unknown) => {
     const state = {
       appearanceMode: 'fluent',
+      ongoingCategoryName: '新番',
+      setOngoingCategoryName: api.setOngoingCategoryName,
       setAppearanceMode: vi.fn(),
       goPlayerTuning: vi.fn(),
     };
@@ -85,6 +88,54 @@ const config = {
 };
 
 describe('SettingsPage 信息架构', () => {
+  test('分类名称保存复用本机UI偏好，不写后台配置', async () => {
+    render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: '媒体来源' }));
+    api.patchConfig.mockClear();
+    api.setOngoingCategoryName.mockClear();
+    fireEvent.change(screen.getByRole('textbox', { name: '分类名称' }), { target: { value: '连载剧集' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存分类名称' }));
+    expect(api.setOngoingCategoryName).toHaveBeenCalledExactlyOnceWith('连载剧集');
+    expect(api.patchConfig).not.toHaveBeenCalled();
+    expect(screen.getByRole('status')).toHaveTextContent('分类名称已保存');
+  });
+
+  test('新番自动更新仅在媒体来源设置，默认关闭且两项独立保存', async () => {
+    let saved = { ...config, ongoing_update_on_startup: false, ongoing_update_interval_minutes: 0 };
+    api.patchConfig.mockImplementation(async patch => {
+      saved = { ...saved, ...patch };
+      return saved;
+    });
+    render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: '媒体来源' }));
+    const startup = screen.getByRole('switch', { name: '启动时更新新番' });
+    const interval = screen.getByRole('combobox', { name: '新番更新间隔' });
+    expect(startup).not.toBeChecked();
+    expect(interval).toHaveValue('0');
+    api.patchConfig.mockClear();
+    fireEvent.click(startup);
+    await waitFor(() => expect(api.patchConfig).toHaveBeenCalledWith({ ongoing_update_on_startup: true }));
+    await waitFor(() => expect(startup).toBeChecked());
+    fireEvent.change(interval, { target: { value: '60' } });
+    await waitFor(() => expect(api.patchConfig).toHaveBeenCalledWith({ ongoing_update_interval_minutes: 60 }));
+    await waitFor(() => expect(interval).toHaveValue('60'));
+    expect(startup).toBeChecked();
+    expect(screen.getByText(/纯 TXT 来源需要选择新导出的清单/)).toBeVisible();
+    expect(document.getElementById('settings-panel-sources')).toContainElement(startup);
+    expect(document.getElementById('settings-panel-openlist')).not.toContainElement(startup);
+  });
+
+  test('新番设置保存失败显示错误且不宣称已启用', async () => {
+    api.patchConfig.mockRejectedValueOnce(new Error('模拟保存失败'));
+    render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: '媒体来源' }));
+    const startup = screen.getByRole('switch', { name: '启动时更新新番' });
+    fireEvent.click(startup);
+    expect(await screen.findByRole('alert')).toHaveTextContent('模拟保存失败');
+    expect(startup).not.toBeChecked();
+    expect(screen.queryByText('新番更新设置已保存')).not.toBeInTheDocument();
+  });
+
   test('联网名称核对复用元数据分类，默认关闭并独立保存密钥', async () => {
     api.getConfig.mockResolvedValue({ ...config, alias_web_recovery_enabled: false, websearch_configured: true, deepseek_configured: true });
     api.patchConfig.mockImplementation(async (patch) => ({ ...config, ...patch, websearch_configured: true, deepseek_configured: true }));

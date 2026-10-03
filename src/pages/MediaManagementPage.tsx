@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Button, Checkbox, Dialog, DialogActions, DialogBody, DialogContent, DialogSurface, DialogTitle, Field, FluentProvider, Input, MessageBar, MessageBarBody, ProgressBar, Select, Spinner } from '@fluentui/react-components'
+import { Button, Checkbox, Dialog, DialogActions, DialogBody, DialogContent, DialogSurface, DialogTitle, Field, FluentProvider, Input, MessageBar, MessageBarBody, ProgressBar, Radio, RadioGroup, Select, Spinner } from '@fluentui/react-components'
 import { openlistConnections, selectOpenlistConnection } from '../api/openlistConnections'
 import OpenListConnectionPicker from '../components/settings/OpenListConnectionPicker'
 import {
@@ -21,7 +21,8 @@ import {
   ScanObject24Regular,
 } from '@fluentui/react-icons'
 import { mediaV4Api, type V4Job, type V4OpenlistBaselineStatus, type V4Preview, type V4SourceEvidence, type V4SourceLibraryCard } from '../api/mediaV4'
-import type { V4ExecutionProgress } from '../api/mediaV4'
+import type { V4ContentScope, V4ExecutionProgress } from '../api/mediaV4'
+import { consumeOngoingSourceAction } from '../components/media/ongoingSourceNavigation'
 import { ApiError } from '../api/client'
 import { configApi, type PublicConfig } from '../api/config'
 import { openlistApi } from '../api/openlist'
@@ -294,6 +295,9 @@ export default function MediaManagementPage() {
   const goManageView = useUiStore((state) => state.goManageView)
   const appearanceMode = useUiStore((state) => state.appearanceMode)
   const [kind, setKind] = useState<ImportKind>('local')
+  const [contentScope, setContentScope] = useState<V4ContentScope>('completed')
+  const [targetRootId, setTargetRootId] = useState('')
+  const [sourceUpdateName, setSourceUpdateName] = useState('')
   const [path, setPath] = useState('')
   const [treeMountRoots, setTreeMountRoots] = useState<Record<string, string>>({})
   const [provider, setProvider] = useState<Exclude<ProviderId, 'local' | 'other'>>('pan115')
@@ -546,7 +550,7 @@ export default function MediaManagementPage() {
       : kind === 'tree'
         ? Boolean(path.trim() && treePlaybackRoot().trim())
         : Boolean(path.trim())
-  const showReset = workflowStage !== 'source' || kind !== 'local' || Boolean(error) || busy === 'scan' || Boolean(scanTask)
+  const showReset = workflowStage !== 'source' || kind !== 'local' || contentScope !== 'completed' || Boolean(error) || busy === 'scan' || Boolean(scanTask)
 
   function providerRoot(providerId: ProviderId, remotePath = '') {
     const matchedRoute = routeForPath(routes, remotePath)
@@ -628,6 +632,8 @@ export default function MediaManagementPage() {
 
   const selectSourceKind = (nextKind: ImportKind) => {
     if (nextKind === kind) return
+    setTargetRootId('')
+    setSourceUpdateName('')
     abandonActiveScan()
     setKind(nextKind)
     setPath(nextKind === 'local' ? config?.local_root || '' : '')
@@ -693,6 +699,7 @@ export default function MediaManagementPage() {
         : requestSource === 'hybrid' ? providerRoot(selectedProvider, remoteRoot)
         : requestSource === 'local' ? path : routeForPath(routes, remoteRoot)?.local_path || ''
       const metadata = sourceCardMetadata(kind, selectedSourceRoot)
+      if (sourceUpdateName) metadata.source_display_name = sourceUpdateName
       let scanMode: 'auto' | 'full' | 'incremental' = 'auto'
       if (action === 'incremental') scanMode = 'incremental'
       else if (action === 'full') scanMode = 'full'
@@ -709,6 +716,8 @@ export default function MediaManagementPage() {
       }
       {
         const task = await mediaV4Api.startDurableScan({
+          content_scope: contentScope,
+          ...(requestSource === 'tree' && targetRootId ? { target_root_id: targetRootId } : {}),
           ...(requiresOpenListConfig ? { connection_id: selectedConnectionId } : {}),
           source: requestSource,
           root_path: requestSource === 'local' ? path : kind === 'hybrid' ? remoteRoot : requestSource === 'openlist' ? remoteRoot : selectedSourceRoot || 'tree',
@@ -899,6 +908,9 @@ export default function MediaManagementPage() {
     abandonActiveScan()
     goManageView('import')
     setKind('local')
+    setContentScope('completed')
+    setTargetRootId('')
+    setSourceUpdateName('')
     setPath(config?.local_root || '')
     setProvider('pan115')
     setRemoteRoot(config?.openlist_remote_root || '/')
@@ -906,6 +918,9 @@ export default function MediaManagementPage() {
   }
 
   const setSourceInputsFromCard = (card: V4SourceLibraryCard) => {
+    setContentScope(card.content_scope || 'completed')
+    setTargetRootId(card.source_mode === 'tree_snapshot' ? card.root_id : '')
+    setSourceUpdateName(card.display_name)
     setSelectedConnectionId(card.connection_id || 'legacy')
     setRemoteAvailable(false)
     ++openlistBaselineRequest.current
@@ -921,6 +936,7 @@ export default function MediaManagementPage() {
     if (card.source_mode === 'tree_snapshot' || (card.source_mode === '' && !card.route_id)) {
       setKind('tree')
       setPath(card.source_locator)
+      if (card.playback_locator) setTreeMountRoots((current) => ({ ...current, [nextProvider]: card.playback_locator }))
       return
     }
     if (card.source_mode === 'tree_openlist' || (card.source_mode === '' && card.route_id)) {
@@ -967,6 +983,7 @@ export default function MediaManagementPage() {
           // 请求预算暂停：复用同一 scan_id 继续，后端从目录级 frontier 断点接着扫。
           // 用新 scan_id 会从根目录重扫，等于把已花的请求全部作废。
           await mediaV4Api.startDurableScan({
+            content_scope: card.content_scope || 'completed',
             source: 'openlist',
             connection_id: card.connection_id || 'legacy',
             root_path: card.source_locator,
@@ -1238,7 +1255,28 @@ export default function MediaManagementPage() {
     clearResultState()
     goManageView('import')
     setSourceInputsFromCard(card)
+    if (card.content_scope === 'ongoing' && card.source_mode === 'tree_snapshot') {
+      // 旧归档只保存上一快照；新事实必须由用户选择的新导出 TXT 提供。
+      setPath('')
+    }
   }
+
+  useEffect(() => {
+    if (sourceCardsLoading) return
+    const action = consumeOngoingSourceAction()
+    if (!action) return
+    const card = sourceCards.find((item) => item.root_id === action.root_id)
+    if (!card) {
+      setError('该新番来源已不可用，请在媒体管理中检查来源。')
+      return
+    }
+    if (action.action === 'new_txt') {
+      prepareSourceUpdate(card)
+      setPath('')
+    } else {
+      void resumeSourceCard({ ...card, revision_id: action.revision_id || card.revision_id, phase: 'review', revision_state: 'draft' })
+    }
+  }, [sourceCards, sourceCardsLoading])
 
   const terminateSourceTask = async (card: V4SourceLibraryCard) => {
     const task = card.active_task
@@ -1550,6 +1588,12 @@ export default function MediaManagementPage() {
           </div>
         </div>
 
+        <Field label="内容范围" hint={contentScope === 'ongoing' ? '请选择独立的新番专用目录；本次导入按正在更新的正片剧集处理。' : undefined}>
+          <RadioGroup layout="horizontal" value={contentScope} onChange={(_, data) => setContentScope(data.value as V4ContentScope)} disabled={busy === 'scan' || Boolean(targetRootId)}>
+            <Radio value="completed" label="已完结" />
+            <Radio value="ongoing" label="新番" />
+          </RadioGroup>
+        </Field>
         <div className="media-v4-source-options" role="group" aria-label="媒体来源类型">
           {SOURCE_OPTIONS.map((option) => {
             const Icon = option.icon
@@ -1567,6 +1611,7 @@ export default function MediaManagementPage() {
         <div className={`media-v4-config-panel media-v4-workspace workspace-${kind}`}>
           <div className="media-v4-config-heading">
             <strong>{kind === 'local' ? '选择本机文件夹' : kind === 'tree' ? '导入目录树清单' : kind === 'hybrid' ? '建立基线并检查后续变化' : '浏览 OpenList 目录'}</strong>
+            {kind === 'tree' && contentScope === 'ongoing' && <span>每次更新请选择新导出的 TXT；旧清单不包含新增剧集。</span>}
             {kind !== 'tree' && <span>{kind === 'local'
               ? '扫描本机文件；网盘挂载请使用目录树或 OpenList。'
               : kind === 'hybrid'
