@@ -129,3 +129,14 @@ piolium/
 docs/**
 !docs/review/
 !docs/review/**
+
+# ===== 内置 MPV 目录按原样随源码可见（2026-10-04）=====
+# mpv/ 下的配置、文档、清单与许可证全部上传 GitHub，便于外部审阅；
+# 仍不纳入版本控制：运行二进制（mpv/runtime 的 exe/dll/bat）、运行期可写产物、
+# 以及含第三方默认密钥的 uosc_danmaku 插件目录与弹幕历史。
+# 注意：这些否定规则必须放在本文件末尾，否则会被后面的 `docs/`、`*.md` 规则重新忽略。
+!/mpv/docs/
+!/mpv/docs/**
+!/mpv/licenses/
+!/mpv/licenses/**
+!/mpv/THIRD_PARTY_NOTICES.md

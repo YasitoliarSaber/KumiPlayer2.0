@@ -88,6 +88,7 @@ mpv.exe
 |---|---|
 | MPV 基础二进制、来源、版本、包哈希与逐文件哈希 | `runtime-manifest.json` |
 | 第三方组件登记与许可证类型 | `components-manifest.json` |
+| 内置播放器第三方组件、许可证与源码获取 | `THIRD_PARTY_NOTICES.md` |
 | 第三方许可证正文 | `licenses/` |
 | 默认套件配置与第三方脚本、着色器、字体 | `config/portable_config/` |
 | KumiPlayer 自有脚本与自有 shader 资源 | `config/kumiplayer/` |

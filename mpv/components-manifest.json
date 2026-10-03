@@ -108,7 +108,7 @@
       "component": "mpv-stats-zh",
       "version": "main@2026-07-12",
       "upstream_repository": "https://github.com/yosh-wang/mpv-stats.lua-zh-chinese-translation-",
-      "license": "MIT（仓库 LICENSE.md）；注意：仓库 README 声明‘严禁任何形式的商业使用’与 LICENSE 存在矛盾，且未声明与官方 stats.lua（GPLv2+/LGPLv2.1+ 生态）的派生关系——发布前必须重新核对，当前仅限本地开发使用",
+      "license": "MIT（本项目固定版本 main@2026-07-12 获取，与本地 licenses/mpv-stats-zh/LICENSE.md 的 MIT 文本一致，脚本 SHA-256 已复核）。上游仓库已于 2026-09-12 把 LICENSE 改为非商业使用许可，不影响已获授权的固定版本；该脚本派生自 mpv / Argon-/mpv-stats（LGPL-2.1+），派生部分仍受 LGPL 约束。升级该脚本前必须重新评估上游许可。",
       "source_artifact": {
         "url": "https://raw.githubusercontent.com/yosh-wang/mpv-stats.lua-zh-chinese-translation-/main/stats.lua",
         "sha256": "4F037D834A6D88B4615FCAF087963D04DFA814E7097621C87370F25184142302"
