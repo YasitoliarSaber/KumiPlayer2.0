@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 24
+V4_SCHEMA_VERSION = 25
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -804,6 +804,15 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
 
     migrate_schema_v22_to_v23(conn)
     migrate_schema_v23_to_v24(conn)
+    migrate_schema_v24_to_v25(conn)
+
+
+def migrate_schema_v24_to_v25(conn: sqlite3.Connection) -> None:
+    """旧来源用途未知；不把观看状态或文件数当成追更授权。"""
+    columns = {row[0] for row in conn.execute("SELECT name FROM pragma_table_info('source_roots')")}
+    if "content_scope" not in columns:
+        conn.execute("ALTER TABLE source_roots ADD COLUMN content_scope TEXT NOT NULL DEFAULT '' "
+                     "CHECK(content_scope IN ('','completed','ongoing'))")
 
 
 def migrate_schema_v23_to_v24(conn: sqlite3.Connection) -> None:

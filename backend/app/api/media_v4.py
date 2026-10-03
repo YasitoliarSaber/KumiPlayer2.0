@@ -133,6 +133,9 @@ class SourceScanRequest(BaseModel):
     # 继续一次因请求预算暂停的扫描：复用同一 scan_id，frontier 断点才有效。
     resume_scan_id: str = ""
     connection_id: str = ""
+    content_scope: Literal["completed", "ongoing"] = "completed"
+    target_root_id: str = ""
+    auto_update: bool = False
 
 
 def _select_openlist_config(identity: str = ""):
@@ -388,6 +391,7 @@ def _ensure_root_container(
     root_container: str = "",
     source_mode: str = "",
     last_scan_mode: str = "",
+    content_scope: str = "",
     conn=None,
 ) -> None:
     """为非目录树来源写入来源根上下文，preview 据此传入解析器。
@@ -451,7 +455,13 @@ def _ensure_root_container(
                 now,
             ),
         )
+        if content_scope:
+            from app.media_v4.tracking.ongoing import set_source_scope
 
+            try:
+                set_source_scope(database, root_id, content_scope, conn=connection)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from None
 
     if conn is not None:
         write(conn)
@@ -473,8 +483,28 @@ def _register_durable_source_scan(
     with database.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
+            if (scan.get("request") or {}).get("auto_update"):
+                active = conn.execute(
+                    "SELECT scan_id FROM source_scans WHERE root_id=? "
+                    "AND status IN ('queued','running','cancelling','paused') ORDER BY generation DESC LIMIT 1",
+                    (root["root_id"],),
+                ).fetchone()
+                if active:
+                    conn.rollback()
+                    return str(active["scan_id"])
+                if conn.execute("SELECT 1 FROM import_revisions WHERE root_id=? AND status='draft'",
+                                (root["root_id"],)).fetchone():
+                    raise HTTPException(status_code=409, detail="此来源已有待确认识别结果，请先在媒体管理处理")
             _ensure_root_container(database, conn=conn, **root)
             result = register_source_scan(database, conn=conn, **scan)
+            scope = (scan.get("request") or {}).get("content_scope")
+            if scope:
+                from app.media_v4.tracking.ongoing import set_source_scope
+
+                try:
+                    set_source_scope(database, str(root["root_id"]), str(scope), conn=conn)
+                except ValueError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from None
             conn.commit()
             return result
         except Exception:
@@ -509,6 +539,7 @@ def _persist_tree_scan(
     last_scan_mode: str = "",
     durable: bool = False,
     save_evidence: bool = True,
+    content_scope: str = "",
 ) -> None:
     """把目录树扫描的证据与验证事实写入事务约束的 SQLite。
 
@@ -571,6 +602,13 @@ def _persist_tree_scan(
                 now,
             ),
         )
+        if content_scope:
+            from app.media_v4.tracking.ongoing import set_source_scope
+
+            try:
+                set_source_scope(database, root_id, content_scope, conn=conn)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from None
         existing = conn.execute(
             "SELECT generation FROM source_scans WHERE scan_id = ?", (scan_id,)
         ).fetchone()
@@ -704,6 +742,7 @@ def scan_source(request: SourceScanRequest):
                 resolution=resolution,
                 source_mode=root_source_mode,
                 last_scan_mode=effective_scan_mode,
+                content_scope=request.content_scope,
             )
             effective_playback_root = resolution.root
             stage_scan_state(
@@ -747,6 +786,7 @@ def scan_source(request: SourceScanRequest):
                 resolution=resolution,
                 source_mode=root_source_mode,
                 last_scan_mode=effective_scan_mode,
+                content_scope=request.content_scope,
             )
             effective_playback_root = resolution.root
         elif request.source == "openlist":
@@ -794,7 +834,6 @@ def scan_source(request: SourceScanRequest):
                     default_provider=content_provider,
                     routes=routes,
                 )
-                stage_scan_state(scan_id, next_state)
             else:
                 effective_scan_mode = "full"
                 root_source_mode = "openlist_full"
@@ -809,10 +848,7 @@ def scan_source(request: SourceScanRequest):
                     routes=routes,
                     directory_observations=directory_observations,
                 )
-                stage_scan_state(
-                    scan_id,
-                    build_full_scan_state(root_id, remote_root, directory_observations),
-                )
+                next_state = build_full_scan_state(root_id, remote_root, directory_observations)
             _ensure_root_container(
                 get_database(),
                 root_id=root_id,
@@ -824,7 +860,10 @@ def scan_source(request: SourceScanRequest):
                 root_container=_container_name(remote_root),
                 source_mode=root_source_mode,
                 last_scan_mode=effective_scan_mode,
+                content_scope=request.content_scope,
             )
+            # 根范围核验成功后才保存扫描检查点；失败请求不留下孤立暂存文件。
+            stage_scan_state(scan_id, next_state)
             effective_playback_root = openlist_playback_root
         else:
             config = load_config()
@@ -842,6 +881,7 @@ def scan_source(request: SourceScanRequest):
                 root_container=_container_name(request.root_path),
                 source_mode="local",
                 last_scan_mode="local",
+                content_scope=request.content_scope,
             )
             effective_playback_root = str(Path(request.root_path).expanduser())
     except DirectoryTreeReadError as exc:
@@ -954,7 +994,7 @@ def preview(request: PreviewRequest):
     root_container = ""
     with database.connect() as conn:
         root_row = conn.execute(
-            "SELECT source_locator, playback_locator, route_id, root_container FROM source_roots WHERE root_id = ?",
+            "SELECT source_locator, playback_locator, route_id, root_container, content_scope FROM source_roots WHERE root_id = ?",
             (request.root_id,),
         ).fetchone()
         if root_row is not None:
@@ -963,8 +1003,11 @@ def preview(request: PreviewRequest):
                 source_locator = str(root_row["source_locator"] or source_locator)
                 playback_locator = str(root_row["playback_locator"] or playback_locator)
                 source_route_id = str(root_row["route_id"] or source_route_id)
+    from app.media_v4.tracking.ongoing import parse_for_scope
+
+    scope = str(root_row["content_scope"] or "completed") if root_row else "completed"
     parsed = normalize_batch_parsed_facts(
-        [(item, parser.parse(item, root_container=root_container)) for item in evidence]
+        [(item, parse_for_scope(parser, item, root_container=root_container, content_scope=scope)) for item in evidence]
     )
     service = V4RevisionService(database)
     try:
@@ -1424,6 +1467,8 @@ def _openlist_scan_request(
             for route in routes
         ],
         "revision_id": request.revision_id.strip(),
+        "content_scope": request.content_scope,
+        "auto_update": request.auto_update,
         "source_display_name": request.source_display_name or "",
     }
 
@@ -1435,9 +1480,11 @@ def _start_durable_local_scan(request: SourceScanRequest) -> dict:
         raise HTTPException(status_code=400, detail="本地媒体目录不能为空")
     database = get_database()
     root_id, locator = _local_root_identity(request.root_path)
+    if request.target_root_id and request.target_root_id != root_id:
+        raise HTTPException(status_code=409, detail="本地更新目录与原来源不一致")
     scan_id = "scan_" + uuid.uuid4().hex
     config = load_config()
-    _register_durable_source_scan(
+    scan_id = _register_durable_source_scan(
         database,
         root={
             "root_id": root_id,
@@ -1456,6 +1503,8 @@ def _start_durable_local_scan(request: SourceScanRequest) -> dict:
             "source_mode": "local",
             "request": {
                 "root_path": request.root_path,
+                "content_scope": request.content_scope,
+                "auto_update": request.auto_update,
                 "excluded_roots": _configured_cloud_roots(config),
                 "revision_id": request.revision_id.strip(),
                 "source_display_name": request.source_display_name or "",
@@ -1541,13 +1590,15 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
         ) from exc
     database = get_database()
     identity_root = resolution.root or configured_roots[0]
+    if request.target_root_id and request.target_root_id != root_id:
+        raise HTTPException(status_code=409, detail="新版 TXT 的来源范围与原来源不一致，请选择原独立文件夹的导出")
     scan_id = "scan_" + uuid.uuid4().hex
     archive = InputArchive(
         archive_path=str(fact["archive_path"]),
         sha256=str(fact["sha256"]),
         original_filename=str(fact["original_filename"]),
     )
-    _register_durable_source_scan(
+    scan_id = _register_durable_source_scan(
         database,
         root={
             "root_id": root_id,
@@ -1573,6 +1624,8 @@ def _start_durable_tree_scan(request: SourceScanRequest) -> dict:
                 "route_id": route_id,
                 "revision_id": request.revision_id.strip(),
                 "source_display_name": request.source_display_name or "",
+                "content_scope": request.content_scope,
+                "auto_update": bool(request.target_root_id and request.content_scope == "ongoing"),
                 "configured_roots": configured_roots,
                 "identity_root": identity_root,
                 "effective_root": resolution.root,
@@ -1645,7 +1698,7 @@ def start_durable_scan(request: SourceScanRequest):
             )
         scan_id = "scan_" + uuid.uuid4().hex
         source_mode = _source_root_mode(root_id) or "openlist_full"
-        _register_durable_source_scan(
+        scan_id = _register_durable_source_scan(
             database,
             root={
                 "root_id": root_id,
@@ -1695,7 +1748,7 @@ def start_durable_scan(request: SourceScanRequest):
             raise HTTPException(status_code=409, detail="该扫描状态已变化，请刷新后重试")
         get_source_scan_runner(database).wake()
         return {"scan_id": resume_scan_id, "root_id": root_id, "scan_mode": "full", "status": "queued"}
-    _register_durable_source_scan(
+    scan_id = _register_durable_source_scan(
         database,
         root={
             "root_id": root_id,

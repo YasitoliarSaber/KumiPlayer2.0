@@ -300,9 +300,14 @@ def assert_artifact_unreferenced(conn, artifact_id: str) -> None:
 def collect_cleanup_candidates(conn, revision_id: str, mirror_root: str | Path) -> list[dict]:
     # 旧版本没有subject引用时，无法证明同语义替代：保守保留，不能凭superseded删除。
     root = Path(mirror_root).resolve(strict=False)
-    source_paths = [Path(r[0]).resolve(strict=False) for r in conn.execute(
-        "SELECT source_locator FROM source_roots WHERE source_locator!=''")
-        if '://' not in str(r[0])]
+    # 来源只作词法排除；resolve 会探测挂载盘，候选审计也不允许读取来源。
+    source_paths: list[Path] = []
+    for source in conn.execute("SELECT source_locator,playback_locator,source_mode FROM source_roots"):
+        values = [source['playback_locator']]
+        if source['source_mode'] not in {'openlist_full', 'tree_openlist'}:
+            values.append(source['source_locator'])
+        source_paths.extend(Path(os.path.abspath(str(value))) for value in values
+                            if value and '://' not in str(value))
     candidates = []
     for row in conn.execute(
         'SELECT DISTINCT a.*,fresh.target_path AS replacement_path,fresh.digest AS replacement_digest '

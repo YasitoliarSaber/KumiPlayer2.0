@@ -81,6 +81,8 @@ class IdentityContext:
     source_files: dict[str, SourceFileRow]
     #: 每个槽位最近一次观察；Asset 连续性直接取自这里的 ``asset_id``。
     latest_by_slot: dict[str, ObservedFile] = field(default_factory=dict)
+    # 混合基线的 TXT 是本地定位，API 是远端定位；同根相对槽位才是共同坐标。
+    relative_slots: bool = False
 
     def observation_for_evidence(self, evidence_id: str) -> ObservedFile | None:
         for item in self.previous_observations:
@@ -101,7 +103,7 @@ class IdentityContext:
 
 
 def observed_from_evidence(
-    evidence: SourceEvidence, *, namespace: str, namespace_kind_name: str
+    evidence: SourceEvidence, *, namespace: str, namespace_kind_name: str, relative_slots: bool = False
 ) -> ObservedFile:
     """把不可变观察映射成连续性输入；不触盘、不算内容哈希。
 
@@ -113,7 +115,7 @@ def observed_from_evidence(
     return ObservedFile(
         evidence_id=evidence.evidence_id,
         source_key=evidence.source_key,
-        locator=evidence.source_locator or evidence.playback_locator or evidence.source_key,
+        locator=evidence.relative_path if relative_slots else (evidence.source_locator or evidence.playback_locator or evidence.source_key),
         identity_namespace=namespace,
         namespace_kind_name=namespace_kind_name,
         size=evidence.size,
@@ -134,11 +136,11 @@ class SourceIdentityRepository:
         self.database = database
 
     @staticmethod
-    def _observed_from_row(row, *, identity_kind_name: str) -> ObservedFile:
+    def _observed_from_row(row, *, identity_kind_name: str, relative_slots: bool = False) -> ObservedFile:
         return ObservedFile(
             evidence_id=str(row["evidence_id"]),
             source_key=str(row["source_key"] or ""),
-            locator=str(row["source_locator"] or row["playback_locator"] or row["source_key"] or ""),
+            locator=str(row["relative_path"] if relative_slots else (row["source_locator"] or row["playback_locator"] or row["source_key"] or "")),
             identity_namespace=str(row["identity_namespace"] or ""),
             namespace_kind_name=identity_kind_name,
             source_file_id=str(row["source_file_id"] or ""),
@@ -168,6 +170,8 @@ class SourceIdentityRepository:
         owns_connection = conn is None
         connection = conn if conn is not None else self.database.open_connection()
         try:
+            root = connection.execute("SELECT source_mode FROM source_roots WHERE root_id=?", (root_id,)).fetchone()
+            relative_slots = bool(root and root["source_mode"] == "tree_openlist")
             for row in connection.execute(
                 "SELECT * FROM source_files WHERE root_id = ? ORDER BY created_at, source_file_id",
                 (root_id,),
@@ -184,7 +188,7 @@ class SourceIdentityRepository:
                 """
                 SELECT o.evidence_id, o.source_file_id, o.asset_id,
                        f.identity_namespace, f.identity_kind,
-                       e.source_key, e.source_locator, e.playback_locator,
+                       e.source_key, e.source_locator, e.playback_locator, e.relative_path,
                        e.size, e.mtime, e.raw_file_id, e.ingest_method
                 FROM source_file_observations o
                 JOIN source_files f ON f.source_file_id = o.source_file_id
@@ -197,14 +201,14 @@ class SourceIdentityRepository:
             if rows:
                 latest: dict[str, ObservedFile] = {}
                 for row in rows:
-                    observed = self._observed_from_row(row, identity_kind_name=identity_kind_name)
+                    observed = self._observed_from_row(row, identity_kind_name=identity_kind_name, relative_slots=relative_slots)
                     latest[observed.source_file_id or observed.evidence_id] = observed
                 observations = list(latest.values())
             else:
                 # 升级前的库只有 confirmed revision 证据：按显式 legacy 分支读取，
                 # 不声称这些观察已验证，也不为它们伪造 SourceFile。
                 observations = self._legacy_observations(
-                    connection, root_id, identity_kind_name=identity_kind_name
+                    connection, root_id, identity_kind_name=identity_kind_name, relative_slots=relative_slots
                 )
         finally:
             if owns_connection:
@@ -220,7 +224,7 @@ class SourceIdentityRepository:
             identity_kind_name=identity_kind_name,
             previous_observations=tuple(observations),
             source_files=source_files,
-            latest_by_slot=latest_by_slot,
+            latest_by_slot=latest_by_slot, relative_slots=relative_slots,
         )
 
     def load_confirmed_slot_bindings(
@@ -275,11 +279,11 @@ class SourceIdentityRepository:
 
     @staticmethod
     def _legacy_observations(
-        conn, root_id: str, *, identity_kind_name: str
+        conn, root_id: str, *, identity_kind_name: str, relative_slots: bool = False
     ) -> list[ObservedFile]:
         rows = conn.execute(
             """
-            SELECT se.evidence_id, se.source_key, se.source_locator, se.playback_locator,
+            SELECT se.evidence_id, se.source_key, se.source_locator, se.playback_locator, se.relative_path,
                    se.size, se.mtime, se.raw_file_id, se.ingest_method, rb.asset_id
             FROM import_revisions ir
             JOIN revision_evidence re ON re.revision_id = ir.revision_id
@@ -295,7 +299,7 @@ class SourceIdentityRepository:
             ObservedFile(
                 evidence_id=str(row["evidence_id"]),
                 source_key=str(row["source_key"] or ""),
-                locator=str(row["source_locator"] or row["playback_locator"] or row["source_key"] or ""),
+                locator=str(row["relative_path"] if relative_slots else (row["source_locator"] or row["playback_locator"] or row["source_key"] or "")),
                 identity_namespace="",
                 namespace_kind_name=identity_kind_name,
                 source_file_id="",

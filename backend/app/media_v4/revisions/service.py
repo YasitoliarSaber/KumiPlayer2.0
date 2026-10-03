@@ -1447,6 +1447,7 @@ class V4RevisionService:
                 evidence,
                 namespace=identity_context.namespace,
                 namespace_kind_name=identity_context.identity_kind_name,
+                relative_slots=identity_context.relative_slots,
             )
             decisions[evidence.evidence_id] = decide_source_identity(
                 observation,
@@ -1695,6 +1696,7 @@ class V4RevisionService:
         source_metadata: dict[str, str] | None = None,
         source_mode: str = "",
         _publish: bool = False,
+        _auto_append: bool = False,
         _evidence_already_persisted: bool = False,
         _facts_already_persisted: bool = False,
         _override_payloads: dict[str, dict] | None = None,
@@ -1855,6 +1857,8 @@ class V4RevisionService:
 
         with self.database.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            previous_revision_id: str | None = None
+            added_evidence_ids: set[str] | None = None
             try:
                 if _publish:
                     from app.media_v4.persistence.identity_lifecycle import release_retired_source_identities
@@ -1876,6 +1880,20 @@ class V4RevisionService:
                         return self._resolve_graph(idempotent_entries, None)
                     if current_revision["status"] != "draft":
                         raise ValueError(f"revision 已经不是可重建草稿: {revision_id}")
+                    if _auto_append:
+                        from app.media_v4.tracking.ongoing import assess_update
+
+                        if assess_update(self.database, revision_id) != "append":
+                            raise ValueError("追更基线或识别结果已改变，请检查预览")
+                        previous_revision_id = str(conn.execute(
+                            "SELECT revision_id FROM import_revisions WHERE root_id=? AND status='confirmed'",
+                            (current_revision["root_id"],),
+                        ).fetchone()[0])
+                        old_paths = {item.relative_path for item, _facts in
+                                     self._load_revision_entries(previous_revision_id, conn=conn)}
+                        added_evidence_ids = {item.evidence_id for item, facts in
+                                              self._load_revision_entries(revision_id, conn=conn)
+                                              if facts.is_importable and item.relative_path not in old_paths}
                     entries = self._load_revision_entries(revision_id, conn=conn)
                     candidates_by_key = self._load_draft_candidates(revision_id, conn=conn)
                     # C-001/C-003：上一代成员与文件槽位必须在同一写事务里重读。
@@ -2662,7 +2680,28 @@ class V4RevisionService:
                     retained = select_applicable_snapshot(conn, revision_id, work_id)
                     if retained is not None:
                         attach_snapshot_refs(conn, revision_id, work_id, retained)
-                self._enqueue_execution_jobs(conn, revision_id, set(work_ids.values()), created_at)
+                execution_work_ids = set(work_ids.values())
+                if added_evidence_ids is not None:
+                    execution_work_ids = {work_ids[work.work_key] for work in graph.works
+                                          if added_evidence_ids.intersection(work.source_evidence_ids)}
+                    # 未更新作品保留镜像引用；不生成虚假 succeeded 作业或改写旧产物。
+                    for work_id in sorted(set(work_ids.values()) - execution_work_ids):
+                        for reference in conn.execute(
+                            "SELECT ar.artifact_id,ar.subject_id FROM artifact_references ar "
+                            "JOIN artifacts a ON a.artifact_id=ar.artifact_id "
+                            "WHERE ar.revision_id=? AND ar.work_id=? AND ar.role='mirror' "
+                            "AND ar.snapshot_id IS NULL AND a.status='published' AND EXISTS ("
+                            "SELECT 1 FROM revision_bindings rb WHERE rb.revision_id=? "
+                            "AND rb.work_id=? AND rb.asset_id=ar.subject_id)",
+                            (previous_revision_id, work_id, revision_id, work_id),
+                        ).fetchall():
+                            conn.execute(
+                                "INSERT OR IGNORE INTO artifact_references(reference_id,artifact_id,revision_id,"
+                                "work_id,snapshot_id,role,subject_id,created_at) VALUES (?,?,?,?,NULL,'mirror',?,?)",
+                                (str(uuid.uuid4()), reference["artifact_id"], revision_id,
+                                 work_id, reference["subject_id"], created_at),
+                            )
+                self._enqueue_execution_jobs(conn, revision_id, execution_work_ids, created_at)
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -2912,7 +2951,7 @@ class V4RevisionService:
             for row in rows
         }
 
-    def confirm(self, revision_id: str) -> None:
+    def confirm(self, revision_id: str, *, auto_append: bool = False) -> None:
         with self.database.connect() as conn:
             revision = conn.execute(
                 "SELECT status, root_id, scan_id FROM import_revisions WHERE revision_id = ?",
@@ -2930,6 +2969,7 @@ class V4RevisionService:
             root_id=str(revision["root_id"]),
             scan_id=str(revision["scan_id"]),
             _publish=True,
+            _auto_append=auto_append,
         )
 
     @staticmethod
@@ -3048,14 +3088,19 @@ class V4RevisionService:
                 (revision_id, work_id),
             ).fetchall()
             artifact_rows = conn.execute(
-                "SELECT target_path, status FROM artifacts "
-                "WHERE revision_id = ? AND work_id = ? AND artifact_type = 'mirror' "
-                "ORDER BY target_path LIMIT 20",
-                (revision_id, work_id),
+                "SELECT DISTINCT a.target_path,a.status FROM artifacts a "
+                "LEFT JOIN artifact_references ar ON ar.artifact_id=a.artifact_id "
+                "WHERE a.artifact_type='mirror' AND a.work_id=? AND (a.revision_id=? "
+                "OR (ar.revision_id=? AND ar.work_id=? AND ar.role='mirror' AND ar.snapshot_id IS NULL)) "
+                "ORDER BY a.target_path LIMIT 20",
+                (work_id, revision_id, revision_id, work_id),
             ).fetchall()
             artifact_total = int(conn.execute(
-                "SELECT COUNT(*) FROM artifacts WHERE revision_id = ? AND work_id = ? AND artifact_type = 'mirror'",
-                (revision_id, work_id),
+                "SELECT COUNT(DISTINCT a.artifact_id) FROM artifacts a "
+                "LEFT JOIN artifact_references ar ON ar.artifact_id=a.artifact_id "
+                "WHERE a.artifact_type='mirror' AND a.work_id=? AND (a.revision_id=? "
+                "OR (ar.revision_id=? AND ar.work_id=? AND ar.role='mirror' AND ar.snapshot_id IS NULL))",
+                (work_id, revision_id, revision_id, work_id),
             ).fetchone()[0])
             scrape_row = conn.execute(
                 "SELECT provider, provider_id, status, metadata_json FROM scrape_bindings "
@@ -3454,7 +3499,10 @@ class V4RevisionService:
                     (row["asset_count"] for row in binding_rows if row["work_id"] == work_id),
                     0,
                 ) or 0),
-                "overall_status": _derive_work_status(
+                "overall_status": "completed" if (
+                    mirror is None and metadata_job is None and scrape_status == "ready"
+                    and scrape.get("metadata", {}).get("metadata_source") == "retained"
+                ) else _derive_work_status(
                     mirror,
                     metadata_job,
                     scrape_status,

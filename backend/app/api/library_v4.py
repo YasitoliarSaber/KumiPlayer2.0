@@ -167,6 +167,7 @@ def get_library(compact: bool = False, source: str | None = None, include_all: b
     work_ids = [card["work_id"] for card in snapshot.cards]
     watch_map = _watch_status_map(work_ids)
     override_map = _work_overrides_map(work_ids)
+    scope_map = _content_scope_map(work_ids)
     works = []
     for card in snapshot.cards:
         override = override_map.get(card["work_id"], {})
@@ -174,6 +175,8 @@ def get_library(compact: bool = False, source: str | None = None, include_all: b
             # 单作品删除：从活动媒体库排除（不可变快照保留审计事实）。
             continue
         payload = _card_payload(card, override)
+        if card["work_id"] in scope_map:
+            payload["content_scope"] = scope_map[card["work_id"]]
         payload["watch_status"] = watch_map.get(card["work_id"], {
             "work_id": card["work_id"], "status": "", "note": "", "favorite": False, "updated_at": "",
         })
@@ -194,6 +197,26 @@ def get_library(compact: bool = False, source: str | None = None, include_all: b
         "needs_rescan": False,
         "digest": snapshot.digest,
     }
+
+
+def _content_scope_map(work_ids: list[str]) -> dict[str, str]:
+    if not work_ids:
+        return {}
+    placeholders = ",".join("?" for _ in work_ids)
+    with get_database().connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT rb.work_id,sr.content_scope FROM revision_bindings rb "
+            "JOIN import_revisions ir ON ir.revision_id=rb.revision_id "
+            "JOIN source_roots sr ON sr.root_id=ir.root_id "
+            "WHERE ir.status='confirmed' AND sr.retired_at='' "
+            "AND sr.content_scope IN ('completed','ongoing') AND rb.work_id IN (" + placeholders + ")",
+            work_ids,
+        ).fetchall()
+    result: dict[str, str] = {}
+    for row in rows:
+        if result.get(row["work_id"]) != "ongoing":
+            result[row["work_id"]] = row["content_scope"]
+    return result
 
 
 @router.get("/works/{work_id}")

@@ -41,7 +41,7 @@ def draft_finalizer(
             root = conn.execute(
                 """
                 SELECT provider, source_locator, playback_locator, route_id,
-                       display_name, root_container, source_mode
+                       display_name, root_container, source_mode, content_scope
                 FROM source_roots WHERE root_id = ?
                 """,
                 (root_id,),
@@ -51,6 +51,17 @@ def draft_finalizer(
         root_container = str(root["root_container"] or "")
         if should_cancel is not None and should_cancel():
             raise SourceScanCancelled()
+        with database.connect() as conn:
+            request_row = conn.execute("SELECT request_json FROM source_scan_requests WHERE scan_id=?", (scan_id,)).fetchone()
+        import json
+
+        request = json.loads(request_row[0]) if request_row else {}
+        auto_update = bool(request.get("auto_update")) and root["content_scope"] == "ongoing"
+        if auto_update:
+            with database.connect() as conn:
+                existing = conn.execute("SELECT status FROM import_revisions WHERE revision_id=?", (normalized_revision,)).fetchone()
+            if existing and existing[0] in {"confirmed", "superseded"}:
+                return
         parser = V4Parser()
         repository = V4Repository(database)
         # 大型目录树分批解析并持续上报进度，但编号归一化必须在完整来源批次
@@ -74,7 +85,10 @@ def draft_finalizer(
                 raise SourceScanCancelled()
             batch = []
             for index, item in enumerate(evidence[offset : offset + 128], start=1):
-                batch.append((item, parser.parse(item, root_container=root_container)))
+                from app.media_v4.tracking.ongoing import parse_for_scope
+
+                batch.append((item, parse_for_scope(parser, item, root_container=root_container,
+                                                     content_scope=str(root["content_scope"] or "completed"))))
                 if on_progress is not None and (
                     index % progress_checkpoint_size == 0 or offset + index == total
                 ):
@@ -117,5 +131,9 @@ def draft_finalizer(
             _evidence_already_persisted=True,
             _facts_already_persisted=True,
         )
+        if auto_update:
+            from app.media_v4.tracking.ongoing import finish_ongoing_update
+
+            finish_ongoing_update(database, normalized_revision)
 
     return finalize

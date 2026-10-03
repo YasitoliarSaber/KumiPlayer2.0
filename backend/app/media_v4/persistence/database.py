@@ -32,6 +32,7 @@ from app.media_v4.persistence.schema_v4 import (
     migrate_schema_v21_to_v22,
     migrate_schema_v22_to_v23,
     migrate_schema_v23_to_v24,
+    migrate_schema_v24_to_v25,
 )
 
 
@@ -155,7 +156,7 @@ class V4Database:
         使用字面量；写回后立即读回校验，版本升级时若字面量未同步会立即失败。
         """
 
-        conn.execute("PRAGMA user_version = 24")
+        conn.execute("PRAGMA user_version = 25")
         written = int(conn.execute("PRAGMA user_version").fetchone()[0])
         if written != V4_SCHEMA_VERSION:
             raise RuntimeError(
@@ -206,6 +207,7 @@ class V4Database:
             21: migrate_schema_v21_to_v22,
             22: migrate_schema_v22_to_v23,
             23: migrate_schema_v23_to_v24,
+            24: migrate_schema_v24_to_v25,
         }
         with self.connect() as conn:
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])

@@ -148,10 +148,13 @@ def test_new_schema_persists_provenance_and_v23_migration_preserves_facts(databa
         conn.execute("ALTER TABLE source_scans DROP COLUMN coverage_json")
         conn.execute("ALTER TABLE source_scan_requests DROP COLUMN resume_after")
         conn.execute("ALTER TABLE source_scan_requests DROP COLUMN budget_cooldowns")
+        conn.execute("ALTER TABLE source_roots DROP COLUMN content_scope")
         conn.execute("PRAGMA user_version = 23")
     database.initialize()
     with database.connect() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 24
+        from app.media_v4.persistence.schema_v4 import V4_SCHEMA_VERSION
+
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == V4_SCHEMA_VERSION
         assert [tuple(row)[:21] for row in conn.execute("SELECT * FROM source_evidence ORDER BY evidence_id")] == before
         assert [tuple(row) for row in conn.execute("SELECT * FROM assets ORDER BY asset_id")] == assets
         assert {row[0] for row in conn.execute("SELECT observation_kind FROM source_evidence")} == {"legacy"}

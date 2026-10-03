@@ -674,7 +674,7 @@ def _is_admitted(facts: ParsedFacts) -> bool:
 
 
 def _observed_for_identity(
-    evidence: SourceEvidence, *, namespace: str, namespace_kind_name: str
+    evidence: SourceEvidence, *, namespace: str, namespace_kind_name: str, relative_slots: bool = False
 ) -> ObservedFile:
     """把一次观察映射为连续性判定的输入（C-001）。
 
@@ -685,7 +685,7 @@ def _observed_for_identity(
     return ObservedFile(
         evidence_id=evidence.evidence_id,
         source_key=evidence.source_key,
-        locator=(
+        locator=evidence.relative_path if relative_slots else (
             evidence.source_locator
             or evidence.playback_locator
             or evidence.source_key
@@ -721,7 +721,8 @@ def _source_file_ids(
     result: dict[str, str] = {}
     for evidence, _facts in entries:
         current = _observed_for_identity(
-            evidence, namespace=namespace, namespace_kind_name=namespace_kind_name
+            evidence, namespace=namespace, namespace_kind_name=namespace_kind_name,
+            relative_slots=bool(getattr(identity_context, "relative_slots", False)),
         )
         decision = decide_source_identity(current, previous, namespace=namespace or None)
         result[evidence.evidence_id] = decision.source_file_id
@@ -868,7 +869,7 @@ def _adjudicate_numbering_candidates(
     group_of: dict[str, tuple[str, str]] = {}
     for evidence, facts in admitted:
         group_of[evidence.evidence_id] = _candidate_group_key(evidence, facts)
-        if _is_tv_anchor(facts):
+        if _is_tv_anchor(facts) and facts.episode_candidate is not None:
             anchor_numbers[group_of[evidence.evidence_id]].add(int(facts.episode_candidate))
 
     placements: dict[str, _NumberingPlacement] = {}
