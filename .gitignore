@@ -140,3 +140,7 @@ docs/**
 !/mpv/licenses/
 !/mpv/licenses/**
 !/mpv/THIRD_PARTY_NOTICES.md
+
+# ===== AI 协作模式说明随源码可见（2026-10-04）=====
+# 必须放在本文件末尾：否则会被前面的 `*.md` 全局排除规则重新忽略。
+!/KumiPlayer AI 协作模式说明（个人开发版）.md
