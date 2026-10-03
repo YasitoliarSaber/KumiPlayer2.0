@@ -393,7 +393,7 @@ def _parse_sidecar_nfo(evidence: SourceEvidence) -> tuple[int | None, str, str, 
 class V4Parser:
     """从一个 SourceEvidence 生成一个不可变 ParsedFacts。"""
 
-    VERSION = "v4-parser-10"
+    VERSION = "v4-parser-11"
 
     @classmethod
     def _parsed_fact_id(cls, evidence: SourceEvidence) -> str:
@@ -606,7 +606,7 @@ class V4Parser:
             episode_title = cjk_episode_title or f"第 {cjk_episode} 集"
         if classification.content_class == CONTENT_CLASS_PLAYABLE_SPECIAL:
             episode_title = stem
-        # 标题优先级：明确文件作品标题 > 最近非结构目录的唯一标题 > 识别器候选。
+        # 词法仲裁提供标题候选；成熟识别器保留多语展示名、正式括号与母系列边界。
         title_decision = arbitrate_title(
             tokens,
             directory,
@@ -615,7 +615,35 @@ class V4Parser:
             provisional_original=guess.original_title,
             provisional_series_group=resolved_series_group,
         )
-        resolved_work_title = guess.work_title or title_decision.work_title
+        if guess.work_title and guess.work_title != title_decision.work_title:
+            # 原候选及来源完整保留，最终决策明确记录成熟工具采用的有效标题；
+            # 不能把带年份/发行参数的目录候选或 Movie 类别段升级为作品身份。
+            candidate_traces = tuple(
+                replace(trace, field="work_title_candidate") for trace in title_decision.traces
+            )
+            title_decision = replace(
+                title_decision,
+                work_title=guess.work_title,
+                traces=(
+                    *candidate_traces,
+                    DecisionTrace(
+                        field="work_title",
+                        value=guess.work_title,
+                        origin=title_decision.traces[0].origin,
+                        scope=title_decision.traces[0].scope,
+                        rule_id="recognized_work_title",
+                        alternatives=_unique_non_empty(tuple(
+                            value
+                            for value in (
+                                title_decision.work_title,
+                                *(value for trace in title_decision.traces for value in trace.alternatives),
+                            )
+                            if value != guess.work_title
+                        )),
+                    ),
+                ),
+            )
+        resolved_work_title = title_decision.work_title
         if (
             not resolved_series_group
             and title_decision.series_group
