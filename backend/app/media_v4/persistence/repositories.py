@@ -49,6 +49,8 @@ class V4Repository:
             target_filename=row["target_filename"],
             observed_at=row["observed_at"],
             presence_state=row["presence_state"],
+            observation_kind=row["observation_kind"],
+            parent_evidence_id=row["parent_evidence_id"],
         )
 
     def save_source_evidence(self, evidence: SourceEvidence) -> None:
@@ -78,6 +80,8 @@ class V4Repository:
             evidence.target_filename,
             evidence.observed_at,
             evidence.presence_state,
+            evidence.observation_kind,
+            evidence.parent_evidence_id,
         )
 
     def save_scan_evidence_bulk(self, evidence: list[SourceEvidence]) -> None:
@@ -168,6 +172,20 @@ class V4Repository:
                         f"{item.scan_id}/{item.root_id}"
                     )
 
+            for item in evidence:
+                if item.observation_kind == "inherited":
+                    parent = conn.execute(
+                        "SELECT root_id, relative_path, scan_id FROM source_evidence WHERE evidence_id=?",
+                        (item.parent_evidence_id,),
+                    ).fetchone()
+                    if (item.parent_evidence_id == item.evidence_id or parent is None
+                            or parent["root_id"] != item.root_id
+                            or parent["relative_path"] != item.relative_path
+                            or parent["scan_id"] == item.scan_id):
+                        raise ValueError("继承证据必须指向同来源同文件槽位的已持久父观察")
+                elif item.parent_evidence_id:
+                    raise ValueError("非继承证据不能引用父观察")
+
             for evidence_id, values in by_id.items():
                 existing = existing_by_id.get(evidence_id)
                 if existing is not None and existing != values:
@@ -185,8 +203,9 @@ class V4Repository:
                     evidence_id, scan_id, root_id, provider, source_key, relative_path, entry_kind,
                     size, mtime, fingerprint, raw_file_id, ingest_method, source_route_id,
                     source_locator, playback_locator, tmdb_hint_id, tmdb_hint_type,
-                    import_family, target_filename, observed_at, presence_state
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    import_family, target_filename, observed_at, presence_state,
+                    observation_kind, parent_evidence_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 unique_values,
             )

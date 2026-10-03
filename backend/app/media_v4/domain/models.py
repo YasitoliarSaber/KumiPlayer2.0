@@ -37,6 +37,8 @@ class SourceEvidence:
     target_filename: str = ""
     observed_at: str = ""
     presence_state: str = "present"
+    observation_kind: str = "observed"
+    parent_evidence_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)

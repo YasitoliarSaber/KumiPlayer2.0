@@ -206,11 +206,13 @@ def _list_all(
     max_entries: int,
     should_cancel=None,
     skipped: list[int] | None = None,
+    complete: list[bool] | None = None,
 ) -> list[OpenListEntry]:
     entries: list[OpenListEntry] = []
     page = 1
     # 请求与终止判据必须用同一个 per_page；短页在 total 缺失时不是末页。
     per_page = 100
+    expected = 0
     while True:
         if should_cancel is not None and should_cancel():
             raise SourceScanCancelled()
@@ -228,13 +230,18 @@ def _list_all(
             raise OpenListScanLimitExceeded()
         entries.extend(result.entries)
         total = int(result.total or 0)
+        expected = max(expected, total)
         if not result.entries:
+            if complete is not None and len({item.remote_path for item in entries}) < expected:
+                complete[0] = False
             return entries
         # 终止判据必须基于**实际收到的条目数**，而不是 `page * per_page`：
         # 驱动可能把每页截得比请求值短（scanner 里同样的注释已承认这一点），
         # 此时按请求值推算会在第一页就判定"已到末页"→ 后续条目被静默丢弃，
         # 而增量路径会把"没观察到的基线文件"当成已删除 pop 掉（库内丢文件）。
-        if total and len(entries) >= total:
+        if total and len(entries) >= expected:
+            if complete is not None and len({item.remote_path for item in entries}) < expected:
+                complete[0] = False
             return entries
         page += 1
 
@@ -267,6 +274,8 @@ def _clone_for_scan(
         import_family=item.import_family,
         target_filename=item.target_filename,
         observed_at=item.observed_at,
+        observation_kind="inherited",
+        parent_evidence_id=item.evidence_id,
     ))
 
 
@@ -343,6 +352,8 @@ def scan_openlist_incremental(
         if len(PurePosixPath(relative_dir).parts) > max_depth:
             raise OpenListScanLimitExceeded("OpenList 目录层级超过安全上限，请选择更精确的目录")
         remote_dir = _join_remote(remote_root, relative_dir)
+        skipped_before = skipped_counter[0]
+        complete = [True]
         try:
             entries = _list_all(
                 client,
@@ -351,6 +362,7 @@ def scan_openlist_incremental(
                 max_entries=max_entries,
                 should_cancel=should_cancel,
                 skipped=skipped_counter,
+                complete=complete,
             )
         except OpenListNotFoundError:
             # 幽灵目录：父目录列表里仍有它，但上游已经移动/改名/删除
@@ -365,6 +377,7 @@ def scan_openlist_incremental(
             missing_directories.append(remote_dir)
             continue
         processed.add(relative_dir)
+        listing_complete = complete[0] and skipped_counter[0] == skipped_before
         if relative_dir == "":
             first_root_entries = entries
 
@@ -403,7 +416,8 @@ def scan_openlist_incremental(
             if len(known_names) >= 20 and len(overlap) * 5 < len(known_names):
                 raise ValueError("OpenList 根目录内容骤减，自动增量已停止；确认远端状态后请执行完整校验")
 
-        for missing_dir in known_children - set(remote_directories):
+        missing_children = known_children - set(remote_directories) if listing_complete else set()
+        for missing_dir in missing_children:
             prefix = missing_dir + "/"
             for path in list(directories):
                 if path == missing_dir or path.startswith(prefix):
@@ -444,7 +458,8 @@ def scan_openlist_incremental(
                 directories[child_path]["last_verified_at"] = 0
 
         existing_direct_files = {path for path in files if _parent(path) == relative_dir}
-        for missing_file in existing_direct_files - set(remote_videos):
+        missing_files = existing_direct_files - set(remote_videos) if listing_complete else set()
+        for missing_file in missing_files:
             files.pop(missing_file, None)
         for relative_file, item in remote_videos.items():
             remote_path = normalize_remote_path(item.remote_path)
@@ -480,9 +495,10 @@ def scan_openlist_incremental(
             # 持久化边界确定，避免把基线数量伪装成远端总量。
             on_progress(processed_count=len(files), total_count=0)
         # 本次已核对：记住状态、mtime 与清单哈希；unknown → verified。
-        directories[relative_dir]["verification_state"] = "verified"
-        directories[relative_dir]["listing_hash"] = listing_hash
-        directories[relative_dir]["last_verified_at"] = timestamp
+        directories[relative_dir]["verification_state"] = "verified" if listing_complete else "unknown"
+        if listing_complete:
+            directories[relative_dir]["listing_hash"] = listing_hash
+            directories[relative_dir]["last_verified_at"] = timestamp
 
     if first_root_entries is None:
         raise RuntimeError("OpenList 根目录未被核对")

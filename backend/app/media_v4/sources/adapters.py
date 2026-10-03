@@ -43,6 +43,8 @@ class SourceEntry:
     import_family: str = "anime"
     target_filename: str = ""
     observed_at: str = ""
+    observation_kind: str = "observed"
+    parent_evidence_id: str = ""
 
 
 def _normalize_relative_path(value: str) -> str:
@@ -89,4 +91,6 @@ def to_source_evidence(entry: SourceEntry) -> SourceEvidence:
         import_family=entry.import_family,
         target_filename=entry.target_filename,
         observed_at=entry.observed_at,
+        observation_kind=entry.observation_kind,
+        parent_evidence_id=entry.parent_evidence_id,
     )

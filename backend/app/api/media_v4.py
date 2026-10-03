@@ -589,6 +589,9 @@ def _persist_tree_scan(
                 "UPDATE source_scans SET status = 'validated', finished_at = ? WHERE scan_id = ?",
                 (now, scan_id),
             )
+    from app.media_v4.sources.observation_contract import merge_text_snapshot
+
+    evidence[:] = merge_text_snapshot(database, root_id, scan_id, evidence)
     if save_evidence:
         V4Repository(database).save_scan_evidence_bulk(evidence)
     upsert_tree_scan_validation(

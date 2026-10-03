@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-V4_SCHEMA_VERSION = 23
+V4_SCHEMA_VERSION = 24
 
 
 def create_schema_v4(conn: sqlite3.Connection) -> None:
@@ -803,6 +803,29 @@ def create_schema_v4(conn: sqlite3.Connection) -> None:
     create_v22_structures(conn)
 
     migrate_schema_v22_to_v23(conn)
+    migrate_schema_v23_to_v24(conn)
+
+
+def migrate_schema_v23_to_v24(conn: sqlite3.Connection) -> None:
+    """保留历史事实；旧行的观察来源未知，不冒充本轮观察。"""
+    additions = (
+        ("source_evidence", "observation_kind",
+         "ALTER TABLE source_evidence ADD COLUMN observation_kind TEXT NOT NULL "
+         "DEFAULT 'legacy' CHECK(observation_kind IN ('observed','inherited','legacy'))"),
+        ("source_evidence", "parent_evidence_id",
+         "ALTER TABLE source_evidence ADD COLUMN parent_evidence_id TEXT NOT NULL DEFAULT ''"),
+        ("source_scans", "coverage_json",
+         "ALTER TABLE source_scans ADD COLUMN coverage_json TEXT NOT NULL DEFAULT '{}'"),
+        ("source_scan_requests", "resume_after",
+         "ALTER TABLE source_scan_requests ADD COLUMN resume_after TEXT NOT NULL DEFAULT ''"),
+        ("source_scan_requests", "budget_cooldowns",
+         "ALTER TABLE source_scan_requests ADD COLUMN budget_cooldowns INTEGER NOT NULL "
+         "DEFAULT 0 CHECK(budget_cooldowns >= 0)"),
+    )
+    for table, column, ddl in additions:
+        columns = {row[0] for row in conn.execute("SELECT name FROM pragma_table_info(?)", (table,))}
+        if column not in columns:
+            conn.execute(ddl)
 
 
 def migrate_schema_v22_to_v23(conn: sqlite3.Connection) -> None:
