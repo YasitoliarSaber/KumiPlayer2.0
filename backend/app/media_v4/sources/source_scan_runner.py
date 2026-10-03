@@ -54,6 +54,15 @@ class ScanTask:
     attempts: int
     archive_path: str = ""
     archive_sha256: str = ""
+    budget_cooldowns: int = 0
+
+
+class SourceScanDeferred(Exception):
+    """本地目录预算已用完；保留断点并把等待交还持久队列。"""
+
+    def __init__(self, delay_seconds: float, message: str):
+        super().__init__(message)
+        self.delay_seconds = max(0.0, float(delay_seconds))
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +86,7 @@ def resume_paused_scan(database: V4Database, *, scan_id: str) -> bool:
 
     now = _now()
     with database.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         updated = conn.execute(
             """
             UPDATE source_scans
@@ -86,6 +96,11 @@ def resume_paused_scan(database: V4Database, *, scan_id: str) -> bool:
             """,
             (now, scan_id),
         )
+        if updated.rowcount:
+            conn.execute(
+                "UPDATE source_scan_requests SET resume_after='', budget_cooldowns=0, updated_at=? WHERE scan_id=?",
+                (now, scan_id),
+            )
     return updated.rowcount == 1
 
 
@@ -185,7 +200,7 @@ def _load_task(database: V4Database, scan_id: str) -> ScanTask | None:
             return None
         request_row = conn.execute(
             "SELECT scan_kind, source_mode, request_json, attempts, "
-            "input_archive_path, input_sha256 FROM source_scan_requests WHERE scan_id = ?",
+            "input_archive_path, input_sha256, budget_cooldowns FROM source_scan_requests WHERE scan_id = ?",
             (scan_id,),
         ).fetchone()
     try:
@@ -201,6 +216,7 @@ def _load_task(database: V4Database, scan_id: str) -> ScanTask | None:
         attempts=int(request_row["attempts"] or 0) if request_row else 0,
         archive_path=str(request_row["input_archive_path"] or "") if request_row else "",
         archive_sha256=str(request_row["input_sha256"] or "") if request_row else "",
+        budget_cooldowns=int(request_row["budget_cooldowns"] or 0) if request_row else 0,
     )
 
 
@@ -219,6 +235,19 @@ def _discard_scan_checkpoints(database: V4Database, scan_id: str) -> None:
 
     scan_frontier.clear(database, scan_id=scan_id)
     discard_scan_state(scan_id)
+    with database.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT request_json FROM source_scan_requests WHERE scan_id=?", (scan_id,),
+        ).fetchone()
+        if row is not None:
+            request = json.loads(row["request_json"])
+            if isinstance(request, dict) and "_directory_observations" in request:
+                request.pop("_directory_observations")
+                conn.execute(
+                    "UPDATE source_scan_requests SET request_json=? WHERE scan_id=?",
+                    (json.dumps(request, ensure_ascii=False), scan_id),
+                )
 
 
 def _resumable_transient_message(exc: BaseException) -> str | None:
@@ -477,18 +506,20 @@ class SourceScanRunner:
     def claim_next_scan(self) -> ScanTask | None:
         """在写事务内 SELECT + 条件 UPDATE 原子领取；失败表示已有执行者。"""
 
+        self._discard_cancelled_deferred_scans()
         stamp = _now()
         with self.database.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 row = conn.execute(
                     """
-                    SELECT scan_id FROM source_scans
-                    WHERE status = ?
-                    ORDER BY started_at, scan_id
+                    SELECT s.scan_id FROM source_scans s
+                    LEFT JOIN source_scan_requests r ON r.scan_id=s.scan_id
+                    WHERE s.status = ? AND (COALESCE(r.resume_after,'') <= ? OR s.cancel_requested=1)
+                    ORDER BY s.started_at, s.scan_id
                     LIMIT 1
                     """,
-                    ("queued",),
+                    ("queued", stamp),
                 ).fetchone()
                 if row is None:
                     conn.rollback()
@@ -514,6 +545,20 @@ class SourceScanRunner:
             return None
         return task
 
+    def _discard_cancelled_deferred_scans(self) -> None:
+        """等待期取消已由接口落终态；仅收尾执行断点，不触碰证据或归档。"""
+
+        with self.database.connect() as conn:
+            rows = conn.execute(
+                "SELECT s.scan_id FROM source_scans s JOIN source_scan_requests r ON r.scan_id=s.scan_id "
+                "WHERE s.status='cancelled' AND r.resume_after<>''",
+            ).fetchall()
+        for row in rows:
+            scan_id = str(row["scan_id"])
+            _discard_scan_checkpoints(self.database, scan_id)
+            with self.database.connect() as conn:
+                conn.execute("UPDATE source_scan_requests SET resume_after='' WHERE scan_id=?", (scan_id,))
+
     def run_scan(self, task: ScanTask) -> None:
         """执行一个已领取的扫描；终态写入与异常收口都集中在这里。"""
 
@@ -522,6 +567,8 @@ class SourceScanRunner:
         self._active_scan_id = task.scan_id
         runtime = _ExecutionRuntime(self.database, task.scan_id, None)
         try:
+            if runtime.cancellation_requested():
+                raise _CancelledScan()
             _update_scan_progress(self.database, task.scan_id, stage="reading_source")
             handler = get_handler(task.scan_kind)
             if handler is None:
@@ -552,6 +599,9 @@ class SourceScanRunner:
                 _finish_scan(self.database, task.scan_id, status="cancelled", error="用户已取消扫描")
         except (SourceScanCancelled, _CancelledScan):
             _finish_scan(self.database, task.scan_id, status="cancelled", error="用户已取消扫描")
+        except SourceScanDeferred as exc:
+            if not self._defer_scan(task.scan_id, exc):
+                _finish_scan(self.database, task.scan_id, status="cancelled", error="用户已取消扫描")
         except SourceScanPaused as exc:
             # 达到请求预算：既不是成功也不是失败。frontier 与已交付证据保留，
             # 界面据此显示"可继续扫描"，绝不允许据此建立 confirmed 基线。
@@ -572,6 +622,26 @@ class SourceScanRunner:
             runtime.close()
             if self._active_scan_id == task.scan_id:
                 self._active_scan_id = None
+
+    def _defer_scan(self, scan_id: str, deferred: SourceScanDeferred) -> bool:
+        """状态与截止时间一起落库；取消竞态不能把扫描改回 queued。"""
+
+        stamp = _now()
+        resume_after = (datetime.fromisoformat(stamp) + timedelta(seconds=deferred.delay_seconds)).isoformat()
+        with self.database.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            updated = conn.execute(
+                "UPDATE source_scans SET status='queued', stage='budget_cooldown', heartbeat_at=?, "
+                "finished_at='', error=? WHERE scan_id=? AND status='running' AND cancel_requested=0",
+                (stamp, str(deferred)[:400], scan_id),
+            )
+            if updated.rowcount:
+                conn.execute(
+                    "UPDATE source_scan_requests SET resume_after=?, budget_cooldowns=budget_cooldowns+1, "
+                    "updated_at=? WHERE scan_id=?",
+                    (resume_after, stamp, scan_id),
+                )
+            return updated.rowcount == 1
 
     def _settled_evidence(self, task: ScanTask, returned) -> list:
         """扫描阶段结束后的证据全集：优先读数据库，必要时兜底保存。

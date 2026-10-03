@@ -68,36 +68,43 @@ def _guarded_openlist_client(config, request):
         return _client(config)
 
 
-#: 请求预算耗尽后的自动缓冲：时长与最大自动轮数。
-#: 缓冲保留风控意义（不是连发请求），但不再要求用户手动点"继续扫描"；
-#: 只有连续多轮仍撞预算（例如对方持续限流）才交回人工，且 frontier 保留可续扫。
+#: 本地目录预算用尽后的持久延期；上游 429/风控不走自动续扫。
 SCAN_BUDGET_COOLDOWN_SECONDS = 15.0
 SCAN_BUDGET_MAX_AUTO_COOLDOWNS = 20
 
 
-def _wait_for_scan_budget(database, *, scan_id: str, runtime=None) -> None:
-    """预算耗尽后的缓冲等待：分批睡眠，期间刷新扫描心跳并响应取消。"""
-
-    import time
-    from datetime import UTC, datetime
+def _defer_for_scan_budget(task, runtime=None) -> None:
+    """退出本轮 handler；runner 将截止时间落库并释放唯一执行线程。"""
 
     from app.media_v4.sources.scanner import SourceScanCancelled
+    from app.media_v4.sources.source_scan_runner import SourceScanDeferred
 
-    deadline = time.monotonic() + SCAN_BUDGET_COOLDOWN_SECONDS
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+    if runtime is not None and runtime.cancellation_requested():
+        raise SourceScanCancelled()
+    raise SourceScanDeferred(
+        SCAN_BUDGET_COOLDOWN_SECONDS,
+        "本轮目录请求预算已用完，进度已保存，稍后自动继续扫描",
+    )
+
+
+def _save_directory_observations(database, task, observations) -> None:
+    """推进 frontier 前保存非敏感相对目录观察，不改登记的业务请求字段。"""
+
+    import json
+
+    with database.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT request_json FROM source_scan_requests WHERE scan_id=?", (task.scan_id,),
+        ).fetchone()
+        if row is None:
             return
-        if runtime is not None and runtime.cancellation_requested():
-            raise SourceScanCancelled()
-        # 心跳必须持续刷新：缓冲累计时长可能超过"扫描失联"阈值，
-        # 否则会被维护逻辑当成僵尸扫描。
-        with database.connect() as conn:
-            conn.execute(
-                "UPDATE source_scans SET heartbeat_at = ? WHERE scan_id = ?",
-                (datetime.now(UTC).isoformat(), scan_id),
-            )
-        time.sleep(min(0.5, remaining))
+        request = json.loads(row["request_json"])
+        request["_directory_observations"] = observations
+        conn.execute(
+            "UPDATE source_scan_requests SET request_json=? WHERE scan_id=?",
+            (json.dumps(request, ensure_ascii=False), task.scan_id),
+        )
 
 
 def _tree_resolution(task):
@@ -225,69 +232,49 @@ def scan_openlist_full_source(database, task, runtime):
     request = task.request
     config = _connection_config(str(request.get("connection_id") or ""))
     _assert_connection_unchanged(config, request)
-    directory_observations: dict[str, float | None] = {}
+    directory_observations: dict[str, float | None] = dict(request.get("_directory_observations") or {})
     scan_stats: dict = {}
 
-    # 请求预算耗尽**不再直接停住等人点**：缓冲一小段时间后从目录级 frontier
-    # 自动继续。旧行为是抛 SourceScanPaused → 扫描停在"已达请求预算"上，用户
-    # 不点就什么都不做（实测 10 分钟后仍停着），既不像进度也谈不上安全缓冲。
-    # 缓冲仍然保留风控意义（不是连发请求），只是把"人工点继续"换成"自动续跑"。
-    cooldown_rounds = 0
-    _scan_id = task.scan_id
-    # 按轮累积证据：多轮续跑时把每轮收集到的条目合并（按 evidence_id 去重），
-    # 单轮情况下与改动前完全一致。
-    collected: dict[str, object] = {}
-    while True:
-        scan_stats.clear()
-        _scan_id, evidence = scan_openlist_directory(
-            _guarded_openlist_client(config, request),
-            remote_root=str(request.get("remote_root") or ""),
-            mapping_root=str(request.get("mapping_root") or _remote_root(config)),
-            mount_root=str(request.get("mount_root") or ""),
-            root_id=task.root_id,
-            scan_id=task.scan_id,
-            default_provider=str(request.get("provider") or ""),
-            routes=_routes_from(request),
-            directory_observations=directory_observations,
-            directory_budget=int(
-                request.get("directory_budget") or DEFAULT_FULL_SCAN_DIRECTORY_BUDGET
-            ),
-            scan_stats=scan_stats,
-            # 目录级 frontier：完成一页写回游标、完成目录置 completed；中断（进程退出、
-            # 风控 5xx、用户取消）后重新执行同一 scan_id 即可从断点继续。
-            frontier_next=lambda: scan_frontier.next_pending_directory(
-                database, scan_id=task.scan_id,
-            ),
-            frontier_mark=lambda **kwargs: scan_frontier.mark_directory(
-                database, scan_id=task.scan_id, **kwargs,
-            ),
-            frontier_add=lambda **kwargs: scan_frontier.ensure_directories(
-                database, scan_id=task.scan_id, **kwargs,
-            ),
-            **_callbacks(runtime),
-        )
-        for item in evidence or ():
-            collected.setdefault(str(item.evidence_id), item)
-        if not scan_stats.get("budget_exhausted"):
-            break
-        cooldown_rounds += 1
-        if cooldown_rounds > SCAN_BUDGET_MAX_AUTO_COOLDOWNS:
-            # 兜底：连续多轮都撞预算（例如对方持续限流）时才交回人工，
-            # 且保留 frontier，用户点"继续扫描"仍从断点接着跑。
+    def mark_directory(**kwargs):
+        _save_directory_observations(database, task, directory_observations)
+        scan_frontier.mark_directory(database, scan_id=task.scan_id, **kwargs)
+
+    _scan_id, evidence = scan_openlist_directory(
+        _guarded_openlist_client(config, request),
+        remote_root=str(request.get("remote_root") or ""),
+        mapping_root=str(request.get("mapping_root") or _remote_root(config)),
+        mount_root=str(request.get("mount_root") or ""),
+        root_id=task.root_id,
+        scan_id=task.scan_id,
+        default_provider=str(request.get("provider") or ""),
+        routes=_routes_from(request),
+        directory_observations=directory_observations,
+        directory_budget=int(request.get("directory_budget") or DEFAULT_FULL_SCAN_DIRECTORY_BUDGET),
+        scan_stats=scan_stats,
+        frontier_next=lambda: scan_frontier.next_pending_directory(database, scan_id=task.scan_id),
+        frontier_mark=mark_directory,
+        frontier_add=lambda **kwargs: scan_frontier.ensure_directories(database, scan_id=task.scan_id, **kwargs),
+        **_callbacks(runtime),
+    )
+    _assert_scan_identity(task, _scan_id, evidence)
+    runtime.persist_evidence_batch(evidence)
+    _save_directory_observations(database, task, directory_observations)
+    if scan_stats.get("budget_exhausted") and scan_frontier.directory_counts(database, scan_id=task.scan_id)["pending"]:
+        cooldown_rounds = getattr(task, "budget_cooldowns", 0)
+        if cooldown_rounds >= SCAN_BUDGET_MAX_AUTO_COOLDOWNS:
             raise SourceScanPaused(
                 f"本次巡检已达到请求预算（已读取 {scan_stats.get('directories_listed', 0)} 个目录，"
-                f"自动缓冲 {cooldown_rounds - 1} 次仍未跑完），进度已保留，可稍后继续扫描"
+                f"自动缓冲 {cooldown_rounds} 次仍未跑完），进度已保留，可稍后继续扫描"
             )
-        _wait_for_scan_budget(database, scan_id=task.scan_id, runtime=runtime)
+        _defer_for_scan_budget(task, runtime)
 
-    _assert_scan_identity(task, _scan_id, list(collected.values()))
     # 扫描完整走完才清理 frontier；异常路径保留断点供续扫。
     scan_frontier.clear(database, scan_id=task.scan_id)
     stage_scan_state(
         task.scan_id,
         build_full_scan_state(task.root_id, str(request.get("remote_root") or ""), directory_observations),
     )
-    return list(collected.values())
+    return evidence
 
 
 @_handler("openlist_incremental")

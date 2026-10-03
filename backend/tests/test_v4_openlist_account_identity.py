@@ -180,7 +180,12 @@ def test_budget_resume_rejects_a_new_account_with_the_same_public_mask(database,
     ))
     request = {"connection_id": "one", "remote_root": "/Anime", "account_namespace":
                openlist_account_namespace(selected.openlist_server_url, "alice")}
-    task = SimpleNamespace(request=request, root_id="offline-root", scan_id="offline-scan")
+    _seed(database, request, root_id="offline-root")
+    task = SimpleNamespace(request=request, root_id="offline-root", scan_id="scan-old")
+    from app.media_v4.sources import scan_frontier
+    from app.media_v4.sources.source_scan_runner import SourceScanDeferred
+
+    scan_frontier.ensure_directories(database, scan_id=task.scan_id, remote_paths=["/Anime/Pending"])
     runtime = SimpleNamespace(cancellation_requested=lambda: False, persist_evidence_batch=lambda _: None,
                               report_progress=lambda **_: None)
 
@@ -189,8 +194,10 @@ def test_budget_resume_rejects_a_new_account_with_the_same_public_mask(database,
         return kwargs["scan_id"], []
 
     monkeypatch.setattr(media_v4, "scan_openlist_directory", scan)
-    monkeypatch.setattr(scan_handlers, "_wait_for_scan_budget",
-                        lambda *_, **__: current.update(username="axxxe"))
+    # 第一轮执行后换账号，第二轮从持久队列恢复时仍须拒绝新账户。
+    with pytest.raises(SourceScanDeferred):
+        scan_handlers.scan_openlist_full_source(database, task, runtime)
+    current.update(username="axxxe")
     with pytest.raises(ValueError, match="账号或映射已改变"):
         scan_handlers.scan_openlist_full_source(database, task, runtime)
     assert accounts == ["alice"]
