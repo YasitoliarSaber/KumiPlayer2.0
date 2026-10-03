@@ -1,6 +1,7 @@
 """KumiPlayer 2.0 FastAPI 应用入口"""
 
 import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -58,6 +59,23 @@ async def lifespan(app: FastAPI):
     # 退出时在安全边界收口，不遗留 daemon 孤儿线程。
     source_scan_worker = get_source_scan_runner(database)
     source_scan_worker.start()
+    async def run_ongoing_updates() -> None:
+        from app.media_v4.tracking.scheduler import OngoingScheduler
+
+        scheduler = OngoingScheduler(database)
+        startup = True
+        while not stop_jobs.is_set():
+            try:
+                await asyncio.to_thread(scheduler.tick, startup=startup)
+            except Exception:
+                logging.getLogger(__name__).warning("追更调度未成功，请在新番分类查看来源状态")
+            startup = False
+            try:
+                await asyncio.wait_for(stop_jobs.wait(), timeout=30)
+            except TimeoutError:
+                continue
+
+    ongoing_worker = asyncio.create_task(run_ongoing_updates())
     manager = get_heartbeat_manager()
     manager.start_monitor()
     try:
@@ -65,6 +83,7 @@ async def lifespan(app: FastAPI):
     finally:
         stop_jobs.set()
         await job_worker
+        await ongoing_worker
         await asyncio.to_thread(thumbnail_preparer.stop)
         source_scan_worker.stop()
         await close_remote_asset_client(app)

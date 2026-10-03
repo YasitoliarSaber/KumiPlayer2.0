@@ -126,6 +126,10 @@ class AppConfig:
     # 分类页卡片尺寸，前端滑块读取并持久化。
     poster_size: int = 180
 
+    # 追更更新只消费显式新番来源，默认不自动访问来源。
+    ongoing_update_on_startup: bool = False
+    ongoing_update_interval_minutes: int = 0
+
     # 心跳
     heartbeat_enabled: bool = True
     heartbeat_timeout: int = 30

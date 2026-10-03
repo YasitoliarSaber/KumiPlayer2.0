@@ -15,7 +15,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -91,6 +91,8 @@ class ConfigPatch(BaseModel):
     mpv_anime4k_quality: str | None = None
     series_card_image_mode: str | None = None
     poster_size: int | None = None
+    ongoing_update_on_startup: bool | None = None
+    ongoing_update_interval_minutes: Annotated[int, Field(ge=15, le=10080)] | Literal[0] | None = None
     heartbeat_enabled: bool | None = None
     heartbeat_timeout: int | None = None
     proxy_url: str | None = None
