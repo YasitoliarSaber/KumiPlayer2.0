@@ -9,12 +9,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi.testclient import TestClient
+
 from app.api import media_v4
 from app.main import app
 from app.media_v4.sources import input_archive, source_scan_runner
 from app.media_v4.sources.input_archive import InputArchiveError, archive_is_intact
-from fastapi.testclient import TestClient
-
 from tests.source_disk_guard import guard_source_disk_io
 
 
